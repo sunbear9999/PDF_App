@@ -1,14 +1,20 @@
-import customtkinter as ctk
+import sys
+from PyQt6.QtWidgets import QApplication
 from gui.main_window import MainWindow
 
 def main():
-    # Set the general theme and color palette for Linux Mint
-    ctk.set_appearance_mode("System")  # Follows your Mint dark/light mode
-    ctk.set_default_color_theme("blue") 
-
-    # Initialize and run the app
-    app = MainWindow()
-    app.mainloop()
+    # Initialize the PyQt6 Application
+    app = QApplication(sys.argv)
+    
+    # Set global application style (optional but makes popups look better)
+    app.setStyle("Fusion")
+    
+    # Instantiate and show the main window
+    window = MainWindow()
+    window.show()
+    
+    # Execute the application event loop
+    sys.exit(app.exec())
 
 if __name__ == "__main__":
     main()
