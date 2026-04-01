@@ -8,7 +8,7 @@ from core.llm_manager import LocalLLMManager
 
 class IndexWorker(QThread):
     progress = pyqtSignal(str)
-    finished_indexing = pyqtSignal()
+    finished_indexing = pyqtSignal(bool, str)
     
     def __init__(self, llm, filepaths):
         super().__init__()
@@ -18,9 +18,9 @@ class IndexWorker(QThread):
     def run(self):
         try:
             self.llm.index_documents(self.filepaths, progress_callback=lambda msg: self.progress.emit(msg))
+            self.finished_indexing.emit(True, "")
         except Exception as e:
-            self.progress.emit(f"Error: {str(e)}")
-        self.finished_indexing.emit()
+            self.finished_indexing.emit(False, str(e))
 
 class ChatWorker(QThread):
     token_received = pyqtSignal(str)
@@ -45,44 +45,42 @@ class ChatWorker(QThread):
             
             while True:
                 if not is_inside_mark:
-                    if "<mark" in buffer:
-                        idx = buffer.find("<mark")
-                        if idx > 0: self.token_received.emit(buffer[:idx])
-                        buffer = buffer[idx:]
+                    start_idx = buffer.find("<highlight")
+                    if start_idx != -1:
+                        if start_idx > 0:
+                            self.token_received.emit(buffer[:start_idx])
+                        buffer = buffer[start_idx:]
                         is_inside_mark = True
                     else:
-                        idx = buffer.rfind("<")
-                        if idx != -1:
-                            partial_tag = buffer[idx:]
-                            if "<mark".startswith(partial_tag):
-                                if idx > 0:
-                                    self.token_received.emit(buffer[:idx])
-                                    buffer = buffer[idx:]
+                        last_less_than = buffer.rfind("<")
+                        if last_less_than != -1:
+                            partial = buffer[last_less_than:]
+                            if "<highlight".startswith(partial):
+                                if last_less_than > 0:
+                                    self.token_received.emit(buffer[:last_less_than])
+                                    buffer = buffer[last_less_than:]
                                 break
-                            else:
-                                self.token_received.emit(buffer)
-                                buffer = ""
-                                break
-                        else:
+                        if buffer:
                             self.token_received.emit(buffer)
                             buffer = ""
-                            break
+                        break
                 else:
-                    if "</mark>" in buffer:
-                        idx = buffer.find("</mark>") + len("</mark>")
-                        buffer = buffer[idx:]
+                    end_idx = buffer.find("</highlight>")
+                    if end_idx != -1:
+                        buffer = buffer[end_idx + len("</highlight>"):]
                         is_inside_mark = False
-                        self.token_received.emit("\n🖍️ <i>[AI Highlight Applied]</i>\n")
                     else:
                         break
 
-        self.llm.query(self.question, self.model, allowed_docs=self.allowed_docs, callback=handle_chunk)
+        try:
+            self.llm.query(self.question, self.model, allowed_docs=self.allowed_docs, callback=handle_chunk)
+        except Exception as e:
+            handle_chunk(f"\n[System Error: {str(e)}]")
         
         if buffer and not is_inside_mark:
             self.token_received.emit(buffer)
             
         self.chat_completed.emit(full_response)
-
 
 class LLMTab(QWidget):
     def __init__(self, parent=None, main_window=None):
@@ -164,16 +162,19 @@ class LLMTab(QWidget):
         self.idx_worker.finished_indexing.connect(self._on_index_complete)
         self.idx_worker.start()
 
-    def _on_index_complete(self):
+    def _on_index_complete(self, success, error_msg):
         self.btn_index.setEnabled(True)
-        self.status_lbl.setText("🟢 Status: Ready (Indexed)")
-        self.status_lbl.setStyleSheet("font-weight: bold; color: #00cc66;")
-        
-        proj_path = self.main_window.project_manager.project_filepath
-        if proj_path:
-            self.llm_manager.save_index(proj_path + ".index.json")
+        if success:
+            self.status_lbl.setText("🟢 Status: Ready (Indexed)")
+            self.status_lbl.setStyleSheet("font-weight: bold; color: #00cc66;")
+            
+            proj_path = self.main_window.project_manager.project_filepath
+            if proj_path:
+                self.llm_manager.save_index(proj_path + ".index.json")
+        else:
+            self.status_lbl.setText(f"❌ Indexing Failed: {error_msg}")
+            self.status_lbl.setStyleSheet("font-weight: bold; color: #ff4444;")
 
-    # --- UI STATE HANDLING FOR CHAT GENERATION ---
     def send_message(self):
         user_text = self.chat_input.text().strip()
         if not user_text: return
@@ -181,7 +182,6 @@ class LLMTab(QWidget):
         self.chat_history.append(f"<b style='color:#55aaff'>You:</b> {user_text}<br><b style='color:#aaffaa'>LLM:</b> ")
         self.chat_input.clear()
         
-        # Lock UI inputs and update button/status text
         self.send_btn.setText("⏳ Generating...")
         self.send_btn.setEnabled(False)
         self.chat_input.setEnabled(False)
@@ -203,24 +203,45 @@ class LLMTab(QWidget):
     def _on_chat_token(self, token):
         cursor = self.chat_history.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
-        if "<" in token and ">" in token:
-            cursor.insertHtml(token)
-        else:
-            cursor.insertText(token)
+        cursor.insertText(token)
         self.chat_history.setTextCursor(cursor)
 
     def _on_chat_complete(self, full_response):
-        # Restore UI inputs when fully finished
         self.send_btn.setText("Send")
         self.send_btn.setEnabled(True)
         self.chat_input.setEnabled(True)
         self.status_lbl.setText("🟢 Status: Ready")
         self.status_lbl.setStyleSheet("font-weight: bold; color: #00cc66;")
         
-        self.chat_history.append("<br><br>")
+        self.chat_history.append("<br>")
         
-        matches = re.finditer(r'<mark\s+(?:[^>]*?)\bquote=["\']([^"\']+)["\']>([\s\S]*?)</mark>', full_response, re.IGNORECASE)
-        for match in matches:
-            quote = match.group(1).strip()
-            note = match.group(2).strip()
-            self.main_window.add_ai_annotation(quote, note)
+        # Parse for the new <highlight> blocks safely
+        blocks = list(re.finditer(r'<highlight>([\s\S]*?)</highlight>', full_response, re.IGNORECASE))
+        
+        # Fallback: The LLM attempted to write highlights but formatted them incorrectly
+        if not blocks and "<highlight" in full_response.lower():
+            self.chat_history.append(f"⚠️ <b style='color:#ffaa00'>[AI Formatting Error: The LLM generated a malformed highlight tag. Raw output hidden.]</b><br>")
+
+        for block in blocks:
+            inner_text = block.group(1)
+            quote_match = re.search(r'<quote>\s*([\s\S]*?)\s*</quote>', inner_text, re.IGNORECASE)
+            note_match = re.search(r'<note>\s*([\s\S]*?)\s*</note>', inner_text, re.IGNORECASE)
+            
+            if quote_match and note_match:
+                quote = quote_match.group(1).strip()
+                note = note_match.group(1).strip()
+                
+                success = self.main_window.add_ai_annotation(quote, note)
+                display_quote = quote[:60] + "..." if len(quote) > 60 else quote
+                
+                if success:
+                    self.chat_history.append(f"🖍️ <b style='color:#00cc66'>[AI Highlight Applied]</b>: <i>\"{display_quote}\"</i><br>")
+                else:
+                    self.chat_history.append(f"⚠️ <b style='color:#ff4444'>[Failed to find exact quote in document]</b>: <i>\"{display_quote}\"</i><br>")
+                
+                if note:
+                    self.chat_history.append(f"<span style='color:#ccc'>Note: {note}</span><br><br>")
+            else:
+                self.chat_history.append(f"⚠️ <b style='color:#ffaa00'>[AI Syntax Error: Missing &lt;quote&gt; or &lt;note&gt; tags inside the highlight block.]</b><br><br>")
+        
+        self.chat_history.append("<br>")

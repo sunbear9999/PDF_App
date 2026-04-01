@@ -123,15 +123,13 @@ class MainWindow(QMainWindow):
 
         self.main_layout.addWidget(self.top_menu)
 
-    # --- ENFORCED OS FILE DIALOGS ---
+    # --- BUG 1 FIX: ENFORCED OS FILE DIALOGS ---
     def _new_project(self):
-        dialog = QFileDialog(self, "Create New Project")
-        dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
-        dialog.setNameFilter("PDF Project (*.pdfproj)")
-        dialog.setDefaultSuffix("pdfproj") # Forces Linux/Mac to append the extension!
-        
-        if dialog.exec():
-            path = dialog.selectedFiles()[0]
+        path, _ = QFileDialog.getSaveFileName(self, "Create New Project", "", "PDF Project (*.pdfproj)")
+        if path:
+            if not path.lower().endswith(".pdfproj"):
+                path += ".pdfproj"
+                
             self.project_manager.create_project(path)
             self.settings.setValue("last_project", self.project_manager.project_filepath)
             self._refresh_pdf_dropdown()
@@ -150,13 +148,11 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No Project", "Create or open a project first.")
             return
             
-        dialog = QFileDialog(self, "Save Project As")
-        dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
-        dialog.setNameFilter("PDF Project (*.pdfproj)")
-        dialog.setDefaultSuffix("pdfproj")
-        
-        if dialog.exec():
-            path = dialog.selectedFiles()[0]
+        path, _ = QFileDialog.getSaveFileName(self, "Save Project As", "", "PDF Project (*.pdfproj)")
+        if path:
+            if not path.lower().endswith(".pdfproj"):
+                path += ".pdfproj"
+                
             old_index = self.project_manager.project_filepath + ".index.json"
             
             self.project_manager.project_filepath = path
@@ -229,15 +225,14 @@ class MainWindow(QMainWindow):
         else:
             QMessageBox.warning(self, "Error", "Failed to load the PDF document.")
 
-    # --- ROBUST FRAGMENTED QUOTE SEARCH ENGINE ---
-    def add_ai_annotation(self, quote, note):
-        if not quote: return
+    # --- BUG 2 FIX: ROBUST FRAGMENTED QUOTE SEARCH ENGINE ---
+    def add_ai_annotation(self, quote, note, target_doc_name=None):
+        if not quote: return False
         clean_quote = quote.strip()
         words = clean_quote.split()
-        if not words: return
+        if not words: return False
         
         # Build graceful degradation chunks (5 words each, overlapping)
-        # This completely bypasses PyMuPDF line-break and hyphenation failures!
         chunks = []
         if len(words) <= 6:
             chunks = [" ".join(words)]
@@ -248,8 +243,23 @@ class MainWindow(QMainWindow):
 
         found_any = False
 
-        for path in self.project_manager.pdfs:
+        # Sort the search order to check the LLM's specified document first
+        search_paths = []
+        target_path = None
+        if target_doc_name:
+            for p in self.project_manager.pdfs:
+                if os.path.basename(p).lower() == target_doc_name.strip().lower():
+                    target_path = p
+                    break
+                    
+        if target_path:
+            search_paths = [target_path] + [p for p in self.project_manager.pdfs if p != target_path]
+        else:
+            search_paths = self.project_manager.pdfs
+
+        for path in search_paths:
             doc = self.project_manager.get_doc(path)
+            
             for page_num in range(len(doc)):
                 page = doc.load_page(page_num)
                 
@@ -266,21 +276,29 @@ class MainWindow(QMainWindow):
                 if rects:
                     annot = page.add_highlight_annot(rects)
                     annot.set_colors(stroke=(0.7, 0.4, 1.0))
+                    import uuid
                     annot.set_info(title=f"AINote|{uuid.uuid4()}", content=note, subject=clean_quote)
                     annot.update()
                     
+                    found_any = True
+                    
+                    # If this happens to be the active view, refresh the screen immediately
                     if path == self.current_file_path:
                         self.viewer.reload_page(page_num)
-                    else:
-                        try: doc.saveIncr()
-                        except: pass
-                    
-                    found_any = True
+
+            # NOTE: Removed automatic background doc.save(). Modifying the `fitz.Document`
+            # in the memory cache is enough. Background saving while the file is loaded 
+            # causes OS lock errors and makes highlights vanish from inactive tabs.
+            
+            # If we found it in the targeted document, stop searching so we don't 
+            # accidentally highlight the same phrase in the wrong document.
+            if found_any:
+                break 
 
         if found_any:
             self.viewer.annot_manager.note_added.emit()
-        else:
-            print(f"DEBUG [LLM Highlight Miss]: Failed on all chunks for -> '{clean_quote}'")
+            
+        return found_any
 
     def save_project(self):
         try:

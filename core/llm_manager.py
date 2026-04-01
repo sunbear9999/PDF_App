@@ -30,10 +30,13 @@ class LocalLLMManager:
 
     def get_embedding(self, text):
         payload = {"model": self.embedding_model, "prompt": text, "keep_alive": "60m"}
-        response = requests.post(f"{self.api_base}/embeddings", json=payload)
-        if response.status_code == 200:
-            return response.json().get("embedding")
-        raise Exception(f"Failed to generate embedding. Did you run 'ollama pull {self.embedding_model}'?")
+        try:
+            response = requests.post(f"{self.api_base}/embeddings", json=payload, timeout=120)
+            if response.status_code == 200:
+                return response.json().get("embedding")
+            raise Exception(f"Server returned {response.status_code}: {response.text}")
+        except Exception as e:
+            raise Exception(f"Embedding failed. Error: {str(e)}")
 
     def save_index(self, filepath):
         try:
@@ -95,10 +98,14 @@ class LocalLLMManager:
             if callback: callback("Please load and index a document first.")
             return ""
 
-        question_emb = self.get_embedding(question)
+        try:
+            question_emb = self.get_embedding(question)
+        except Exception as e:
+            if callback: callback(f"\n[System Error: {str(e)}]")
+            return f"[System Error: {str(e)}]"
+
         similarities = [self._cosine_similarity(question_emb, doc_emb) for doc_emb in self.document_embeddings]
         
-        # Filter strictly by the PDFs the user checked in the UI
         valid_indices = []
         for i, chunk in enumerate(self.document_chunks):
             if not allowed_docs or chunk['doc_name'] in allowed_docs:
@@ -113,22 +120,27 @@ class LocalLLMManager:
         context = "\n\n".join(context_pieces)
 
         system_prompt = (
-            "You are an AI research assistant analyzing a set of documents. Use the provided context to answer the user's question.\n\n"
+            "You are an AI research assistant analyzing a set of documents.\n"
+            "Use the provided context to answer the user's question.\n\n"
             "AUTONOMOUS HIGHLIGHTING:\n"
-            "If you find specific evidence in the context that supports your answer, you can highlight it in the user's PDF and leave a note. "
-            "To do this, include the following XML tag anywhere in your response:\n"
-            '<mark quote="Paste the exact sentence or phrase from the context here">Your original commentary explaining WHY you highlighted this.</mark>\n\n'
-            "CRITICAL RULES FOR HIGHLIGHTING:\n"
-            "1. The 'quote' MUST be an exact copy-paste from the context. Do not alter a single character.\n"
-            "2. DO NOT use placeholders like 'EXACT_SHORT_QUOTE'. You must put the actual context text inside the quote attribute.\n"
-            "3. The text INSIDE the tags MUST be your own insightful note or summary. DO NOT just repeat the quote inside the tag.\n\n"
+            "When you find evidence in the context, you MUST highlight it in the user's PDF.\n"
+            "To highlight, you MUST use this exact XML format for EACH piece of evidence:\n"
+            "<highlight>\n"
+            "<doc>exact filename from context</doc>\n"
+            "<quote>exact continuous sentence or phrase from context</quote>\n"
+            "<note>Your commentary or explanation here</note>\n"
+            "</highlight>\n\n"
+            "CRITICAL RULES:\n"
+            "1. The text inside <quote> MUST be an exact copy-paste of a continuous phrase (5-15 words) from the CONTEXT.\n"
+            "2. You MUST create MULTIPLE <highlight> blocks if the evidence spans multiple documents or locations.\n"
+            "3. Put all your regular text/commentary inside the <note> tags.\n\n"
             f"CONTEXT:\n{context}"
         )
 
         payload = {"model": selected_model, "prompt": question, "system": system_prompt, "stream": True, "keep_alive": "60m"}
         full_response = ""
         try:
-            with requests.post(f"{self.api_base}/generate", json=payload, stream=True) as response:
+            with requests.post(f"{self.api_base}/generate", json=payload, stream=True, timeout=120) as response:
                 for line in response.iter_lines():
                     if line:
                         chunk = json.loads(line)
@@ -136,6 +148,7 @@ class LocalLLMManager:
                         full_response += txt
                         if callback: callback(txt)
         except Exception as e:
-            if callback: callback(f"\n[Error: {str(e)}]")
+            if callback: callback(f"\n[Generation Error: {str(e)}]")
+            full_response += f"\n[Generation Error: {str(e)}]"
         
         return full_response

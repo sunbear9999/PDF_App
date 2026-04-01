@@ -64,5 +64,12 @@ class ProjectManager:
     def save_all_docs(self):
         for path, doc in self.open_docs.items():
             if not doc.is_closed:
-                try: doc.saveIncr()
-                except: pass
+                # BUG 2 FIX: Enforce robust safe incremental saving 
+                try: 
+                    doc.save(doc.name, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
+                except Exception as e: 
+                    print(f"Incremental save failed in project manager for {doc.name}: {e}")
+                    try:
+                        doc.save(doc.name) # Full save fallback
+                    except Exception as fallback_e:
+                        print(f"Full save fallback failed for {doc.name}: {fallback_e}")
