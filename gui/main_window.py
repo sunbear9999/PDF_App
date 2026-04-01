@@ -50,7 +50,6 @@ class MainWindow(QMainWindow):
         self._build_workspace()
         self._setup_shortcuts()
         
-        # AUTOSAVE SYSTEM: Silently runs every 5 minutes (300,000 ms)
         self.autosave_timer = QTimer(self)
         self.autosave_timer.timeout.connect(self.autosave_project)
         self.autosave_timer.start(5 * 60 * 1000) 
@@ -128,16 +127,42 @@ class MainWindow(QMainWindow):
 
         self.main_layout.addWidget(self.top_menu)
 
+    def _clear_ui_for_new_project(self):
+        self.current_file_path = None
+        self.pdf_selector.blockSignals(True)
+        self.pdf_selector.clear()
+        self.pdf_selector.blockSignals(False)
+        
+        if hasattr(self.viewer, 'scene') and self.viewer.scene:
+            self.viewer.scene.clear()
+        if hasattr(self.viewer, 'doc'):
+            self.viewer.doc = None
+            
+        if "Notes" in self.tabs:
+            for i in reversed(range(self.tabs["Notes"].scroll_layout.count())): 
+                widget = self.tabs["Notes"].scroll_layout.itemAt(i).widget()
+                if widget: widget.deleteLater()
+            
+            self.tabs["Notes"].workspace_view.scene_obj.clear()
+            self.tabs["Notes"].workspace_view.nodes.clear()
+            self.tabs["Notes"].workspace_view.edges.clear()
+
     def _new_project(self):
         path, _ = QFileDialog.getSaveFileName(self, "Create New Project", "", "PDF Project (*.pdfproj)")
         if path:
             if not path.lower().endswith(".pdfproj"):
                 path += ".pdfproj"
                 
+            if self.project_manager.project_filepath:
+                self.save_project()
+                
+            self._clear_ui_for_new_project()
+                
             self.project_manager.create_project(path)
             self.settings.setValue("last_project", self.project_manager.project_filepath)
             self._refresh_pdf_dropdown()
             self.setWindowTitle(f"PDF Workspace - {self.project_manager.project_name}")
+            self.tabs["LLM Chat"].refresh_project_ui()
 
     def _open_project(self):
         dialog = QFileDialog(self, "Open Project")
@@ -162,8 +187,7 @@ class MainWindow(QMainWindow):
             self.project_manager.project_filepath = path
             self.project_manager.project_name = os.path.basename(path).replace(".pdfproj", "")
             
-            self.project_manager.save_all_docs()
-            self.project_manager.save_project()
+            self.save_project() 
             
             new_index = path + ".index.json"
             if os.path.exists(old_index):
@@ -172,10 +196,14 @@ class MainWindow(QMainWindow):
                 
             self.settings.setValue("last_project", path)
             self.setWindowTitle(f"PDF Workspace - {self.project_manager.project_name}")
-            QMessageBox.information(self, "Success", "Project duplicated successfully!")
 
     def _load_project(self, path):
+        if self.project_manager.project_filepath:
+            self.save_project()
+            
         if self.project_manager.load_project(path):
+            self._clear_ui_for_new_project()
+            
             self.settings.setValue("last_project", self.project_manager.project_filepath)
             self.setWindowTitle(f"PDF Workspace - {self.project_manager.project_name}")
             self._refresh_pdf_dropdown()
@@ -220,35 +248,42 @@ class MainWindow(QMainWindow):
             self.pdf_selector.blockSignals(False)
 
         self.current_file_path = pdf_path
-        
         self.project_manager.set_active_file(pdf_path)
         
         doc = self.project_manager.get_doc(pdf_path)
-        success = self.viewer.load_document(doc)
-        
-        if success:
-            self._check_needs_ocr()
-            self._sync_tools_with_file(pdf_path)
+        if doc:
+            success = self.viewer.load_document(doc)
+            if success:
+                self._check_needs_ocr()
+                self._sync_tools_with_file(pdf_path)
+            else:
+                QMessageBox.warning(self, "Error", "Failed to load the PDF document.")
         else:
-            QMessageBox.warning(self, "Error", "Failed to load the PDF document.")
+            QMessageBox.warning(self, "Error", "Failed to access the file from the filesystem.")
 
     def autosave_project(self):
         if self.project_manager.project_filepath:
             try:
+                if "Notes" in self.tabs and hasattr(self.tabs["Notes"], "save_workspace_state"):
+                    self.tabs["Notes"].save_workspace_state()
                 self.project_manager.save_all_docs()
                 self.project_manager.save_project()
             except Exception as e:
                 print(f"Background autosave failed: {e}")
 
     def save_project(self):
+        if not self.project_manager.project_filepath: return
         try:
+            if "Notes" in self.tabs and hasattr(self.tabs["Notes"], "save_workspace_state"):
+                self.tabs["Notes"].save_workspace_state()
+                
             self.project_manager.save_all_docs()
             self.project_manager.save_project()
             QMessageBox.information(self, "Success", "Project and all highlights saved successfully!")
         except Exception as e:
             QMessageBox.warning(self, "Save Error", f"Error saving project: {str(e)}")
 
-    def add_ai_annotation(self, quote, note, target_doc_name=None):
+    def add_ai_annotation(self, quote, note, target_doc_name=None, allowed_paths=None):
         if not quote: return False
         clean_quote = quote.strip()
         words = clean_quote.split()
@@ -262,49 +297,56 @@ class MainWindow(QMainWindow):
                 chunk = " ".join(words[i:i+6])
                 if chunk.strip(): chunks.append(chunk)
 
+        search_paths = allowed_paths if allowed_paths else self.project_manager.pdfs
+        
+        # If the LLM successfully identified the source doc, prioritize it.
+        if target_doc_name:
+            filtered_paths = []
+            for p in search_paths:
+                if target_doc_name.lower().strip() in os.path.basename(p).lower():
+                    filtered_paths.append(p)
+            if filtered_paths:
+                search_paths = filtered_paths
+
         found_any = False
 
-        search_paths = []
-        target_path = None
-        if target_doc_name:
-            for p in self.project_manager.pdfs:
-                if os.path.basename(p).lower() == target_doc_name.strip().lower():
-                    target_path = p
-                    break
-                    
-        if target_path:
-            search_paths = [target_path] + [p for p in self.project_manager.pdfs if p != target_path]
-        else:
-            search_paths = self.project_manager.pdfs
-
         for path in search_paths:
-            doc = self.project_manager.get_doc(path)
-            
-            for page_num in range(len(doc)):
-                page = doc.load_page(page_num)
-                rects = page.search_for(" ".join(words))
+            try:
+                doc = self.project_manager.get_doc(path)
+                if not doc: continue
                 
-                if not rects and len(chunks) > 1:
-                    rects = []
-                    for chunk in chunks:
-                        res = page.search_for(chunk)
-                        if res: rects.extend(res)
-                
-                if rects:
-                    annot = page.add_highlight_annot(rects)
-                    annot.set_colors(stroke=(0.7, 0.4, 1.0))
-                    annot.set_info(title=f"AINote|{uuid.uuid4()}", content=note, subject=clean_quote)
-                    annot.update()
+                for page_num in range(len(doc)):
+                    page = doc.load_page(page_num)
                     
-                    found_any = True
+                    rects = page.search_for(clean_quote)
                     
-                    self.project_manager.mark_dirty(path)
+                    if not rects and len(chunks) > 1:
+                        rects = []
+                        for chunk in chunks:
+                            res = page.search_for(chunk)
+                            if res: rects.extend(res)
                     
-                    if path == self.current_file_path:
-                        self.viewer.reload_page(page_num)
+                    if rects:
+                        quads = [r.quad for r in rects]
+                        annot = page.add_highlight_annot(quads)
+                        annot.set_colors(stroke=(0.7, 0.4, 1.0))
+                        
+                        annot_info = {
+                            "title": f"AINote|{uuid.uuid4()}",
+                            "content": note,
+                            "subject": clean_quote
+                        }
+                        annot.set_info(info=annot_info)
+                        annot.update()
+                        
+                        found_any = True
+                        self.project_manager.mark_dirty(path)
+                        
+                        if path == self.current_file_path:
+                            self.viewer.reload_page(page_num)
 
-            if found_any:
-                break 
+            except Exception as e:
+                print(f"Error adding AI annotation to {path}: {e}")
 
         if found_any:
             self.viewer.annot_manager.note_added.emit()
@@ -368,14 +410,15 @@ class MainWindow(QMainWindow):
         self.toggle_tool_panel("Notes")
         self.tabs["Notes"].scroll_to_note(annot_id)
 
-    # --- MISSING METHODS RESTORED BELOW ---
     def _check_needs_ocr(self):
         self.ocr_banner.hide()
         if not self.viewer.doc: return
-        pages_to_check = min(3, len(self.viewer.doc))
-        total_text = "".join([self.viewer.doc.load_page(i).get_text() for i in range(pages_to_check)])
-        if len(total_text.strip()) < 50:
-            self.ocr_banner.show()
+        try:
+            pages_to_check = min(3, len(self.viewer.doc))
+            total_text = "".join([self.viewer.doc.load_page(i).get_text() for i in range(pages_to_check)])
+            if len(total_text.strip()) < 50:
+                self.ocr_banner.show()
+        except: pass
 
     def _trigger_auto_ocr(self):
         self.ocr_banner.hide()

@@ -215,29 +215,41 @@ class LLMTab(QWidget):
         
         self.chat_history.append("<br>")
         
-        # Parse for the new <highlight> blocks safely
         blocks = list(re.finditer(r'<highlight>([\s\S]*?)</highlight>', full_response, re.IGNORECASE))
         
-        # Fallback: The LLM attempted to write highlights but formatted them incorrectly
         if not blocks and "<highlight" in full_response.lower():
             self.chat_history.append(f"⚠️ <b style='color:#ffaa00'>[AI Formatting Error: The LLM generated a malformed highlight tag. Raw output hidden.]</b><br>")
+
+        allowed_paths = []
+        for i in range(self.pdf_list.count()):
+            item = self.pdf_list.item(i)
+            if item.checkState() == Qt.CheckState.Checked:
+                doc_name = item.text()
+                for p in self.main_window.project_manager.pdfs:
+                    if os.path.basename(p) == doc_name:
+                        allowed_paths.append(p)
+                        break
 
         for block in blocks:
             inner_text = block.group(1)
             quote_match = re.search(r'<quote>\s*([\s\S]*?)\s*</quote>', inner_text, re.IGNORECASE)
             note_match = re.search(r'<note>\s*([\s\S]*?)\s*</note>', inner_text, re.IGNORECASE)
+            # CRITICAL FIX: Extract <doc> tag so the target engine knows where to look
+            doc_match = re.search(r'<doc>\s*([\s\S]*?)\s*</doc>', inner_text, re.IGNORECASE)
             
             if quote_match and note_match:
                 quote = quote_match.group(1).strip()
                 note = note_match.group(1).strip()
+                target_doc = doc_match.group(1).strip() if doc_match else None
                 
-                success = self.main_window.add_ai_annotation(quote, note)
+                success = self.main_window.add_ai_annotation(quote, note, target_doc_name=target_doc, allowed_paths=allowed_paths)
                 display_quote = quote[:60] + "..." if len(quote) > 60 else quote
                 
+                doc_label = f" in {target_doc}" if target_doc else ""
                 if success:
-                    self.chat_history.append(f"🖍️ <b style='color:#00cc66'>[AI Highlight Applied]</b>: <i>\"{display_quote}\"</i><br>")
+                    self.chat_history.append(f"🖍️ <b style='color:#00cc66'>[AI Highlight Applied{doc_label}]</b>: <i>\"{display_quote}\"</i><br>")
                 else:
-                    self.chat_history.append(f"⚠️ <b style='color:#ff4444'>[Failed to find exact quote in document]</b>: <i>\"{display_quote}\"</i><br>")
+                    self.chat_history.append(f"⚠️ <b style='color:#ff4444'>[Failed to find exact quote{doc_label}]</b>: <i>\"{display_quote}\"</i><br>")
                 
                 if note:
                     self.chat_history.append(f"<span style='color:#ccc'>Note: {note}</span><br><br>")

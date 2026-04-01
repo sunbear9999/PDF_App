@@ -1,3 +1,4 @@
+# gui/tabs/notes_tab.py
 import os
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                              QPushButton, QScrollArea, QFrame, QComboBox, 
@@ -185,25 +186,28 @@ class NotesTab(QWidget):
         msg_box.exec()
 
     def toggle_view(self):
-        if self.stack.currentIndex() == 0:
-            self.stack.setCurrentIndex(1)
-            self.btn_toggle_view.setText("Switch to List")
-            self.btn_add_bubble.show()
-            self.btn_zoom_in.show()
-            self.btn_zoom_out.show()
-            self.btn_help.show()
-            self.scope_combo.hide()
-            self._sync_workspace()
-        else:
-            self.save_workspace_state() 
-            self.stack.setCurrentIndex(0)
-            self.btn_toggle_view.setText("Switch to Workspace")
-            self.btn_add_bubble.hide()
-            self.btn_zoom_in.hide()
-            self.btn_zoom_out.hide()
-            self.btn_help.hide()
-            self.scope_combo.show()
-            self.refresh_notes()
+        try:
+            if self.stack.currentIndex() == 0:
+                self.stack.setCurrentIndex(1)
+                self.btn_toggle_view.setText("Switch to List")
+                self.btn_add_bubble.show()
+                self.btn_zoom_in.show()
+                self.btn_zoom_out.show()
+                self.btn_help.show()
+                self.scope_combo.hide()
+                self._sync_workspace()
+            else:
+                self.save_workspace_state() 
+                self.stack.setCurrentIndex(0)
+                self.btn_toggle_view.setText("Switch to Workspace")
+                self.btn_add_bubble.hide()
+                self.btn_zoom_in.hide()
+                self.btn_zoom_out.hide()
+                self.btn_help.hide()
+                self.scope_combo.show()
+                self.refresh_notes()
+        except Exception as e:
+            print(f"Error toggling view: {e}")
 
     def add_bubble(self):
         self.workspace_view.add_custom_bubble()
@@ -219,58 +223,72 @@ class NotesTab(QWidget):
         for path in self.main_window.project_manager.pdfs:
             try:
                 doc = self.main_window.project_manager.get_doc(path)
+                if not doc: continue
                 for i in range(len(doc)):
                     page = doc.load_page(i)
                     for annot in page.annots():
-                        title = annot.info.get("title", "")
-                        if title.startswith("UserNote") or title.startswith("AINote"):
-                            annots.append({
-                                "id": title,
-                                "subject": annot.info.get("subject", ""),
-                                "content": annot.info.get("content", ""),
-                                "pdf_path": path,     
-                                "page_num": i         
-                            })
-            except: pass
+                        info = annot.info
+                        if info:
+                            title = info.get("title", "")
+                            if title.startswith("UserNote") or title.startswith("AINote"):
+                                annots.append({
+                                    "id": title,
+                                    "subject": info.get("subject", ""),
+                                    "content": info.get("content", ""),
+                                    "pdf_path": path,     
+                                    "page_num": i         
+                                })
+            except Exception as e: 
+                print(f"Error extracting annotations from {path}: {e}")
         return annots
 
     def _sync_workspace(self):
-        if not self.main_window.project_manager.project_filepath: return
-        workspace_data = self.main_window.project_manager.workspace_data
-        all_annots = self._get_all_project_annotations_for_workspace()
-        self.workspace_view.sync_with_project(workspace_data, all_annots)
+        try:
+            if not self.main_window.project_manager.project_filepath: return
+            workspace_data = self.main_window.project_manager.workspace_data
+            all_annots = self._get_all_project_annotations_for_workspace()
+            self.workspace_view.sync_with_project(workspace_data, all_annots)
+        except Exception as e:
+            print(f"Error syncing workspace: {e}")
 
     def refresh_notes(self):
-        for i in reversed(range(self.scroll_layout.count())): 
-            widget = self.scroll_layout.itemAt(i).widget()
-            if widget: widget.deleteLater()
+        try:
+            for i in reversed(range(self.scroll_layout.count())): 
+                widget = self.scroll_layout.itemAt(i).widget()
+                if widget: widget.deleteLater()
+                
+            scope = self.scope_combo.currentText()
+            paths_to_check = []
             
-        scope = self.scope_combo.currentText()
-        paths_to_check = []
-        
-        if scope == "Current PDF" and self.main_window.current_file_path:
-            paths_to_check = [self.main_window.current_file_path]
-        elif scope == "Entire Project":
-            paths_to_check = self.main_window.project_manager.pdfs
-            
-        for path in paths_to_check:
-            self._load_notes_from_pdf(path)
-            
-        if self.stack.currentIndex() == 1:
-            self._sync_workspace()
+            if scope == "Current PDF" and self.main_window.current_file_path:
+                paths_to_check = [self.main_window.current_file_path]
+            elif scope == "Entire Project":
+                paths_to_check = self.main_window.project_manager.pdfs
+                
+            for path in paths_to_check:
+                self._load_notes_from_pdf(path)
+                
+            if self.stack.currentIndex() == 1:
+                self._sync_workspace()
+        except Exception as e:
+            print(f"Error refreshing notes: {e}")
 
     def _load_notes_from_pdf(self, path):
         try:
             doc = self.main_window.project_manager.get_doc(path)
+            if not doc: return
             for i in range(len(doc)):
                 page = doc.load_page(i)
                 for annot in page.annots():
-                    title = annot.info.get("title", "")
-                    if title.startswith("UserNote") or title.startswith("AINote"):
-                        is_ai = title.startswith("AINote")
-                        bubble = NoteBubble(self, path, i, title, annot.info.get("subject", ""), annot.info.get("content", ""), annot.colors.get("stroke"), is_ai=is_ai)
-                        self.scroll_layout.addWidget(bubble)
-        except: pass
+                    info = annot.info
+                    if info:
+                        title = info.get("title", "")
+                        if title.startswith("UserNote") or title.startswith("AINote"):
+                            is_ai = title.startswith("AINote")
+                            bubble = NoteBubble(self, path, i, title, info.get("subject", ""), info.get("content", ""), annot.colors.get("stroke"), is_ai=is_ai)
+                            self.scroll_layout.addWidget(bubble)
+        except Exception as e:
+            print(f"Error loading notes from {path}: {e}")
 
     def scroll_to_note(self, annot_id):
         if self.stack.currentIndex() == 1:
@@ -292,28 +310,37 @@ class NotesTab(QWidget):
         self._modify_note(pdf_path, page_num, annot_id, action="color", color=color_tuple)
 
     def _modify_note(self, pdf_path, page_num, annot_id, action, color=None, content=None, refresh=True):
-        doc = self.main_window.project_manager.get_doc(pdf_path)
-        is_active = (pdf_path == self.main_window.current_file_path)
-        
-        page = doc.load_page(page_num)
-        for annot in page.annots():
-            if annot.info.get("title") == annot_id:
-                if action == "delete": 
-                    page.delete_annot(annot)
-                elif action == "color":
-                    annot.set_colors(stroke=color)
-                    annot.update()
-                elif action == "edit_content":
-                    new_info = annot.info
-                    new_info["content"] = str(content)
-                    annot.set_info(new_info)
-                    annot.update()
-                break
-                
-        if is_active: self.viewer.reload_page(page_num)
-        
-        self.main_window.project_manager.mark_dirty(pdf_path)
-        
-        # Prevent violent canvas rebuilds if edited directly inside the Workspace View
-        if refresh:
-            self.refresh_notes()
+        try:
+            doc = self.main_window.project_manager.get_doc(pdf_path)
+            if not doc: return
+            
+            is_active = (pdf_path == self.main_window.current_file_path)
+            page = doc.load_page(page_num)
+            
+            for annot in page.annots():
+                info = annot.info
+                if info and info.get("title") == annot_id:
+                    if action == "delete": 
+                        page.delete_annot(annot)
+                    elif action == "color":
+                        annot.set_colors(stroke=color)
+                        annot.update()
+                    elif action == "edit_content":
+                        # CRITICAL FIX: To prevent silent failures in PyMuPDF, create a distinct dict
+                        new_info = dict(info)
+                        new_info["content"] = str(content)
+                        # Explicitly pass info as a kwargs to respect PyMuPDF updates
+                        annot.set_info(info=new_info)
+                        annot.update()
+                    break
+                    
+            if is_active and self.viewer:
+                self.viewer.reload_page(page_num)
+            
+            self.main_window.project_manager.mark_dirty(pdf_path)
+            
+            # Prevent violent canvas rebuilds if edited directly inside the Workspace View
+            if refresh:
+                self.refresh_notes()
+        except Exception as e:
+            print(f"Error applying annotation modification: {e}")

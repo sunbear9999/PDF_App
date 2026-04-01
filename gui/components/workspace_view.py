@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (QGraphicsView, QGraphicsScene, QGraphicsRectItem,
                              QGraphicsTextItem, QGraphicsLineItem, QGraphicsItem, 
                              QInputDialog, QColorDialog, QMenu, QGraphicsProxyWidget,
                              QPushButton, QHBoxLayout, QWidget, QMessageBox)
-from PyQt6.QtCore import Qt, QRectF, QPointF, QLineF, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QRectF, QPointF, QLineF, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor, QPen, QBrush, QFont, QPainter, QCursor, QTextDocument
 
 def get_text_color_for_bg(bg_color):
@@ -51,13 +51,12 @@ class AIOrganizeWorker(QThread):
         try:
             self.llm_manager.query(prompt, self.model, allowed_docs=None, callback=callback, rag_enabled=False)
             
-            # Robust JSON extraction to handle LLM hallucinations
             match = re.search(r'\[\s*\{.*?\}\s*\]', response_text, re.DOTALL)
             if not match:
                 raise ValueError("No JSON array found in output.")
                 
             cleaned = match.group(0)
-            cleaned = re.sub(r',\s*([\]}])', r'\1', cleaned) # Bruteforce remove trailing commas
+            cleaned = re.sub(r',\s*([\]}])', r'\1', cleaned) 
             clusters = json.loads(cleaned)
             self.finished.emit(clusters, "")
         except Exception as e:
@@ -190,8 +189,14 @@ class Node(QGraphicsRectItem):
         btn_font = QPushButton("🔠 Size")
         btn_connect = QPushButton("🔗 Connect")
         
-        for btn in [btn_edit, btn_color, btn_font, btn_connect]:
-            btn.setStyleSheet("background-color: #444; color: white; border-radius: 4px; padding: 2px 6px; font-size: 10px;")
+        buttons = [btn_edit, btn_color, btn_font, btn_connect]
+        
+        if self.pdf_path is not None:
+            self.btn_jump = QPushButton("📄 Jump to PDF")
+            buttons.append(self.btn_jump)
+        
+        for btn in buttons:
+            btn.setStyleSheet("background-color: #444; color: white; border-radius: 4px; padding: 2px 6px; font-size: 10px; font-weight: bold;")
             t_layout.addWidget(btn)
             
         btn_edit.clicked.connect(self.trigger_edit)
@@ -199,11 +204,38 @@ class Node(QGraphicsRectItem):
         btn_font.clicked.connect(self.trigger_font_size_change)
         btn_connect.clicked.connect(self.trigger_connect)
         
+        if self.pdf_path is not None:
+            self.btn_jump.clicked.connect(self.trigger_jump)
+        
         self.proxy_toolbar = QGraphicsProxyWidget(self)
         self.proxy_toolbar.setWidget(self.toolbar_widget)
         self.proxy_toolbar.hide()
         
         self.refresh_layout()
+
+    def mousePressEvent(self, event):
+        view = self.scene().view if self.scene() and hasattr(self.scene(), 'view') else None
+        if view and view.connecting_node and view.connecting_node != self:
+            view.finish_connection(self)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def trigger_jump(self):
+        if self.pdf_path and self.page_num is not None:
+            if self.scene() and hasattr(self.scene(), 'view'):
+                main_win = self.scene().view.main_window
+                
+                # CRITICAL FIX: To prevent a C++ Segfault, we MUST delay the execution 
+                # of the scene wipe until after this button's click event has fully completed.
+                pdf_path = self.pdf_path
+                page_num = self.page_num
+                
+                def do_jump():
+                    main_win.switch_to_pdf(pdf_path)
+                    main_win.viewer.jump_to_page(page_num)
+                    
+                QTimer.singleShot(0, do_jump)
 
     def add_edge(self, edge):
         self.edges.append(edge)
@@ -272,7 +304,7 @@ class Node(QGraphicsRectItem):
         collapsed_text = self.note if self.note else (f'"{self.quote}"' if self.quote else "[Empty Note]")
             
         if self.is_hovered:
-            needed_width = max(self.base_width, 260) 
+            needed_width = max(self.base_width, 320) 
             self.text_item.setTextWidth(needed_width - (margin * 2))
             
             font_size = self.manual_font_size if self.manual_font_size else 12
@@ -364,7 +396,6 @@ class Node(QGraphicsRectItem):
             
         if not self.is_custom and self.pdf_path is not None:
             notes_tab = self.scene().view.main_window.tabs["Notes"]
-            # CRITICAL FIX: Pass refresh=False to stop the violent scene wipe that causes state loss
             notes_tab._modify_note(self.pdf_path, self.page_num, self.node_id, action="edit_content", content=self.note, refresh=False)
             
         if self.scene() and hasattr(self.scene(), 'view'):
@@ -384,7 +415,6 @@ class Node(QGraphicsRectItem):
             
             if not self.is_custom and self.pdf_path is not None:
                 notes_tab = self.scene().view.main_window.tabs["Notes"]
-                # Pass refresh=False to avoid violently wiping the canvas 
                 notes_tab._modify_note(self.pdf_path, self.page_num, self.node_id, action="color", color=color.getRgbF()[:3], refresh=False)
                 
             if self.scene() and hasattr(self.scene(), 'view'):
@@ -435,10 +465,27 @@ class WorkspaceView(QGraphicsView):
         self.scale(1 / 1.15, 1 / 1.15)
 
     def mousePressEvent(self, event):
-        item = self.itemAt(event.pos())
+        if self.connecting_node:
+            item = self.itemAt(event.pos())
+            is_node = False
+            current = item
+            while current:
+                if isinstance(current, Node):
+                    is_node = True
+                    break
+                current = current.parentItem()
+                
+            if not is_node:
+                self.connecting_node.setPen(QPen(QColor("#555555"), 2))
+                self.connecting_node = None
+                event.accept()
+                return
 
         if event.button() == Qt.MouseButton.LeftButton and event.modifiers() == Qt.KeyboardModifier.ShiftModifier:
             self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
+            item = self.itemAt(event.pos())
+            while item and not isinstance(item, (Node, Edge)):
+                item = item.parentItem()
             if isinstance(item, Node):
                 item.setSelected(not item.isSelected())
                 event.accept()
@@ -449,15 +496,6 @@ class WorkspaceView(QGraphicsView):
         if event.button() == Qt.MouseButton.MiddleButton or (event.button() == Qt.MouseButton.LeftButton and event.modifiers() == Qt.KeyboardModifier.AltModifier):
             self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
             event.accept()
-            return
-
-        if self.connecting_node:
-            if isinstance(item, Node) and item != self.connecting_node:
-                self.finish_connection(item)
-            else:
-                self.connecting_node.setPen(QPen(QColor("#555555"), 2))
-                self.connecting_node = None
-            super().mousePressEvent(event)
             return
 
         super().mousePressEvent(event)

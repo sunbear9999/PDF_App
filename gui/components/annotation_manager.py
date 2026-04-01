@@ -107,14 +107,23 @@ class AnnotationManager(QObject):
         text, ok = QInputDialog.getText(self.viewer, "Add Note", "Enter a note for this highlight:")
         
         if ok:
-            page = self.viewer.doc.load_page(self.current_page_idx)
-            quads = [fitz.Rect(w[:4]).quad for w in selected_words]
-            
-            annot = page.add_highlight_annot(quads)
-            annot.set_colors(stroke=(1.0, 0.9, 0.0)) # Default to Yellow now
-            annot.set_info(title=f"UserNote|{uuid.uuid4()}", content=text if text else "", subject=extracted_text)
-            annot.update()
-            
-            # Instantly re-render the page to show the native PyMuPDF annotation
-            self.viewer.reload_page(self.current_page_idx)
-            self.note_added.emit()
+            try:
+                page = self.viewer.doc.load_page(self.current_page_idx)
+                quads = [fitz.Rect(w[:4]).quad for w in selected_words]
+                
+                annot = page.add_highlight_annot(quads)
+                annot.set_colors(stroke=(1.0, 0.9, 0.0))
+                
+                # CRITICAL FIX: Build a dictionary to prevent PyMuPDF memory corruption and segfaults
+                annot_info = {
+                    "title": f"UserNote|{uuid.uuid4()}",
+                    "content": text if text else "",
+                    "subject": extracted_text
+                }
+                annot.set_info(info=annot_info)
+                annot.update()
+                
+                self.viewer.reload_page(self.current_page_idx)
+                self.note_added.emit()
+            except Exception as e:
+                print(f"Error saving highlight: {e}")
