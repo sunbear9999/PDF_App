@@ -247,6 +247,10 @@ class MainWindow(QMainWindow):
             self.pdf_selector.setCurrentIndex(idx)
             self.pdf_selector.blockSignals(False)
 
+        # CRITICAL FIX: If we are already viewing the file, do not reload the thread
+        if self.current_file_path == pdf_path and self.viewer.doc:
+            return
+
         self.current_file_path = pdf_path
         self.project_manager.set_active_file(pdf_path)
         
@@ -299,7 +303,6 @@ class MainWindow(QMainWindow):
 
         search_paths = allowed_paths if allowed_paths else self.project_manager.pdfs
         
-        # If the LLM successfully identified the source doc, prioritize it.
         if target_doc_name:
             filtered_paths = []
             for p in search_paths:

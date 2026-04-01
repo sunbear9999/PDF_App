@@ -1,7 +1,7 @@
 import fitz
 from PyQt6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QFrame, QVBoxLayout, QLabel
 from PyQt6.QtGui import QImage, QPixmap, QPainter, QColor
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QRectF
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QRectF, QTimer
 
 from gui.components.annotation_manager import AnnotationManager
 
@@ -45,9 +45,11 @@ class PDFViewer(QGraphicsView):
         self.page_items = []
         self.worker = None
         self.annot_manager = AnnotationManager(self)
+        
+        # Tracks jumps requested before the target page has finished rendering
+        self.pending_jump = None 
 
     def load_document(self, doc):
-        """Now takes a pre-opened fitz.Document to prevent memory wiping on switches."""
         if self.worker and self.worker.isRunning():
             self.worker.stop()
             self.worker.wait()
@@ -55,6 +57,7 @@ class PDFViewer(QGraphicsView):
         self.doc = doc
         self.scene.clear()
         self.page_items.clear()
+        self.pending_jump = None 
         
         self.worker = RenderWorker(self.doc, self.base_zoom)
         self.worker.page_ready.connect(self._on_page_ready)
@@ -69,6 +72,13 @@ class PDFViewer(QGraphicsView):
         self.scene.addItem(item)
         self.page_items.append(item)
         self.scene.setSceneRect(self.scene.itemsBoundingRect())
+
+        # CRITICAL FIX: If a jump was queued for this newly rendered page, execute it!
+        if self.pending_jump and self.pending_jump[0] == page_num:
+            p_num, a_id = self.pending_jump
+            self.pending_jump = None
+            # Defer the UI jump by 100ms to let the Qt rendering engine calculate boundaries
+            QTimer.singleShot(100, lambda: self._execute_jump(p_num, a_id))
 
     def reload_page(self, page_num):
         if not self.doc or page_num < 0 or page_num >= len(self.page_items): return
@@ -113,6 +123,31 @@ class PDFViewer(QGraphicsView):
             target_item = self.page_items[page_num]
             top_edge = QRectF(target_item.scenePos().x(), target_item.scenePos().y(), target_item.boundingRect().width(), 1)
             self.ensureVisible(top_edge, 50, 10)
+
+    def jump_to_annotation(self, page_num, annot_id):
+        # If the page hasn't rendered yet (e.g., just switched PDFs), queue the jump
+        if page_num >= len(self.page_items):
+            self.pending_jump = (page_num, annot_id)
+        else:
+            self._execute_jump(page_num, annot_id)
+
+    def _execute_jump(self, page_num, annot_id):
+        if 0 <= page_num < len(self.page_items) and self.doc:
+            target_item = self.page_items[page_num]
+            page = self.doc.load_page(page_num)
+            for annot in page.annots():
+                if annot.info.get("title") == annot_id:
+                    r = annot.rect
+                    z = self.base_zoom
+                    qt_rect = QRectF(r.x0 * z, r.y0 * z, (r.x1 - r.x0) * z, (r.y1 - r.y0) * z)
+                    scene_rect = target_item.mapToScene(qt_rect).boundingRect()
+                    
+                    # Aggressively center the view on the specific highlight
+                    self.ensureVisible(scene_rect, 300, 300)
+                    self.centerOn(scene_rect.center())
+                    return
+            
+            self.jump_to_page(page_num)
 
     def zoom_in(self): self.scale(1.2, 1.2)
     def zoom_out(self): self.scale(1 / 1.2, 1 / 1.2)

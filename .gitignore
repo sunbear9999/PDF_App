@@ -41,3 +41,7 @@ gui/tabs/__pycache__/ocr_tab.cpython-312.pyc
 gui/tabs/__pycache__/tts_tab.cpython-312.pyc
 gui/tabs/__pycache__
 gui/components/__pycache__
+gui/components/__pycache__/annotation_manager.cpython-312.pyc
+gui/components/__pycache__/pdf_viewer.cpython-312.pyc
+gui/tabs/__pycache__/llm_tab.cpython-312.pyc
+gui/tabs/__pycache__/notes_tab.cpython-312.pyc

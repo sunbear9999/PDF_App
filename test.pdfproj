@@ -1,0 +1,39 @@
+{
+    "name": "test",
+    "pdfs": [
+        "/home/sunbear/Downloads/Light When Computers Were Women.pdf",
+        "/home/sunbear/Downloads/The Concept of the Goddess copy.pdf",
+        "/home/sunbear/Downloads/The Goddess Asherah copy.pdf"
+    ],
+    "workspace_data": {
+        "nodes": {
+            "AINote|4c874914-b355-447e-905b-37b26bc7de8f": {
+                "quote": "Aesthetics of wartime computing prized discipline, order, and exactness - traits associated with feminine service roles.",
+                "note": "This quote demonstrates how aesthetics in technology and labor during wartime were influenced by gendered expectations. The association of disciplined, orderly work (traditionally linked to femininity) with computing reinforces societal norms that contributed to the marginalization and objectification of women's contributions in tech fields.",
+                "color": "#2d2238",
+                "is_custom": false,
+                "pdf_path": "/home/sunbear/Downloads/Light When Computers Were Women.pdf",
+                "page_num": 10,
+                "manual_font_size": null,
+                "x": 16.0,
+                "y": -334.0,
+                "width": 300.0,
+                "height": 160.0
+            },
+            "AINote|7b7af549-00ca-4a72-8947-9bf553ba4e16": {
+                "quote": "Only intermittently, although with gradually increasing intensity and frequency, did the prophetic demand for the worship of Yah\u00ad weh as the one and only god make itself be heard and was it heeded by the people and their leaders.",
+                "note": "This quote illustrates how religious changes under Solomon led to a gradual shift in social norms, reducing the influence of goddess Asherah. This process reflects the beginnings of male-dominated monotheism that may have contributed to the development of patriarchal societies with attendant sexism.",
+                "color": "#2d2238",
+                "is_custom": false,
+                "pdf_path": "/home/sunbear/Downloads/The Goddess Asherah copy.pdf",
+                "page_num": 0,
+                "manual_font_size": null,
+                "x": 35.0,
+                "y": -67.0,
+                "width": 300.0,
+                "height": 160.0
+            }
+        },
+        "edges": []
+    }
+}

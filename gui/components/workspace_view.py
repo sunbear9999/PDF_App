@@ -22,16 +22,24 @@ def get_text_color_for_bg(bg_color):
 class AIOrganizeWorker(QThread):
     finished = pyqtSignal(object, str)
 
-    def __init__(self, llm_manager, model, nodes_data):
+    def __init__(self, llm_manager, model, nodes_data, custom_instructions=""):
         super().__init__()
         self.llm_manager = llm_manager
         self.model = model
         self.nodes_data = nodes_data
+        self.custom_instructions = custom_instructions
 
     def run(self):
+        custom_rule = f"CRITICAL USER RULE FOR CATEGORIES: '{self.custom_instructions}'\n" if self.custom_instructions else "Group by general semantic similarity into logical topics.\n"
+        
         prompt = (
-            "You are a strict JSON data processing API. You must group the following text snippets into 2-4 logical categories based on semantic similarity.\n"
-            "Respond ONLY with a valid, raw JSON array. No markdown formatting, no backticks, no conversational text.\n"
+            "You are a strict JSON data processing API.\n"
+            f"{custom_rule}"
+            "INSTRUCTIONS:\n"
+            "1. You MUST strictly follow the user rule above for how to name and define the categories.\n"
+            "2. You MUST include EVERY SINGLE 'id' from the Input Data in exactly one category. Do not drop items.\n"
+            "3. DO NOT alter the 'id' strings. Copy them exactly as provided.\n"
+            "4. Respond ONLY with a valid, raw JSON array. No markdown, no conversational text.\n"
             "Schema:\n"
             "[\n"
             "  {\n"
@@ -225,15 +233,20 @@ class Node(QGraphicsRectItem):
         if self.pdf_path and self.page_num is not None:
             if self.scene() and hasattr(self.scene(), 'view'):
                 main_win = self.scene().view.main_window
-                
-                # CRITICAL FIX: To prevent a C++ Segfault, we MUST delay the execution 
-                # of the scene wipe until after this button's click event has fully completed.
                 pdf_path = self.pdf_path
                 page_num = self.page_num
+                annot_id = self.node_id
+                
+                # CRITICAL: Pre-save the workspace layout before switching documents so it doesn't reset nodes!
+                if "Notes" in main_win.tabs:
+                    main_win.tabs["Notes"].save_workspace_state()
                 
                 def do_jump():
                     main_win.switch_to_pdf(pdf_path)
-                    main_win.viewer.jump_to_page(page_num)
+                    if hasattr(main_win.viewer, "jump_to_annotation"):
+                        main_win.viewer.jump_to_annotation(page_num, annot_id)
+                    else:
+                        main_win.viewer.jump_to_page(page_num)
                     
                 QTimer.singleShot(0, do_jump)
 
@@ -595,6 +608,13 @@ class WorkspaceView(QGraphicsView):
     def trigger_ai_organize(self, selected_nodes):
         if self.loading_indicator: return
 
+        instructions, ok = QInputDialog.getText(
+            self, 
+            "AI Organize Options", 
+            "Enter custom organization instructions (e.g., 'Group by Timeline' or 'Pros vs Cons'):\nLeave blank for default semantic grouping."
+        )
+        if not ok: return
+
         nodes_data = [{"id": n.node_id, "text": n.note or n.quote} for n in selected_nodes]
         llm_manager = self.main_window.tabs["LLM Chat"].llm_manager
         model = self.main_window.tabs["LLM Chat"].model_combo.currentText()
@@ -606,7 +626,7 @@ class WorkspaceView(QGraphicsView):
         self.loading_indicator.setPos(view_center.x() - 150, view_center.y())
         self.loading_indicator.setZValue(1000)
 
-        self.worker = AIOrganizeWorker(llm_manager, model, nodes_data)
+        self.worker = AIOrganizeWorker(llm_manager, model, nodes_data, custom_instructions=instructions.strip())
         self.worker.finished.connect(self._on_ai_organize_finished)
         self.worker.start()
 

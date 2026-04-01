@@ -111,7 +111,8 @@ class LocalLLMManager:
                     if not allowed_docs or chunk['doc_name'] in allowed_docs:
                         valid_indices.append(i)
                         
-                top_indices = sorted(valid_indices, key=lambda i: similarities[i], reverse=True)[:4]
+                # Double the context window to pull top 8 chunks instead of 4
+                top_indices = sorted(valid_indices, key=lambda i: similarities[i], reverse=True)[:8]
                 
                 context_pieces = []
                 for i in top_indices:
@@ -124,10 +125,11 @@ class LocalLLMManager:
                 return f"[System Error: {str(e)}]"
 
             system_prompt = (
-                "You are an AI research assistant analyzing a set of documents.\n"
-                "Use the provided context to answer the user's question.\n\n"
+                "You are an expert AI research assistant analyzing documents.\n"
+                "Provide comprehensive, intelligent, and deeply analytical answers using the provided context.\n"
+                "If the context doesn't contain the exact answer, use your general knowledge to infer, but clarify what is from the document.\n\n"
                 "AUTONOMOUS HIGHLIGHTING:\n"
-                "When you find evidence in the context, you MUST highlight it in the user's PDF.\n"
+                "When you cite specific evidence from the context, you MUST highlight it in the user's PDF.\n"
                 "To highlight, you MUST use this exact XML format for EACH piece of evidence:\n"
                 "<highlight>\n"
                 "<doc>exact filename from context</doc>\n"
