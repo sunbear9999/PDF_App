@@ -1,66 +1,95 @@
-import customtkinter as ctk
-import threading
 import os
+import threading
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
+                             QRadioButton, QButtonGroup, QTextEdit, QPushButton)
+from PyQt6.QtCore import Qt, pyqtSignal
 from core.ocr_engine import run_ocr_on_pdf
 
-class OCRTab(ctk.CTkFrame):
-    def __init__(self, master, main_window):
-        super().__init__(master, corner_radius=0, fg_color="transparent")
+class OCRTab(QWidget):
+    # Signals for safe background thread -> UI updates
+    progress_updated = pyqtSignal(int, int)
+    ocr_completed = pyqtSignal(str, str, str) # text, ui_mode, save_path
+
+    def __init__(self, parent=None, main_window=None):
+        super().__init__(parent)
         self.main_window = main_window
+        layout = QVBoxLayout(self)
+
+        # Header
+        self.header = QLabel("OCR Engine")
+        self.header.setStyleSheet("font-size: 24px; font-weight: bold; margin-bottom: 10px;")
+        layout.addWidget(self.header)
+
+        # Top Frame (Options)
+        top_layout = QHBoxLayout()
+        self.mode_group = QButtonGroup(self)
         
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(2, weight=1)
+        self.rb_text = QRadioButton("Extract Text")
+        self.rb_new = QRadioButton("Save New PDF")
+        self.rb_replace = QRadioButton("Replace Original")
+        self.rb_text.setChecked(True)
 
-        self.header = ctk.CTkLabel(self, text="OCR Engine", font=ctk.CTkFont(size=28, weight="bold"))
-        self.header.grid(row=0, column=0, padx=0, pady=(0, 10), sticky="w")
+        self.mode_group.addButton(self.rb_text, 1)
+        self.mode_group.addButton(self.rb_new, 2)
+        self.mode_group.addButton(self.rb_replace, 3)
 
-        self.top_frame = ctk.CTkFrame(self, fg_color="#2b2b2b", corner_radius=10)
-        self.top_frame.grid(row=1, column=0, padx=0, pady=5, sticky="ew")
-        
-        self.output_mode = ctk.StringVar(value="text")
-        self.rb_text = ctk.CTkRadioButton(self.top_frame, text="Extract Text", variable=self.output_mode, value="text")
-        self.rb_text.pack(side="left", padx=(20, 20), pady=15)
-        
-        self.rb_new = ctk.CTkRadioButton(self.top_frame, text="Save New PDF", variable=self.output_mode, value="save_new")
-        self.rb_new.pack(side="left", padx=(0, 20), pady=15)
+        top_layout.addWidget(self.rb_text)
+        top_layout.addWidget(self.rb_new)
+        top_layout.addWidget(self.rb_replace)
+        top_layout.addStretch()
+        layout.addLayout(top_layout)
 
-        self.rb_replace = ctk.CTkRadioButton(self.top_frame, text="Replace Original", variable=self.output_mode, value="replace")
-        self.rb_replace.pack(side="left", pady=15)
+        # Text Area
+        self.text_area = QTextEdit()
+        self.text_area.setReadOnly(True)
+        self.text_area.setStyleSheet("background-color: #1e1e1e; border: 1px solid #555; font-size: 14px; padding: 10px;")
+        layout.addWidget(self.text_area, 1)
 
-        self.text_area = ctk.CTkTextbox(self, wrap="word", font=ctk.CTkFont(size=15), fg_color="transparent", text_color="#e0e0e0")
-        self.text_area.grid(row=2, column=0, padx=0, pady=10, sticky="nsew")
-        
-        self.control_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.control_frame.grid(row=3, column=0, padx=0, pady=(0, 0), sticky="ew")
+        # Control Frame
+        control_layout = QHBoxLayout()
+        self.run_ocr_btn = QPushButton("Run OCR")
+        self.run_ocr_btn.setStyleSheet("background-color: #00cc66; color: white; padding: 10px 20px; font-weight: bold;")
+        self.run_ocr_btn.clicked.connect(self.start_ocr_thread)
+        control_layout.addWidget(self.run_ocr_btn)
 
-        self.run_ocr_btn = ctk.CTkButton(
-            self.control_frame, text="Run OCR", fg_color="#00cc66", hover_color="#00994c", 
-            text_color="white", height=45, corner_radius=22, font=ctk.CTkFont(size=15, weight="bold"),
-            command=self.start_ocr_thread
-        )
-        self.run_ocr_btn.pack(side="left")
+        self.status_label = QLabel("Ready")
+        self.status_label.setStyleSheet("color: gray; font-size: 14px; margin-left: 10px;")
+        control_layout.addWidget(self.status_label)
+        control_layout.addStretch()
+        layout.addLayout(control_layout)
 
-        self.status_label = ctk.CTkLabel(self.control_frame, text="Ready", text_color="gray", font=ctk.CTkFont(size=14))
-        self.status_label.pack(side="left", padx=20)
+        # Wire up signals
+        self.progress_updated.connect(self._update_progress_ui)
+        self.ocr_completed.connect(self._finalize_ocr)
+
+    def get_output_mode(self):
+        if self.rb_text.isChecked(): return "text"
+        if self.rb_new.isChecked(): return "save_new"
+        if self.rb_replace.isChecked(): return "replace"
 
     def sync_file(self, file_path):
-        """Called automatically by main window when a new file opens."""
-        self.text_area.delete("0.0", "end")
-        self.status_label.configure(text=f"Target: {os.path.basename(file_path)}")
+        self.text_area.clear()
+        self.status_label.setText(f"Target: {os.path.basename(file_path)}")
+        self.status_label.setStyleSheet("color: gray;")
 
     def update_progress(self, current_page, total_pages):
-        self.after(0, lambda: self.status_label.configure(text=f"Processing Page {current_page}/{total_pages}...", text_color="#ffaa00"))
+        self.progress_updated.emit(current_page, total_pages)
+
+    def _update_progress_ui(self, current_page, total_pages):
+        self.status_label.setText(f"Processing Page {current_page}/{total_pages}...")
+        self.status_label.setStyleSheet("color: #ffaa00;")
 
     def start_ocr_thread(self):
         current_file = self.main_window.current_file_path
         if not current_file:
-            self.status_label.configure(text="No document loaded in viewer.", text_color="#ff4444")
+            self.status_label.setText("No document loaded in viewer.")
+            self.status_label.setStyleSheet("color: #ff4444;")
             return
             
-        self.run_ocr_btn.configure(state="disabled")
-        self.text_area.delete("0.0", "end")
+        self.run_ocr_btn.setEnabled(False)
+        self.text_area.clear()
         
-        mode = self.output_mode.get()
+        mode = self.get_output_mode()
         thread = threading.Thread(target=self._process_ocr_logic, args=(current_file, mode), daemon=True)
         thread.start()
 
@@ -77,20 +106,21 @@ class OCRTab(ctk.CTkFrame):
             save_path = file_path
             
         result_text = run_ocr_on_pdf(file_path, mode=engine_mode, save_path=save_path, progress_callback=self.update_progress)
-        self.after(0, self._finalize_ocr, result_text, ui_mode, save_path)
+        self.ocr_completed.emit(result_text, ui_mode, save_path if save_path else "")
 
     def _finalize_ocr(self, text, ui_mode, save_path):
         if text.startswith("OCR Engine Error"):
-            self.text_area.insert("0.0", text)
-            self.status_label.configure(text="Failed", text_color="#ff4444")
+            self.text_area.setPlainText(text)
+            self.status_label.setText("Failed")
+            self.status_label.setStyleSheet("color: #ff4444;")
         else:
-            self.text_area.insert("0.0", text)
+            self.text_area.setPlainText(text)
             msg = "OCR Complete!"
             if ui_mode != "text":
                 msg += f" Saved to {os.path.basename(save_path)}"
-                # If they replaced the original, reload the viewer!
                 if ui_mode == "replace":
                     self.main_window.viewer.load_document(save_path)
-            self.status_label.configure(text=msg, text_color="#00cc66")
+            self.status_label.setText(msg)
+            self.status_label.setStyleSheet("color: #00cc66;")
             
-        self.run_ocr_btn.configure(state="normal")
+        self.run_ocr_btn.setEnabled(True)
