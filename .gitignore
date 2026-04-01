@@ -15,3 +15,4 @@ models/voice4.onnx.json
 models/voice5.onnx
 models/voice5.onnx.json
 temp_tts_input.txt
+audio
