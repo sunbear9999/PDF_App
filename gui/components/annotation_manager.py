@@ -18,9 +18,9 @@ class AnnotationManager(QObject):
         self.temp_highlights = [] 
 
     def toggle_search(self):
-        text, ok = QInputDialog.getText(self.viewer, "Search PDF", "Enter text to search:")
-        if ok and text:
-            print(f"Searching for: {text}")
+        # Delegate to the modern Search Bar in the viewer
+        if hasattr(self.viewer, 'toggle_search_bar'):
+            self.viewer.toggle_search_bar()
 
     def _get_page_at_pos(self, scene_pos):
         for i, item in enumerate(self.viewer.page_items):

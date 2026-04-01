@@ -115,17 +115,26 @@ class NotesTab(QWidget):
         self.btn_help.clicked.connect(self.show_workspace_help)
         self.btn_help.hide()
         
+        # --- Undo / Redo System ---
+        self.btn_undo = QPushButton("↩️ Undo")
+        self.btn_undo.setStyleSheet("background-color: #444; color: white; font-weight: bold; border-radius: 4px; padding: 4px 10px;")
+        self.btn_undo.hide()
+        
+        self.btn_redo = QPushButton("↪️ Redo")
+        self.btn_redo.setStyleSheet("background-color: #444; color: white; font-weight: bold; border-radius: 4px; padding: 4px 10px;")
+        self.btn_redo.hide()
+
         self.btn_zoom_out = QPushButton("➖")
         self.btn_zoom_out.setStyleSheet("background-color: #333;")
-        self.btn_zoom_out.clicked.connect(lambda: self.workspace_view.zoom_out())
         self.btn_zoom_out.hide()
         
         self.btn_zoom_in = QPushButton("➕")
         self.btn_zoom_in.setStyleSheet("background-color: #333;")
-        self.btn_zoom_in.clicked.connect(lambda: self.workspace_view.zoom_in())
         self.btn_zoom_in.hide()
         
         top_layout.addWidget(self.btn_help)
+        top_layout.addWidget(self.btn_undo)
+        top_layout.addWidget(self.btn_redo)
         top_layout.addWidget(self.btn_zoom_out)
         top_layout.addWidget(self.btn_zoom_in)
         
@@ -165,6 +174,12 @@ class NotesTab(QWidget):
         self.workspace_view = WorkspaceView(self.main_window)
         self.stack.addWidget(self.workspace_view)
         
+        # Connect Undo/Redo signals
+        self.btn_undo.clicked.connect(self.workspace_view.undo)
+        self.btn_redo.clicked.connect(self.workspace_view.redo)
+        self.btn_zoom_out.clicked.connect(lambda: self.workspace_view.zoom_out())
+        self.btn_zoom_in.clicked.connect(lambda: self.workspace_view.zoom_in())
+        
         layout.addWidget(self.stack)
 
     def show_workspace_help(self):
@@ -174,6 +189,7 @@ class NotesTab(QWidget):
             "<li><b>Left Click + Drag:</b> Move nodes / Pan canvas</li>"
             "<li><b>Shift + Click & Drag:</b> Select multiple nodes</li>"
             "<li><b>Shift + Scroll:</b> Zoom in/out</li>"
+            "<li><b>Ctrl + Z / Ctrl + Y:</b> Undo / Redo</li>"
             "<li><b>Double Click Node:</b> Start drawing a connection</li>"
             "<li><b>Right Click Selected Nodes:</b> ✨ AI Organize</li>"
             "<li><b>Right Click Connection Line:</b> Edit / Delete connection</li>"
@@ -185,22 +201,32 @@ class NotesTab(QWidget):
         msg_box.setStyleSheet("QLabel { min-width: 400px; font-size: 14px; }")
         msg_box.exec()
 
+    def update_undo_redo_buttons(self):
+        if hasattr(self, 'workspace_view'):
+            self.btn_undo.setEnabled(len(self.workspace_view.undo_stack) > 0)
+            self.btn_redo.setEnabled(len(self.workspace_view.redo_stack) > 0)
+
     def toggle_view(self):
         try:
             if self.stack.currentIndex() == 0:
                 self.stack.setCurrentIndex(1)
                 self.btn_toggle_view.setText("Switch to List")
                 self.btn_add_bubble.show()
+                self.btn_undo.show()
+                self.btn_redo.show()
                 self.btn_zoom_in.show()
                 self.btn_zoom_out.show()
                 self.btn_help.show()
                 self.scope_combo.hide()
+                self.update_undo_redo_buttons()
                 self._sync_workspace()
             else:
                 self.save_workspace_state() 
                 self.stack.setCurrentIndex(0)
                 self.btn_toggle_view.setText("Switch to Workspace")
                 self.btn_add_bubble.hide()
+                self.btn_undo.hide()
+                self.btn_redo.hide()
                 self.btn_zoom_in.hide()
                 self.btn_zoom_out.hide()
                 self.btn_help.hide()
@@ -326,10 +352,8 @@ class NotesTab(QWidget):
                         annot.set_colors(stroke=color)
                         annot.update()
                     elif action == "edit_content":
-                        # CRITICAL FIX: To prevent silent failures in PyMuPDF, create a distinct dict
                         new_info = dict(info)
                         new_info["content"] = str(content)
-                        # Explicitly pass info as a kwargs to respect PyMuPDF updates
                         annot.set_info(info=new_info)
                         annot.update()
                     break
@@ -339,7 +363,6 @@ class NotesTab(QWidget):
             
             self.main_window.project_manager.mark_dirty(pdf_path)
             
-            # Prevent violent canvas rebuilds if edited directly inside the Workspace View
             if refresh:
                 self.refresh_notes()
         except Exception as e:

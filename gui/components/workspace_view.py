@@ -19,6 +19,7 @@ def get_text_color_for_bg(bg_color):
     except:
         return "#ffffff"
 
+
 class AIOrganizeWorker(QThread):
     finished = pyqtSignal(object, str)
 
@@ -143,6 +144,11 @@ class ResizeHandle(QGraphicsRectItem):
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
         self._is_resizing = False
 
+    def mousePressEvent(self, event):
+        if self.scene() and hasattr(self.scene(), 'view'):
+            self.scene().view.save_state_for_undo()
+        super().mousePressEvent(event)
+
     def itemChange(self, change, value):
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange and not self._is_resizing:
             parent = self.parentItem()
@@ -223,10 +229,14 @@ class Node(QGraphicsRectItem):
 
     def mousePressEvent(self, event):
         view = self.scene().view if self.scene() and hasattr(self.scene(), 'view') else None
-        if view and view.connecting_node and view.connecting_node != self:
-            view.finish_connection(self)
-            event.accept()
-            return
+        if view:
+            if view.connecting_node and view.connecting_node != self:
+                view.save_state_for_undo()
+                view.finish_connection(self)
+                event.accept()
+                return
+            else:
+                view.save_state_for_undo()
         super().mousePressEvent(event)
 
     def trigger_jump(self):
@@ -237,7 +247,6 @@ class Node(QGraphicsRectItem):
                 page_num = self.page_num
                 annot_id = self.node_id
                 
-                # CRITICAL: Pre-save the workspace layout before switching documents so it doesn't reset nodes!
                 if "Notes" in main_win.tabs:
                     main_win.tabs["Notes"].save_workspace_state()
                 
@@ -393,6 +402,8 @@ class Node(QGraphicsRectItem):
             self.scene().view.start_connection(self)
 
     def trigger_edit(self):
+        if self.scene() and hasattr(self.scene(), 'view'):
+            self.scene().view.save_state_for_undo()
         self.text_item.setPlainText(self.note)
         self.text_item.setDefaultTextColor(QColor(get_text_color_for_bg(self.color)))
         self.text_item.setTextInteractionFlags(Qt.TextInteractionFlag.TextEditorInteraction)
@@ -419,6 +430,8 @@ class Node(QGraphicsRectItem):
     def trigger_color_change(self):
         color = QColorDialog.getColor(QColor(self.color))
         if color.isValid():
+            if self.scene() and hasattr(self.scene(), 'view'):
+                self.scene().view.save_state_for_undo()
             self.color = color.name()
             self.setBrush(QBrush(QColor(self.color)))
             self.refresh_layout() 
@@ -437,11 +450,16 @@ class Node(QGraphicsRectItem):
         current = self.manual_font_size if self.manual_font_size else 12
         val, ok = QInputDialog.getInt(None, "Font Size", "Enter static font size (8-72)\nCancel to Auto-Scale:", current, 8, 72)
         if ok:
+            if self.scene() and hasattr(self.scene(), 'view'):
+                self.scene().view.save_state_for_undo()
             self.manual_font_size = val
         else:
+            if self.scene() and hasattr(self.scene(), 'view'):
+                self.scene().view.save_state_for_undo()
             self.manual_font_size = None
         self.refresh_layout()
-        self.scene().view.main_window.project_manager.mark_dirty("workspace")
+        if self.scene() and hasattr(self.scene(), 'view'):
+            self.scene().view.main_window.project_manager.mark_dirty("workspace")
 
 
 class WorkspaceView(QGraphicsView):
@@ -461,6 +479,84 @@ class WorkspaceView(QGraphicsView):
         self.edges = []
         self.connecting_node = None
         self.loading_indicator = None
+
+        self.undo_stack = []
+        self.redo_stack = []
+        self.is_restoring = False
+
+    def save_state_for_undo(self):
+        if self.is_restoring: return
+        state = self.serialize_workspace()
+        state_str = json.dumps(state, sort_keys=True)
+        
+        if not self.undo_stack or self.undo_stack[-1][0] != state_str:
+            self.undo_stack.append((state_str, state))
+            if len(self.undo_stack) > 50:
+                self.undo_stack.pop(0)
+            self.redo_stack.clear()
+            self._update_buttons()
+
+    def _update_buttons(self):
+        if "Notes" in self.main_window.tabs:
+            self.main_window.tabs["Notes"].update_undo_redo_buttons()
+
+    def undo(self):
+        if not self.undo_stack: return
+        self.is_restoring = True
+        current_state = self.serialize_workspace()
+        current_str = json.dumps(current_state, sort_keys=True)
+        self.redo_stack.append((current_str, current_state))
+        
+        _, prev_state = self.undo_stack.pop()
+        self.load_workspace_state(prev_state)
+        
+        self.is_restoring = False
+        self._update_buttons()
+        self.main_window.project_manager.mark_dirty("workspace")
+
+    def redo(self):
+        if not self.redo_stack: return
+        self.is_restoring = True
+        current_state = self.serialize_workspace()
+        current_str = json.dumps(current_state, sort_keys=True)
+        self.undo_stack.append((current_str, current_state))
+        
+        _, next_state = self.redo_stack.pop()
+        self.load_workspace_state(next_state)
+        
+        self.is_restoring = False
+        self._update_buttons()
+        self.main_window.project_manager.mark_dirty("workspace")
+
+    def load_workspace_state(self, state_data):
+        self.scene_obj.clear()
+        self.nodes.clear()
+        self.edges.clear()
+        
+        for n_id, data in state_data.get("nodes", {}).items():
+            node = Node(n_id, data["quote"], data["note"], data["color"], data["is_custom"], 
+                        data["width"], data["height"], data.get("pdf_path"), data.get("page_num"), data.get("manual_font_size"))
+            node.setPos(data["x"], data["y"])
+            self.scene_obj.addItem(node)
+            self.nodes[n_id] = node
+            
+        for edge_data in state_data.get("edges", []):
+            if edge_data["source"] in self.nodes and edge_data["target"] in self.nodes:
+                src = self.nodes[edge_data["source"]]
+                tgt = self.nodes[edge_data["target"]]
+                edge = Edge(src, tgt, edge_data["label"], edge_data["id"], edge_data.get("color", "#888888"))
+                self.scene_obj.addItem(edge)
+                self.edges.append(edge)
+
+    def keyPressEvent(self, event):
+        if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            if event.key() == Qt.Key.Key_Z:
+                self.undo()
+                return
+            elif event.key() == Qt.Key.Key_Y:
+                self.redo()
+                return
+        super().keyPressEvent(event)
 
     def wheelEvent(self, event):
         if event.modifiers() in (Qt.KeyboardModifier.ControlModifier, Qt.KeyboardModifier.ShiftModifier):
@@ -560,6 +656,7 @@ class WorkspaceView(QGraphicsView):
             if action == ai_action:
                 self.trigger_ai_organize(selected_nodes)
             elif action == del_action:
+                self.save_state_for_undo()
                 for n in selected_nodes:
                     self.delete_node(n)
             return
@@ -576,6 +673,7 @@ class WorkspaceView(QGraphicsView):
             elif action == color_action:
                 item.trigger_color_change()
             elif action == del_action:
+                self.save_state_for_undo()
                 self.delete_node(item)
             return
             
@@ -589,6 +687,7 @@ class WorkspaceView(QGraphicsView):
             if action == edit_action:
                 text, ok = QInputDialog.getText(self, "Edit Label", "Enter new text:", text=item.label_text)
                 if ok:
+                    self.save_state_for_undo()
                     item.label_text = text
                     item.text_item.setPlainText(text)
                     item.update_position()
@@ -596,10 +695,12 @@ class WorkspaceView(QGraphicsView):
             elif action == color_action:
                 color = QColorDialog.getColor(item.base_color)
                 if color.isValid():
+                    self.save_state_for_undo()
                     item.base_color = color
                     item.setPen(QPen(item.base_color, 4 if item.isSelected() else 2, Qt.PenStyle.SolidLine))
                     self.main_window.project_manager.mark_dirty("workspace")
             elif action == del_action:
+                self.save_state_for_undo()
                 self.delete_edge(item)
             return
 
@@ -639,6 +740,8 @@ class WorkspaceView(QGraphicsView):
             QMessageBox.warning(self, "AI Organize Failed", error_msg)
             return
 
+        self.save_state_for_undo()
+        
         try:
             selected_nodes = [n for n in self.nodes.values() if n.isSelected()]
             if not selected_nodes: return
@@ -674,7 +777,7 @@ class WorkspaceView(QGraphicsView):
                         
                         child.setSelected(False) 
 
-                current_x += 280
+            current_x += 280
 
             self.main_window.project_manager.mark_dirty("workspace")
         except Exception as e:
@@ -696,6 +799,8 @@ class WorkspaceView(QGraphicsView):
         self.connecting_node = None
 
     def add_custom_bubble(self):
+        self.save_state_for_undo()
+        
         node_id = f"custom_{uuid.uuid4()}"
         node = Node(node_id, quote="", note="", color="#005577", is_custom=True, width=180, height=80)
         
