@@ -16,3 +16,6 @@ models/voice5.onnx
 models/voice5.onnx.json
 temp_tts_input.txt
 audio
+gui/components/__pycache__
+gui/tabs/__pycache__
+gui/tabs/__pycache__/notes_tab.cpython-312.pyc
