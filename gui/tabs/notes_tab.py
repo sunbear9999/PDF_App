@@ -1,16 +1,16 @@
+import os
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-                             QPushButton, QScrollArea, QFrame)
+                             QPushButton, QScrollArea, QFrame, QComboBox)
 from PyQt6.QtCore import Qt, QTimer
-import fitz
 
 class NoteBubble(QFrame):
-    def __init__(self, tab, page_num, annot_id, subject, content, color, is_ai=False):
+    def __init__(self, tab, pdf_path, page_num, annot_id, subject, content, color, is_ai=False):
         super().__init__()
         self.tab = tab
+        self.pdf_path = pdf_path
         self.page_num = page_num
         self.annot_id = annot_id
         
-        # Apply special Cyber-Purple styling if it's an AI note
         if is_ai:
             self.setStyleSheet("""
                 NoteBubble { background-color: #2d2238; border: 1px solid #b57edc; border-radius: 8px; margin-bottom: 5px; }
@@ -25,28 +25,20 @@ class NoteBubble(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         
-        # Header
         header_layout = QHBoxLayout()
-        lbl_page = QLabel(f"📄 Page {page_num + 1}")
+        doc_name = os.path.basename(pdf_path)
+        lbl_page = QLabel(f"📄 {doc_name} - Pg {page_num + 1}")
         lbl_page.setStyleSheet("font-weight: bold; color: #aaa; border: none;")
         header_layout.addWidget(lbl_page)
         
-        # Add special AI badge
         if is_ai:
-            lbl_ai = QLabel("🤖 AI Generated")
+            lbl_ai = QLabel("🤖 AI Note")
             lbl_ai.setStyleSheet("color: #d194ff; font-weight: bold; font-size: 11px; border: none; margin-left: 10px;")
             header_layout.addWidget(lbl_ai)
             
         header_layout.addStretch()
         
-        colors = [
-            ("Yellow", (1.0, 0.9, 0.0)), 
-            ("Green", (0.0, 0.8, 0.4)), 
-            ("Blue", (0.2, 0.6, 1.0)), 
-            ("Purple", (0.7, 0.4, 1.0)),
-            ("Red", (1.0, 0.3, 0.3))
-        ]
-        
+        colors = [("Yellow", (1.0, 0.9, 0.0)), ("Green", (0.0, 0.8, 0.4)), ("Blue", (0.2, 0.6, 1.0)), ("Purple", (0.7, 0.4, 1.0)), ("Red", (1.0, 0.3, 0.3))]
         def is_close(c1, c2):
             if not c1 or not c2 or len(c1) != len(c2): return False
             return all(abs(c1[i] - c2[i]) < 0.05 for i in range(len(c1)))
@@ -56,25 +48,22 @@ class NoteBubble(QFrame):
             btn_c.setFixedSize(16, 16)
             border = "2px solid white" if is_close(c_val, color) else "none"
             btn_c.setStyleSheet(f"background-color: rgb({int(c_val[0]*255)}, {int(c_val[1]*255)}, {int(c_val[2]*255)}); border-radius: 8px; border: {border};")
-            
             btn_c.setToolTip(f"Change to {c_name}")
-            btn_c.clicked.connect(lambda checked, c=c_val: self.tab.change_note_color(self.page_num, self.annot_id, c))
+            btn_c.clicked.connect(lambda checked, c=c_val: self.tab.change_note_color(self.pdf_path, self.page_num, self.annot_id, c))
             header_layout.addWidget(btn_c)
             
         header_layout.addSpacing(10)
             
-        btn_del = QPushButton("✖ Delete")
-        btn_del.setFixedSize(70, 24)
+        btn_del = QPushButton("✖")
+        btn_del.setFixedSize(24, 24)
         btn_del.setStyleSheet("""
-            QPushButton { background-color: #442222; color: #ff6666; border: 1px solid #662222; border-radius: 4px; font-weight: bold; font-size: 11px; }
+            QPushButton { background-color: #442222; color: #ff6666; border: 1px solid #662222; border-radius: 4px; font-weight: bold;}
             QPushButton:hover { background-color: #ff4444; color: white; }
         """)
         btn_del.clicked.connect(self.delete_note)
         header_layout.addWidget(btn_del)
-        
         layout.addLayout(header_layout)
         
-        # Content
         lbl_subj = QLabel(f'"{subject}"')
         lbl_subj.setWordWrap(True)
         lbl_subj.setStyleSheet("font-style: italic; color: #ddd; border: none;")
@@ -88,23 +77,33 @@ class NoteBubble(QFrame):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            if self.pdf_path != self.tab.main_window.current_file_path:
+                self.tab.main_window.switch_to_pdf(self.pdf_path)
             self.tab.viewer.jump_to_page(self.page_num)
         super().mousePressEvent(event)
 
     def delete_note(self):
-        self.tab.delete_note(self.page_num, self.annot_id)
-
+        self.tab.delete_note(self.pdf_path, self.page_num, self.annot_id)
 
 class NotesTab(QWidget):
-    def __init__(self, parent=None, viewer=None):
+    def __init__(self, parent=None, viewer=None, main_window=None):
         super().__init__(parent)
         self.viewer = viewer
+        self.main_window = main_window
         layout = QVBoxLayout(self)
         layout.setContentsMargins(5, 10, 5, 5)
         
-        lbl = QLabel("Project Notes & Highlights")
-        lbl.setStyleSheet("font-size: 16px; font-weight: bold; margin-bottom: 5px; padding-left: 5px;")
-        layout.addWidget(lbl)
+        top_layout = QHBoxLayout()
+        lbl = QLabel("Notes:")
+        lbl.setStyleSheet("font-size: 16px; font-weight: bold; padding-left: 5px;")
+        top_layout.addWidget(lbl)
+        
+        self.scope_combo = QComboBox()
+        self.scope_combo.addItems(["Current PDF", "Entire Project"])
+        self.scope_combo.setStyleSheet("background: #333; border: 1px solid #555; padding: 2px;")
+        self.scope_combo.currentIndexChanged.connect(self.refresh_notes)
+        top_layout.addWidget(self.scope_combo)
+        layout.addLayout(top_layout)
         
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
@@ -115,33 +114,38 @@ class NotesTab(QWidget):
         self.scroll_layout = QVBoxLayout(self.scroll_content)
         self.scroll_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.scroll_layout.setContentsMargins(5, 5, 5, 5)
-        
         self.scroll_area.setWidget(self.scroll_content)
         layout.addWidget(self.scroll_area)
         
     def refresh_notes(self):
-        if not self.viewer.doc: return
-        
         for i in reversed(range(self.scroll_layout.count())): 
             widget = self.scroll_layout.itemAt(i).widget()
             if widget: widget.deleteLater()
+            
+        scope = self.scope_combo.currentText()
+        paths_to_check = []
         
-        for i in range(len(self.viewer.doc)):
-            page = self.viewer.doc.load_page(i)
-            for annot in page.annots():
-                title = annot.info.get("title", "")
-                
-                # Check for either Human notes or AI notes
-                if title.startswith("UserNote") or title.startswith("AINote"):
-                    is_ai = title.startswith("AINote")
-                    subject = annot.info.get("subject", "")
-                    content = annot.info.get("content", "")
-                    
-                    colors = annot.colors
-                    stroke = colors.get("stroke") if colors else None
-                    
-                    bubble = NoteBubble(self, i, title, subject, content, stroke, is_ai=is_ai)
-                    self.scroll_layout.addWidget(bubble)
+        if scope == "Current PDF" and self.main_window.current_file_path:
+            paths_to_check = [self.main_window.current_file_path]
+        elif scope == "Entire Project":
+            paths_to_check = self.main_window.project_manager.pdfs
+            
+        for path in paths_to_check:
+            self._load_notes_from_pdf(path)
+
+    def _load_notes_from_pdf(self, path):
+        try:
+            # Reads directly from Project Memory Cache
+            doc = self.main_window.project_manager.get_doc(path)
+            for i in range(len(doc)):
+                page = doc.load_page(i)
+                for annot in page.annots():
+                    title = annot.info.get("title", "")
+                    if title.startswith("UserNote") or title.startswith("AINote"):
+                        is_ai = title.startswith("AINote")
+                        bubble = NoteBubble(self, path, i, title, annot.info.get("subject", ""), annot.info.get("content", ""), annot.colors.get("stroke"), is_ai=is_ai)
+                        self.scroll_layout.addWidget(bubble)
+        except: pass
 
     def scroll_to_note(self, annot_id):
         for i in range(self.scroll_layout.count()):
@@ -153,21 +157,24 @@ class NotesTab(QWidget):
                 QTimer.singleShot(1500, lambda w=widget, s=original_style: w.setStyleSheet(s))
                 break
 
-    def delete_note(self, page_num, annot_id):
-        page = self.viewer.doc.load_page(page_num)
-        for annot in page.annots():
-            if annot.info.get("title") == annot_id:
-                page.delete_annot(annot)
-                break
-        self.viewer.reload_page(page_num)
-        self.refresh_notes()
+    def delete_note(self, pdf_path, page_num, annot_id):
+        self._modify_note(pdf_path, page_num, annot_id, action="delete")
 
-    def change_note_color(self, page_num, annot_id, color_tuple):
-        page = self.viewer.doc.load_page(page_num)
+    def change_note_color(self, pdf_path, page_num, annot_id, color_tuple):
+        self._modify_note(pdf_path, page_num, annot_id, action="color", color=color_tuple)
+
+    def _modify_note(self, pdf_path, page_num, annot_id, action, color=None):
+        doc = self.main_window.project_manager.get_doc(pdf_path)
+        is_active = (pdf_path == self.main_window.current_file_path)
+        
+        page = doc.load_page(page_num)
         for annot in page.annots():
             if annot.info.get("title") == annot_id:
-                annot.set_colors(stroke=color_tuple)
-                annot.update()
+                if action == "delete": page.delete_annot(annot)
+                elif action == "color":
+                    annot.set_colors(stroke=color)
+                    annot.update()
                 break
-        self.viewer.reload_page(page_num)
+                
+        if is_active: self.viewer.reload_page(page_num)
         self.refresh_notes()

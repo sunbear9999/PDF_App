@@ -1,12 +1,14 @@
 import os
-import uuid # ADDED UUID IMPORT
+import uuid
 import fitz
+import shutil
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, 
                              QPushButton, QLabel, QSplitter, QStackedWidget, 
-                             QFileDialog, QFrame, QButtonGroup, QMessageBox)
+                             QFileDialog, QFrame, QButtonGroup, QMessageBox, QComboBox, QMenu)
 from PyQt6.QtGui import QShortcut, QKeySequence
 from PyQt6.QtCore import Qt, QSettings
 
+from core.project_manager import ProjectManager
 from gui.components.pdf_viewer import PDFViewer
 from gui.tabs.ocr_tab import OCRTab
 from gui.tabs.tts_tab import TTSTab
@@ -19,19 +21,20 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("PDF Workspace")
         self.resize(1400, 900)
         self.setMinimumSize(1000, 700)
-        self.current_file_path = None
         
+        self.project_manager = ProjectManager()
+        self.current_file_path = None
         self.settings = QSettings("PDFMultitool", "Workspace")
 
         self.setStyleSheet("""
             QMainWindow { background-color: #1e1e1e; }
             QWidget { color: white; font-family: Arial; }
-            QPushButton { 
-                background-color: transparent; border-radius: 4px; 
-                padding: 6px 12px; font-weight: bold; border: 1px solid #444; 
-            }
+            QPushButton { background-color: transparent; border-radius: 4px; padding: 6px 12px; font-weight: bold; border: 1px solid #444; }
             QPushButton:hover { background-color: #333333; }
             QPushButton:checked { background-color: #0078D7; border: 1px solid #0055ff; }
+            QComboBox { background-color: #333; border: 1px solid #555; padding: 4px; border-radius: 4px; color: white;}
+            QMenu { background-color: #2b2b2b; color: white; border: 1px solid #444; }
+            QMenu::item:selected { background-color: #0078D7; }
         """)
 
         central_widget = QWidget()
@@ -47,32 +50,9 @@ class MainWindow(QMainWindow):
         self._build_workspace()
         self._setup_shortcuts()
         
-        last_file = self.settings.value("last_file", "")
-        if last_file and os.path.exists(last_file):
-            self._load_file(last_file)
-
-    def add_ai_annotation(self, quote, note):
-        """Called autonomously by the LLM agent to inject highlights directly into the document."""
-        if not self.viewer.doc: return
-        found = False
-        
-        for page_num in range(len(self.viewer.doc)):
-            page = self.viewer.doc.load_page(page_num)
-            rects = page.search_for(quote)
-            
-            if rects:
-                annot = page.add_highlight_annot(rects)
-                annot.set_colors(stroke=(0.7, 0.4, 1.0)) # Purple AI Highlight
-                # Tag it specifically as an AINote
-                annot.set_info(title=f"AINote|{uuid.uuid4()}", content=note, subject=quote)
-                annot.update()
-                
-                self.viewer.reload_page(page_num)
-                found = True
-                break # Just highlight the first occurrence so we don't spam the PDF
-                
-        if found:
-            self.viewer.annot_manager.note_added.emit()
+        last_project = self.settings.value("last_project", "")
+        if last_project and os.path.exists(last_project):
+            self._load_project(last_project)
 
     def _setup_shortcuts(self):
         QShortcut(QKeySequence("Ctrl+="), self).activated.connect(self.viewer.zoom_in)
@@ -80,8 +60,7 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+-"), self).activated.connect(self.viewer.zoom_out)
         QShortcut(QKeySequence("Ctrl+0"), self).activated.connect(self.viewer.zoom_reset)
         QShortcut(QKeySequence("Ctrl+F"), self).activated.connect(self.viewer.annot_manager.toggle_search)
-        QShortcut(QKeySequence("Ctrl+O"), self).activated.connect(self.open_file)
-        QShortcut(QKeySequence("Ctrl+S"), self).activated.connect(self.save_file)
+        QShortcut(QKeySequence("Ctrl+S"), self).activated.connect(self.save_project)
 
     def _build_top_menu(self):
         self.top_menu = QFrame()
@@ -90,41 +69,30 @@ class MainWindow(QMainWindow):
         menu_layout = QHBoxLayout(self.top_menu)
         menu_layout.setContentsMargins(10, 5, 10, 5)
 
-        self.btn_open = QPushButton("📂 Open")
-        self.btn_open.setStyleSheet("background-color: #333;")
-        self.btn_open.clicked.connect(self.open_file)
-        menu_layout.addWidget(self.btn_open)
+        self.btn_project = QPushButton("📁 Project ▼")
+        self.btn_project.setStyleSheet("background-color: #333; padding: 6px 15px;")
         
-        self.btn_save = QPushButton("💾 Save PDF")
-        self.btn_save.setStyleSheet("background-color: #333;")
-        self.btn_save.clicked.connect(self.save_file)
-        menu_layout.addWidget(self.btn_save)
-
-        menu_layout.addSpacing(20)
-
-        self.view_group = QButtonGroup(self)
-        self.view_group.setExclusive(True)
-        
-        self.btn_read = QPushButton("Read")
-        self.btn_read.setCheckable(True)
-        self.btn_read.setChecked(True)
-        self.btn_overview = QPushButton("Overview")
-        self.btn_overview.setCheckable(True)
-        
-        self.view_group.addButton(self.btn_read)
-        self.view_group.addButton(self.btn_overview)
-        
-        self.btn_read.clicked.connect(lambda: self.toggle_view("read"))
-        self.btn_overview.clicked.connect(lambda: self.toggle_view("overview"))
-        
-        menu_layout.addWidget(self.btn_read)
-        menu_layout.addWidget(self.btn_overview)
-
+        project_menu = QMenu(self)
+        project_menu.addAction("New Project...", self._new_project)
+        project_menu.addAction("Open Project...", self._open_project)
+        project_menu.addAction("Save Project As...", self._save_project_as)
+        project_menu.addSeparator()
+        project_menu.addAction("Add PDF to Project...", self._add_pdf)
+        self.btn_project.setMenu(project_menu)
+        menu_layout.addWidget(self.btn_project)
         menu_layout.addSpacing(15)
-        hint_label = QLabel("(Shift + Drag to Highlight)")
-        hint_label.setStyleSheet("color: #888; font-size: 12px; border: none;")
-        menu_layout.addWidget(hint_label)
 
+        menu_layout.addWidget(QLabel("Active PDF:"))
+        self.pdf_selector = QComboBox()
+        self.pdf_selector.setFixedWidth(250)
+        self.pdf_selector.currentIndexChanged.connect(self._on_pdf_dropdown_changed)
+        menu_layout.addWidget(self.pdf_selector)
+        
+        menu_layout.addSpacing(15)
+        self.btn_save = QPushButton("💾 Save Project")
+        self.btn_save.setStyleSheet("background-color: #333;")
+        self.btn_save.clicked.connect(self.save_project)
+        menu_layout.addWidget(self.btn_save)
         menu_layout.addStretch()
 
         self.btn_zoom_out = QPushButton("➖")
@@ -137,7 +105,6 @@ class MainWindow(QMainWindow):
         menu_layout.addWidget(self.btn_zoom_out)
         menu_layout.addWidget(self.btn_zoom_reset)
         menu_layout.addWidget(self.btn_zoom_in)
-
         menu_layout.addStretch()
 
         self.tool_group = QButtonGroup(self)
@@ -148,15 +115,180 @@ class MainWindow(QMainWindow):
         for name in tool_names:
             btn = QPushButton(name)
             btn.setCheckable(True)
-            if name == "Close Tool":
-                btn.setChecked(True)
+            if name == "Close Tool": btn.setChecked(True)
             self.tool_group.addButton(btn)
-            
             btn.clicked.connect(lambda checked, n=name: self.toggle_tool_panel(n))
             menu_layout.addWidget(btn)
             self.tool_buttons[name] = btn
 
         self.main_layout.addWidget(self.top_menu)
+
+    # --- ENFORCED OS FILE DIALOGS ---
+    def _new_project(self):
+        dialog = QFileDialog(self, "Create New Project")
+        dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+        dialog.setNameFilter("PDF Project (*.pdfproj)")
+        dialog.setDefaultSuffix("pdfproj") # Forces Linux/Mac to append the extension!
+        
+        if dialog.exec():
+            path = dialog.selectedFiles()[0]
+            self.project_manager.create_project(path)
+            self.settings.setValue("last_project", self.project_manager.project_filepath)
+            self._refresh_pdf_dropdown()
+            self.setWindowTitle(f"PDF Workspace - {self.project_manager.project_name}")
+
+    def _open_project(self):
+        dialog = QFileDialog(self, "Open Project")
+        dialog.setNameFilter("PDF Project (*.pdfproj);;All Files (*)")
+        
+        if dialog.exec():
+            path = dialog.selectedFiles()[0]
+            self._load_project(path)
+
+    def _save_project_as(self):
+        if not self.project_manager.project_filepath:
+            QMessageBox.warning(self, "No Project", "Create or open a project first.")
+            return
+            
+        dialog = QFileDialog(self, "Save Project As")
+        dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+        dialog.setNameFilter("PDF Project (*.pdfproj)")
+        dialog.setDefaultSuffix("pdfproj")
+        
+        if dialog.exec():
+            path = dialog.selectedFiles()[0]
+            old_index = self.project_manager.project_filepath + ".index.json"
+            
+            self.project_manager.project_filepath = path
+            self.project_manager.project_name = os.path.basename(path).replace(".pdfproj", "")
+            
+            self.project_manager.save_all_docs()
+            self.project_manager.save_project()
+            
+            new_index = path + ".index.json"
+            if os.path.exists(old_index):
+                try: shutil.copy(old_index, new_index)
+                except: pass
+                
+            self.settings.setValue("last_project", path)
+            self.setWindowTitle(f"PDF Workspace - {self.project_manager.project_name}")
+            QMessageBox.information(self, "Success", "Project duplicated successfully!")
+
+    def _load_project(self, path):
+        if self.project_manager.load_project(path):
+            self.settings.setValue("last_project", self.project_manager.project_filepath)
+            self.setWindowTitle(f"PDF Workspace - {self.project_manager.project_name}")
+            self._refresh_pdf_dropdown()
+            self.tabs["LLM Chat"].refresh_project_ui()
+            if self.project_manager.pdfs:
+                self.switch_to_pdf(self.project_manager.pdfs[0])
+        else:
+            QMessageBox.warning(self, "Error", "Failed to load project file.")
+
+    def _add_pdf(self):
+        if not self.project_manager.project_filepath:
+            QMessageBox.warning(self, "No Project", "Please Create or Open a Project first.")
+            return
+            
+        file_paths, _ = QFileDialog.getOpenFileNames(self, "Add PDFs to Project", "", "PDF Files (*.pdf)")
+        for path in file_paths:
+            self.project_manager.add_pdf(path)
+            
+        if file_paths:
+            self._refresh_pdf_dropdown()
+            self.switch_to_pdf(file_paths[-1])
+
+    def _refresh_pdf_dropdown(self):
+        self.pdf_selector.blockSignals(True)
+        self.pdf_selector.clear()
+        for path in self.project_manager.pdfs:
+            self.pdf_selector.addItem(os.path.basename(path), userData=path)
+        self.pdf_selector.blockSignals(False)
+
+    def _on_pdf_dropdown_changed(self, index):
+        if index >= 0:
+            pdf_path = self.pdf_selector.itemData(index)
+            self.switch_to_pdf(pdf_path)
+
+    def switch_to_pdf(self, pdf_path):
+        if not os.path.exists(pdf_path): return
+        
+        idx = self.pdf_selector.findData(pdf_path)
+        if idx >= 0 and self.pdf_selector.currentIndex() != idx:
+            self.pdf_selector.blockSignals(True)
+            self.pdf_selector.setCurrentIndex(idx)
+            self.pdf_selector.blockSignals(False)
+
+        self.current_file_path = pdf_path
+        doc = self.project_manager.get_doc(pdf_path)
+        success = self.viewer.load_document(doc)
+        
+        if success:
+            self._check_needs_ocr()
+            self._sync_tools_with_file(pdf_path)
+        else:
+            QMessageBox.warning(self, "Error", "Failed to load the PDF document.")
+
+    # --- ROBUST FRAGMENTED QUOTE SEARCH ENGINE ---
+    def add_ai_annotation(self, quote, note):
+        if not quote: return
+        clean_quote = quote.strip()
+        words = clean_quote.split()
+        if not words: return
+        
+        # Build graceful degradation chunks (5 words each, overlapping)
+        # This completely bypasses PyMuPDF line-break and hyphenation failures!
+        chunks = []
+        if len(words) <= 6:
+            chunks = [" ".join(words)]
+        else:
+            for i in range(0, len(words), 4):
+                chunk = " ".join(words[i:i+6])
+                if chunk.strip(): chunks.append(chunk)
+
+        found_any = False
+
+        for path in self.project_manager.pdfs:
+            doc = self.project_manager.get_doc(path)
+            for page_num in range(len(doc)):
+                page = doc.load_page(page_num)
+                
+                # Try Exact Match First
+                rects = page.search_for(" ".join(words))
+                
+                # If exact fails, assemble the rects using the fragment chunks
+                if not rects and len(chunks) > 1:
+                    rects = []
+                    for chunk in chunks:
+                        res = page.search_for(chunk)
+                        if res: rects.extend(res)
+                
+                if rects:
+                    annot = page.add_highlight_annot(rects)
+                    annot.set_colors(stroke=(0.7, 0.4, 1.0))
+                    annot.set_info(title=f"AINote|{uuid.uuid4()}", content=note, subject=clean_quote)
+                    annot.update()
+                    
+                    if path == self.current_file_path:
+                        self.viewer.reload_page(page_num)
+                    else:
+                        try: doc.saveIncr()
+                        except: pass
+                    
+                    found_any = True
+
+        if found_any:
+            self.viewer.annot_manager.note_added.emit()
+        else:
+            print(f"DEBUG [LLM Highlight Miss]: Failed on all chunks for -> '{clean_quote}'")
+
+    def save_project(self):
+        try:
+            self.project_manager.save_all_docs()
+            self.project_manager.save_project()
+            QMessageBox.information(self, "Success", "Project and all highlights saved successfully!")
+        except Exception as e:
+            QMessageBox.warning(self, "Save Error", f"Error saving project: {str(e)}")
 
     def _build_ocr_banner(self):
         self.ocr_banner = QFrame()
@@ -164,23 +296,18 @@ class MainWindow(QMainWindow):
         self.ocr_banner.setFixedHeight(45)
         banner_layout = QHBoxLayout(self.ocr_banner)
         banner_layout.setContentsMargins(20, 0, 10, 0)
-        
-        lbl = QLabel("⚠️ This document appears to be scanned and lacks selectable text. Would you like to run OCR?")
+        lbl = QLabel("⚠️ Scanned document detected. Run OCR?")
         lbl.setStyleSheet("font-weight: bold; color: white; border: none;")
         banner_layout.addWidget(lbl)
-        
         banner_layout.addStretch()
-        
-        btn_run = QPushButton("Run OCR Now")
+        btn_run = QPushButton("Run OCR")
         btn_run.setStyleSheet("background-color: white; color: black; border: none;")
         btn_run.clicked.connect(self._trigger_auto_ocr)
         banner_layout.addWidget(btn_run)
-        
         btn_dismiss = QPushButton("Dismiss")
         btn_dismiss.setStyleSheet("border: 1px solid white; color: white;")
         btn_dismiss.clicked.connect(self.ocr_banner.hide)
         banner_layout.addWidget(btn_dismiss)
-        
         self.main_layout.addWidget(self.ocr_banner)
         self.ocr_banner.hide()
 
@@ -194,7 +321,7 @@ class MainWindow(QMainWindow):
         self.tool_panel.setStyleSheet("QStackedWidget { background-color: #222222; border-left: 1px solid #444; }")
         
         self.tabs = {
-            "Notes": NotesTab(self.tool_panel, self.viewer),
+            "Notes": NotesTab(self.tool_panel, self.viewer, self),
             "OCR": OCRTab(self.tool_panel, self),
             "Audio (TTS)": TTSTab(self.tool_panel, self),
             "LLM Chat": LLMTab(self.tool_panel, self)
@@ -205,36 +332,10 @@ class MainWindow(QMainWindow):
             
         self.splitter.addWidget(self.tool_panel)
         self.tool_panel.hide()
-        
         self.splitter.setSizes([1400, 0])
         
         self.viewer.annot_manager.note_added.connect(self.tabs["Notes"].refresh_notes)
         self.viewer.annotation_clicked.connect(self._on_annotation_clicked)
-
-    def open_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "Open PDF", "", "PDF Files (*.pdf)")
-        if file_path:
-            self._load_file(file_path)
-            
-    def _load_file(self, file_path):
-        self.current_file_path = file_path
-        self.setWindowTitle(f"PDF Workspace - {os.path.basename(file_path)}")
-        
-        success = self.viewer.load_document(file_path)
-        if success:
-            self._check_needs_ocr()
-            self._sync_tools_with_file(file_path)
-            self.settings.setValue("last_file", file_path)
-        else:
-            QMessageBox.warning(self, "Error", "Failed to load the PDF document.")
-
-    def save_file(self):
-        if self.current_file_path and self.viewer.doc:
-            try:
-                self.viewer.doc.saveIncr()
-                QMessageBox.information(self, "Success", "Annotations saved to PDF successfully!")
-            except Exception as e:
-                QMessageBox.warning(self, "Save Error", f"Could not save file directly. Ensure it isn't locked or read-only.\nError: {str(e)}")
 
     def _on_annotation_clicked(self, annot_id):
         self.tool_buttons["Notes"].setChecked(True)
@@ -244,10 +345,8 @@ class MainWindow(QMainWindow):
     def _check_needs_ocr(self):
         self.ocr_banner.hide()
         if not self.viewer.doc: return
-        
         pages_to_check = min(3, len(self.viewer.doc))
         total_text = "".join([self.viewer.doc.load_page(i).get_text() for i in range(pages_to_check)])
-        
         if len(total_text.strip()) < 50:
             self.ocr_banner.show()
 
@@ -258,12 +357,10 @@ class MainWindow(QMainWindow):
 
     def _sync_tools_with_file(self, file_path):
         self.tabs["Notes"].refresh_notes()
-        for t in ["OCR", "Audio (TTS)", "LLM Chat"]:
+        self.tabs["LLM Chat"].refresh_project_ui()
+        for t in ["OCR", "Audio (TTS)"]:
             if hasattr(self.tabs[t], "sync_file"):
                 self.tabs[t].sync_file(file_path)
-
-    def toggle_view(self, mode):
-        pass
 
     def toggle_tool_panel(self, tool_name):
         if tool_name == "Close Tool":
@@ -272,7 +369,6 @@ class MainWindow(QMainWindow):
         else:
             self.tool_panel.show()
             self.tool_panel.setCurrentWidget(self.tabs[tool_name])
-            
             current_sizes = self.splitter.sizes()
             if current_sizes[1] == 0:
                 self.splitter.setSizes([1000, 400])
