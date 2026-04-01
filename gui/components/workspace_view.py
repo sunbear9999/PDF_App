@@ -1,12 +1,13 @@
 import uuid
+import json
+import re
 from PyQt6.QtWidgets import (QGraphicsView, QGraphicsScene, QGraphicsRectItem, 
                              QGraphicsTextItem, QGraphicsLineItem, QGraphicsItem, 
                              QInputDialog, QColorDialog, QMenu, QGraphicsProxyWidget,
-                             QPushButton, QHBoxLayout, QWidget)
-from PyQt6.QtCore import Qt, QRectF, QPointF, QLineF
+                             QPushButton, QHBoxLayout, QWidget, QMessageBox)
+from PyQt6.QtCore import Qt, QRectF, QPointF, QLineF, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QPen, QBrush, QFont, QPainter, QCursor, QTextDocument
 
-# Calculates optimal text color (black or white) based on background luminance
 def get_text_color_for_bg(bg_color):
     try:
         if isinstance(bg_color, (tuple, list)):
@@ -17,6 +18,52 @@ def get_text_color_for_bg(bg_color):
         return "#000000" if brightness > 140 else "#ffffff"
     except:
         return "#ffffff"
+
+class AIOrganizeWorker(QThread):
+    finished = pyqtSignal(object, str)
+
+    def __init__(self, llm_manager, model, nodes_data):
+        super().__init__()
+        self.llm_manager = llm_manager
+        self.model = model
+        self.nodes_data = nodes_data
+
+    def run(self):
+        prompt = (
+            "You are a strict JSON data processing API. You must group the following text snippets into 2-4 logical categories based on semantic similarity.\n"
+            "Respond ONLY with a valid, raw JSON array. No markdown formatting, no backticks, no conversational text.\n"
+            "Schema:\n"
+            "[\n"
+            "  {\n"
+            "    \"cluster_name\": \"Category Name\",\n"
+            "    \"node_ids\": [\"id1\", \"id2\"]\n"
+            "  }\n"
+            "]\n\n"
+            f"Input Data:\n{json.dumps(self.nodes_data, indent=2)}\n\n"
+            "OUTPUT STRICTLY JSON:"
+        )
+        
+        response_text = ""
+        def callback(chunk):
+            nonlocal response_text
+            response_text += chunk
+
+        try:
+            self.llm_manager.query(prompt, self.model, allowed_docs=None, callback=callback, rag_enabled=False)
+            
+            # Robust JSON extraction to handle LLM hallucinations
+            match = re.search(r'\[\s*\{.*?\}\s*\]', response_text, re.DOTALL)
+            if not match:
+                raise ValueError("No JSON array found in output.")
+                
+            cleaned = match.group(0)
+            cleaned = re.sub(r',\s*([\]}])', r'\1', cleaned) # Bruteforce remove trailing commas
+            clusters = json.loads(cleaned)
+            self.finished.emit(clusters, "")
+        except Exception as e:
+            err = f"Failed to parse LLM Output. It must be valid JSON.\nError: {str(e)}\n\nRaw Output:\n{response_text[:150]}..."
+            self.finished.emit(None, err)
+
 
 class Edge(QGraphicsLineItem):
     def __init__(self, source_node, dest_node, label_text="", edge_id=None, color="#888888"):
@@ -34,14 +81,12 @@ class Edge(QGraphicsLineItem):
         self.text_item = QGraphicsTextItem(label_text, self)
         self.text_item.setDefaultTextColor(QColor("#ffffff"))
         self.text_item.setFont(QFont("Arial", 10, QFont.Weight.Bold))
-        # FIXED: Pass clicks through the text so the line itself gets selected
         self.text_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
         
         self.source_node.add_edge(self)
         self.dest_node.add_edge(self)
         self.update_position()
 
-    # Expands the clickable area of the line to include the text label bounding box
     def shape(self):
         path = super().shape()
         if self.text_item.scene():
@@ -67,33 +112,6 @@ class Edge(QGraphicsLineItem):
                 self.setPen(QPen(self.base_color, 2, Qt.PenStyle.SolidLine))
         return super().itemChange(change, value)
 
-    def contextMenuEvent(self, event):
-        menu = QMenu()
-        edit_action = menu.addAction("Edit Connection Text")
-        color_action = menu.addAction("Change Line Color")
-        delete_action = menu.addAction("Delete Connection")
-        
-        action = menu.exec(event.screenPos())
-        if action == edit_action:
-            text, ok = QInputDialog.getText(None, "Edit Label", "Enter new text:", text=self.label_text)
-            if ok:
-                self.label_text = text
-                self.text_item.setPlainText(text)
-                self.update_position()
-                self.scene().view.main_window.project_manager.mark_dirty("workspace")
-        elif action == color_action:
-            color = QColorDialog.getColor(self.base_color)
-            if color.isValid():
-                self.base_color = color
-                self.setPen(QPen(self.base_color, 4 if self.isSelected() else 2, Qt.PenStyle.SolidLine))
-                self.scene().view.main_window.project_manager.mark_dirty("workspace")
-        elif action == delete_action:
-            self.source_node.edges.remove(self)
-            self.dest_node.edges.remove(self)
-            self.scene().removeItem(self)
-            self.scene().view.edges.remove(self)
-            self.scene().view.main_window.project_manager.mark_dirty("workspace")
-
 
 class InPlaceTextItem(QGraphicsTextItem):
     def __init__(self, node, text=""):
@@ -110,8 +128,9 @@ class InPlaceTextItem(QGraphicsTextItem):
 
 class ResizeHandle(QGraphicsRectItem):
     def __init__(self, parent):
-        super().__init__(0, 0, 10, 10, parent)
-        self.setBrush(QBrush(QColor("#ffffff")))
+        super().__init__(0, 0, 16, 16, parent)
+        self.setBrush(QBrush(QColor(255, 255, 255, 150)))
+        self.setPen(QPen(QColor(255, 255, 255, 200), 1))
         self.setCursor(Qt.CursorShape.SizeFDiagCursor)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
@@ -120,13 +139,13 @@ class ResizeHandle(QGraphicsRectItem):
     def itemChange(self, change, value):
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange and not self._is_resizing:
             parent = self.parentItem()
-            if parent and not parent.is_hovered:
+            if parent:
                 self._is_resizing = True
-                new_w = max(50, value.x() + 10)
-                new_h = max(30, value.y() + 10)
+                new_w = max(50, value.x() + 16)
+                new_h = max(30, value.y() + 16)
                 parent.update_size(new_w, new_h)
                 self._is_resizing = False
-                return QPointF(new_w - 10, new_h - 10)
+                return QPointF(new_w - 16, new_h - 16)
         return super().itemChange(change, value)
 
 
@@ -135,10 +154,9 @@ class Node(QGraphicsRectItem):
         super().__init__(0, 0, width, height)
         self.node_id = node_id
         self.is_custom = is_custom
-        self.quote = quote
-        self.note = note
+        self.quote = quote if quote else ""
+        self.note = note if note else ""
         
-        # Ensure color is safely parsed to a hex string
         self.color = color if isinstance(color, str) else QColor(int(color[0]*255), int(color[1]*255), int(color[2]*255)).name()
         
         self.pdf_path = pdf_path
@@ -161,7 +179,6 @@ class Node(QGraphicsRectItem):
         self.text_item = InPlaceTextItem(self)
         self.resize_handle = ResizeHandle(self)
         
-        # Action Toolbar
         self.toolbar_widget = QWidget()
         self.toolbar_widget.setStyleSheet("background: transparent;")
         t_layout = QHBoxLayout(self.toolbar_widget)
@@ -171,13 +188,16 @@ class Node(QGraphicsRectItem):
         btn_edit = QPushButton("✏️ Edit")
         btn_color = QPushButton("🎨 Color")
         btn_font = QPushButton("🔠 Size")
-        for btn in [btn_edit, btn_color, btn_font]:
+        btn_connect = QPushButton("🔗 Connect")
+        
+        for btn in [btn_edit, btn_color, btn_font, btn_connect]:
             btn.setStyleSheet("background-color: #444; color: white; border-radius: 4px; padding: 2px 6px; font-size: 10px;")
             t_layout.addWidget(btn)
             
         btn_edit.clicked.connect(self.trigger_edit)
         btn_color.clicked.connect(self.trigger_color_change)
         btn_font.clicked.connect(self.trigger_font_size_change)
+        btn_connect.clicked.connect(self.trigger_connect)
         
         self.proxy_toolbar = QGraphicsProxyWidget(self)
         self.proxy_toolbar.setWidget(self.toolbar_widget)
@@ -188,48 +208,33 @@ class Node(QGraphicsRectItem):
     def add_edge(self, edge):
         self.edges.append(edge)
 
-    def _get_html(self, text_content, show_quote=False):
-        text_color = get_text_color_for_bg(self.color)
-        html = ""
-        quote_color = "#444444" if text_color == "#000000" else "#cccccc"
-        
-        # Only render the distinct quote if it exists AND is different from the main text_content
-        if show_quote and self.quote and not self.is_custom and text_content != self.quote:
-            html += f"<span style='color:{quote_color}; font-size:11px;'><i>\"{self.quote}\"</i></span><br><br>"
-            
-        if text_content:
-            html += f"<b style='color:{text_color};'>{text_content}</b>"
-            
-        return html
-
-    def calculate_best_fit(self, plain_note, max_w, max_h):
-        if not plain_note: return 12, ""
+    def calculate_best_fit(self, text, max_w, max_h):
+        if not text: return 12, ""
         
         doc = QTextDocument()
         doc.setTextWidth(max_w)
         
         def check_fit(text_to_test, size_to_test):
-            doc.setDefaultFont(QFont("Arial", size_to_test))
-            doc.setHtml(self._get_html(text_to_test, show_quote=False))
+            doc.setDefaultFont(QFont("Arial", size_to_test, QFont.Weight.Bold))
+            doc.setPlainText(text_to_test)
             return doc.size().height() <= max_h
             
         if self.manual_font_size is not None:
-            if check_fit(plain_note, self.manual_font_size):
-                return self.manual_font_size, plain_note
-            return self.manual_font_size, self.truncate_to_fit(plain_note, max_w, max_h, self.manual_font_size)
+            if check_fit(text, self.manual_font_size):
+                return self.manual_font_size, text
+            return self.manual_font_size, self.truncate_to_fit(text, max_w, max_h, self.manual_font_size)
             
-        # Binary search for dynamic scaling
-        for size in range(32, 7, -1):
-            if check_fit(plain_note, size):
-                return size, plain_note
+        for size in range(24, 7, -1):
+            if check_fit(text, size):
+                return size, text
                 
-        return 8, self.truncate_to_fit(plain_note, max_w, max_h, 8)
+        return 8, self.truncate_to_fit(text, max_w, max_h, 8)
 
     def truncate_to_fit(self, text, max_w, max_h, font_size):
         if not text: return ""
         doc = QTextDocument()
         doc.setTextWidth(max_w)
-        doc.setDefaultFont(QFont("Arial", font_size))
+        doc.setDefaultFont(QFont("Arial", font_size, QFont.Weight.Bold))
         
         words = text.split()
         low = 0
@@ -239,7 +244,7 @@ class Node(QGraphicsRectItem):
         while low <= high:
             mid = (low + high) // 2
             test_text = " ".join(words[:mid]) + "..." if mid < len(words) else " ".join(words)
-            doc.setHtml(self._get_html(test_text, show_quote=False))
+            doc.setPlainText(test_text)
             if doc.size().height() <= max_h:
                 best = test_text
                 low = mid + 1
@@ -250,39 +255,56 @@ class Node(QGraphicsRectItem):
 
     def refresh_layout(self):
         margin = 8
-        max_w = max(10, self.base_width - (margin * 2))
-        max_h = max(10, self.base_height - (margin * 2))
+        text_color = QColor(get_text_color_for_bg(self.color))
         
-        self.text_item.setPos(margin, margin)
-        self.text_item.setTextWidth(max_w)
-        
-        # Fallback to display the quote if the user left the note entirely empty
-        plain_note = self.note if self.note else (self.quote if self.quote else "")
-        if not plain_note: plain_note = ""
-        
+        expanded_text = ""
+        if self.note:
+            expanded_text += self.note
+            
+        if self.quote and self.quote != self.note and not self.is_custom:
+            if expanded_text:
+                expanded_text += "\n\n"
+            expanded_text += f'"{self.quote}"'
+            
+        if not expanded_text.strip():
+            expanded_text = "[Empty Note]"
+            
+        collapsed_text = self.note if self.note else (f'"{self.quote}"' if self.quote else "[Empty Note]")
+            
         if self.is_hovered:
-            self.resize_handle.hide()
+            needed_width = max(self.base_width, 260) 
+            self.text_item.setTextWidth(needed_width - (margin * 2))
+            
             font_size = self.manual_font_size if self.manual_font_size else 12
             self.text_item.setFont(QFont("Arial", font_size))
-            self.text_item.setHtml(self._get_html(plain_note, show_quote=True))
+            
+            self.text_item.setDefaultTextColor(text_color)
+            self.text_item.setPlainText(expanded_text)
             
             doc_height = self.text_item.document().size().height()
-            needed_height = doc_height + (margin * 2) + 35 
+            needed_height = max(self.base_height, doc_height + (margin * 2) + 35)
             
-            expanded_height = max(self.base_height, needed_height)
-            self.setRect(0, 0, self.base_width, expanded_height)
-            
-            self.proxy_toolbar.setPos(margin, expanded_height - 30)
+            self.setRect(0, 0, needed_width, needed_height)
+            self.proxy_toolbar.setPos(margin, needed_height - 30)
             self.proxy_toolbar.show()
+            self.resize_handle.hide()
+            
         else:
-            self.resize_handle.show()
-            self.resize_handle.setPos(self.base_width - 10, self.base_height - 10)
             self.proxy_toolbar.hide()
             self.setRect(0, 0, self.base_width, self.base_height)
             
-            best_size, fitted_note = self.calculate_best_fit(plain_note, max_w, max_h)
-            self.text_item.setFont(QFont("Arial", best_size))
-            self.text_item.setHtml(self._get_html(fitted_note, show_quote=False))
+            max_w = max(10, self.base_width - (margin * 2))
+            max_h = max(10, self.base_height - (margin * 2))
+            self.text_item.setTextWidth(max_w)
+            
+            best_size, fitted_text = self.calculate_best_fit(collapsed_text, max_w, max_h)
+            self.text_item.setFont(QFont("Arial", best_size, QFont.Weight.Bold))
+            self.text_item.setDefaultTextColor(text_color)
+            self.text_item.setPlainText(fitted_text)
+            
+            self.resize_handle.show()
+            self.resize_handle.setPos(self.base_width - 16, self.base_height - 16)
+            self.resize_handle.setZValue(10)
 
     def update_size(self, width, height):
         self.base_width = width
@@ -293,14 +315,16 @@ class Node(QGraphicsRectItem):
 
     def hoverEnterEvent(self, event):
         self.is_hovered = True
-        self.setZValue(100) 
+        if not self.isSelected():
+            self.setZValue(100) 
         self.refresh_layout()
         super().hoverEnterEvent(event)
 
     def hoverLeaveEvent(self, event):
         if self.text_item.hasFocus(): return 
         self.is_hovered = False
-        self.setZValue(1)
+        if not self.isSelected():
+            self.setZValue(1)
         self.refresh_layout()
         super().hoverLeaveEvent(event)
 
@@ -311,13 +335,17 @@ class Node(QGraphicsRectItem):
             if self.scene() and hasattr(self.scene(), 'view'):
                 self.scene().view.main_window.project_manager.mark_dirty("workspace")
         elif change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:
-            self.setPen(QPen(QColor("#ffffff") if self.isSelected() else QColor("#555555"), 2))
+            if self.isSelected():
+                self.setPen(QPen(QColor("#ffffff"), 4))
+                self.setZValue(150) 
+            else:
+                self.setPen(QPen(QColor("#555555"), 2))
+                self.setZValue(1 if not self.is_hovered else 100)
         return super().itemChange(change, value)
 
-    def mouseDoubleClickEvent(self, event):
+    def trigger_connect(self):
         if self.scene() and hasattr(self.scene(), 'view'):
             self.scene().view.start_connection(self)
-        super().mouseDoubleClickEvent(event)
 
     def trigger_edit(self):
         self.text_item.setPlainText(self.note)
@@ -331,10 +359,15 @@ class Node(QGraphicsRectItem):
         self.note = new_text
         self.refresh_layout()
         
+        if self.scene() and hasattr(self.scene(), 'view'):
+            self.scene().view.main_window.tabs["Notes"].save_workspace_state()
+            
         if not self.is_custom and self.pdf_path is not None:
             notes_tab = self.scene().view.main_window.tabs["Notes"]
-            notes_tab._modify_note(self.pdf_path, self.page_num, self.node_id, action="edit_content", content=self.note)
-        else:
+            # CRITICAL FIX: Pass refresh=False to stop the violent scene wipe that causes state loss
+            notes_tab._modify_note(self.pdf_path, self.page_num, self.node_id, action="edit_content", content=self.note, refresh=False)
+            
+        if self.scene() and hasattr(self.scene(), 'view'):
             self.scene().view.main_window.project_manager.mark_dirty("workspace")
             
         self.hoverLeaveEvent(None)
@@ -346,10 +379,15 @@ class Node(QGraphicsRectItem):
             self.setBrush(QBrush(QColor(self.color)))
             self.refresh_layout() 
             
+            if self.scene() and hasattr(self.scene(), 'view'):
+                self.scene().view.main_window.tabs["Notes"].save_workspace_state()
+            
             if not self.is_custom and self.pdf_path is not None:
                 notes_tab = self.scene().view.main_window.tabs["Notes"]
-                notes_tab._modify_note(self.pdf_path, self.page_num, self.node_id, action="color", color=color.getRgbF()[:3])
-            else:
+                # Pass refresh=False to avoid violently wiping the canvas 
+                notes_tab._modify_note(self.pdf_path, self.page_num, self.node_id, action="color", color=color.getRgbF()[:3], refresh=False)
+                
+            if self.scene() and hasattr(self.scene(), 'view'):
                 self.scene().view.main_window.project_manager.mark_dirty("workspace")
 
     def trigger_font_size_change(self):
@@ -373,11 +411,13 @@ class WorkspaceView(QGraphicsView):
         
         self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         self.setBackgroundBrush(QBrush(QColor("#1a1a1a")))
-        self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
+        
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         
         self.nodes = {}
         self.edges = []
         self.connecting_node = None
+        self.loading_indicator = None
 
     def wheelEvent(self, event):
         if event.modifiers() in (Qt.KeyboardModifier.ControlModifier, Qt.KeyboardModifier.ShiftModifier):
@@ -395,22 +435,192 @@ class WorkspaceView(QGraphicsView):
         self.scale(1 / 1.15, 1 / 1.15)
 
     def mousePressEvent(self, event):
+        item = self.itemAt(event.pos())
+
+        if event.button() == Qt.MouseButton.LeftButton and event.modifiers() == Qt.KeyboardModifier.ShiftModifier:
+            self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
+            if isinstance(item, Node):
+                item.setSelected(not item.isSelected())
+                event.accept()
+                return
+        elif event.button() == Qt.MouseButton.LeftButton:
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+
         if event.button() == Qt.MouseButton.MiddleButton or (event.button() == Qt.MouseButton.LeftButton and event.modifiers() == Qt.KeyboardModifier.AltModifier):
             self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
             event.accept()
-        else:
-            item = self.itemAt(event.pos())
-            if self.connecting_node:
-                if isinstance(item, Node) and item != self.connecting_node:
-                    self.finish_connection(item)
-                else:
-                    self.connecting_node.setPen(QPen(QColor("#555555"), 2))
-                    self.connecting_node = None
+            return
+
+        if self.connecting_node:
+            if isinstance(item, Node) and item != self.connecting_node:
+                self.finish_connection(item)
+            else:
+                self.connecting_node.setPen(QPen(QColor("#555555"), 2))
+                self.connecting_node = None
             super().mousePressEvent(event)
+            return
+
+        super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
-        self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
         super().mouseReleaseEvent(event)
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+
+    def delete_edge(self, edge):
+        if edge in edge.source_node.edges:
+            edge.source_node.edges.remove(edge)
+        if edge in edge.dest_node.edges:
+            edge.dest_node.edges.remove(edge)
+            
+        self.scene_obj.removeItem(edge)
+        if edge in self.edges:
+            self.edges.remove(edge)
+            
+        self.main_window.project_manager.mark_dirty("workspace")
+
+    def delete_node(self, node):
+        for edge in list(node.edges):
+            self.delete_edge(edge)
+            
+        self.scene_obj.removeItem(node)
+        if node.node_id in self.nodes:
+            del self.nodes[node.node_id]
+            
+        if not node.is_custom and node.pdf_path is not None:
+            self.main_window.tabs["Notes"].save_workspace_state()
+            self.main_window.tabs["Notes"].delete_note(node.pdf_path, node.page_num, node.node_id)
+            
+        self.main_window.project_manager.mark_dirty("workspace")
+
+    def contextMenuEvent(self, event):
+        item = self.itemAt(event.pos())
+        
+        while item and not isinstance(item, (Node, Edge)):
+            item = item.parentItem()
+
+        selected_nodes = [n for n in self.scene_obj.selectedItems() if isinstance(n, Node)]
+
+        if len(selected_nodes) > 1 and isinstance(item, Node) and item in selected_nodes:
+            menu = QMenu()
+            ai_action = menu.addAction("✨ AI Organize Selected")
+            del_action = menu.addAction("🗑️ Delete Selected Nodes")
+            
+            action = menu.exec(event.globalPos())
+            if action == ai_action:
+                self.trigger_ai_organize(selected_nodes)
+            elif action == del_action:
+                for n in selected_nodes:
+                    self.delete_node(n)
+            return
+
+        if isinstance(item, Node):
+            menu = QMenu()
+            edit_action = menu.addAction("✏️ Edit Note Text")
+            color_action = menu.addAction("🎨 Change Color")
+            del_action = menu.addAction("🗑️ Delete Note")
+            
+            action = menu.exec(event.globalPos())
+            if action == edit_action:
+                item.trigger_edit()
+            elif action == color_action:
+                item.trigger_color_change()
+            elif action == del_action:
+                self.delete_node(item)
+            return
+            
+        if isinstance(item, Edge):
+            menu = QMenu()
+            edit_action = menu.addAction("✏️ Edit Connection Text")
+            color_action = menu.addAction("🎨 Change Line Color")
+            del_action = menu.addAction("🗑️ Delete Connection")
+            
+            action = menu.exec(event.globalPos())
+            if action == edit_action:
+                text, ok = QInputDialog.getText(self, "Edit Label", "Enter new text:", text=item.label_text)
+                if ok:
+                    item.label_text = text
+                    item.text_item.setPlainText(text)
+                    item.update_position()
+                    self.main_window.project_manager.mark_dirty("workspace")
+            elif action == color_action:
+                color = QColorDialog.getColor(item.base_color)
+                if color.isValid():
+                    item.base_color = color
+                    item.setPen(QPen(item.base_color, 4 if item.isSelected() else 2, Qt.PenStyle.SolidLine))
+                    self.main_window.project_manager.mark_dirty("workspace")
+            elif action == del_action:
+                self.delete_edge(item)
+            return
+
+        super().contextMenuEvent(event)
+
+    def trigger_ai_organize(self, selected_nodes):
+        if self.loading_indicator: return
+
+        nodes_data = [{"id": n.node_id, "text": n.note or n.quote} for n in selected_nodes]
+        llm_manager = self.main_window.tabs["LLM Chat"].llm_manager
+        model = self.main_window.tabs["LLM Chat"].model_combo.currentText()
+
+        self.loading_indicator = self.scene_obj.addText("✨ AI is organizing notes...", QFont("Arial", 16, QFont.Weight.Bold))
+        self.loading_indicator.setDefaultTextColor(QColor("#00cc66"))
+        
+        view_center = self.mapToScene(self.viewport().rect().center())
+        self.loading_indicator.setPos(view_center.x() - 150, view_center.y())
+        self.loading_indicator.setZValue(1000)
+
+        self.worker = AIOrganizeWorker(llm_manager, model, nodes_data)
+        self.worker.finished.connect(self._on_ai_organize_finished)
+        self.worker.start()
+
+    def _on_ai_organize_finished(self, clusters, error_msg):
+        if self.loading_indicator:
+            self.scene_obj.removeItem(self.loading_indicator)
+            self.loading_indicator = None
+
+        if error_msg or not clusters:
+            QMessageBox.warning(self, "AI Organize Failed", error_msg)
+            return
+
+        try:
+            selected_nodes = [n for n in self.nodes.values() if n.isSelected()]
+            if not selected_nodes: return
+
+            avg_x = sum(n.pos().x() for n in selected_nodes) / len(selected_nodes)
+            avg_y = sum(n.pos().y() for n in selected_nodes) / len(selected_nodes)
+
+            start_x = avg_x - (len(clusters) * 125)
+            current_x = start_x
+            start_y = avg_y - 150
+
+            for cluster in clusters:
+                c_name = cluster.get("cluster_name", "Cluster")
+                n_ids = cluster.get("node_ids", [])
+                if not n_ids: continue
+
+                cluster_node_id = f"custom_{uuid.uuid4()}"
+                cluster_node = Node(cluster_node_id, quote="", note=c_name, color="#0078D7", is_custom=True, width=180, height=60)
+                cluster_node.setPos(current_x, start_y)
+                self.scene_obj.addItem(cluster_node)
+                self.nodes[cluster_node_id] = cluster_node
+
+                child_y = start_y + 120
+                for nid in n_ids:
+                    if nid in self.nodes:
+                        child = self.nodes[nid]
+                        child.setPos(current_x, child_y)
+                        child_y += child.base_height + 25
+                        
+                        edge = Edge(cluster_node, child, "")
+                        self.scene_obj.addItem(edge)
+                        self.edges.append(edge)
+                        
+                        child.setSelected(False) 
+
+                current_x += 280
+
+            self.main_window.project_manager.mark_dirty("workspace")
+        except Exception as e:
+            QMessageBox.warning(self, "Layout Error", str(e))
 
     def start_connection(self, node):
         self.connecting_node = node
@@ -446,9 +656,18 @@ class WorkspaceView(QGraphicsView):
         self.nodes.clear()
         self.edges.clear()
 
+        annot_dict = {a["id"]: a for a in pdf_annotations}
+
         saved_nodes = workspace_data.get("nodes", {})
         for n_id, data in saved_nodes.items():
-            node = Node(n_id, data.get("quote", ""), data.get("note", ""), data["color"], data["is_custom"], 
+            quote = data.get("quote", "")
+            note = data.get("note", "")
+
+            if n_id in annot_dict:
+                quote = annot_dict[n_id]["subject"] or ""
+                note = annot_dict[n_id]["content"] or ""
+
+            node = Node(n_id, quote, note, data["color"], data["is_custom"], 
                         data["width"], data["height"], data.get("pdf_path"), data.get("page_num"), data.get("manual_font_size"))
             node.setPos(data["x"], data["y"])
             self.scene_obj.addItem(node)
@@ -457,11 +676,16 @@ class WorkspaceView(QGraphicsView):
         y_offset = 50
         for annot in pdf_annotations:
             if annot["id"] not in self.nodes:
-                l = len(annot["content"])
+                quote = annot["subject"] or ""
+                note = annot["content"] or ""
+                
+                l = len(note + quote)
                 w = 200 if l < 50 else (250 if l < 150 else 300)
                 h = 70 if l < 50 else (110 if l < 150 else 160)
                 
-                node = Node(annot["id"], annot["subject"], annot["content"], color="#442255", is_custom=False, 
+                color = "#2d2238" if annot["id"].startswith("AINote") else "#2b2b2b"
+                
+                node = Node(annot["id"], quote, note, color=color, is_custom=False, 
                             width=w, height=h, pdf_path=annot["pdf_path"], page_num=annot["page_num"])
                 node.setPos(50, y_offset)
                 y_offset += 100

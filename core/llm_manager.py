@@ -93,49 +93,56 @@ class LocalLLMManager:
         if not magnitude: return 0
         return dot_product / magnitude
 
-    def query(self, question, selected_model, allowed_docs=None, callback=None):
-        if not self.document_chunks:
-            if callback: callback("Please load and index a document first.")
-            return ""
+    def query(self, question, selected_model, allowed_docs=None, callback=None, rag_enabled=True):
+        context = ""
+        system_prompt = ""
 
-        try:
-            question_emb = self.get_embedding(question)
-        except Exception as e:
-            if callback: callback(f"\n[System Error: {str(e)}]")
-            return f"[System Error: {str(e)}]"
+        if rag_enabled:
+            if not self.document_chunks:
+                if callback: callback("Please load and index a document first.")
+                return ""
 
-        similarities = [self._cosine_similarity(question_emb, doc_emb) for doc_emb in self.document_embeddings]
-        
-        valid_indices = []
-        for i, chunk in enumerate(self.document_chunks):
-            if not allowed_docs or chunk['doc_name'] in allowed_docs:
-                valid_indices.append(i)
+            try:
+                question_emb = self.get_embedding(question)
+                similarities = [self._cosine_similarity(question_emb, doc_emb) for doc_emb in self.document_embeddings]
                 
-        top_indices = sorted(valid_indices, key=lambda i: similarities[i], reverse=True)[:4]
-        
-        context_pieces = []
-        for i in top_indices:
-            chunk = self.document_chunks[i]
-            context_pieces.append(f"--- DOCUMENT: {chunk['doc_name']} | PAGE {chunk['page'] + 1} ---\n{chunk['text']}")
-        context = "\n\n".join(context_pieces)
+                valid_indices = []
+                for i, chunk in enumerate(self.document_chunks):
+                    if not allowed_docs or chunk['doc_name'] in allowed_docs:
+                        valid_indices.append(i)
+                        
+                top_indices = sorted(valid_indices, key=lambda i: similarities[i], reverse=True)[:4]
+                
+                context_pieces = []
+                for i in top_indices:
+                    chunk = self.document_chunks[i]
+                    context_pieces.append(f"--- DOCUMENT: {chunk['doc_name']} | PAGE {chunk['page'] + 1} ---\n{chunk['text']}")
+                context = "\n\n".join(context_pieces)
 
-        system_prompt = (
-            "You are an AI research assistant analyzing a set of documents.\n"
-            "Use the provided context to answer the user's question.\n\n"
-            "AUTONOMOUS HIGHLIGHTING:\n"
-            "When you find evidence in the context, you MUST highlight it in the user's PDF.\n"
-            "To highlight, you MUST use this exact XML format for EACH piece of evidence:\n"
-            "<highlight>\n"
-            "<doc>exact filename from context</doc>\n"
-            "<quote>exact continuous sentence or phrase from context</quote>\n"
-            "<note>Your commentary or explanation here</note>\n"
-            "</highlight>\n\n"
-            "CRITICAL RULES:\n"
-            "1. The text inside <quote> MUST be an exact copy-paste of a continuous phrase (5-15 words) from the CONTEXT.\n"
-            "2. You MUST create MULTIPLE <highlight> blocks if the evidence spans multiple documents or locations.\n"
-            "3. Put all your regular text/commentary inside the <note> tags.\n\n"
-            f"CONTEXT:\n{context}"
-        )
+            except Exception as e:
+                if callback: callback(f"\n[System Error: {str(e)}]")
+                return f"[System Error: {str(e)}]"
+
+            system_prompt = (
+                "You are an AI research assistant analyzing a set of documents.\n"
+                "Use the provided context to answer the user's question.\n\n"
+                "AUTONOMOUS HIGHLIGHTING:\n"
+                "When you find evidence in the context, you MUST highlight it in the user's PDF.\n"
+                "To highlight, you MUST use this exact XML format for EACH piece of evidence:\n"
+                "<highlight>\n"
+                "<doc>exact filename from context</doc>\n"
+                "<quote>exact continuous sentence or phrase from context</quote>\n"
+                "<note>Your commentary or explanation here</note>\n"
+                "</highlight>\n\n"
+                "CRITICAL RULES:\n"
+                "1. The text inside <quote> MUST be an exact copy-paste of a continuous phrase (5-15 words) from the CONTEXT.\n"
+                "2. You MUST create MULTIPLE <highlight> blocks if the evidence spans multiple documents or locations.\n"
+                "3. Put all your regular text/commentary inside the <note> tags.\n\n"
+                f"CONTEXT:\n{context}"
+            )
+        else:
+            # Bypass RAG completely for structural/system queries
+            system_prompt = "You are a highly capable AI assistant interacting with a user's workspace software. Follow their instructions exactly."
 
         payload = {"model": selected_model, "prompt": question, "system": system_prompt, "stream": True, "keep_alive": "60m"}
         full_response = ""

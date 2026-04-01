@@ -1,7 +1,7 @@
 import os
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                              QPushButton, QScrollArea, QFrame, QComboBox, 
-                             QStackedWidget, QColorDialog)
+                             QStackedWidget, QColorDialog, QMessageBox)
 from PyQt6.QtCore import Qt, QTimer
 from gui.components.workspace_view import WorkspaceView
 
@@ -109,7 +109,11 @@ class NotesTab(QWidget):
         
         top_layout.addStretch()
         
-        # --- Workspace Tool Buttons ---
+        self.btn_help = QPushButton("❓")
+        self.btn_help.setStyleSheet("background-color: #555; font-weight: bold; border-radius: 4px; padding: 4px 10px;")
+        self.btn_help.clicked.connect(self.show_workspace_help)
+        self.btn_help.hide()
+        
         self.btn_zoom_out = QPushButton("➖")
         self.btn_zoom_out.setStyleSheet("background-color: #333;")
         self.btn_zoom_out.clicked.connect(lambda: self.workspace_view.zoom_out())
@@ -120,6 +124,7 @@ class NotesTab(QWidget):
         self.btn_zoom_in.clicked.connect(lambda: self.workspace_view.zoom_in())
         self.btn_zoom_in.hide()
         
+        top_layout.addWidget(self.btn_help)
         top_layout.addWidget(self.btn_zoom_out)
         top_layout.addWidget(self.btn_zoom_in)
         
@@ -161,6 +166,24 @@ class NotesTab(QWidget):
         
         layout.addWidget(self.stack)
 
+    def show_workspace_help(self):
+        help_text = (
+            "<h3>Workspace Controls</h3>"
+            "<ul>"
+            "<li><b>Left Click + Drag:</b> Move nodes / Pan canvas</li>"
+            "<li><b>Shift + Click & Drag:</b> Select multiple nodes</li>"
+            "<li><b>Shift + Scroll:</b> Zoom in/out</li>"
+            "<li><b>Double Click Node:</b> Start drawing a connection</li>"
+            "<li><b>Right Click Selected Nodes:</b> ✨ AI Organize</li>"
+            "<li><b>Right Click Connection Line:</b> Edit / Delete connection</li>"
+            "</ul>"
+        )
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Workspace Help")
+        msg_box.setText(help_text)
+        msg_box.setStyleSheet("QLabel { min-width: 400px; font-size: 14px; }")
+        msg_box.exec()
+
     def toggle_view(self):
         if self.stack.currentIndex() == 0:
             self.stack.setCurrentIndex(1)
@@ -168,15 +191,19 @@ class NotesTab(QWidget):
             self.btn_add_bubble.show()
             self.btn_zoom_in.show()
             self.btn_zoom_out.show()
+            self.btn_help.show()
             self.scope_combo.hide()
             self._sync_workspace()
         else:
+            self.save_workspace_state() 
             self.stack.setCurrentIndex(0)
             self.btn_toggle_view.setText("Switch to Workspace")
             self.btn_add_bubble.hide()
             self.btn_zoom_in.hide()
             self.btn_zoom_out.hide()
+            self.btn_help.hide()
             self.scope_combo.show()
+            self.refresh_notes()
 
     def add_bubble(self):
         self.workspace_view.add_custom_bubble()
@@ -185,6 +212,7 @@ class NotesTab(QWidget):
         if hasattr(self, 'workspace_view'):
             data = self.workspace_view.serialize_workspace()
             self.main_window.project_manager.workspace_data = data
+            self.main_window.project_manager.mark_dirty("workspace")
 
     def _get_all_project_annotations_for_workspace(self):
         annots = []
@@ -200,8 +228,8 @@ class NotesTab(QWidget):
                                 "id": title,
                                 "subject": annot.info.get("subject", ""),
                                 "content": annot.info.get("content", ""),
-                                "pdf_path": path,     # Passed to node so it can edit the backend
-                                "page_num": i         # Passed to node so it can edit the backend
+                                "pdf_path": path,     
+                                "page_num": i         
                             })
             except: pass
         return annots
@@ -263,7 +291,7 @@ class NotesTab(QWidget):
     def change_note_color(self, pdf_path, page_num, annot_id, color_tuple):
         self._modify_note(pdf_path, page_num, annot_id, action="color", color=color_tuple)
 
-    def _modify_note(self, pdf_path, page_num, annot_id, action, color=None, content=None):
+    def _modify_note(self, pdf_path, page_num, annot_id, action, color=None, content=None, refresh=True):
         doc = self.main_window.project_manager.get_doc(pdf_path)
         is_active = (pdf_path == self.main_window.current_file_path)
         
@@ -276,14 +304,16 @@ class NotesTab(QWidget):
                     annot.set_colors(stroke=color)
                     annot.update()
                 elif action == "edit_content":
-                    # Updates the underlying note text in the PDF
-                    info = annot.info
-                    info["content"] = content
-                    annot.set_info(info)
+                    new_info = annot.info
+                    new_info["content"] = str(content)
+                    annot.set_info(new_info)
                     annot.update()
                 break
                 
         if is_active: self.viewer.reload_page(page_num)
         
         self.main_window.project_manager.mark_dirty(pdf_path)
-        self.refresh_notes()
+        
+        # Prevent violent canvas rebuilds if edited directly inside the Workspace View
+        if refresh:
+            self.refresh_notes()
