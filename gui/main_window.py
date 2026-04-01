@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
                              QPushButton, QLabel, QSplitter, QStackedWidget, 
                              QFileDialog, QFrame, QButtonGroup, QMessageBox, QComboBox, QMenu)
 from PyQt6.QtGui import QShortcut, QKeySequence
-from PyQt6.QtCore import Qt, QSettings
+from PyQt6.QtCore import Qt, QSettings, QTimer
 
 from core.project_manager import ProjectManager
 from gui.components.pdf_viewer import PDFViewer
@@ -49,6 +49,11 @@ class MainWindow(QMainWindow):
         self._build_ocr_banner()
         self._build_workspace()
         self._setup_shortcuts()
+        
+        # AUTOSAVE SYSTEM: Silently runs every 5 minutes (300,000 ms)
+        self.autosave_timer = QTimer(self)
+        self.autosave_timer.timeout.connect(self.autosave_project)
+        self.autosave_timer.start(5 * 60 * 1000) 
         
         last_project = self.settings.value("last_project", "")
         if last_project and os.path.exists(last_project):
@@ -123,7 +128,6 @@ class MainWindow(QMainWindow):
 
         self.main_layout.addWidget(self.top_menu)
 
-    # --- BUG 1 FIX: ENFORCED OS FILE DIALOGS ---
     def _new_project(self):
         path, _ = QFileDialog.getSaveFileName(self, "Create New Project", "", "PDF Project (*.pdfproj)")
         if path:
@@ -216,6 +220,9 @@ class MainWindow(QMainWindow):
             self.pdf_selector.blockSignals(False)
 
         self.current_file_path = pdf_path
+        
+        self.project_manager.set_active_file(pdf_path)
+        
         doc = self.project_manager.get_doc(pdf_path)
         success = self.viewer.load_document(doc)
         
@@ -225,14 +232,28 @@ class MainWindow(QMainWindow):
         else:
             QMessageBox.warning(self, "Error", "Failed to load the PDF document.")
 
-    # --- BUG 2 FIX: ROBUST FRAGMENTED QUOTE SEARCH ENGINE ---
+    def autosave_project(self):
+        if self.project_manager.project_filepath:
+            try:
+                self.project_manager.save_all_docs()
+                self.project_manager.save_project()
+            except Exception as e:
+                print(f"Background autosave failed: {e}")
+
+    def save_project(self):
+        try:
+            self.project_manager.save_all_docs()
+            self.project_manager.save_project()
+            QMessageBox.information(self, "Success", "Project and all highlights saved successfully!")
+        except Exception as e:
+            QMessageBox.warning(self, "Save Error", f"Error saving project: {str(e)}")
+
     def add_ai_annotation(self, quote, note, target_doc_name=None):
         if not quote: return False
         clean_quote = quote.strip()
         words = clean_quote.split()
         if not words: return False
         
-        # Build graceful degradation chunks (5 words each, overlapping)
         chunks = []
         if len(words) <= 6:
             chunks = [" ".join(words)]
@@ -243,7 +264,6 @@ class MainWindow(QMainWindow):
 
         found_any = False
 
-        # Sort the search order to check the LLM's specified document first
         search_paths = []
         target_path = None
         if target_doc_name:
@@ -262,11 +282,8 @@ class MainWindow(QMainWindow):
             
             for page_num in range(len(doc)):
                 page = doc.load_page(page_num)
-                
-                # Try Exact Match First
                 rects = page.search_for(" ".join(words))
                 
-                # If exact fails, assemble the rects using the fragment chunks
                 if not rects and len(chunks) > 1:
                     rects = []
                     for chunk in chunks:
@@ -276,22 +293,16 @@ class MainWindow(QMainWindow):
                 if rects:
                     annot = page.add_highlight_annot(rects)
                     annot.set_colors(stroke=(0.7, 0.4, 1.0))
-                    import uuid
                     annot.set_info(title=f"AINote|{uuid.uuid4()}", content=note, subject=clean_quote)
                     annot.update()
                     
                     found_any = True
                     
-                    # If this happens to be the active view, refresh the screen immediately
+                    self.project_manager.mark_dirty(path)
+                    
                     if path == self.current_file_path:
                         self.viewer.reload_page(page_num)
 
-            # NOTE: Removed automatic background doc.save(). Modifying the `fitz.Document`
-            # in the memory cache is enough. Background saving while the file is loaded 
-            # causes OS lock errors and makes highlights vanish from inactive tabs.
-            
-            # If we found it in the targeted document, stop searching so we don't 
-            # accidentally highlight the same phrase in the wrong document.
             if found_any:
                 break 
 
@@ -300,13 +311,9 @@ class MainWindow(QMainWindow):
             
         return found_any
 
-    def save_project(self):
-        try:
-            self.project_manager.save_all_docs()
-            self.project_manager.save_project()
-            QMessageBox.information(self, "Success", "Project and all highlights saved successfully!")
-        except Exception as e:
-            QMessageBox.warning(self, "Save Error", f"Error saving project: {str(e)}")
+    def _mark_current_dirty(self):
+        if self.current_file_path:
+            self.project_manager.mark_dirty(self.current_file_path)
 
     def _build_ocr_banner(self):
         self.ocr_banner = QFrame()
@@ -353,6 +360,7 @@ class MainWindow(QMainWindow):
         self.splitter.setSizes([1400, 0])
         
         self.viewer.annot_manager.note_added.connect(self.tabs["Notes"].refresh_notes)
+        self.viewer.annot_manager.note_added.connect(self._mark_current_dirty)
         self.viewer.annotation_clicked.connect(self._on_annotation_clicked)
 
     def _on_annotation_clicked(self, annot_id):
@@ -360,6 +368,7 @@ class MainWindow(QMainWindow):
         self.toggle_tool_panel("Notes")
         self.tabs["Notes"].scroll_to_note(annot_id)
 
+    # --- MISSING METHODS RESTORED BELOW ---
     def _check_needs_ocr(self):
         self.ocr_banner.hide()
         if not self.viewer.doc: return

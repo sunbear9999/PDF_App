@@ -1,7 +1,9 @@
 import os
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-                             QPushButton, QScrollArea, QFrame, QComboBox)
+                             QPushButton, QScrollArea, QFrame, QComboBox, 
+                             QStackedWidget, QColorDialog)
 from PyQt6.QtCore import Qt, QTimer
+from gui.components.workspace_view import WorkspaceView
 
 class NoteBubble(QFrame):
     def __init__(self, tab, pdf_path, page_num, annot_id, subject, content, color, is_ai=False):
@@ -85,6 +87,7 @@ class NoteBubble(QFrame):
     def delete_note(self):
         self.tab.delete_note(self.pdf_path, self.page_num, self.annot_id)
 
+
 class NotesTab(QWidget):
     def __init__(self, parent=None, viewer=None, main_window=None):
         super().__init__(parent)
@@ -103,7 +106,41 @@ class NotesTab(QWidget):
         self.scope_combo.setStyleSheet("background: #333; border: 1px solid #555; padding: 2px;")
         self.scope_combo.currentIndexChanged.connect(self.refresh_notes)
         top_layout.addWidget(self.scope_combo)
+        
+        top_layout.addStretch()
+        
+        # --- Workspace Tool Buttons ---
+        self.btn_zoom_out = QPushButton("➖")
+        self.btn_zoom_out.setStyleSheet("background-color: #333;")
+        self.btn_zoom_out.clicked.connect(lambda: self.workspace_view.zoom_out())
+        self.btn_zoom_out.hide()
+        
+        self.btn_zoom_in = QPushButton("➕")
+        self.btn_zoom_in.setStyleSheet("background-color: #333;")
+        self.btn_zoom_in.clicked.connect(lambda: self.workspace_view.zoom_in())
+        self.btn_zoom_in.hide()
+        
+        top_layout.addWidget(self.btn_zoom_out)
+        top_layout.addWidget(self.btn_zoom_in)
+        
+        self.btn_add_bubble = QPushButton("+ Main Idea")
+        self.btn_add_bubble.setStyleSheet("background-color: #0078D7; font-weight: bold;")
+        self.btn_add_bubble.clicked.connect(self.add_bubble)
+        self.btn_add_bubble.hide()
+        top_layout.addWidget(self.btn_add_bubble)
+        
+        self.btn_toggle_view = QPushButton("Switch to Workspace")
+        self.btn_toggle_view.setStyleSheet("background-color: #444; font-weight: bold;")
+        self.btn_toggle_view.clicked.connect(self.toggle_view)
+        top_layout.addWidget(self.btn_toggle_view)
+        
         layout.addLayout(top_layout)
+        
+        self.stack = QStackedWidget()
+        
+        self.list_view_widget = QWidget()
+        list_layout = QVBoxLayout(self.list_view_widget)
+        list_layout.setContentsMargins(0, 0, 0, 0)
         
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
@@ -115,8 +152,66 @@ class NotesTab(QWidget):
         self.scroll_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.scroll_layout.setContentsMargins(5, 5, 5, 5)
         self.scroll_area.setWidget(self.scroll_content)
-        layout.addWidget(self.scroll_area)
+        list_layout.addWidget(self.scroll_area)
         
+        self.stack.addWidget(self.list_view_widget)
+        
+        self.workspace_view = WorkspaceView(self.main_window)
+        self.stack.addWidget(self.workspace_view)
+        
+        layout.addWidget(self.stack)
+
+    def toggle_view(self):
+        if self.stack.currentIndex() == 0:
+            self.stack.setCurrentIndex(1)
+            self.btn_toggle_view.setText("Switch to List")
+            self.btn_add_bubble.show()
+            self.btn_zoom_in.show()
+            self.btn_zoom_out.show()
+            self.scope_combo.hide()
+            self._sync_workspace()
+        else:
+            self.stack.setCurrentIndex(0)
+            self.btn_toggle_view.setText("Switch to Workspace")
+            self.btn_add_bubble.hide()
+            self.btn_zoom_in.hide()
+            self.btn_zoom_out.hide()
+            self.scope_combo.show()
+
+    def add_bubble(self):
+        self.workspace_view.add_custom_bubble()
+
+    def save_workspace_state(self):
+        if hasattr(self, 'workspace_view'):
+            data = self.workspace_view.serialize_workspace()
+            self.main_window.project_manager.workspace_data = data
+
+    def _get_all_project_annotations_for_workspace(self):
+        annots = []
+        for path in self.main_window.project_manager.pdfs:
+            try:
+                doc = self.main_window.project_manager.get_doc(path)
+                for i in range(len(doc)):
+                    page = doc.load_page(i)
+                    for annot in page.annots():
+                        title = annot.info.get("title", "")
+                        if title.startswith("UserNote") or title.startswith("AINote"):
+                            annots.append({
+                                "id": title,
+                                "subject": annot.info.get("subject", ""),
+                                "content": annot.info.get("content", ""),
+                                "pdf_path": path,     # Passed to node so it can edit the backend
+                                "page_num": i         # Passed to node so it can edit the backend
+                            })
+            except: pass
+        return annots
+
+    def _sync_workspace(self):
+        if not self.main_window.project_manager.project_filepath: return
+        workspace_data = self.main_window.project_manager.workspace_data
+        all_annots = self._get_all_project_annotations_for_workspace()
+        self.workspace_view.sync_with_project(workspace_data, all_annots)
+
     def refresh_notes(self):
         for i in reversed(range(self.scroll_layout.count())): 
             widget = self.scroll_layout.itemAt(i).widget()
@@ -132,10 +227,12 @@ class NotesTab(QWidget):
             
         for path in paths_to_check:
             self._load_notes_from_pdf(path)
+            
+        if self.stack.currentIndex() == 1:
+            self._sync_workspace()
 
     def _load_notes_from_pdf(self, path):
         try:
-            # Reads directly from Project Memory Cache
             doc = self.main_window.project_manager.get_doc(path)
             for i in range(len(doc)):
                 page = doc.load_page(i)
@@ -148,6 +245,9 @@ class NotesTab(QWidget):
         except: pass
 
     def scroll_to_note(self, annot_id):
+        if self.stack.currentIndex() == 1:
+            self.toggle_view()
+            
         for i in range(self.scroll_layout.count()):
             widget = self.scroll_layout.itemAt(i).widget()
             if isinstance(widget, NoteBubble) and widget.annot_id == annot_id:
@@ -163,18 +263,27 @@ class NotesTab(QWidget):
     def change_note_color(self, pdf_path, page_num, annot_id, color_tuple):
         self._modify_note(pdf_path, page_num, annot_id, action="color", color=color_tuple)
 
-    def _modify_note(self, pdf_path, page_num, annot_id, action, color=None):
+    def _modify_note(self, pdf_path, page_num, annot_id, action, color=None, content=None):
         doc = self.main_window.project_manager.get_doc(pdf_path)
         is_active = (pdf_path == self.main_window.current_file_path)
         
         page = doc.load_page(page_num)
         for annot in page.annots():
             if annot.info.get("title") == annot_id:
-                if action == "delete": page.delete_annot(annot)
+                if action == "delete": 
+                    page.delete_annot(annot)
                 elif action == "color":
                     annot.set_colors(stroke=color)
+                    annot.update()
+                elif action == "edit_content":
+                    # Updates the underlying note text in the PDF
+                    info = annot.info
+                    info["content"] = content
+                    annot.set_info(info)
                     annot.update()
                 break
                 
         if is_active: self.viewer.reload_page(page_num)
+        
+        self.main_window.project_manager.mark_dirty(pdf_path)
         self.refresh_notes()
