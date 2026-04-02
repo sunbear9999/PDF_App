@@ -2,6 +2,7 @@ import os
 import uuid
 import fitz
 import shutil
+import threading
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, 
                              QPushButton, QLabel, QSplitter, QStackedWidget, 
                              QFileDialog, QFrame, QButtonGroup, QMessageBox, QComboBox, QMenu)
@@ -57,6 +58,23 @@ class MainWindow(QMainWindow):
         last_project = self.settings.value("last_project", "")
         if last_project and os.path.exists(last_project):
             self._load_project(last_project)
+
+        # Allow UI to load, then hit Ollama to warm up models in the background
+        QTimer.singleShot(1500, self._trigger_background_preload)
+
+    def _trigger_background_preload(self):
+        try:
+            default_model = self.tabs["LLM Chat"].model_combo.currentText()
+            llm_manager = self.tabs["LLM Chat"].llm_manager
+            
+            thread = threading.Thread(
+                target=llm_manager.preload_model, 
+                args=(default_model,), 
+                daemon=True
+            )
+            thread.start()
+        except Exception as e:
+            print(f"Could not trigger preload: {e}")
 
     def _setup_shortcuts(self):
         QShortcut(QKeySequence("Ctrl+="), self).activated.connect(self.viewer.zoom_in)
@@ -182,17 +200,47 @@ class MainWindow(QMainWindow):
             if not path.lower().endswith(".pdfproj"):
                 path += ".pdfproj"
                 
-            old_index = self.project_manager.project_filepath + ".index.json"
+            old_path = self.project_manager.project_filepath
+            old_chroma_dir = old_path + "_chroma_db"
+            new_chroma_dir = path + "_chroma_db"
             
+            # Flush existing data to current SQLite database
+            if "Notes" in self.tabs and hasattr(self.tabs["Notes"], "save_workspace_state"):
+                self.tabs["Notes"].save_workspace_state()
+            self.project_manager.save_all_docs()
+            
+            # Safely detach SQLite connection to release file lock
+            if self.project_manager._conn:
+                self.project_manager._conn.close()
+                self.project_manager._conn = None
+                
+            try:
+                # Copy SQL DB
+                shutil.copy2(old_path, path)
+                
+                # Copy Vector DB Directory
+                if os.path.exists(old_chroma_dir):
+                    if os.path.exists(new_chroma_dir):
+                        shutil.rmtree(new_chroma_dir)
+                    shutil.copytree(old_chroma_dir, new_chroma_dir)
+                    
+            except Exception as e:
+                QMessageBox.warning(self, "Error", f"Failed to copy project database: {e}")
+                self.project_manager._init_db() # Reconnect to old one if copy fails
+                return
+
             self.project_manager.project_filepath = path
             self.project_manager.project_name = os.path.basename(path).replace(".pdfproj", "")
             
-            self.save_project() 
+            # Connect to new database and update metadata
+            self.project_manager._init_db()
+            cursor = self.project_manager._conn.cursor()
+            cursor.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)", 
+                           ("project_name", self.project_manager.project_name))
+            self.project_manager._conn.commit()
             
-            new_index = path + ".index.json"
-            if os.path.exists(old_index):
-                try: shutil.copy(old_index, new_index)
-                except: pass
+            # Reconnect Vector DB to the new folder
+            self.tabs["LLM Chat"].refresh_project_ui()
                 
             self.settings.setValue("last_project", path)
             self.setWindowTitle(f"PDF Workspace - {self.project_manager.project_name}")
@@ -247,7 +295,6 @@ class MainWindow(QMainWindow):
             self.pdf_selector.setCurrentIndex(idx)
             self.pdf_selector.blockSignals(False)
 
-        # CRITICAL FIX: If we are already viewing the file, do not reload the thread
         if self.current_file_path == pdf_path and self.viewer.doc:
             return
 
@@ -271,7 +318,6 @@ class MainWindow(QMainWindow):
                 if "Notes" in self.tabs and hasattr(self.tabs["Notes"], "save_workspace_state"):
                     self.tabs["Notes"].save_workspace_state()
                 self.project_manager.save_all_docs()
-                self.project_manager.save_project()
             except Exception as e:
                 print(f"Background autosave failed: {e}")
 
@@ -282,7 +328,6 @@ class MainWindow(QMainWindow):
                 self.tabs["Notes"].save_workspace_state()
                 
             self.project_manager.save_all_docs()
-            self.project_manager.save_project()
             QMessageBox.information(self, "Success", "Project and all highlights saved successfully!")
         except Exception as e:
             QMessageBox.warning(self, "Save Error", f"Error saving project: {str(e)}")

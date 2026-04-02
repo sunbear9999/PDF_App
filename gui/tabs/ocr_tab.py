@@ -1,3 +1,4 @@
+# gui/tabs/ocr_tab.py
 import os
 import threading
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
@@ -118,8 +119,26 @@ class OCRTab(QWidget):
             msg = "OCR Complete!"
             if ui_mode != "text":
                 msg += f" Saved to {os.path.basename(save_path)}"
+                
                 if ui_mode == "replace":
-                    self.main_window.viewer.load_document(save_path)
+                    pm = self.main_window.project_manager
+                    # Force eviction of the old document from cache
+                    if save_path in pm.open_docs:
+                        if not pm.open_docs[save_path].is_closed:
+                            pm.open_docs[save_path].close()
+                        del pm.open_docs[save_path]
+                    
+                    # Fetch the new PyMuPDF document object and load it into the viewer
+                    new_doc = pm.get_doc(save_path)
+                    if new_doc:
+                        self.main_window.viewer.load_document(new_doc)
+                        
+                elif ui_mode == "save_new":
+                    # Automatically add the new PDF to the project and switch to it
+                    self.main_window.project_manager.add_pdf(save_path)
+                    self.main_window._refresh_pdf_dropdown()
+                    self.main_window.switch_to_pdf(save_path)
+                    
             self.status_label.setText(msg)
             self.status_label.setStyleSheet("color: #00cc66;")
             

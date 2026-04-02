@@ -1,3 +1,4 @@
+# gui/components/pdf_viewer.py
 import fitz
 from PyQt6.QtWidgets import (QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsRectItem,
                              QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox)
@@ -111,7 +112,6 @@ class PDFViewer(QGraphicsView):
         self.search_debounce_timer.setSingleShot(True)
         self.search_debounce_timer.timeout.connect(self.trigger_search)
         
-        # Wire up search bar signals
         self.search_bar.search_input.textChanged.connect(self._on_search_text_changed)
         self.search_bar.search_input.returnPressed.connect(self._on_search_return_pressed)
         self.search_bar.btn_next.clicked.connect(self.next_search_hit)
@@ -143,16 +143,13 @@ class PDFViewer(QGraphicsView):
             self.search_bar.search_input.selectAll()
 
     def _on_search_text_changed(self, text):
-        # Debounce typing to automatically search after a 400ms pause
         self.search_debounce_timer.start(400)
 
     def _on_search_return_pressed(self):
-        # If user presses Enter while typing, force search immediately
         if self.search_debounce_timer.isActive():
             self.search_debounce_timer.stop()
             self.trigger_search()
         else:
-            # Otherwise, use Enter to cycle to the next result
             self.next_search_hit()
 
     def trigger_search(self):
@@ -160,7 +157,6 @@ class PDFViewer(QGraphicsView):
         scope = self.search_bar.scope_combo.currentText()
         match_case = self.search_bar.chk_match_case.isChecked()
         
-        # Prevent redundant searches if criteria haven't changed
         if (text == self.current_search_text and 
             scope == self.current_search_scope and 
             match_case == self.current_match_case):
@@ -188,20 +184,15 @@ class PDFViewer(QGraphicsView):
             if main_window.current_file_path:
                 pdfs_to_search = [main_window.current_file_path]
                 
-        # Configure flags. (Case-insensitive by default in newer PyMuPDF workflows)
         flags = fitz.TEXT_PRESERVE_LIGATURES | fitz.TEXT_PRESERVE_WHITESPACE
         if match_case:
-            # 4 is the standard internal fallback integer for TEXT_MATCH_CASE
             flags |= getattr(fitz, "TEXT_MATCH_CASE", 4)
                 
-        # Scour through the selected PDFs for matches
         for pdf_path in pdfs_to_search:
             doc = main_window.project_manager.get_doc(pdf_path)
             if not doc: continue
             for page_num in range(len(doc)):
                 page = doc.load_page(page_num)
-                # CRITICAL FIX: quads=True forces PyMuPDF to group disjoint characters 
-                # into a single accurate phrase block instead of isolating individual letters.
                 quads = page.search_for(text, hit_max=999, quads=True, flags=flags)
                 for q in quads:
                     self.search_hits.append({
@@ -250,8 +241,11 @@ class PDFViewer(QGraphicsView):
 
     def clear_search_highlights(self):
         for h in self.search_highlight_items:
-            if h.scene():
-                self.scene.removeItem(h)
+            try:
+                if h.scene():
+                    self.scene.removeItem(h)
+            except RuntimeError:
+                pass
         self.search_highlight_items.clear()
 
     def render_search_highlights(self):
@@ -299,9 +293,14 @@ class PDFViewer(QGraphicsView):
             self.worker.wait()
 
         self.doc = doc
+        
+        # FIX: Clear all visual items from arrays BEFORE wiping the scene
+        self.annot_manager.clear_selection()
+        self.clear_search_highlights()
+        
+        # Now it is safe to wipe the actual scene
         self.scene.clear()
         self.page_items.clear()
-        self.search_highlight_items.clear() 
         self.pending_jump = None 
         
         self.worker = RenderWorker(self.doc, self.base_zoom)
@@ -340,12 +339,29 @@ class PDFViewer(QGraphicsView):
         self.page_items[page_num].setPixmap(QPixmap.fromImage(img.copy()))
 
     def mousePressEvent(self, event):
-        if event.modifiers() == Qt.KeyboardModifier.ShiftModifier:
-            self.setDragMode(QGraphicsView.DragMode.NoDrag)
-            self.annot_manager.handle_mouse_press(event)
-        else:
-            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        is_shift = event.modifiers() == Qt.KeyboardModifier.ShiftModifier
+        is_right = event.button() == Qt.MouseButton.RightButton
+        is_left = event.button() == Qt.MouseButton.LeftButton
+        
+        if is_right and self.annot_manager.has_selection():
             scene_pos = self.mapToScene(event.pos())
+            if self.annot_manager.is_pos_in_selection(scene_pos):
+                self.annot_manager.show_context_menu(event.globalPosition().toPoint())
+                return
+
+        if is_right or (is_left and is_shift):
+            self.setDragMode(QGraphicsView.DragMode.NoDrag)
+            self.viewport().setCursor(Qt.CursorShape.IBeamCursor)
+            self.annot_manager.start_selection(event)
+            return
+        
+        if is_left:
+            scene_pos = self.mapToScene(event.pos())
+            
+            if self.annot_manager.has_selection() and not self.annot_manager.is_pos_in_selection(scene_pos):
+                self.annot_manager.clear_selection()
+                
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
             page_idx, page_item = self.annot_manager._get_page_at_pos(scene_pos)
             
             if page_idx != -1 and self.doc:
@@ -360,13 +376,16 @@ class PDFViewer(QGraphicsView):
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        if self.dragMode() == QGraphicsView.DragMode.NoDrag:
-            self.annot_manager.handle_mouse_move(event)
-        else: super().mouseMoveEvent(event)
+        if self.annot_manager.is_selecting:
+            self.annot_manager.update_selection(event)
+        else: 
+            super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if self.dragMode() == QGraphicsView.DragMode.NoDrag:
-            self.annot_manager.handle_mouse_release(event)
+        if self.annot_manager.is_selecting:
+            self.annot_manager.finish_selection(event)
+            self.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         super().mouseReleaseEvent(event)
         
     def jump_to_page(self, page_num):

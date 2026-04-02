@@ -174,7 +174,6 @@ class NotesTab(QWidget):
         self.workspace_view = WorkspaceView(self.main_window)
         self.stack.addWidget(self.workspace_view)
         
-        # Connect Undo/Redo signals
         self.btn_undo.clicked.connect(self.workspace_view.undo)
         self.btn_redo.clicked.connect(self.workspace_view.redo)
         self.btn_zoom_out.clicked.connect(lambda: self.workspace_view.zoom_out())
@@ -241,7 +240,7 @@ class NotesTab(QWidget):
     def save_workspace_state(self):
         if hasattr(self, 'workspace_view'):
             data = self.workspace_view.serialize_workspace()
-            self.main_window.project_manager.workspace_data = data
+            self.main_window.project_manager.save_workspace_data(data)
             self.main_window.project_manager.mark_dirty("workspace")
 
     def _get_all_project_annotations_for_workspace(self):
@@ -271,8 +270,10 @@ class NotesTab(QWidget):
     def _sync_workspace(self):
         try:
             if not self.main_window.project_manager.project_filepath: return
-            workspace_data = self.main_window.project_manager.workspace_data
+            
+            workspace_data = self.main_window.project_manager.get_workspace_data()
             all_annots = self._get_all_project_annotations_for_workspace()
+            
             self.workspace_view.sync_with_project(workspace_data, all_annots)
         except Exception as e:
             print(f"Error syncing workspace: {e}")
@@ -326,7 +327,16 @@ class NotesTab(QWidget):
                 self.scroll_area.ensureWidgetVisible(widget)
                 original_style = widget.styleSheet()
                 widget.setStyleSheet(original_style + "\nNoteBubble { border: 2px solid white; background-color: #444; }")
-                QTimer.singleShot(1500, lambda w=widget, s=original_style: w.setStyleSheet(s))
+                
+                # --- SAFE TIMER ---
+                # Check if the bubble still exists before attempting to revert its style
+                def revert_style(w=widget, s=original_style):
+                    try:
+                        w.setStyleSheet(s)
+                    except RuntimeError:
+                        pass # The note was deleted or refreshed by the user before the timer finished
+                        
+                QTimer.singleShot(1500, revert_style)
                 break
 
     def delete_note(self, pdf_path, page_num, annot_id):

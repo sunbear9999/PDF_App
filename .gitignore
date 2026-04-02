@@ -45,3 +45,6 @@ gui/components/__pycache__/annotation_manager.cpython-312.pyc
 gui/components/__pycache__/pdf_viewer.cpython-312.pyc
 gui/tabs/__pycache__/llm_tab.cpython-312.pyc
 gui/tabs/__pycache__/notes_tab.cpython-312.pyc
+test.pdfproj_chroma_db
+Unit3.pdfproj_chroma_db
+test.pdfproj.index.json
