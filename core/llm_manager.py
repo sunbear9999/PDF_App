@@ -54,7 +54,6 @@ class LocalLLMManager:
         except Exception as e:
             print(f"[System] Error fetching models: {e}")
 
-        # BULLETPROOF FALLBACK: Guarantees your models appear in UI even if the local server is slow to wake up
         return ["qwen2.5:7b", "llama3", "mistral"] 
 
     def get_embedding(self, text):
@@ -151,10 +150,16 @@ class LocalLLMManager:
 
                 results = self.collection.query(
                     query_embeddings=[question_emb],
-                    n_results=8,
+                    n_results=10, 
                     where=where_clause
                 )
                 
+                # --- NEW SAFETY CHECK: ABORT IF NO CONTEXT IS FOUND ---
+                if not results.get('documents') or not results['documents'][0]:
+                    err_msg = "\n[System Warning: No readable text was found in the selected document. If you recently ran OCR on a scanned PDF, you must click 'Build / Rebuild Search Index' to update the AI's memory.]"
+                    if callback: callback(err_msg)
+                    return err_msg
+
                 context_pieces = []
                 for idx, doc_text in enumerate(results['documents'][0]):
                     meta = results['metadatas'][0][idx]
@@ -166,10 +171,11 @@ class LocalLLMManager:
                 if callback: callback(f"\n[System Error: {str(e)}]")
                 return f"[System Error: {str(e)}]"
 
+            # --- UPDATED PROMPT: STRICTLY FORBIDS HALLUCINATION ---
             system_prompt = (
                 "You are an expert AI research assistant analyzing documents.\n"
-                "Provide comprehensive, intelligent, and deeply analytical answers using the provided context.\n"
-                "If the context doesn't contain the exact answer, use your general knowledge to infer, but clarify what is from the document.\n\n"
+                "Provide comprehensive, intelligent, and deeply analytical answers using ONLY the provided context.\n"
+                "CRITICAL: If the context doesn't contain the exact answer, you MUST state 'I cannot answer this based on the provided documents.' DO NOT invent hypothetical examples, facts, or documents under any circumstances.\n\n"
                 "--- AUTONOMOUS HIGHLIGHTING ---\n"
                 "When you cite specific evidence, you MUST highlight it in the user's UI using EXACTLY this XML format:\n"
                 "<highlight>\n"
@@ -186,7 +192,8 @@ class LocalLLMManager:
         else:
             system_prompt = "You are a highly capable AI assistant interacting with a user's workspace software. Follow their instructions exactly."
 
-        payload = {"model": selected_model, "prompt": question, "system": system_prompt, "stream": True, "keep_alive": "60m", "options": {"temperature": 0.1, "top_p": 0.8}}
+        # Reduced temperature to 0.0 to completely eliminate creative writing/hallucinations
+        payload = {"model": selected_model, "prompt": question, "system": system_prompt, "stream": True, "keep_alive": "60m", "options": {"temperature": 0.0, "top_p": 0.8}}
         
         full_response = ""
         try:

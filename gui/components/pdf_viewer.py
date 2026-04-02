@@ -11,8 +11,9 @@ class RenderWorker(QThread):
     page_ready = pyqtSignal(int, QImage)
     finished_rendering = pyqtSignal()
 
-    def __init__(self, doc, zoom):
-        super().__init__()
+    # ADDED parent=None
+    def __init__(self, doc, zoom, parent=None):
+        super().__init__(parent)
         self.doc = doc
         self.zoom = zoom
         self._is_running = True
@@ -294,16 +295,15 @@ class PDFViewer(QGraphicsView):
 
         self.doc = doc
         
-        # FIX: Clear all visual items from arrays BEFORE wiping the scene
         self.annot_manager.clear_selection()
         self.clear_search_highlights()
         
-        # Now it is safe to wipe the actual scene
         self.scene.clear()
         self.page_items.clear()
         self.pending_jump = None 
         
-        self.worker = RenderWorker(self.doc, self.base_zoom)
+        # ADDED parent=self
+        self.worker = RenderWorker(self.doc, self.base_zoom, parent=self)
         self.worker.page_ready.connect(self._on_page_ready)
         self.worker.start()
         return True

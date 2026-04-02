@@ -6,8 +6,8 @@ from PyQt6.QtCore import QThread, pyqtSignal
 class AIOrganizeWorker(QThread):
     finished = pyqtSignal(object, str)
 
-    def __init__(self, llm_manager, model, nodes_data, custom_instructions=""):
-        super().__init__()
+    def __init__(self, llm_manager, model, nodes_data, custom_instructions="", parent=None):
+        super().__init__(parent)
         self.llm_manager = llm_manager
         self.model = model
         self.nodes_data = nodes_data
@@ -43,7 +43,6 @@ class AIOrganizeWorker(QThread):
         try:
             self.llm_manager.query(prompt, self.model, allowed_docs=None, callback=callback, rag_enabled=False)
             
-            # --- Stop Execution if API threw an error ---
             if "[Generation Error" in response_text:
                 self.finished.emit(None, f"The AI engine encountered an error:\n{response_text}")
                 return

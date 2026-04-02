@@ -273,7 +273,6 @@ class WorkspaceView(QGraphicsView):
     def trigger_ai_organize(self, selected_nodes):
         if not self.loading_overlay.isHidden(): return
 
-        # Validate that a valid model is selected before starting
         model = self.main_window.tabs["LLM Chat"].model_combo.currentText().strip()
         if not model or "Error" in model or "running" in model:
             QMessageBox.warning(self, "No Model Selected", "Please select a valid AI model in the LLM Chat tab first.")
@@ -285,17 +284,15 @@ class WorkspaceView(QGraphicsView):
             "Enter custom organization instructions (e.g., 'Group by Timeline' or 'Pros vs Cons'):\nLeave blank for default semantic grouping."
         )
         if not ok: return
-        
-        # ... (rest of the function continues normally)
 
         nodes_data = [{"id": n.node_id, "text": n.note or n.quote} for n in selected_nodes]
         llm_manager = self.main_window.tabs["LLM Chat"].llm_manager
 
-        # Show the prominent loading overlay
         self.loading_overlay.resize(self.viewport().size())
         self.loading_overlay.show()
 
-        self.worker = AIOrganizeWorker(llm_manager, model, nodes_data, custom_instructions=instructions.strip())
+        # ADDED parent=self to protect against thread destruction 
+        self.worker = AIOrganizeWorker(llm_manager, model, nodes_data, custom_instructions=instructions.strip(), parent=self)
         self.worker.finished.connect(self._on_ai_organize_finished)
         self.worker.start()
 

@@ -1,13 +1,13 @@
+# gui/main_window.py
 import os
 import uuid
 import fitz
 import shutil
-import threading
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, 
                              QPushButton, QLabel, QSplitter, QStackedWidget, 
                              QFileDialog, QFrame, QButtonGroup, QMessageBox, QComboBox, QMenu)
 from PyQt6.QtGui import QShortcut, QKeySequence
-from PyQt6.QtCore import Qt, QSettings, QTimer
+from PyQt6.QtCore import Qt, QSettings, QTimer, QThread
 
 from core.project_manager import ProjectManager
 from gui.components.pdf_viewer import PDFViewer
@@ -15,6 +15,16 @@ from gui.tabs.ocr_tab import OCRTab
 from gui.tabs.tts_tab import TTSTab
 from gui.tabs.llm_tab import LLMTab
 from gui.tabs.notes_tab import NotesTab
+
+# --- NEW SAFE PRELOAD THREAD ---
+class PreloadWorker(QThread):
+    def __init__(self, llm_manager, model, parent=None):
+        super().__init__(parent)
+        self.llm_manager = llm_manager
+        self.model = model
+
+    def run(self):
+        self.llm_manager.preload_model(self.model)
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -59,7 +69,6 @@ class MainWindow(QMainWindow):
         if last_project and os.path.exists(last_project):
             self._load_project(last_project)
 
-        # Allow UI to load, then hit Ollama to warm up models in the background
         QTimer.singleShot(1500, self._trigger_background_preload)
 
     def _trigger_background_preload(self):
@@ -67,12 +76,9 @@ class MainWindow(QMainWindow):
             default_model = self.tabs["LLM Chat"].model_combo.currentText()
             llm_manager = self.tabs["LLM Chat"].llm_manager
             
-            thread = threading.Thread(
-                target=llm_manager.preload_model, 
-                args=(default_model,), 
-                daemon=True
-            )
-            thread.start()
+            # Replaced Python threading with safe PyQt QThread
+            self.preload_worker = PreloadWorker(llm_manager, default_model, parent=self)
+            self.preload_worker.start()
         except Exception as e:
             print(f"Could not trigger preload: {e}")
 
@@ -204,42 +210,34 @@ class MainWindow(QMainWindow):
             old_chroma_dir = old_path + "_chroma_db"
             new_chroma_dir = path + "_chroma_db"
             
-            # Flush existing data to current SQLite database
             if "Notes" in self.tabs and hasattr(self.tabs["Notes"], "save_workspace_state"):
                 self.tabs["Notes"].save_workspace_state()
             self.project_manager.save_all_docs()
             
-            # Safely detach SQLite connection to release file lock
             if self.project_manager._conn:
                 self.project_manager._conn.close()
                 self.project_manager._conn = None
                 
             try:
-                # Copy SQL DB
                 shutil.copy2(old_path, path)
-                
-                # Copy Vector DB Directory
                 if os.path.exists(old_chroma_dir):
                     if os.path.exists(new_chroma_dir):
                         shutil.rmtree(new_chroma_dir)
                     shutil.copytree(old_chroma_dir, new_chroma_dir)
-                    
             except Exception as e:
                 QMessageBox.warning(self, "Error", f"Failed to copy project database: {e}")
-                self.project_manager._init_db() # Reconnect to old one if copy fails
+                self.project_manager._init_db() 
                 return
 
             self.project_manager.project_filepath = path
             self.project_manager.project_name = os.path.basename(path).replace(".pdfproj", "")
             
-            # Connect to new database and update metadata
             self.project_manager._init_db()
             cursor = self.project_manager._conn.cursor()
             cursor.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)", 
                            ("project_name", self.project_manager.project_name))
             self.project_manager._conn.commit()
             
-            # Reconnect Vector DB to the new folder
             self.tabs["LLM Chat"].refresh_project_ui()
                 
             self.settings.setValue("last_project", path)

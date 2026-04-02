@@ -11,8 +11,9 @@ class IndexWorker(QThread):
     progress = pyqtSignal(str)
     finished_indexing = pyqtSignal(bool, str)
     
-    def __init__(self, llm, filepaths):
-        super().__init__()
+    # ADDED parent=None
+    def __init__(self, llm, filepaths, parent=None):
+        super().__init__(parent)
         self.llm = llm
         self.filepaths = filepaths
         
@@ -27,8 +28,9 @@ class ChatWorker(QThread):
     token_received = pyqtSignal(str)
     chat_completed = pyqtSignal(str)
     
-    def __init__(self, llm, question, model, allowed_docs):
-        super().__init__()
+    # ADDED parent=None
+    def __init__(self, llm, question, model, allowed_docs, parent=None):
+        super().__init__(parent)
         self.llm = llm
         self.question = question
         self.model = model
@@ -145,7 +147,6 @@ class LLMTab(QWidget):
         layout.addLayout(input_layout)
         
     def refresh_project_ui(self):
-        """Correctly initializes the Vector DB context when a project is loaded."""
         self.pdf_list.clear()
         if self.main_window.project_manager.pdfs:
             for pdf_path in self.main_window.project_manager.pdfs:
@@ -166,7 +167,6 @@ class LLMTab(QWidget):
                 self.status_lbl.setStyleSheet("font-weight: bold; color: #ffaa00;")
 
     def refresh_models(self):
-        """Re-polls the Ollama server safely using the dedicated refresh button."""
         models = self.llm_manager.get_available_models()
         if models:
             self.model_combo.clear()
@@ -182,10 +182,17 @@ class LLMTab(QWidget):
             return
             
         self.btn_index.setEnabled(False)
-        self.idx_worker = IndexWorker(self.llm_manager, paths_to_index)
-        self.idx_worker.progress.connect(lambda msg: self.status_lbl.setText(f"🟡 {msg}"))
+        
+        # ADDED parent=self to prevent garbage collection
+        self.idx_worker = IndexWorker(self.llm_manager, paths_to_index, parent=self)
+        
+        # REPLACED lambda with direct connection to prevent background thread UI crashes
+        self.idx_worker.progress.connect(self._update_index_progress)
         self.idx_worker.finished_indexing.connect(self._on_index_complete)
         self.idx_worker.start()
+
+    def _update_index_progress(self, msg):
+        self.status_lbl.setText(f"🟡 {msg}")
 
     def _on_index_complete(self, success, error_msg):
         self.btn_index.setEnabled(True)
@@ -216,7 +223,9 @@ class LLMTab(QWidget):
                 allowed_docs.append(item.text())
         
         model = self.model_combo.currentText()
-        self.chat_worker = ChatWorker(self.llm_manager, user_text, model, allowed_docs)
+        
+        # ADDED parent=self to securely tether it to the UI
+        self.chat_worker = ChatWorker(self.llm_manager, user_text, model, allowed_docs, parent=self)
         self.chat_worker.token_received.connect(self._on_chat_token)
         self.chat_worker.chat_completed.connect(self._on_chat_complete)
         self.chat_worker.start()
