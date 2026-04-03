@@ -18,7 +18,7 @@ class LocalLLMManager:
 
     def ensure_server_running(self):
         try:
-            requests.get("http://localhost:11434/", timeout=1)
+            requests.get("http://localhost:11434/", timeout=2)
         except requests.exceptions.ConnectionError:
             subprocess.Popen(['ollama', 'serve'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             time.sleep(2) 
@@ -38,10 +38,11 @@ class LocalLLMManager:
         if not model_name: return
         try:
             payload = {"model": model_name, "keep_alive": "60m"}
-            requests.post(f"{self.api_base}/generate", json=payload, timeout=10)
+            # INCREASED TIMEOUT: Gives the system up to 60 seconds to push the model into VRAM
+            requests.post(f"{self.api_base}/generate", json=payload, timeout=60)
             print(f"[System] Successfully preloaded {model_name} into memory.")
         except Exception as e:
-            print(f"[System] Failed to preload model: {e}")
+            print(f"[System] Failed to preload model (It may still be loading in the background): {e}")
 
     def get_available_models(self):
         try:
@@ -59,7 +60,8 @@ class LocalLLMManager:
     def get_embedding(self, text):
         payload = {"model": self.embedding_model, "prompt": text, "keep_alive": "60m"}
         try:
-            response = requests.post(f"{self.api_base}/embeddings", json=payload, timeout=120)
+            # INCREASED TIMEOUT: 10s to connect, 300s to wait for heavy document embedding
+            response = requests.post(f"{self.api_base}/embeddings", json=payload, timeout=(10, 300))
             if response.status_code == 200:
                 return response.json().get("embedding")
             raise Exception(f"Server returned {response.status_code}: {response.text}")
@@ -154,7 +156,6 @@ class LocalLLMManager:
                     where=where_clause
                 )
                 
-                # --- NEW SAFETY CHECK: ABORT IF NO CONTEXT IS FOUND ---
                 if not results.get('documents') or not results['documents'][0]:
                     err_msg = "\n[System Warning: No readable text was found in the selected document. If you recently ran OCR on a scanned PDF, you must click 'Build / Rebuild Search Index' to update the AI's memory.]"
                     if callback: callback(err_msg)
@@ -171,7 +172,6 @@ class LocalLLMManager:
                 if callback: callback(f"\n[System Error: {str(e)}]")
                 return f"[System Error: {str(e)}]"
 
-            # --- UPDATED PROMPT: STRICTLY FORBIDS HALLUCINATION ---
             system_prompt = (
                 "You are an expert AI research assistant analyzing documents.\n"
                 "Provide comprehensive, intelligent, and deeply analytical answers using ONLY the provided context.\n"
@@ -192,12 +192,12 @@ class LocalLLMManager:
         else:
             system_prompt = "You are a highly capable AI assistant interacting with a user's workspace software. Follow their instructions exactly."
 
-        # Reduced temperature to 0.0 to completely eliminate creative writing/hallucinations
         payload = {"model": selected_model, "prompt": question, "system": system_prompt, "stream": True, "keep_alive": "60m", "options": {"temperature": 0.0, "top_p": 0.8}}
         
         full_response = ""
         try:
-            with requests.post(f"{self.api_base}/generate", json=payload, stream=True, timeout=120) as response:
+            # INCREASED TIMEOUT: (10, 300) means 10s to connect, up to 5 minutes to wait for the first token
+            with requests.post(f"{self.api_base}/generate", json=payload, stream=True, timeout=(10, 300)) as response:
                 if response.status_code != 200:
                     try: err_msg = response.json().get("error", response.text)
                     except: err_msg = response.text
@@ -211,6 +211,10 @@ class LocalLLMManager:
                         txt = chunk.get("response", "")
                         full_response += txt
                         if callback: callback(txt)
+        except requests.exceptions.ReadTimeout:
+            err = "\n[Generation Error: The AI took too long to respond. Your hardware might be struggling to load this model, or it is too large for your system's RAM.]"
+            if callback: callback(err)
+            full_response += err
         except Exception as e:
             err = f"\n[Generation Error: {str(e)}]"
             if callback: callback(err)
