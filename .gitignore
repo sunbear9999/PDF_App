@@ -66,3 +66,10 @@ goddesses.pdfproj_chroma_db/96c6c4fd-4736-4dbd-bbd8-43a9b1994429/length.bin
 .gitignore
 goddesses.pdfproj_chroma_db/96c6c4fd-4736-4dbd-bbd8-43a9b1994429/data_level0.bin
 gui/tabs/__pycache__/llm_tab.cpython-312.pyc
+gui/tabs/__pycache__/llm_tab.cpython-312.pyc
+tests/__pycache__/test_annotation_manager.cpython-312.pyc
+tests/__pycache__/test_llm_manager.cpython-312.pyc
+voices/en_US-lessac-medium.onnx.json
+voices/en_US-lessac-medium.onnx
+voices/en_US-libritts-high.onnx.json
+voices/en_US-libritts-high.onnx

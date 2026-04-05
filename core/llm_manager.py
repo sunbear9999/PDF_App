@@ -130,14 +130,35 @@ class LocalLLMManager:
                 ids=batch_ids
             )
 
-    def query(self, question, selected_model, allowed_docs=None, callback=None, rag_enabled=True, use_agents=True):
+    def query(self, question, selected_model, allowed_docs=None, callback=None, rag_enabled=True, use_agents=True, custom_system_prompt=None, existing_highlights=None):
         context = ""
         system_prompt = ""
+        
+        if existing_highlights is None:
+            existing_highlights = []
 
         if not selected_model:
             err = "\n[Generation Error: No AI model selected.]"
             if callback: callback(err)
             return err
+
+        highlight_rules = (
+            "--- HIGHLIGHTS ---\n"
+            "To autonomously highlight quotes in the PDF for the user, you MUST create a final section at the VERY END of your response exactly titled '--- HIGHLIGHTS ---'.\n"
+            "Under this section, list your quotes using this exact single-line format:\n"
+            "%%QUOTE | Document_Name.pdf | The exact phrase from the text | Your explanation\n\n"
+            "CRITICAL RULES (FAILURE TO FOLLOW WILL BREAK THE SYSTEM):\n"
+            "1. STRICT ANTI-HALLUCINATION: You MUST ONLY extract exact, verbatim phrases that physically appear in the provided CONTEXT text below. NEVER alter text, paraphrase, or invent 'implied' quotes.\n"
+            "2. EXACT DOCUMENT NAMES: Use ONLY the exact document names provided in the CONTEXT headers. NEVER invent or repeat document names if they aren't in the context.\n"
+            "3. NO FORCED QUOTAS: If a document does not contain highly relevant text, SKIP IT entirely. Do not force quotes.\n"
+            "4. NO REPETITION: Every quote must be entirely distinct.\n"
+            "5. ISOLATION: The '--- FINAL ANSWER ---' section MUST NOT contain any quotes, highlight tags, or direct document citations. It should only be a high-level conceptual summary. Reserve ALL quotes and explanations exclusively for the '--- HIGHLIGHTS ---' section.\n"
+        )
+
+        if existing_highlights:
+            highlight_rules += "6. DO NOT highlight the following phrases as they are ALREADY highlighted by the user:\n"
+            for h in set(existing_highlights):
+                highlight_rules += f" - {h}\n"
 
         if rag_enabled:
             if not self.collection or self.collection.count() == 0:
@@ -146,65 +167,89 @@ class LocalLLMManager:
 
             try:
                 search_queries = [question]
-                
-                if use_agents:
-                    if callback: callback("\n[🤖 Agent Planner] Formulating search strategy...\n")
-                    
-                    search_prompt = (
-                        "You are an NLP keyword extractor. Ignore all action verbs in the user's prompt. "
-                        "Identify the core factual subjects and generate exactly 2 short search phrases (2-4 words each).\n"
-                        "Output ONLY a bulleted list using a dash (-). Do not output any other text.\n\n"
-                        "User: Highlight quotes about the foundation of the Roman empire\n"
-                        "- foundation of Rome\n"
-                        "- roman empire origins\n\n"
-                        f"User: {question}\n"
-                    )
-                    
-                    exp_payload = {"model": selected_model, "prompt": search_prompt, "stream": False, "options": {"temperature": 0.1, "num_predict": 40}}
-                    try:
-                        exp_resp = requests.post(f"{self.api_base}/generate", json=exp_payload, timeout=10)
-                        if exp_resp.status_code == 200:
-                            raw_resp = exp_resp.json().get("response", "").strip()
-                            for line in raw_resp.split('\n'):
-                                clean_q = re.sub(r'^[-*0-9.\s]+', '', line).strip(' "\'')
-                                if clean_q and len(clean_q) > 3 and clean_q.lower() not in question.lower():
-                                    search_queries.append(clean_q)
-                    except Exception:
-                        pass 
-                    
-                    search_queries = list(dict.fromkeys(search_queries))[:3] 
-
-                    if callback: 
-                        clean_qs = " | ".join(f"'{q}'" for q in search_queries)
-                        callback(f"[🔍 Agent Retriever] Scanning knowledge base: {clean_qs}\n")
-
                 where_clause = None
+                
                 if allowed_docs:
                     if len(allowed_docs) == 1:
                         where_clause = {"doc_name": allowed_docs[0]}
                     else:
                         where_clause = {"doc_name": {"$in": allowed_docs}}
 
+                if use_agents:
+                    if callback: callback("@@AGENT@@🔍 Performing initial scan based on your query...")
+                    
+                    try:
+                        sq_emb = self.get_embedding(question)
+                        initial_results = self.collection.query(
+                            query_embeddings=[sq_emb],
+                            n_results=3, 
+                            where=where_clause
+                        )
+                        
+                        initial_context = ""
+                        if initial_results.get('documents') and initial_results['documents'][0]:
+                            initial_context = "\n\n".join(initial_results['documents'][0])
+                        
+                        if callback: callback("@@AGENT@@🤖 Analyzing context to formulate advanced search strategy...")
+                        
+                        search_prompt = (
+                            "You are an expert researcher. A user asked the following question:\n"
+                            f"USER QUERY: '{question}'\n\n"
+                            "I performed an initial database search and retrieved this preliminary context:\n"
+                            "--- START INITIAL CONTEXT ---\n"
+                            f"{initial_context}\n"
+                            "--- END INITIAL CONTEXT ---\n\n"
+                            "Based on the user's query and the preliminary context, generate exactly 3 highly specific search phrases (2-6 words each) "
+                            "that will help me find the most relevant and complete information across the documents to properly answer the user. Focus on key entities, core concepts, or missing details.\n"
+                            "Output ONLY a bulleted list using a dash (-). Do not output any other text or reasoning.\n"
+                        )
+                        
+                        exp_payload = {"model": selected_model, "prompt": search_prompt, "stream": False, "options": {"temperature": 0.2, "num_predict": 100, "num_ctx": 4096}}
+                        try:
+                            exp_resp = requests.post(f"{self.api_base}/generate", json=exp_payload, timeout=15)
+                            if exp_resp.status_code == 200:
+                                raw_resp = exp_resp.json().get("response", "").strip()
+                                for line in raw_resp.split('\n'):
+                                    clean_q = re.sub(r'^[-*0-9.\s]+', '', line).strip(' "\'')
+                                    if clean_q and len(clean_q) > 3 and clean_q.lower() not in question.lower():
+                                        search_queries.append(clean_q)
+                        except Exception:
+                            pass 
+                    except Exception:
+                        pass
+                    
+                    search_queries = list(dict.fromkeys(search_queries))[:4] 
+
+                    if callback: 
+                        clean_qs = ", ".join(f"'{q}'" for q in search_queries[1:])
+                        if clean_qs:
+                            callback(f"@@AGENT@@📚 Exploring deeper across project using terms: <b>{clean_qs}</b>")
+
                 aggregated_docs = {}
+                
+                # Iterate through EACH allowed document individually to guarantee balanced context retrieval.
+                docs_to_search = allowed_docs if allowed_docs else [None]
                 
                 for sq in search_queries:
                     try:
                         sq_emb = self.get_embedding(sq)
-                        results = self.collection.query(
-                            query_embeddings=[sq_emb],
-                            n_results=7 if use_agents else 12, 
-                            where=where_clause
-                        )
-                        if results.get('documents') and results['documents'][0]:
-                            for idx, doc_text in enumerate(results['documents'][0]):
-                                doc_id = results['ids'][0][idx]
-                                meta = results['metadatas'][0][idx]
-                                if doc_id not in aggregated_docs:
-                                    aggregated_docs[doc_id] = {
-                                        "text": doc_text,
-                                        "doc_name": meta['doc_name'],
-                                        "page": meta['page']
-                                    }
+                        for doc in docs_to_search:
+                            doc_where = {"doc_name": doc} if doc else None
+                            results = self.collection.query(
+                                query_embeddings=[sq_emb],
+                                n_results=3 if use_agents else 6, # Fetch equal chunks per document (reduced slightly to save context window)
+                                where=doc_where
+                            )
+                            if results.get('documents') and results['documents'][0]:
+                                for idx, doc_text in enumerate(results['documents'][0]):
+                                    doc_id = results['ids'][0][idx]
+                                    meta = results['metadatas'][0][idx]
+                                    if doc_id not in aggregated_docs:
+                                        aggregated_docs[doc_id] = {
+                                            "text": doc_text,
+                                            "doc_name": meta['doc_name'],
+                                            "page": meta['page']
+                                        }
                     except Exception:
                         continue
 
@@ -217,23 +262,15 @@ class LocalLLMManager:
                 context_pieces = [f"--- DOCUMENT: {d['doc_name']} | PAGE {d['page'] + 1} ---\n{d['text']}" for d in sorted_docs]
 
                 context = "\n\n".join(context_pieces)
-                if use_agents and callback: callback("[🧠 Agent Synthesizer] Analyzing gathered context...\n\n")
+
+                # Explicitly inject the strictly valid document names to prevent name hallucinations
+                available_docs_list = list(set([d['doc_name'] for d in sorted_docs]))
+                if available_docs_list:
+                    highlight_rules += f"\nCRITICAL: The ONLY VALID DOCUMENT NAMES you can use for %%QUOTE are: {', '.join(available_docs_list)}\n"
 
             except Exception as e:
                 if callback: callback(f"\n[System Error: {str(e)}]\n")
                 return f"[System Error: {str(e)}]"
-
-            # NEW: More robust rules preventing the LLM from appending extra symbols or messing up the extraction strings
-            highlight_rules = (
-                "--- AUTONOMOUS HIGHLIGHTING ---\n"
-                "To highlight a quote, you MUST use this exact single-line format at the VERY END of your response. Separate the three parts with a pipe (|).\n\n"
-                "%%QUOTE | Document_Name.pdf | The exact phrase from the text | Your explanation\n\n"
-                "CRITICAL RULES:\n"
-                "1. Start the line EXACTLY with %%QUOTE | \n"
-                "2. DO NOT use closing tags. The highlight ends at the end of the line.\n"
-                "3. DO NOT wrap the quote in quotation marks unless they are in the original text.\n"
-                "4. DO NOT REPEAT YOURSELF. Find MULTIPLE, DISTINCT quotes.\n"
-            )
 
             if use_agents:
                 system_prompt = (
@@ -241,21 +278,21 @@ class LocalLLMManager:
                     "Provide comprehensive, highly detailed answers using ONLY the provided context.\n"
                     "CRITICAL: Follow this exact structure to simulate your thought process. Do NOT deviate:\n\n"
                     "--- AGENT REASONING ---\n"
-                    "(Write your step-by-step thoughts here. Analyze the context and plan your answer.)\n\n"
+                    "(Write your step-by-step thoughts here. Analyze the context, plan your answer, and brainstorm VERBATIM quotes. Realize if a document lacks relevant quotes, you should skip it.)\n\n"
                     "--- FINAL ANSWER ---\n"
-                    "(Provide your final answer here. DO NOT put %%QUOTE lines in this section.)\n\n"
-                    f"{highlight_rules}"
+                    "(Provide a high-level conceptual summary answering the user's prompt. DO NOT use quotation marks. DO NOT output specific quotes here. All quotes belong in the highlights section.)\n\n"
+                    f"{highlight_rules}\n\n"
                     f"CONTEXT:\n{context}"
                 )
             else:
                 system_prompt = (
                     "You are an expert AI research assistant.\n"
                     "Provide comprehensive answers using ONLY the provided context.\n"
-                    f"{highlight_rules}"
+                    f"{highlight_rules}\n\n"
                     f"CONTEXT:\n{context}"
                 )
         else:
-            system_prompt = "You are an intelligent AI assistant interacting with a user's workspace software. Follow their instructions exactly."
+            system_prompt = custom_system_prompt or "You are an intelligent AI assistant interacting with a user's workspace software. Follow their instructions exactly."
 
         payload = {
             "model": selected_model, 
@@ -263,7 +300,11 @@ class LocalLLMManager:
             "system": system_prompt, 
             "stream": True, 
             "keep_alive": "60m", 
-            "options": {"temperature": 0.2 if use_agents else 0.0, "top_p": 0.9}
+            "options": {
+                "temperature": 0.1, 
+                "top_p": 0.7,
+                "num_ctx": 16384 # Critical fix: ensures the model reads the full context without truncation
+            }
         }
         
         full_response = ""

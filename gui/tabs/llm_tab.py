@@ -26,60 +26,68 @@ class IndexWorker(QThread):
 class ChatWorker(QThread):
     token_received = pyqtSignal(str)
     chat_completed = pyqtSignal(str)
+    agent_update = pyqtSignal(str)
     
-    def __init__(self, llm, question, model, allowed_docs, use_agents, parent=None):
+    def __init__(self, llm, question, model, allowed_docs, use_agents, rag_enabled=True, custom_system_prompt=None, existing_highlights=None, parent=None):
         super().__init__(parent)
         self.llm = llm
         self.question = question
         self.model = model
         self.allowed_docs = allowed_docs
         self.use_agents = use_agents
+        self.rag_enabled = rag_enabled
+        self.custom_system_prompt = custom_system_prompt
+        self.existing_highlights = existing_highlights or []
         
     def run(self):
         buffer = ""
-        is_inside_mark = False
         full_response = ""
+        hide_future_output = False
         
         def handle_chunk(chunk):
-            nonlocal buffer, is_inside_mark, full_response
+            nonlocal buffer, hide_future_output, full_response
+            
+            # Intercept special UI callbacks from the Agent Retriever
+            if chunk.startswith("@@AGENT@@"):
+                clean_msg = chunk.replace("@@AGENT@@", "").strip()
+                self.agent_update.emit(clean_msg)
+                return
+                
             full_response += chunk
+            
+            if hide_future_output:
+                return
+                
             buffer += chunk
             
-            while True:
-                if not is_inside_mark:
-                    start_idx = buffer.find('%%QUOTE')
-                    if start_idx != -1:
-                        if start_idx > 0:
-                            self.token_received.emit(buffer[:start_idx])
-                        buffer = buffer[start_idx:]
-                        is_inside_mark = True
-                    else:
-                        last_percent = buffer.rfind('%')
-                        if last_percent != -1:
-                            if buffer[last_percent:].startswith('%%Q') or buffer[last_percent:] == '%':
-                                if last_percent > 0:
-                                    self.token_received.emit(buffer[:last_percent])
-                                    buffer = buffer[last_percent:]
-                                break
-                        if buffer:
-                            self.token_received.emit(buffer)
-                            buffer = ""
-                        break
-                else:
-                    # NEW: End mark is now simply the new line. This prevents infinite hiding if LLM forgets closing tags.
-                    end_idx = buffer.find('\n') 
-                    if end_idx != -1:
-                        buffer = buffer[end_idx + 1:] # Drop the newline entirely
-                        is_inside_mark = False
-                    else:
-                        break
+            # Permanently hide output once the highlight section begins
+            if "--- HIGHLIGHTS ---" in buffer:
+                hide_future_output = True
+                visible_part, _ = buffer.split("--- HIGHLIGHTS ---", 1)
+                buffer = visible_part
+            
+            # Line buffering to safely filter out any rogue %%QUOTE tags placed incorrectly by the LLM
+            while '\n' in buffer:
+                line, buffer = buffer.split('\n', 1)
+                if "%%QUOTE" not in line:
+                    self.token_received.emit(line + '\n')
 
         try:
-            self.llm.query(self.question, self.model, allowed_docs=self.allowed_docs, callback=handle_chunk, use_agents=self.use_agents)
+            self.llm.query(
+                self.question, 
+                self.model, 
+                allowed_docs=self.allowed_docs, 
+                callback=handle_chunk, 
+                rag_enabled=self.rag_enabled,
+                use_agents=self.use_agents,
+                custom_system_prompt=self.custom_system_prompt,
+                existing_highlights=self.existing_highlights
+            )
         except Exception as e:
             handle_chunk(f"\n[System Error: {str(e)}]")
         
-        if buffer:
+        # Flush the remaining buffer if it doesn't contain a quote string
+        if buffer and "%%QUOTE" not in buffer and not hide_future_output:
             self.token_received.emit(buffer)
             
         self.chat_completed.emit(full_response)
@@ -89,6 +97,7 @@ class LLMTab(QWidget):
         super().__init__(parent)
         self.main_window = main_window
         self.llm_manager = LocalLLMManager() 
+        self.current_existing_quotes = []
         
         layout = QVBoxLayout(self)
         
@@ -205,6 +214,7 @@ class LLMTab(QWidget):
         user_text = self.chat_input.text().strip()
         if not user_text: return
         
+        # Display the pure user input in the chat
         self.chat_history.append(f"<b style='color:#55aaff'>You:</b> {user_text}<br>")
         self.chat_input.clear()
         
@@ -221,17 +231,54 @@ class LLMTab(QWidget):
         self.status_lbl.setStyleSheet("font-weight: bold; color: #ffaa00;")
         
         allowed_docs = []
+        allowed_paths = []
         for i in range(self.pdf_list.count()):
             item = self.pdf_list.item(i)
             if item.checkState() == Qt.CheckState.Checked:
-                allowed_docs.append(item.text())
+                doc_name = item.text()
+                allowed_docs.append(doc_name)
+                for p in self.main_window.project_manager.pdfs:
+                    if os.path.basename(p) == doc_name:
+                        allowed_paths.append(p)
+                        break
+        
+        existing_quotes = []
+        for path in allowed_paths:
+            doc = self.main_window.project_manager.get_doc(path)
+            if doc:
+                for i in range(len(doc)):
+                    try:
+                        for annot in doc.load_page(i).annots():
+                            if annot.info and annot.info.get("subject"):
+                                existing_quotes.append(annot.info.get("subject"))
+                    except: pass
+                    
+        self.current_existing_quotes = existing_quotes
         
         model = self.model_combo.currentText()
         
-        self.chat_worker = ChatWorker(self.llm_manager, user_text, model, allowed_docs, use_agents, parent=self)
+        self.chat_worker = ChatWorker(
+            self.llm_manager, 
+            user_text, # Pass pure user prompt without hostile quotas
+            model, 
+            allowed_docs, 
+            use_agents, 
+            rag_enabled=True,
+            custom_system_prompt=None,
+            existing_highlights=existing_quotes,
+            parent=self
+        )
         self.chat_worker.token_received.connect(self._on_chat_token)
+        self.chat_worker.agent_update.connect(self._on_agent_update)
         self.chat_worker.chat_completed.connect(self._on_chat_complete)
         self.chat_worker.start()
+
+    def _on_agent_update(self, msg):
+        # Stylized terminal-like output for agent logs
+        self.chat_history.append(
+            f"<div style='color: #4CAF50; font-family: monospace; padding: 4px; border-left: 2px solid #4CAF50; margin-bottom: 4px;'>"
+            f"{msg}</div>"
+        )
 
     def _on_chat_token(self, token):
         cursor = self.chat_history.textCursor()
@@ -251,28 +298,35 @@ class LLMTab(QWidget):
         blocks = []
         seen_quotes = set() 
         
-        # NEW: Line-by-line parsing to avoid any regex failure if the AI forgets closing symbols
+        # Aggressive normalization function to strip ALL non-alphanumeric chars
+        def normalize_text(text):
+            return re.sub(r'[^a-z0-9]', '', str(text).lower())
+            
+        # Pre-populate seen_quotes with ultra-aggressive normalization
+        for eq in self.current_existing_quotes:
+            seen_quotes.add(normalize_text(eq))
+        
         for line in full_response.split('\n'):
             line = line.strip()
-            if line.startswith('%%QUOTE'):
+            if line.upper().startswith('%%QUOTE'):
                 parts = line.split('|')
                 if len(parts) >= 4:
                     doc_name = parts[1].strip()
                     raw_quote = parts[2].strip()
                     note = '|'.join(parts[3:]).strip() 
                     
-                    # Clean up the AI's tendency to add quotation marks that break exact searching
                     raw_quote = re.sub(r'^["\']|["\']$', '', raw_quote).strip()
                     note = re.sub(r'%%$', '', note).strip()
                     
                     if doc_name and "|" in doc_name:
                         doc_name = doc_name.split("|")[0].strip()
                         
-                    normalized_quote = re.sub(r'\s+', ' ', raw_quote).strip().lower()
-                    unique_id = f"{doc_name}::{normalized_quote}"
+                    # Apply aggressive normalization for comparisons to completely block duplicates
+                    normalized_quote = normalize_text(raw_quote)
                     
-                    if unique_id not in seen_quotes and len(raw_quote) > 5:
-                        seen_quotes.add(unique_id)
+                    # Strictly check against the global seen quotes
+                    if normalized_quote not in seen_quotes and len(normalized_quote) > 5:
+                        seen_quotes.add(normalized_quote)
                         blocks.append({
                             'doc': doc_name,
                             'quote': raw_quote,
@@ -289,21 +343,36 @@ class LLMTab(QWidget):
                         allowed_paths.append(p)
                         break
 
+        success_count = 0
+        failed_blocks = []
+
         for b in blocks:
             quote = b['quote']
             note = b['note']
             target_doc = b['doc']
                 
             success = self.main_window.add_ai_annotation(quote, note, target_doc_name=target_doc, allowed_paths=allowed_paths)
-            display_quote = quote[:60] + "..." if len(quote) > 60 else quote
-            
-            doc_label = f" in {target_doc}" if target_doc else ""
             if success:
-                self.chat_history.append(f"🖍️ <b style='color:#00cc66'>[AI Highlight Applied{doc_label}]</b>: <i>\"{display_quote}\"</i><br>")
+                success_count += 1
             else:
-                self.chat_history.append(f"⚠️ <b style='color:#ff4444'>[Failed to find exact quote{doc_label}]</b>: <i>\"{display_quote}\"</i><br>")
+                failed_blocks.append(b)
+        
+        if success_count > 0:
+            self.chat_history.append(
+                f"<div style='color: #d194ff; font-weight: bold; padding: 5px 0px;'>"
+                f"🖍️ Successfully applied {success_count} highlight(s) to the document(s)."
+                f"</div>"
+            )
             
-            if note:
-                self.chat_history.append(f"<span style='color:#ccc'>Note: {note}</span><br><br>")
+        for b in failed_blocks:
+            display_quote = b['quote'][:80] + "..." if len(b['quote']) > 80 else b['quote']
+            target_doc = b['doc']
+            doc_label = f" in {target_doc}" if target_doc else ""
+            self.chat_history.append(
+                f"<div style='background-color: #2b2b2b; padding: 10px; border-left: 4px solid #ff4444; margin-top: 5px; margin-bottom: 5px; border-radius: 0px 4px 4px 0px;'>"
+                f"⚠️ <b style='color:#ff4444;'>Failed to locate quote{doc_label}</b><br>"
+                f"<i style='color:#ddd;'>\"{display_quote}\"</i>"
+                f"</div>"
+            )
         
         self.chat_history.append("<hr><br>")
