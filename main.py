@@ -2,6 +2,7 @@
 import sys
 import traceback
 from PyQt6.QtWidgets import QApplication
+from PyQt6.QtGui import QIcon
 from gui.main_window import MainWindow
 
 def global_exception_handler(exc_type, exc_value, exc_traceback):
@@ -32,7 +33,7 @@ def main():
     
     # 2. Start the application
     app = QApplication(sys.argv)
-    
+    app.setWindowIcon(QIcon("icon.png"))
     # Apply a global stylesheet to ensure consistent theming across all dialogs/menus
     app.setStyleSheet("""
         QMenu { background-color: #2b2b2b; color: white; border: 1px solid #444; }

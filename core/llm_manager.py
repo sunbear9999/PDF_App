@@ -6,6 +6,7 @@ import fitz
 import os
 import time
 import chromadb
+import re
 from chromadb.config import Settings
 
 class LocalLLMManager:
@@ -38,11 +39,10 @@ class LocalLLMManager:
         if not model_name: return
         try:
             payload = {"model": model_name, "keep_alive": "60m"}
-            # INCREASED TIMEOUT: Gives the system up to 60 seconds to push the model into VRAM
             requests.post(f"{self.api_base}/generate", json=payload, timeout=60)
             print(f"[System] Successfully preloaded {model_name} into memory.")
         except Exception as e:
-            print(f"[System] Failed to preload model (It may still be loading in the background): {e}")
+            print(f"[System] Failed to preload model: {e}")
 
     def get_available_models(self):
         try:
@@ -60,7 +60,6 @@ class LocalLLMManager:
     def get_embedding(self, text):
         payload = {"model": self.embedding_model, "prompt": text, "keep_alive": "60m"}
         try:
-            # INCREASED TIMEOUT: 10s to connect, 300s to wait for heavy document embedding
             response = requests.post(f"{self.api_base}/embeddings", json=payload, timeout=(10, 300))
             if response.status_code == 200:
                 return response.json().get("embedding")
@@ -80,6 +79,9 @@ class LocalLLMManager:
         metadatas = []
         ids = []
         
+        chunk_word_size = 150
+        overlap_words = 30
+
         for doc_idx, pdf_path in enumerate(pdf_paths):
             doc_name = os.path.basename(pdf_path)
             try:
@@ -92,16 +94,18 @@ class LocalLLMManager:
                         progress_callback(f"[{doc_name}] Extracting Page {page_num+1}/{total_pages}...")
                     
                     page = doc.load_page(page_num)
-                    blocks = page.get_text("blocks") 
+                    text = page.get_text("text").replace('\n', ' ').strip()
+                    text = re.sub(r'\s+', ' ', text) 
                     
-                    for block in blocks:
-                        if block[6] == 0: 
-                            text = block[4].strip()
-                            if len(text) > 50: 
-                                chunks.append(text)
-                                metadatas.append({"doc_name": doc_name, "page": page_num})
-                                ids.append(f"{doc_name}_p{page_num}_c{chunk_counter}")
-                                chunk_counter += 1
+                    words = text.split(' ')
+                    
+                    for i in range(0, len(words), chunk_word_size - overlap_words):
+                        chunk_text = ' '.join(words[i:i + chunk_word_size])
+                        if len(chunk_text) > 50: 
+                            chunks.append(chunk_text)
+                            metadatas.append({"doc_name": doc_name, "page": page_num})
+                            ids.append(f"{doc_name}_p{page_num}_c{chunk_counter}")
+                            chunk_counter += 1
                 doc.close()
             except Exception as e: 
                 print(f"Failed to index {doc_name}: {e}")
@@ -126,12 +130,12 @@ class LocalLLMManager:
                 ids=batch_ids
             )
 
-    def query(self, question, selected_model, allowed_docs=None, callback=None, rag_enabled=True):
+    def query(self, question, selected_model, allowed_docs=None, callback=None, rag_enabled=True, use_agents=True):
         context = ""
         system_prompt = ""
 
         if not selected_model:
-            err = "\n[Generation Error: No AI model selected. Please select a model in the LLM Chat tab.]"
+            err = "\n[Generation Error: No AI model selected.]"
             if callback: callback(err)
             return err
 
@@ -141,8 +145,39 @@ class LocalLLMManager:
                 return ""
 
             try:
-                question_emb = self.get_embedding(question)
+                search_queries = [question]
                 
+                if use_agents:
+                    if callback: callback("\n[🤖 Agent Planner] Formulating search strategy...\n")
+                    
+                    search_prompt = (
+                        "You are an NLP keyword extractor. Ignore all action verbs in the user's prompt. "
+                        "Identify the core factual subjects and generate exactly 2 short search phrases (2-4 words each).\n"
+                        "Output ONLY a bulleted list using a dash (-). Do not output any other text.\n\n"
+                        "User: Highlight quotes about the foundation of the Roman empire\n"
+                        "- foundation of Rome\n"
+                        "- roman empire origins\n\n"
+                        f"User: {question}\n"
+                    )
+                    
+                    exp_payload = {"model": selected_model, "prompt": search_prompt, "stream": False, "options": {"temperature": 0.1, "num_predict": 40}}
+                    try:
+                        exp_resp = requests.post(f"{self.api_base}/generate", json=exp_payload, timeout=10)
+                        if exp_resp.status_code == 200:
+                            raw_resp = exp_resp.json().get("response", "").strip()
+                            for line in raw_resp.split('\n'):
+                                clean_q = re.sub(r'^[-*0-9.\s]+', '', line).strip(' "\'')
+                                if clean_q and len(clean_q) > 3 and clean_q.lower() not in question.lower():
+                                    search_queries.append(clean_q)
+                    except Exception:
+                        pass 
+                    
+                    search_queries = list(dict.fromkeys(search_queries))[:3] 
+
+                    if callback: 
+                        clean_qs = " | ".join(f"'{q}'" for q in search_queries)
+                        callback(f"[🔍 Agent Retriever] Scanning knowledge base: {clean_qs}\n")
+
                 where_clause = None
                 if allowed_docs:
                     if len(allowed_docs) == 1:
@@ -150,53 +185,89 @@ class LocalLLMManager:
                     else:
                         where_clause = {"doc_name": {"$in": allowed_docs}}
 
-                results = self.collection.query(
-                    query_embeddings=[question_emb],
-                    n_results=10, 
-                    where=where_clause
-                )
+                aggregated_docs = {}
                 
-                if not results.get('documents') or not results['documents'][0]:
-                    err_msg = "\n[System Warning: No readable text was found in the selected document. If you recently ran OCR on a scanned PDF, you must click 'Build / Rebuild Search Index' to update the AI's memory.]"
+                for sq in search_queries:
+                    try:
+                        sq_emb = self.get_embedding(sq)
+                        results = self.collection.query(
+                            query_embeddings=[sq_emb],
+                            n_results=7 if use_agents else 12, 
+                            where=where_clause
+                        )
+                        if results.get('documents') and results['documents'][0]:
+                            for idx, doc_text in enumerate(results['documents'][0]):
+                                doc_id = results['ids'][0][idx]
+                                meta = results['metadatas'][0][idx]
+                                if doc_id not in aggregated_docs:
+                                    aggregated_docs[doc_id] = {
+                                        "text": doc_text,
+                                        "doc_name": meta['doc_name'],
+                                        "page": meta['page']
+                                    }
+                    except Exception:
+                        continue
+
+                if not aggregated_docs:
+                    err_msg = "\n[System Warning: No readable text was found in the selected documents.]\n"
                     if callback: callback(err_msg)
                     return err_msg
 
-                context_pieces = []
-                for idx, doc_text in enumerate(results['documents'][0]):
-                    meta = results['metadatas'][0][idx]
-                    context_pieces.append(f"--- DOCUMENT: {meta['doc_name']} | PAGE {meta['page'] + 1} ---\n{doc_text}")
-                
+                sorted_docs = sorted(aggregated_docs.values(), key=lambda x: (x['doc_name'], x['page']))
+                context_pieces = [f"--- DOCUMENT: {d['doc_name']} | PAGE {d['page'] + 1} ---\n{d['text']}" for d in sorted_docs]
+
                 context = "\n\n".join(context_pieces)
+                if use_agents and callback: callback("[🧠 Agent Synthesizer] Analyzing gathered context...\n\n")
 
             except Exception as e:
-                if callback: callback(f"\n[System Error: {str(e)}]")
+                if callback: callback(f"\n[System Error: {str(e)}]\n")
                 return f"[System Error: {str(e)}]"
 
-            system_prompt = (
-                "You are an expert AI research assistant analyzing documents.\n"
-                "Provide comprehensive, intelligent, and deeply analytical answers using ONLY the provided context.\n"
-                "CRITICAL: If the context doesn't contain the exact answer, you MUST state 'I cannot answer this based on the provided documents.' DO NOT invent hypothetical examples, facts, or documents under any circumstances.\n\n"
+            # NEW: More robust rules preventing the LLM from appending extra symbols or messing up the extraction strings
+            highlight_rules = (
                 "--- AUTONOMOUS HIGHLIGHTING ---\n"
-                "When you cite specific evidence, you MUST highlight it in the user's UI using EXACTLY this XML format:\n"
-                "<highlight>\n"
-                "<doc>Exact Document Name Here</doc>\n"
-                "<quote>Exact continuous phrase from the text (5-15 words)</quote>\n"
-                "<note>Your commentary on why this is relevant</note>\n"
-                "</highlight>\n\n"
-                "CRITICAL RULES for highlighting:\n"
-                "1. NO markdown formatting around the XML. Output the raw tags.\n"
-                "2. ALL THREE inner tags (<doc>, <quote>, <note>) MUST be present inside the <highlight> block.\n"
-                "3. Create a separate <highlight> block for EACH piece of evidence. Do not bundle multiple quotes in one tag.\n\n"
-                f"CONTEXT:\n{context}"
+                "To highlight a quote, you MUST use this exact single-line format at the VERY END of your response. Separate the three parts with a pipe (|).\n\n"
+                "%%QUOTE | Document_Name.pdf | The exact phrase from the text | Your explanation\n\n"
+                "CRITICAL RULES:\n"
+                "1. Start the line EXACTLY with %%QUOTE | \n"
+                "2. DO NOT use closing tags. The highlight ends at the end of the line.\n"
+                "3. DO NOT wrap the quote in quotation marks unless they are in the original text.\n"
+                "4. DO NOT REPEAT YOURSELF. Find MULTIPLE, DISTINCT quotes.\n"
             )
-        else:
-            system_prompt = "You are a highly capable AI assistant interacting with a user's workspace software. Follow their instructions exactly."
 
-        payload = {"model": selected_model, "prompt": question, "system": system_prompt, "stream": True, "keep_alive": "60m", "options": {"temperature": 0.0, "top_p": 0.8}}
+            if use_agents:
+                system_prompt = (
+                    "You are an expert AI research agent.\n"
+                    "Provide comprehensive, highly detailed answers using ONLY the provided context.\n"
+                    "CRITICAL: Follow this exact structure to simulate your thought process. Do NOT deviate:\n\n"
+                    "--- AGENT REASONING ---\n"
+                    "(Write your step-by-step thoughts here. Analyze the context and plan your answer.)\n\n"
+                    "--- FINAL ANSWER ---\n"
+                    "(Provide your final answer here. DO NOT put %%QUOTE lines in this section.)\n\n"
+                    f"{highlight_rules}"
+                    f"CONTEXT:\n{context}"
+                )
+            else:
+                system_prompt = (
+                    "You are an expert AI research assistant.\n"
+                    "Provide comprehensive answers using ONLY the provided context.\n"
+                    f"{highlight_rules}"
+                    f"CONTEXT:\n{context}"
+                )
+        else:
+            system_prompt = "You are an intelligent AI assistant interacting with a user's workspace software. Follow their instructions exactly."
+
+        payload = {
+            "model": selected_model, 
+            "prompt": question, 
+            "system": system_prompt, 
+            "stream": True, 
+            "keep_alive": "60m", 
+            "options": {"temperature": 0.2 if use_agents else 0.0, "top_p": 0.9}
+        }
         
         full_response = ""
         try:
-            # INCREASED TIMEOUT: (10, 300) means 10s to connect, up to 5 minutes to wait for the first token
             with requests.post(f"{self.api_base}/generate", json=payload, stream=True, timeout=(10, 300)) as response:
                 if response.status_code != 200:
                     try: err_msg = response.json().get("error", response.text)
@@ -212,7 +283,7 @@ class LocalLLMManager:
                         full_response += txt
                         if callback: callback(txt)
         except requests.exceptions.ReadTimeout:
-            err = "\n[Generation Error: The AI took too long to respond. Your hardware might be struggling to load this model, or it is too large for your system's RAM.]"
+            err = "\n[Generation Error: The AI took too long to respond. Hardware limits exceeded.]"
             if callback: callback(err)
             full_response += err
         except Exception as e:
