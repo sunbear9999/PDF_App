@@ -35,11 +35,24 @@ class LocalLLMManager:
         self.chroma_client = chromadb.PersistentClient(path=db_path, settings=Settings(anonymized_telemetry=False))
         self.collection = self.chroma_client.get_or_create_collection(name="pdf_workspace")
 
+    def unload_all_models(self):
+        """Frees up system RAM/VRAM by explicitly asking Ollama to drop all active models."""
+        try:
+            resp = requests.get(f"{self.api_base}/ps", timeout=3)
+            if resp.status_code == 200:
+                models = resp.json().get("models", [])
+                for m in models:
+                    name = m.get("name")
+                    # Sending an empty generate request with keep_alive=0 unloads it
+                    requests.post(f"{self.api_base}/generate", json={"model": name, "keep_alive": 0}, timeout=3)
+        except Exception as e:
+            print(f"[System] Warning during model unload: {e}")
+
     def preload_model(self, model_name="llama3"):
         if not model_name: return
         try:
             payload = {"model": model_name, "keep_alive": "60m"}
-            requests.post(f"{self.api_base}/generate", json=payload, timeout=60)
+            requests.post(f"{self.api_base}/generate", json=payload, timeout=(15, 600))
             print(f"[System] Successfully preloaded {model_name} into memory.")
         except Exception as e:
             print(f"[System] Failed to preload model: {e}")
@@ -49,13 +62,29 @@ class LocalLLMManager:
             response = requests.get(f"{self.api_base}/tags", timeout=3)
             if response.status_code == 200:
                 models = response.json().get("models", [])
-                found_models = [m["name"] for m in models if m["name"] != self.embedding_model]
+                # Filter out the embedding model so it doesn't show up in your chat dropdowns
+                found_models = [m["name"] for m in models if m["name"] != self.embedding_model and not m["name"].startswith(f"{self.embedding_model}:")]
                 if found_models:
                     return found_models
         except Exception as e:
             print(f"[System] Error fetching models: {e}")
 
         return ["qwen2.5:7b", "llama3", "mistral"] 
+
+    def check_and_pull_embedding_model(self, progress_callback=None):
+        """Checks if the required embedding model is installed, and pulls it if missing."""
+        try:
+            response = requests.get(f"{self.api_base}/tags", timeout=3)
+            if response.status_code == 200:
+                models = response.json().get("models", [])
+                model_names = [m["name"] for m in models]
+                if self.embedding_model not in model_names and f"{self.embedding_model}:latest" not in model_names:
+                    if progress_callback:
+                        progress_callback(f"Downloading required embedding model '{self.embedding_model}'... (This takes a few minutes)")
+                    # Ask Ollama to download the model (with a generous 30 min timeout)
+                    requests.post(f"{self.api_base}/pull", json={"name": self.embedding_model}, timeout=(10, 1800)) 
+        except Exception as e:
+            print(f"[System] Warning: Could not verify/pull embedding model: {e}")
 
     def get_embedding(self, text):
         payload = {"model": self.embedding_model, "prompt": text, "keep_alive": "60m"}
@@ -67,9 +96,30 @@ class LocalLLMManager:
         except Exception as e:
             raise Exception(f"Embedding failed. Error: {str(e)}")
 
+    def get_batch_embeddings(self, texts):
+        """Uses Ollama's newer /api/embed endpoint to process multiple chunks at lightning speed."""
+        payload = {"model": self.embedding_model, "input": texts, "keep_alive": "60m"}
+        try:
+            response = requests.post(f"{self.api_base}/embed", json=payload, timeout=(15, 600))
+            if response.status_code == 200:
+                return response.json().get("embeddings")
+        except Exception as e:
+            print(f"[System] Batch embedding failed, falling back to sequential: {e}")
+            
+        # Fallback sequentially if the user has an older version of Ollama without /api/embed
+        return [self.get_embedding(t) for t in texts]
+
     def index_documents(self, pdf_paths, progress_callback=None):
         if not self.collection:
             raise Exception("Vector Database not initialized. Please save the project first.")
+
+        if progress_callback:
+            progress_callback("Clearing VRAM to prioritize embedding engine...")
+            
+        self.unload_all_models()
+
+        # 1. Guarantee the embedding model is downloaded and ready
+        self.check_and_pull_embedding_model(progress_callback)
 
         existing_ids = self.collection.get()["ids"]
         if existing_ids:
@@ -111,24 +161,33 @@ class LocalLLMManager:
                 print(f"Failed to index {doc_name}: {e}")
                     
         total_chunks = len(chunks)
-        batch_size = 50 
+        if total_chunks == 0:
+            return
+
+        batch_size = 100 
+        total_batches = (total_chunks // batch_size) + (1 if total_chunks % batch_size != 0 else 0)
         
         for i in range(0, total_chunks, batch_size):
+            current_batch_num = (i // batch_size) + 1
+            if progress_callback: 
+                progress_callback(f"Embedding and saving batch {current_batch_num} of {total_batches}...")
+                
             batch_texts = chunks[i:i+batch_size]
             batch_metadatas = metadatas[i:i+batch_size]
             batch_ids = ids[i:i+batch_size]
             
-            if progress_callback: 
-                progress_callback(f"Embedding batch {i//batch_size + 1} of {(total_chunks//batch_size) + 1}...")
-                
-            batch_embeddings = [self.get_embedding(text) for text in batch_texts]
+            batch_embs = self.get_batch_embeddings(batch_texts)
             
             self.collection.upsert(
                 documents=batch_texts,
-                embeddings=batch_embeddings,
+                embeddings=batch_embs,
                 metadatas=batch_metadatas,
                 ids=batch_ids
             )
+            
+        if progress_callback:
+            progress_callback("Releasing embedding model from memory...")
+        self.unload_all_models()
 
     def query(self, question, selected_model, allowed_docs=None, callback=None, rag_enabled=True, use_agents=True, custom_system_prompt=None, existing_highlights=None):
         context = ""
@@ -309,7 +368,7 @@ class LocalLLMManager:
         
         full_response = ""
         try:
-            with requests.post(f"{self.api_base}/generate", json=payload, stream=True, timeout=(10, 300)) as response:
+            with requests.post(f"{self.api_base}/generate", json=payload, stream=True, timeout=(15, 600)) as response:
                 if response.status_code != 200:
                     try: err_msg = response.json().get("error", response.text)
                     except: err_msg = response.text

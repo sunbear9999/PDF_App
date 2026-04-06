@@ -4,7 +4,6 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QRadioButton, QButtonGroup, QTextEdit, QPushButton)
 from PyQt6.QtCore import Qt, pyqtSignal, QThread
 
-# --- NEW SAFE OCR WORKER ---
 class OCRWorker(QThread):
     progress_updated = pyqtSignal(int, int)
     ocr_completed = pyqtSignal(str, str, str)
@@ -37,10 +36,10 @@ class OCRTab(QWidget):
     def __init__(self, parent=None, main_window=None):
         super().__init__(parent)
         self.main_window = main_window
+        self.theme = None
         layout = QVBoxLayout(self)
 
         self.header = QLabel("OCR Engine")
-        self.header.setStyleSheet("font-size: 24px; font-weight: bold; margin-bottom: 10px;")
         layout.addWidget(self.header)
 
         top_layout = QHBoxLayout()
@@ -63,20 +62,24 @@ class OCRTab(QWidget):
 
         self.text_area = QTextEdit()
         self.text_area.setReadOnly(True)
-        self.text_area.setStyleSheet("background-color: #1e1e1e; border: 1px solid #555; font-size: 14px; padding: 10px;")
         layout.addWidget(self.text_area, 1)
 
         control_layout = QHBoxLayout()
         self.run_ocr_btn = QPushButton("Run OCR")
-        self.run_ocr_btn.setStyleSheet("background-color: #00cc66; color: white; padding: 10px 20px; font-weight: bold;")
         self.run_ocr_btn.clicked.connect(self.start_ocr_thread)
         control_layout.addWidget(self.run_ocr_btn)
 
         self.status_label = QLabel("Ready")
-        self.status_label.setStyleSheet("color: gray; font-size: 14px; margin-left: 10px;")
         control_layout.addWidget(self.status_label)
         control_layout.addStretch()
         layout.addLayout(control_layout)
+
+    def update_theme(self, theme):
+        self.theme = theme
+        self.header.setStyleSheet(f"font-size: 24px; font-weight: bold; margin-bottom: 10px; color: {theme['text_main']};")
+        self.run_ocr_btn.setStyleSheet(f"background-color: {theme['success']}; color: #ffffff; padding: 10px 20px; font-weight: bold; border-radius: 4px; border: none;")
+        if self.status_label.text() == "Ready" or self.status_label.text().startswith("Target:"):
+            self.status_label.setStyleSheet(f"color: {theme['text_muted']}; font-size: 14px; margin-left: 10px;")
 
     def get_output_mode(self):
         if self.rb_text.isChecked(): return "text"
@@ -86,17 +89,20 @@ class OCRTab(QWidget):
     def sync_file(self, file_path):
         self.text_area.clear()
         self.status_label.setText(f"Target: {os.path.basename(file_path)}")
-        self.status_label.setStyleSheet("color: gray;")
+        color = self.theme['text_muted'] if self.theme else "gray"
+        self.status_label.setStyleSheet(f"color: {color}; font-size: 14px; margin-left: 10px;")
 
     def _update_progress_ui(self, current_page, total_pages):
         self.status_label.setText(f"Processing Page {current_page}/{total_pages}...")
-        self.status_label.setStyleSheet("color: #ffaa00;")
+        color = self.theme['warning'] if self.theme else "#ffaa00"
+        self.status_label.setStyleSheet(f"color: {color}; font-size: 14px; margin-left: 10px;")
 
     def start_ocr_thread(self):
         current_file = self.main_window.current_file_path
         if not current_file:
             self.status_label.setText("No document loaded in viewer.")
-            self.status_label.setStyleSheet("color: #ff4444;")
+            color = self.theme['error'] if self.theme else "#ff4444"
+            self.status_label.setStyleSheet(f"color: {color}; font-size: 14px; margin-left: 10px;")
             return
             
         self.run_ocr_btn.setEnabled(False)
@@ -104,7 +110,6 @@ class OCRTab(QWidget):
         
         mode = self.get_output_mode()
         
-        # Replaced Python threading with safe PyQt QThread
         self.ocr_worker = OCRWorker(current_file, mode, parent=self)
         self.ocr_worker.progress_updated.connect(self._update_progress_ui)
         self.ocr_worker.ocr_completed.connect(self._finalize_ocr)
@@ -114,7 +119,8 @@ class OCRTab(QWidget):
         if text.startswith("OCR Engine Error"):
             self.text_area.setPlainText(text)
             self.status_label.setText("Failed")
-            self.status_label.setStyleSheet("color: #ff4444;")
+            color = self.theme['error'] if self.theme else "#ff4444"
+            self.status_label.setStyleSheet(f"color: {color}; font-size: 14px; margin-left: 10px;")
         else:
             self.text_area.setPlainText(text)
             msg = "OCR Complete!"
@@ -138,6 +144,7 @@ class OCRTab(QWidget):
                     self.main_window.switch_to_pdf(save_path)
                     
             self.status_label.setText(msg)
-            self.status_label.setStyleSheet("color: #00cc66;")
+            color = self.theme['success'] if self.theme else "#00cc66"
+            self.status_label.setStyleSheet(f"color: {color}; font-size: 14px; margin-left: 10px;")
             
         self.run_ocr_btn.setEnabled(True)

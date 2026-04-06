@@ -13,31 +13,19 @@ class NoteBubble(QFrame):
         self.pdf_path = pdf_path
         self.page_num = page_num
         self.annot_id = annot_id
-        
-        if is_ai:
-            self.setStyleSheet("""
-                NoteBubble { background-color: #2d2238; border: 1px solid #b57edc; border-radius: 8px; margin-bottom: 5px; }
-                NoteBubble:hover { border: 1px solid #d194ff; background-color: #38274a; }
-            """)
-        else:
-            self.setStyleSheet("""
-                NoteBubble { background-color: #2b2b2b; border: 1px solid #444; border-radius: 8px; margin-bottom: 5px; }
-                NoteBubble:hover { border: 1px solid #0078D7; background-color: #333333; }
-            """)
+        self.is_ai = is_ai
         
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         
         header_layout = QHBoxLayout()
         doc_name = os.path.basename(pdf_path)
-        lbl_page = QLabel(f"📄 {doc_name} - Pg {page_num + 1}")
-        lbl_page.setStyleSheet("font-weight: bold; color: #aaa; border: none;")
-        header_layout.addWidget(lbl_page)
+        self.lbl_page = QLabel(f"📄 {doc_name} - Pg {page_num + 1}")
+        header_layout.addWidget(self.lbl_page)
         
         if is_ai:
-            lbl_ai = QLabel("🤖 AI Note")
-            lbl_ai.setStyleSheet("color: #d194ff; font-weight: bold; font-size: 11px; border: none; margin-left: 10px;")
-            header_layout.addWidget(lbl_ai)
+            self.lbl_ai = QLabel("🤖 AI Note")
+            header_layout.addWidget(self.lbl_ai)
             
         header_layout.addStretch()
         
@@ -57,26 +45,49 @@ class NoteBubble(QFrame):
             
         header_layout.addSpacing(10)
             
-        btn_del = QPushButton("✖")
-        btn_del.setFixedSize(24, 24)
-        btn_del.setStyleSheet("""
-            QPushButton { background-color: #442222; color: #ff6666; border: 1px solid #662222; border-radius: 4px; font-weight: bold;}
-            QPushButton:hover { background-color: #ff4444; color: white; }
-        """)
-        btn_del.clicked.connect(self.delete_note)
-        header_layout.addWidget(btn_del)
+        self.btn_del = QPushButton("✖")
+        self.btn_del.setFixedSize(24, 24)
+        self.btn_del.clicked.connect(self.delete_note)
+        header_layout.addWidget(self.btn_del)
         layout.addLayout(header_layout)
         
-        lbl_subj = QLabel(f'"{subject}"')
-        lbl_subj.setWordWrap(True)
-        lbl_subj.setStyleSheet("font-style: italic; color: #ddd; border: none;")
-        layout.addWidget(lbl_subj)
+        self.lbl_subj = QLabel(f'"{subject}"')
+        self.lbl_subj.setWordWrap(True)
+        layout.addWidget(self.lbl_subj)
         
         if content:
-            lbl_content = QLabel(content)
-            lbl_content.setWordWrap(True)
-            lbl_content.setStyleSheet("font-weight: bold; color: white; margin-top: 5px; border: none;")
-            layout.addWidget(lbl_content)
+            self.lbl_content = QLabel(content)
+            self.lbl_content.setWordWrap(True)
+            layout.addWidget(self.lbl_content)
+
+        # Apply theme dynamically based on main window's theme manager
+        if hasattr(self.tab, 'main_window') and hasattr(self.tab.main_window, 'theme_manager'):
+            self.apply_theme(self.tab.main_window.theme_manager.get_theme())
+
+    def apply_theme(self, theme):
+        if self.is_ai:
+            self.setStyleSheet(f"""
+                NoteBubble {{ background-color: {theme['ai_bubble']}; border: 1px solid {theme['ai_bubble_border']}; border-radius: 8px; margin-bottom: 5px; }}
+                NoteBubble:hover {{ border: 1px solid {theme['accent']}; background-color: {theme['ai_bubble_hover']}; }}
+            """)
+            if hasattr(self, 'lbl_ai'):
+                self.lbl_ai.setStyleSheet(f"color: {theme['ai_bubble_border']}; font-weight: bold; font-size: 11px; border: none; margin-left: 10px;")
+        else:
+            self.setStyleSheet(f"""
+                NoteBubble {{ background-color: {theme['user_bubble']}; border: 1px solid {theme['user_bubble_border']}; border-radius: 8px; margin-bottom: 5px; }}
+                NoteBubble:hover {{ border: 1px solid {theme['accent']}; background-color: {theme['user_bubble_hover']}; }}
+            """)
+        
+        self.lbl_page.setStyleSheet(f"font-weight: bold; color: {theme['text_muted']}; border: none;")
+        self.lbl_subj.setStyleSheet(f"font-style: italic; color: {theme['text_muted']}; border: none;")
+        
+        if hasattr(self, 'lbl_content'):
+            self.lbl_content.setStyleSheet(f"font-weight: bold; color: {theme['text_main']}; margin-top: 5px; border: none;")
+            
+        self.btn_del.setStyleSheet(f"""
+            QPushButton {{ background-color: transparent; color: {theme['error']}; border: 1px solid {theme['error']}; border-radius: 4px; font-weight: bold; }}
+            QPushButton:hover {{ background-color: {theme['error']}; color: #ffffff; }}
+        """)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -88,7 +99,6 @@ class NoteBubble(QFrame):
     def delete_note(self):
         self.tab.delete_note(self.pdf_path, self.page_num, self.annot_id)
 
-
 class NotesTab(QWidget):
     def __init__(self, parent=None, viewer=None, main_window=None):
         super().__init__(parent)
@@ -98,38 +108,30 @@ class NotesTab(QWidget):
         layout.setContentsMargins(5, 10, 5, 5)
         
         top_layout = QHBoxLayout()
-        lbl = QLabel("Notes:")
-        lbl.setStyleSheet("font-size: 16px; font-weight: bold; padding-left: 5px;")
-        top_layout.addWidget(lbl)
+        self.lbl = QLabel("Notes:")
+        top_layout.addWidget(self.lbl)
         
         self.scope_combo = QComboBox()
         self.scope_combo.addItems(["Current PDF", "Entire Project"])
-        self.scope_combo.setStyleSheet("background: #333; border: 1px solid #555; padding: 2px;")
         self.scope_combo.currentIndexChanged.connect(self.refresh_notes)
         top_layout.addWidget(self.scope_combo)
         
         top_layout.addStretch()
         
         self.btn_help = QPushButton("❓")
-        self.btn_help.setStyleSheet("background-color: #555; font-weight: bold; border-radius: 4px; padding: 4px 10px;")
         self.btn_help.clicked.connect(self.show_workspace_help)
         self.btn_help.hide()
         
-        # --- Undo / Redo System ---
         self.btn_undo = QPushButton("↩️ Undo")
-        self.btn_undo.setStyleSheet("background-color: #444; color: white; font-weight: bold; border-radius: 4px; padding: 4px 10px;")
         self.btn_undo.hide()
         
         self.btn_redo = QPushButton("↪️ Redo")
-        self.btn_redo.setStyleSheet("background-color: #444; color: white; font-weight: bold; border-radius: 4px; padding: 4px 10px;")
         self.btn_redo.hide()
 
         self.btn_zoom_out = QPushButton("➖")
-        self.btn_zoom_out.setStyleSheet("background-color: #333;")
         self.btn_zoom_out.hide()
         
         self.btn_zoom_in = QPushButton("➕")
-        self.btn_zoom_in.setStyleSheet("background-color: #333;")
         self.btn_zoom_in.hide()
         
         top_layout.addWidget(self.btn_help)
@@ -139,13 +141,11 @@ class NotesTab(QWidget):
         top_layout.addWidget(self.btn_zoom_in)
         
         self.btn_add_bubble = QPushButton("+ Main Idea")
-        self.btn_add_bubble.setStyleSheet("background-color: #0078D7; font-weight: bold;")
         self.btn_add_bubble.clicked.connect(self.add_bubble)
         self.btn_add_bubble.hide()
         top_layout.addWidget(self.btn_add_bubble)
         
         self.btn_toggle_view = QPushButton("Switch to Workspace")
-        self.btn_toggle_view.setStyleSheet("background-color: #444; font-weight: bold;")
         self.btn_toggle_view.clicked.connect(self.toggle_view)
         top_layout.addWidget(self.btn_toggle_view)
         
@@ -159,10 +159,8 @@ class NotesTab(QWidget):
         
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setStyleSheet("QScrollArea { border: none; background-color: transparent; }")
         
         self.scroll_content = QWidget()
-        self.scroll_content.setStyleSheet("background-color: transparent;")
         self.scroll_layout = QVBoxLayout(self.scroll_content)
         self.scroll_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.scroll_layout.setContentsMargins(5, 5, 5, 5)
@@ -181,6 +179,18 @@ class NotesTab(QWidget):
         
         layout.addWidget(self.stack)
 
+    def update_theme(self, theme):
+        self.lbl.setStyleSheet(f"font-size: 16px; font-weight: bold; padding-left: 5px; color: {theme['text_main']};")
+        self.btn_add_bubble.setStyleSheet(f"background-color: {theme['accent']}; color: #ffffff; font-weight: bold; border: none; padding: 6px 12px; border-radius: 4px;")
+        
+        for i in range(self.scroll_layout.count()):
+            widget = self.scroll_layout.itemAt(i).widget()
+            if isinstance(widget, NoteBubble):
+                widget.apply_theme(theme)
+                
+        if hasattr(self, 'workspace_view'):
+            self.workspace_view.update_theme(theme)
+
     def show_workspace_help(self):
         help_text = (
             "<h3>Workspace Controls</h3>"
@@ -197,7 +207,6 @@ class NotesTab(QWidget):
         msg_box = QMessageBox(self)
         msg_box.setWindowTitle("Workspace Help")
         msg_box.setText(help_text)
-        msg_box.setStyleSheet("QLabel { min-width: 400px; font-size: 14px; }")
         msg_box.exec()
 
     def update_undo_redo_buttons(self):
@@ -325,16 +334,17 @@ class NotesTab(QWidget):
             widget = self.scroll_layout.itemAt(i).widget()
             if isinstance(widget, NoteBubble) and widget.annot_id == annot_id:
                 self.scroll_area.ensureWidgetVisible(widget)
-                original_style = widget.styleSheet()
-                widget.setStyleSheet(original_style + "\nNoteBubble { border: 2px solid white; background-color: #444; }")
                 
-                # --- SAFE TIMER ---
-                # Check if the bubble still exists before attempting to revert its style
+                # Dynamic border focus based on theme
+                theme = self.main_window.theme_manager.get_theme()
+                original_style = widget.styleSheet()
+                widget.setStyleSheet(original_style + f"\nNoteBubble {{ border: 2px solid {theme['accent']}; background-color: {theme['bg_input']}; }}")
+                
                 def revert_style(w=widget, s=original_style):
                     try:
                         w.setStyleSheet(s)
                     except RuntimeError:
-                        pass # The note was deleted or refreshed by the user before the timer finished
+                        pass
                         
                 QTimer.singleShot(1500, revert_style)
                 break

@@ -3,7 +3,10 @@ import sys
 import traceback
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtGui import QIcon
+from PyQt6.QtCore import QSettings
+
 from gui.main_window import MainWindow
+from gui.theme import ThemeManager
 
 def global_exception_handler(exc_type, exc_value, exc_traceback):
     """
@@ -34,17 +37,13 @@ def main():
     # 2. Start the application
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon("icon.png"))
-    # Apply a global stylesheet to ensure consistent theming across all dialogs/menus
-    app.setStyleSheet("""
-        QMenu { background-color: #2b2b2b; color: white; border: 1px solid #444; }
-        QMenu::item:selected { background-color: #0078D7; }
-        QMessageBox { background-color: #1e1e1e; color: white; }
-        QMessageBox QLabel { color: white; }
-        QMessageBox QPushButton { background-color: #333; color: white; padding: 5px 15px; border-radius: 4px; }
-        QMessageBox QPushButton:hover { background-color: #444; }
-        QInputDialog { background-color: #1e1e1e; color: white; }
-        QInputDialog QLineEdit { background-color: #333; color: white; border: 1px solid #555; padding: 4px; }
-    """)
+    
+    # 3. Initialize and apply Theme Manager
+    theme_manager = ThemeManager()
+    settings = QSettings("PDFMultitool", "Workspace")
+    saved_theme = settings.value("theme", "Dark (Default)")
+    theme_manager.set_theme(saved_theme)
+    theme_manager.apply_global_style(app)
     
     window = MainWindow()
     window.show()

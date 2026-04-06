@@ -15,8 +15,8 @@ from gui.tabs.ocr_tab import OCRTab
 from gui.tabs.tts_tab import TTSTab
 from gui.tabs.llm_tab import LLMTab
 from gui.tabs.notes_tab import NotesTab
+from gui.theme import ThemeManager
 
-# --- NEW SAFE PRELOAD THREAD ---
 class PreloadWorker(QThread):
     def __init__(self, llm_manager, model, parent=None):
         super().__init__(parent)
@@ -33,20 +33,10 @@ class MainWindow(QMainWindow):
         self.resize(1400, 900)
         self.setMinimumSize(1000, 700)
         
+        self.theme_manager = ThemeManager()
         self.project_manager = ProjectManager()
         self.current_file_path = None
         self.settings = QSettings("PDFMultitool", "Workspace")
-
-        self.setStyleSheet("""
-            QMainWindow { background-color: #1e1e1e; }
-            QWidget { color: white; font-family: Arial; }
-            QPushButton { background-color: transparent; border-radius: 4px; padding: 6px 12px; font-weight: bold; border: 1px solid #444; }
-            QPushButton:hover { background-color: #333333; }
-            QPushButton:checked { background-color: #0078D7; border: 1px solid #0055ff; }
-            QComboBox { background-color: #333; border: 1px solid #555; padding: 4px; border-radius: 4px; color: white;}
-            QMenu { background-color: #2b2b2b; color: white; border: 1px solid #444; }
-            QMenu::item:selected { background-color: #0078D7; }
-        """)
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -60,6 +50,10 @@ class MainWindow(QMainWindow):
         self._build_ocr_banner()
         self._build_workspace()
         self._setup_shortcuts()
+        
+        # Connect Theme Manager to trigger visual updates
+        self.theme_manager.theme_changed.connect(self.update_theme)
+        self.update_theme(self.theme_manager.get_theme()) # Initial Apply
         
         self.autosave_timer = QTimer(self)
         self.autosave_timer.timeout.connect(self.autosave_project)
@@ -76,7 +70,6 @@ class MainWindow(QMainWindow):
             default_model = self.tabs["LLM Chat"].model_combo.currentText()
             llm_manager = self.tabs["LLM Chat"].llm_manager
             
-            # Replaced Python threading with safe PyQt QThread
             self.preload_worker = PreloadWorker(llm_manager, default_model, parent=self)
             self.preload_worker.start()
         except Exception as e:
@@ -92,13 +85,11 @@ class MainWindow(QMainWindow):
 
     def _build_top_menu(self):
         self.top_menu = QFrame()
-        self.top_menu.setStyleSheet("background-color: #1a1a1a; border-bottom: 1px solid #333;")
         self.top_menu.setFixedHeight(55)
         menu_layout = QHBoxLayout(self.top_menu)
         menu_layout.setContentsMargins(10, 5, 10, 5)
 
         self.btn_project = QPushButton("📁 Project ▼")
-        self.btn_project.setStyleSheet("background-color: #333; padding: 6px 15px;")
         
         project_menu = QMenu(self)
         project_menu.addAction("New Project...", self._new_project)
@@ -118,7 +109,6 @@ class MainWindow(QMainWindow):
         
         menu_layout.addSpacing(15)
         self.btn_save = QPushButton("💾 Save Project")
-        self.btn_save.setStyleSheet("background-color: #333;")
         self.btn_save.clicked.connect(self.save_project)
         menu_layout.addWidget(self.btn_save)
         menu_layout.addStretch()
@@ -135,6 +125,20 @@ class MainWindow(QMainWindow):
         menu_layout.addWidget(self.btn_zoom_in)
         menu_layout.addStretch()
 
+        # Theme Selector
+        menu_layout.addWidget(QLabel("Theme:"))
+        self.theme_selector = QComboBox()
+        self.theme_selector.addItems(self.theme_manager.themes.keys())
+        self.theme_selector.setCurrentText(self.theme_manager.current_theme_name)
+        self.theme_selector.currentTextChanged.connect(self._on_theme_changed)
+        menu_layout.addWidget(self.theme_selector)
+        
+        self.btn_edit_theme = QPushButton("✏️ Edit Custom")
+        self.btn_edit_theme.clicked.connect(lambda: self.theme_manager.edit_custom_theme(self))
+        menu_layout.addWidget(self.btn_edit_theme)
+        
+        menu_layout.addSpacing(15)
+
         self.tool_group = QButtonGroup(self)
         self.tool_group.setExclusive(True)
         tool_names = ["Notes", "OCR", "Audio (TTS)", "LLM Chat", "Close Tool"]
@@ -150,6 +154,25 @@ class MainWindow(QMainWindow):
             self.tool_buttons[name] = btn
 
         self.main_layout.addWidget(self.top_menu)
+
+    def _on_theme_changed(self, theme_name):
+        if theme_name == "Custom":
+            self.theme_manager.edit_custom_theme(self)
+            
+        self.settings.setValue("theme", theme_name)
+        self.theme_manager.set_theme(theme_name)
+
+    def update_theme(self, theme):
+        self.top_menu.setStyleSheet(f"background-color: {theme['bg_panel']}; border-bottom: 1px solid {theme['border']};")
+        self.ocr_banner.setStyleSheet(f"background-color: {theme['warning']}; border-bottom: 1px solid {theme['border']};")
+        self.lbl_ocr_banner.setStyleSheet(f"font-weight: bold; color: #1e1e1e; border: none;") # Dark text for contrast against yellow/warning
+        
+        for tab in self.tabs.values():
+            if hasattr(tab, "update_theme"):
+                tab.update_theme(theme)
+
+        if hasattr(self.viewer, "update_theme"):
+            self.viewer.update_theme(theme)
 
     def _clear_ui_for_new_project(self):
         self.current_file_path = None
@@ -330,7 +353,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Save Error", f"Error saving project: {str(e)}")
 
-    def add_ai_annotation(self, quote, note, target_doc_name=None, allowed_paths=None):
+    def add_ai_annotation(self, quote, note, target_doc_name=None, allowed_paths=None, forced_annot_id=None, emit_signal=True):
         if not quote: return False
         clean_quote = quote.strip()
         words = clean_quote.split()
@@ -377,8 +400,10 @@ class MainWindow(QMainWindow):
                         annot = page.add_highlight_annot(quads)
                         annot.set_colors(stroke=(0.7, 0.4, 1.0))
                         
+                        # Apply forced ID if provided for workspace linking
+                        annot_id_to_use = forced_annot_id if forced_annot_id else f"AINote|{uuid.uuid4()}"
                         annot_info = {
-                            "title": f"AINote|{uuid.uuid4()}",
+                            "title": annot_id_to_use,
                             "content": note,
                             "subject": clean_quote
                         }
@@ -390,11 +415,18 @@ class MainWindow(QMainWindow):
                         
                         if path == self.current_file_path:
                             self.viewer.reload_page(page_num)
+                            
+                        # Break out of page loop to avoid duplicates for the same quote
+                        break
+                
+                if found_any and forced_annot_id:
+                    break
 
             except Exception as e:
                 print(f"Error adding AI annotation to {path}: {e}")
 
-        if found_any:
+        # Suspend UI triggers for batched workspace graph building
+        if found_any and emit_signal:
             self.viewer.annot_manager.note_added.emit()
             
         return found_any
@@ -405,20 +437,18 @@ class MainWindow(QMainWindow):
 
     def _build_ocr_banner(self):
         self.ocr_banner = QFrame()
-        self.ocr_banner.setStyleSheet("background-color: #cc8800; border-bottom: 1px solid #aa6600;")
         self.ocr_banner.setFixedHeight(45)
         banner_layout = QHBoxLayout(self.ocr_banner)
         banner_layout.setContentsMargins(20, 0, 10, 0)
-        lbl = QLabel("⚠️ Scanned document detected. Run OCR?")
-        lbl.setStyleSheet("font-weight: bold; color: white; border: none;")
-        banner_layout.addWidget(lbl)
+        self.lbl_ocr_banner = QLabel("⚠️ Scanned document detected. Run OCR?")
+        banner_layout.addWidget(self.lbl_ocr_banner)
         banner_layout.addStretch()
         btn_run = QPushButton("Run OCR")
         btn_run.setStyleSheet("background-color: white; color: black; border: none;")
         btn_run.clicked.connect(self._trigger_auto_ocr)
         banner_layout.addWidget(btn_run)
         btn_dismiss = QPushButton("Dismiss")
-        btn_dismiss.setStyleSheet("border: 1px solid white; color: white;")
+        btn_dismiss.setStyleSheet("background-color: transparent; border: 1px solid #1e1e1e; color: #1e1e1e;")
         btn_dismiss.clicked.connect(self.ocr_banner.hide)
         banner_layout.addWidget(btn_dismiss)
         self.main_layout.addWidget(self.ocr_banner)
@@ -431,7 +461,6 @@ class MainWindow(QMainWindow):
         self.splitter.addWidget(self.viewer)
 
         self.tool_panel = QStackedWidget()
-        self.tool_panel.setStyleSheet("QStackedWidget { background-color: #222222; border-left: 1px solid #444; }")
         
         self.tabs = {
             "Notes": NotesTab(self.tool_panel, self.viewer, self),

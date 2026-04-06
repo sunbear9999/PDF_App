@@ -47,7 +47,6 @@ class ChatWorker(QThread):
         def handle_chunk(chunk):
             nonlocal buffer, hide_future_output, full_response
             
-            # Intercept special UI callbacks from the Agent Retriever
             if chunk.startswith("@@AGENT@@"):
                 clean_msg = chunk.replace("@@AGENT@@", "").strip()
                 self.agent_update.emit(clean_msg)
@@ -60,13 +59,11 @@ class ChatWorker(QThread):
                 
             buffer += chunk
             
-            # Permanently hide output once the highlight section begins
             if "--- HIGHLIGHTS ---" in buffer:
                 hide_future_output = True
                 visible_part, _ = buffer.split("--- HIGHLIGHTS ---", 1)
                 buffer = visible_part
             
-            # Line buffering to safely filter out any rogue %%QUOTE tags placed incorrectly by the LLM
             while '\n' in buffer:
                 line, buffer = buffer.split('\n', 1)
                 if "%%QUOTE" not in line:
@@ -86,7 +83,6 @@ class ChatWorker(QThread):
         except Exception as e:
             handle_chunk(f"\n[System Error: {str(e)}]")
         
-        # Flush the remaining buffer if it doesn't contain a quote string
         if buffer and "%%QUOTE" not in buffer and not hide_future_output:
             self.token_received.emit(buffer)
             
@@ -98,18 +94,17 @@ class LLMTab(QWidget):
         self.main_window = main_window
         self.llm_manager = LocalLLMManager() 
         self.current_existing_quotes = []
+        self.theme = None
         
         layout = QVBoxLayout(self)
         
         top_layout = QHBoxLayout()
         self.status_lbl = QLabel("🔴 Status: Unindexed")
-        self.status_lbl.setStyleSheet("font-weight: bold; font-size: 14px;")
         top_layout.addWidget(self.status_lbl)
         top_layout.addStretch()
 
         self.agent_checkbox = QCheckBox("Use Advanced Agents (Slower, High Detail)")
         self.agent_checkbox.setChecked(True)
-        self.agent_checkbox.setStyleSheet("color: #bbb; margin-right: 15px;")
         top_layout.addWidget(self.agent_checkbox)
         
         self.model_combo = QComboBox()
@@ -119,7 +114,6 @@ class LLMTab(QWidget):
         self.btn_refresh_models = QPushButton("🔄")
         self.btn_refresh_models.setToolTip("Refresh Model List")
         self.btn_refresh_models.setFixedWidth(35)
-        self.btn_refresh_models.setStyleSheet("background-color: #444; font-weight: bold;")
         self.btn_refresh_models.clicked.connect(self.refresh_models)
 
         top_layout.addWidget(QLabel("Model:"))
@@ -130,32 +124,35 @@ class LLMTab(QWidget):
         layout.addWidget(QLabel("Select PDFs to Include in AI Search:"))
         self.pdf_list = QListWidget()
         self.pdf_list.setFixedHeight(100)
-        self.pdf_list.setStyleSheet("background-color: #333; border: 1px solid #555; padding: 5px;")
         layout.addWidget(self.pdf_list)
         
         self.btn_index = QPushButton("Build / Rebuild Search Index")
-        self.btn_index.setStyleSheet("background-color: #444; padding: 6px; font-weight: bold; margin-bottom: 10px;")
         self.btn_index.clicked.connect(self.start_indexing)
         layout.addWidget(self.btn_index)
         
         self.chat_history = QTextEdit()
         self.chat_history.setReadOnly(True)
-        self.chat_history.setStyleSheet("background-color: #1e1e1e; border: 1px solid #555; padding: 10px; font-size: 14px;")
         layout.addWidget(self.chat_history)
         
         input_layout = QHBoxLayout()
         self.chat_input = QLineEdit()
         self.chat_input.setPlaceholderText("Ask a question...")
-        self.chat_input.setStyleSheet("padding: 8px; background: #333; border: 1px solid #555;")
         self.chat_input.returnPressed.connect(self.send_message)
         
         self.send_btn = QPushButton("Send")
-        self.send_btn.setStyleSheet("background-color: #0078D7; padding: 8px 20px; font-weight: bold;")
         self.send_btn.clicked.connect(self.send_message)
         
         input_layout.addWidget(self.chat_input)
         input_layout.addWidget(self.send_btn)
         layout.addLayout(input_layout)
+
+    def update_theme(self, theme):
+        self.theme = theme
+        self.status_lbl.setStyleSheet(f"font-weight: bold; font-size: 14px; color: {theme['text_main']};")
+        self.agent_checkbox.setStyleSheet(f"color: {theme['text_muted']}; margin-right: 15px;")
+        self.btn_refresh_models.setStyleSheet(f"background-color: {theme['bg_input']}; font-weight: bold;")
+        self.btn_index.setStyleSheet(f"background-color: {theme['bg_panel']}; padding: 6px; font-weight: bold; margin-bottom: 10px; border: 1px solid {theme['border']};")
+        self.send_btn.setStyleSheet(f"background-color: {theme['accent']}; padding: 8px 20px; font-weight: bold; color: #ffffff; border-radius: 4px;")
         
     def refresh_project_ui(self):
         self.pdf_list.clear()
@@ -172,10 +169,12 @@ class LLMTab(QWidget):
             self.llm_manager.set_project_database(proj_path)
             if self.llm_manager.collection and self.llm_manager.collection.count() > 0:
                 self.status_lbl.setText("🟢 Status: Ready (Vector DB Loaded)")
-                self.status_lbl.setStyleSheet("font-weight: bold; color: #00cc66;")
+                color = self.theme['success'] if self.theme else "#00cc66"
+                self.status_lbl.setStyleSheet(f"font-weight: bold; color: {color}; font-size: 14px;")
             else:
                 self.status_lbl.setText("🔴 Status: Needs Indexing")
-                self.status_lbl.setStyleSheet("font-weight: bold; color: #ffaa00;")
+                color = self.theme['warning'] if self.theme else "#ffaa00"
+                self.status_lbl.setStyleSheet(f"font-weight: bold; color: {color}; font-size: 14px;")
 
     def refresh_models(self):
         models = self.llm_manager.get_available_models()
@@ -205,17 +204,19 @@ class LLMTab(QWidget):
         self.btn_index.setEnabled(True)
         if success:
             self.status_lbl.setText("🟢 Status: Ready (Indexed to Vector DB)")
-            self.status_lbl.setStyleSheet("font-weight: bold; color: #00cc66;")
+            color = self.theme['success'] if self.theme else "#00cc66"
+            self.status_lbl.setStyleSheet(f"font-weight: bold; color: {color}; font-size: 14px;")
         else:
             self.status_lbl.setText(f"❌ Indexing Failed: {error_msg}")
-            self.status_lbl.setStyleSheet("font-weight: bold; color: #ff4444;")
+            color = self.theme['error'] if self.theme else "#ff4444"
+            self.status_lbl.setStyleSheet(f"font-weight: bold; color: {color}; font-size: 14px;")
 
     def send_message(self):
         user_text = self.chat_input.text().strip()
         if not user_text: return
         
-        # Display the pure user input in the chat
-        self.chat_history.append(f"<b style='color:#55aaff'>You:</b> {user_text}<br>")
+        accent_color = self.theme['accent'] if self.theme else "#55aaff"
+        self.chat_history.append(f"<b style='color:{accent_color}'>You:</b> {user_text}<br>")
         self.chat_input.clear()
         
         self.send_btn.setText("⏳ Processing...")
@@ -228,7 +229,8 @@ class LLMTab(QWidget):
         else:
             self.status_lbl.setText("⚙️ AI is generating response...")
             
-        self.status_lbl.setStyleSheet("font-weight: bold; color: #ffaa00;")
+        warn_color = self.theme['warning'] if self.theme else "#ffaa00"
+        self.status_lbl.setStyleSheet(f"font-weight: bold; color: {warn_color}; font-size: 14px;")
         
         allowed_docs = []
         allowed_paths = []
@@ -259,7 +261,7 @@ class LLMTab(QWidget):
         
         self.chat_worker = ChatWorker(
             self.llm_manager, 
-            user_text, # Pass pure user prompt without hostile quotas
+            user_text,
             model, 
             allowed_docs, 
             use_agents, 
@@ -274,9 +276,9 @@ class LLMTab(QWidget):
         self.chat_worker.start()
 
     def _on_agent_update(self, msg):
-        # Stylized terminal-like output for agent logs
+        suc_color = self.theme['success'] if self.theme else "#4CAF50"
         self.chat_history.append(
-            f"<div style='color: #4CAF50; font-family: monospace; padding: 4px; border-left: 2px solid #4CAF50; margin-bottom: 4px;'>"
+            f"<div style='color: {suc_color}; font-family: monospace; padding: 4px; border-left: 2px solid {suc_color}; margin-bottom: 4px;'>"
             f"{msg}</div>"
         )
 
@@ -291,18 +293,17 @@ class LLMTab(QWidget):
         self.send_btn.setEnabled(True)
         self.chat_input.setEnabled(True)
         self.status_lbl.setText("🟢 Status: Ready")
-        self.status_lbl.setStyleSheet("font-weight: bold; color: #00cc66;")
+        suc_color = self.theme['success'] if self.theme else "#00cc66"
+        self.status_lbl.setStyleSheet(f"font-weight: bold; color: {suc_color}; font-size: 14px;")
         
         self.chat_history.append("<br>")
         
         blocks = []
         seen_quotes = set() 
         
-        # Aggressive normalization function to strip ALL non-alphanumeric chars
         def normalize_text(text):
             return re.sub(r'[^a-z0-9]', '', str(text).lower())
             
-        # Pre-populate seen_quotes with ultra-aggressive normalization
         for eq in self.current_existing_quotes:
             seen_quotes.add(normalize_text(eq))
         
@@ -321,10 +322,8 @@ class LLMTab(QWidget):
                     if doc_name and "|" in doc_name:
                         doc_name = doc_name.split("|")[0].strip()
                         
-                    # Apply aggressive normalization for comparisons to completely block duplicates
                     normalized_quote = normalize_text(raw_quote)
                     
-                    # Strictly check against the global seen quotes
                     if normalized_quote not in seen_quotes and len(normalized_quote) > 5:
                         seen_quotes.add(normalized_quote)
                         blocks.append({
@@ -358,8 +357,9 @@ class LLMTab(QWidget):
                 failed_blocks.append(b)
         
         if success_count > 0:
+            ai_color = self.theme['ai_bubble_border'] if self.theme else "#d194ff"
             self.chat_history.append(
-                f"<div style='color: #d194ff; font-weight: bold; padding: 5px 0px;'>"
+                f"<div style='color: {ai_color}; font-weight: bold; padding: 5px 0px;'>"
                 f"🖍️ Successfully applied {success_count} highlight(s) to the document(s)."
                 f"</div>"
             )
@@ -368,10 +368,14 @@ class LLMTab(QWidget):
             display_quote = b['quote'][:80] + "..." if len(b['quote']) > 80 else b['quote']
             target_doc = b['doc']
             doc_label = f" in {target_doc}" if target_doc else ""
+            err_color = self.theme['error'] if self.theme else "#ff4444"
+            panel_bg = self.theme['bg_panel'] if self.theme else "#2b2b2b"
+            text_muted = self.theme['text_muted'] if self.theme else "#ddd"
+            
             self.chat_history.append(
-                f"<div style='background-color: #2b2b2b; padding: 10px; border-left: 4px solid #ff4444; margin-top: 5px; margin-bottom: 5px; border-radius: 0px 4px 4px 0px;'>"
-                f"⚠️ <b style='color:#ff4444;'>Failed to locate quote{doc_label}</b><br>"
-                f"<i style='color:#ddd;'>\"{display_quote}\"</i>"
+                f"<div style='background-color: {panel_bg}; padding: 10px; border-left: 4px solid {err_color}; margin-top: 5px; margin-bottom: 5px; border-radius: 0px 4px 4px 0px;'>"
+                f"⚠️ <b style='color:{err_color};'>Failed to locate quote{doc_label}</b><br>"
+                f"<i style='color:{text_muted};'>\"{display_quote}\"</i>"
                 f"</div>"
             )
         

@@ -4,16 +4,6 @@ from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton,
 class SearchBarWidget(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setStyleSheet("""
-            QFrame { background-color: #2b2b2b; border: 1px solid #555; border-radius: 8px; }
-            QLineEdit { background-color: #1e1e1e; border: 1px solid #444; padding: 6px; color: white; border-radius: 4px; }
-            QLabel { color: #ccc; font-weight: bold; border: none; }
-            QCheckBox { color: white; font-weight: bold; border: none; padding-right: 5px; }
-            QPushButton { background-color: #444; color: white; border: none; padding: 6px 10px; border-radius: 4px; font-weight: bold; }
-            QPushButton:hover { background-color: #555; }
-            QComboBox { background-color: #1e1e1e; border: 1px solid #444; color: white; padding: 4px; border-radius: 4px; }
-        """)
-        
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 5, 10, 5)
         
@@ -32,7 +22,6 @@ class SearchBarWidget(QFrame):
         self.scope_combo.addItems(["Current PDF", "Entire Project"])
         
         self.btn_close = QPushButton("✖")
-        self.btn_close.setStyleSheet("QPushButton { background-color: #662222; } QPushButton:hover { background-color: #ff4444; }")
         
         layout.addWidget(self.search_input)
         layout.addWidget(self.chk_match_case)
@@ -41,6 +30,18 @@ class SearchBarWidget(QFrame):
         layout.addWidget(self.btn_next)
         layout.addWidget(self.scope_combo)
         layout.addWidget(self.btn_close)
+
+    def update_theme(self, theme):
+        self.setStyleSheet(f"""
+            QFrame {{ background-color: {theme['bg_panel']}; border: 1px solid {theme['border']}; border-radius: 8px; }}
+            QLineEdit {{ background-color: {theme['bg_input']}; border: 1px solid {theme['border']}; padding: 6px; color: {theme['text_main']}; border-radius: 4px; }}
+            QLabel {{ color: {theme['text_muted']}; font-weight: bold; border: none; }}
+            QCheckBox {{ color: {theme['text_main']}; font-weight: bold; border: none; padding-right: 5px; }}
+            QPushButton {{ background-color: {theme['bg_input']}; color: {theme['text_main']}; border: none; padding: 6px 10px; border-radius: 4px; font-weight: bold; }}
+            QPushButton:hover {{ background-color: {theme['border']}; }}
+            QComboBox {{ background-color: {theme['bg_input']}; border: 1px solid {theme['border']}; color: {theme['text_main']}; padding: 4px; border-radius: 4px; }}
+        """)
+        self.btn_close.setStyleSheet(f"QPushButton {{ background-color: {theme['error']}; color: #ffffff; }} QPushButton:hover {{ background-color: #ff6666; }}")
 
     def update_hits(self, current, total):
         self.hit_label.setText(f"{current} / {total}")

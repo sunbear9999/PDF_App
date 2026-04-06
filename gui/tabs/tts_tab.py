@@ -15,11 +15,11 @@ class TTSTab(QWidget):
     def __init__(self, parent=None, main_window=None):
         super().__init__(parent)
         self.main_window = main_window
+        self.theme = None
         layout = QVBoxLayout(self)
         
-        instructions = QLabel("1. Extract Text from PDF:")
-        instructions.setStyleSheet("font-weight: bold; margin-bottom: 5px;")
-        layout.addWidget(instructions)
+        self.instructions = QLabel("1. Extract Text from PDF:")
+        layout.addWidget(self.instructions)
         
         # --- Extraction Controls ---
         extract_layout = QHBoxLayout()
@@ -27,12 +27,10 @@ class TTSTab(QWidget):
         extract_layout.addWidget(QLabel("Pages:"))
         self.spin_start = QSpinBox()
         self.spin_start.setMinimum(1)
-        self.spin_start.setStyleSheet("background: #333; padding: 4px;")
         
         self.spin_end = QSpinBox()
         self.spin_end.setMinimum(1)
         self.spin_end.setMaximum(9999)
-        self.spin_end.setStyleSheet("background: #333; padding: 4px;")
         
         extract_layout.addWidget(self.spin_start)
         extract_layout.addWidget(QLabel("to"))
@@ -43,7 +41,6 @@ class TTSTab(QWidget):
         extract_layout.addWidget(self.chk_ignore)
         
         self.btn_fetch = QPushButton("⬇️ Pull Text")
-        self.btn_fetch.setStyleSheet("background-color: #444; padding: 6px;")
         self.btn_fetch.clicked.connect(self.pull_text)
         extract_layout.addWidget(self.btn_fetch)
         
@@ -53,14 +50,13 @@ class TTSTab(QWidget):
         # --- Text Editor ---
         self.text_editor = QTextEdit()
         self.text_editor.setPlaceholderText("Extracted text will appear here. Edit it before generating audio...")
-        self.text_editor.setStyleSheet("background-color: #1e1e1e; border: 1px solid #555; padding: 10px; margin-top: 10px;")
         layout.addWidget(self.text_editor)
         
         # --- TTS Options ---
         opts_layout = QHBoxLayout()
         
         self.voice_combo = QComboBox()
-        self.voice_mapping = {} # Maps "Voice 1" -> "voice1.onnx"
+        self.voice_mapping = {} 
         self._load_voices()
         
         opts_layout.addWidget(QLabel("Voice:"))
@@ -74,19 +70,29 @@ class TTSTab(QWidget):
         
         # --- Status & Actions ---
         self.status_lbl = QLabel("Ready")
-        self.status_lbl.setStyleSheet("color: #aaa; margin-top: 5px;")
         layout.addWidget(self.status_lbl)
         
         self.btn_generate = QPushButton("▶ Generate & Save Audio")
-        self.btn_generate.setStyleSheet("background-color: #0078D7; padding: 12px; font-weight: bold; font-size: 14px; margin-top: 5px;")
         self.btn_generate.clicked.connect(self.start_generation_thread)
         layout.addWidget(self.btn_generate)
 
-        self.status_updated.connect(self.status_lbl.setText)
+        self.status_updated.connect(self._handle_status_update)
         self.generation_complete.connect(self._on_generation_complete)
 
+    def update_theme(self, theme):
+        self.theme = theme
+        self.instructions.setStyleSheet(f"font-weight: bold; margin-bottom: 5px; color: {theme['text_main']};")
+        self.btn_fetch.setStyleSheet(f"background-color: {theme['bg_input']}; padding: 6px; border: 1px solid {theme['border']};")
+        self.btn_generate.setStyleSheet(f"background-color: {theme['accent']}; padding: 12px; font-weight: bold; font-size: 14px; margin-top: 5px; color: #ffffff;")
+        if self.status_lbl.text() == "Ready":
+            self.status_lbl.setStyleSheet(f"color: {theme['text_muted']}; margin-top: 5px;")
+
+    def _handle_status_update(self, msg):
+        self.status_lbl.setText(msg)
+        color = self.theme['warning'] if self.theme else "#ffaa00"
+        self.status_lbl.setStyleSheet(f"color: {color}; margin-top: 5px;")
+
     def _load_voices(self):
-        """Scans the models directory and formats the names nicely."""
         self.voice_combo.clear()
         self.voice_mapping.clear()
         
@@ -94,7 +100,6 @@ class TTSTab(QWidget):
         if os.path.exists(models_dir):
             onnx_files = [f for f in os.listdir(models_dir) if f.endswith(".onnx")]
             for f in sorted(onnx_files):
-                # Formats "voice1.onnx" to "Voice 1"
                 display_name = f.replace(".onnx", "").replace("voice", "Voice ").title()
                 self.voice_mapping[display_name] = f
                 self.voice_combo.addItem(display_name)
@@ -120,13 +125,15 @@ class TTSTab(QWidget):
         ignore = self.chk_ignore.isChecked()
         
         self.status_lbl.setText("Pulling text...")
-        self.status_lbl.setStyleSheet("color: #ffaa00;")
+        color = self.theme['warning'] if self.theme else "#ffaa00"
+        self.status_lbl.setStyleSheet(f"color: {color}; margin-top: 5px;")
         
         text = extract_filtered_blocks(self.main_window.current_file_path, ignore, start, end)
         self.text_editor.setPlainText(text)
         
         self.status_lbl.setText(f"Extracted {len(text)} characters.")
-        self.status_lbl.setStyleSheet("color: #00cc66;")
+        scolor = self.theme['success'] if self.theme else "#00cc66"
+        self.status_lbl.setStyleSheet(f"color: {scolor}; margin-top: 5px;")
 
     def start_generation_thread(self):
         text_to_read = self.text_editor.toPlainText().strip()
@@ -136,7 +143,8 @@ class TTSTab(QWidget):
             
         self.btn_generate.setEnabled(False)
         self.status_lbl.setText("Generating audio... This may take a moment.")
-        self.status_lbl.setStyleSheet("color: #ffaa00;")
+        color = self.theme['warning'] if self.theme else "#ffaa00"
+        self.status_lbl.setStyleSheet(f"color: {color}; margin-top: 5px;")
         
         display_voice = self.voice_combo.currentText()
         voice_file = self.voice_mapping.get(display_voice, display_voice)
@@ -170,7 +178,9 @@ class TTSTab(QWidget):
         self.btn_generate.setEnabled(True)
         if success:
             self.status_lbl.setText(f"✅ Audio saved to: audio/{message}")
-            self.status_lbl.setStyleSheet("color: #00cc66;")
+            color = self.theme['success'] if self.theme else "#00cc66"
+            self.status_lbl.setStyleSheet(f"color: {color}; margin-top: 5px;")
         else:
             self.status_lbl.setText(f"❌ Error: {message}")
-            self.status_lbl.setStyleSheet("color: #ff4444;")
+            color = self.theme['error'] if self.theme else "#ff4444"
+            self.status_lbl.setStyleSheet(f"color: {color}; margin-top: 5px;")

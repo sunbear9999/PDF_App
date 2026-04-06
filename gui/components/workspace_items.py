@@ -6,6 +6,8 @@ from PyQt6.QtWidgets import (QGraphicsRectItem, QGraphicsTextItem, QGraphicsLine
 from PyQt6.QtCore import Qt, QLineF, QPointF, QTimer
 from PyQt6.QtGui import QColor, QPen, QBrush, QFont, QTextDocument
 
+from gui.theme import ThemeManager
+
 def get_text_color_for_bg(bg_color):
     try:
         if isinstance(bg_color, (tuple, list)):
@@ -18,17 +20,18 @@ def get_text_color_for_bg(bg_color):
         return "#ffffff"
 
 class Edge(QGraphicsLineItem):
-    def __init__(self, source_node, dest_node, label_text="", edge_id=None, color="#888888"):
+    def __init__(self, source_node, dest_node, label_text="", edge_id=None, color="#888888", weight=2):
         super().__init__()
         self.source_node = source_node
         self.dest_node = dest_node
         self.label_text = label_text
         self.edge_id = edge_id or str(uuid.uuid4())
         self.base_color = QColor(color)
+        self.weight = weight
         
         self.setZValue(-1) 
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
-        self.setPen(QPen(self.base_color, 2, Qt.PenStyle.SolidLine))
+        self.setPen(QPen(self.base_color, self.weight, Qt.PenStyle.SolidLine))
         
         self.text_item = QGraphicsTextItem(label_text, self)
         self.text_item.setDefaultTextColor(QColor("#ffffff"))
@@ -56,12 +59,52 @@ class Edge(QGraphicsLineItem):
         text_rect = self.text_item.boundingRect()
         self.text_item.setPos(center_x - text_rect.width() / 2, center_y - text_rect.height() / 2 - 10)
 
+    def trigger_edit(self):
+        view = self.scene().view if self.scene() and hasattr(self.scene(), 'view') else None
+        if view:
+            view.save_state_for_undo()
+            
+        text, ok = QInputDialog.getText(view, "Edit Label", "Enter new text:", text=self.label_text)
+        if ok:
+            self.label_text = text
+            self.text_item.setPlainText(text)
+            self.update_position()
+            if view:
+                view.main_window.project_manager.mark_dirty("workspace")
+
+    def trigger_color_change(self):
+        view = self.scene().view if self.scene() and hasattr(self.scene(), 'view') else None
+        
+        # Explicitly set the view as the parent so the dialog cannot hide or be suppressed
+        color = QColorDialog.getColor(self.base_color, view, "Select Line Color")
+        
+        if color.isValid():
+            if view:
+                view.save_state_for_undo()
+            self.base_color = color
+            self.setPen(QPen(self.base_color, self.weight + 2 if self.isSelected() else self.weight, Qt.PenStyle.SolidLine))
+            if view:
+                view.main_window.project_manager.mark_dirty("workspace")
+
+    def trigger_weight_change(self):
+        view = self.scene().view if self.scene() and hasattr(self.scene(), 'view') else None
+        
+        weight, ok = QInputDialog.getInt(view, "Line Weight", "Enter line weight (1-10):", self.weight, 1, 10)
+        if ok:
+            if view:
+                view.save_state_for_undo()
+            self.weight = weight
+            self.setPen(QPen(self.base_color, self.weight + 2 if self.isSelected() else self.weight, Qt.PenStyle.SolidLine))
+            if view:
+                view.main_window.project_manager.mark_dirty("workspace")
+
     def itemChange(self, change, value):
         if change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:
             if self.isSelected():
-                self.setPen(QPen(QColor("#ffffff"), 4, Qt.PenStyle.SolidLine))
+                # Fix: Don't turn the line white! Keep the chosen color but make it thicker to show selection
+                self.setPen(QPen(self.base_color, self.weight + 2, Qt.PenStyle.SolidLine))
             else:
-                self.setPen(QPen(self.base_color, 2, Qt.PenStyle.SolidLine))
+                self.setPen(QPen(self.base_color, self.weight, Qt.PenStyle.SolidLine))
         return super().itemChange(change, value)
 
 class InPlaceTextItem(QGraphicsTextItem):
@@ -71,15 +114,20 @@ class InPlaceTextItem(QGraphicsTextItem):
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Return and not (event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
-            self.clearFocus()
-            self.node.finish_in_place_edit()
+            self.clearFocus() # This now safely triggers focusOutEvent to commit the save
             return
         super().keyPressEvent(event)
+
+    def focusOutEvent(self, event):
+        # Automatically save text whenever the user clicks away or loses focus
+        super().focusOutEvent(event)
+        self.node.finish_in_place_edit()
 
 class ResizeHandle(QGraphicsRectItem):
     def __init__(self, parent):
         super().__init__(0, 0, 16, 16, parent)
-        self.setBrush(QBrush(QColor(255, 255, 255, 150)))
+        # Make the grabber slightly more visible and obvious
+        self.setBrush(QBrush(QColor(100, 100, 100, 255)))
         self.setPen(QPen(QColor(255, 255, 255, 200), 1))
         self.setCursor(Qt.CursorShape.SizeFDiagCursor)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
@@ -96,21 +144,27 @@ class ResizeHandle(QGraphicsRectItem):
             parent = self.parentItem()
             if parent:
                 self._is_resizing = True
-                new_w = max(50, value.x() + 16)
-                new_h = max(30, value.y() + 16)
+                # Sit exactly at the outer boundary, making value.x/y the direct width/height
+                new_w = max(50, value.x())
+                new_h = max(30, value.y())
                 parent.update_size(new_w, new_h)
                 self._is_resizing = False
-                return QPointF(new_w - 16, new_h - 16)
+                return QPointF(new_w, new_h)
         return super().itemChange(change, value)
 
 class Node(QGraphicsRectItem):
-    def __init__(self, node_id, quote, note, color="#333333", is_custom=False, width=150, height=80, pdf_path=None, page_num=None, manual_font_size=None):
+    def __init__(self, node_id, quote, note, color=None, is_custom=False, width=150, height=80, pdf_path=None, page_num=None, manual_font_size=None):
         super().__init__(0, 0, width, height)
         self.node_id = node_id
         self.is_custom = is_custom
         self.quote = quote if quote else ""
         self.note = note if note else ""
         
+        # If no color is provided, default to theme's panel color
+        theme = ThemeManager().get_theme()
+        if not color or color == "#333333":
+            color = theme['bg_panel']
+            
         self.color = color if isinstance(color, str) else QColor(int(color[0]*255), int(color[1]*255), int(color[2]*255)).name()
         
         self.pdf_path = pdf_path
@@ -127,7 +181,8 @@ class Node(QGraphicsRectItem):
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges)
-        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemClipsChildrenToShape, True)
+        # Fix: Disable clipping so the resize handle can sit completely outside the main box
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemClipsChildrenToShape, False)
         self.setAcceptHoverEvents(True)
         
         self.text_item = InPlaceTextItem(self)
@@ -141,7 +196,7 @@ class Node(QGraphicsRectItem):
         
         btn_edit = QPushButton("✏️ Edit")
         btn_color = QPushButton("🎨 Color")
-        btn_font = QPushButton("🔠 Size")
+        btn_font = QPushButton("📐 Size")
         btn_connect = QPushButton("🔗 Connect")
         
         buttons = [btn_edit, btn_color, btn_font, btn_connect]
@@ -151,7 +206,7 @@ class Node(QGraphicsRectItem):
             buttons.append(self.btn_jump)
         
         for btn in buttons:
-            btn.setStyleSheet("background-color: #444; color: white; border-radius: 4px; padding: 2px 6px; font-size: 10px; font-weight: bold;")
+            btn.setStyleSheet(f"background-color: {theme['bg_panel']}; color: {theme['text_main']}; border-radius: 4px; padding: 2px 6px; font-size: 10px; font-weight: bold; border: 1px solid {theme['border']};")
             t_layout.addWidget(btn)
             
         btn_edit.clicked.connect(self.trigger_edit)
@@ -282,7 +337,8 @@ class Node(QGraphicsRectItem):
             self.setRect(0, 0, needed_width, needed_height)
             self.proxy_toolbar.setPos(margin, needed_height - 30)
             self.proxy_toolbar.show()
-            self.resize_handle.hide()
+            
+            # Note: We completely removed `self.resize_handle.hide()` here!
             
         else:
             self.proxy_toolbar.hide()
@@ -297,9 +353,10 @@ class Node(QGraphicsRectItem):
             self.text_item.setDefaultTextColor(text_color)
             self.text_item.setPlainText(fitted_text)
             
-            self.resize_handle.show()
-            self.resize_handle.setPos(self.base_width - 16, self.base_height - 16)
-            self.resize_handle.setZValue(10)
+        # Ensure the resize handle is ALWAYS visible, pegged diagonally outside the bottom right edge
+        self.resize_handle.show()
+        self.resize_handle.setPos(self.rect().width(), self.rect().height())
+        self.resize_handle.setZValue(10)
 
     def update_size(self, width, height):
         self.base_width = width
@@ -351,6 +408,10 @@ class Node(QGraphicsRectItem):
         self.text_item.setFocus()
 
     def finish_in_place_edit(self):
+        # Guard clause: Prevents saving logic from firing twice if multiple events close the editor
+        if not (self.text_item.textInteractionFlags() & Qt.TextInteractionFlag.TextEditorInteraction):
+            return
+            
         self.text_item.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
         new_text = self.text_item.toPlainText().strip()
         self.note = new_text
