@@ -17,24 +17,26 @@ class ProjectManager:
         self._conn = None
 
     def _init_db(self):
-        """Initializes the SQLite Database schema."""
-        if self._conn:
-            self._conn.close()
-        
-        self._conn = sqlite3.connect(self.project_filepath)
-        cursor = self._conn.cursor()
-        
-        cursor.execute('''CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT)''')
-        cursor.execute('''CREATE TABLE IF NOT EXISTS pdfs (path TEXT PRIMARY KEY)''')
-        cursor.execute('''CREATE TABLE IF NOT EXISTS nodes (
-            node_id TEXT PRIMARY KEY, quote TEXT, note TEXT, color TEXT, 
-            is_custom INTEGER, pdf_path TEXT, page_num INTEGER, 
-            manual_font_size INTEGER, x REAL, y REAL, width REAL, height REAL
-        )''')
-        cursor.execute('''CREATE TABLE IF NOT EXISTS edges (
-            edge_id TEXT PRIMARY KEY, source_id TEXT, target_id TEXT, label TEXT, color TEXT
-        )''')
-        self._conn.commit()
+        try:
+            if self._conn:
+                self._conn.close()
+            
+            self._conn = sqlite3.connect(self.project_filepath)
+            cursor = self._conn.cursor()
+            
+            cursor.execute('''CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT)''')
+            cursor.execute('''CREATE TABLE IF NOT EXISTS pdfs (path TEXT PRIMARY KEY)''')
+            cursor.execute('''CREATE TABLE IF NOT EXISTS nodes (
+                node_id TEXT PRIMARY KEY, quote TEXT, note TEXT, color TEXT, 
+                is_custom INTEGER, pdf_path TEXT, page_num INTEGER, 
+                manual_font_size INTEGER, x REAL, y REAL, width REAL, height REAL
+            )''')
+            cursor.execute('''CREATE TABLE IF NOT EXISTS edges (
+                edge_id TEXT PRIMARY KEY, source_id TEXT, target_id TEXT, label TEXT, color TEXT
+            )''')
+            self._conn.commit()
+        except sqlite3.Error as e:
+            print(f"Database initialization error: {e}")
 
     def create_project(self, filepath):
         try:
@@ -80,12 +82,12 @@ class ProjectManager:
                 cursor.execute("SELECT path FROM pdfs")
                 self.pdfs = [row[0] for row in cursor.fetchall()]
             except sqlite3.DatabaseError:
-                # MIGRATE LEGACY JSON TO SQLITE
                 print("Legacy JSON project detected. Migrating to SQLite...")
                 with open(filepath, 'r') as f:
                     data = json.load(f)
                 
-                self._conn.close()
+                if self._conn:
+                    self._conn.close()
                 os.remove(filepath)
                 self._init_db()     
                 
@@ -103,66 +105,87 @@ class ProjectManager:
             return False
 
     def save_project(self):
-        pass # SQLite auto-saves to disk on commit, this is just a pass-through now
+        pass 
 
     def add_pdf(self, pdf_path):
         if pdf_path not in self.pdfs:
             self.pdfs.append(pdf_path)
             if self._conn:
-                self._conn.execute("INSERT OR IGNORE INTO pdfs (path) VALUES (?)", (pdf_path,))
-                self._conn.commit()
+                try:
+                    self._conn.execute("INSERT OR IGNORE INTO pdfs (path) VALUES (?)", (pdf_path,))
+                    self._conn.commit()
+                except sqlite3.Error as e:
+                    print(f"Error adding PDF to DB: {e}")
             return True
         return False
 
     def get_workspace_data(self):
         if not self._conn: return {"nodes": {}, "edges": []}
-        cursor = self._conn.cursor()
-        
-        nodes = {}
-        cursor.execute("SELECT * FROM nodes")
-        for row in cursor.fetchall():
-            node_id, quote, note, color, is_custom, pdf_path, page_num, font_size, x, y, w, h = row
-            nodes[node_id] = {
-                "quote": quote, "note": note, "color": color, "is_custom": bool(is_custom),
-                "pdf_path": pdf_path, "page_num": page_num, "manual_font_size": font_size,
-                "x": x, "y": y, "width": w, "height": h
-            }
+        try:
+            cursor = self._conn.cursor()
             
-        edges = []
-        cursor.execute("SELECT * FROM edges")
-        for row in cursor.fetchall():
-            edge_id, source_id, target_id, label, color = row
-            edges.append({
-                "id": edge_id, "source": source_id, "target": target_id, 
-                "label": label, "color": color
-            })
-            
-        return {"nodes": nodes, "edges": edges}
+            nodes = {}
+            cursor.execute("SELECT * FROM nodes")
+            for row in cursor.fetchall():
+                node_id, quote, note, color, is_custom, pdf_path, page_num, font_size, x, y, w, h = row
+                nodes[node_id] = {
+                    "quote": quote, "note": note, "color": color, "is_custom": bool(is_custom),
+                    "pdf_path": pdf_path, "page_num": page_num, "manual_font_size": font_size,
+                    "x": x, "y": y, "width": w, "height": h
+                }
+                
+            edges = []
+            cursor.execute("SELECT * FROM edges")
+            for row in cursor.fetchall():
+                edge_id, source_id, target_id, label, color = row
+                edges.append({
+                    "id": edge_id, "source": source_id, "target": target_id, 
+                    "label": label, "color": color
+                })
+                
+            return {"nodes": nodes, "edges": edges}
+        except sqlite3.Error as e:
+            print(f"Error reading workspace data: {e}")
+            return {"nodes": {}, "edges": []}
 
     def save_workspace_data(self, workspace_data):
+        """OPTIMIZED: Uses bulk transactions for massive speedup when saving large workspaces"""
         if not self._conn: return
-        cursor = self._conn.cursor()
-        
-        cursor.execute("DELETE FROM nodes")
-        cursor.execute("DELETE FROM edges")
-        
-        nodes = workspace_data.get("nodes", {})
-        for n_id, d in nodes.items():
-            cursor.execute("""
+        try:
+            cursor = self._conn.cursor()
+            
+            cursor.execute("BEGIN TRANSACTION")
+            cursor.execute("DELETE FROM nodes")
+            cursor.execute("DELETE FROM edges")
+            
+            nodes = workspace_data.get("nodes", {})
+            node_insert_data = [
+                (n_id, d.get("quote"), d.get("note"), d.get("color"), int(d.get("is_custom", 0)), 
+                 d.get("pdf_path"), d.get("page_num"), d.get("manual_font_size"),
+                 d.get("x"), d.get("y"), d.get("width"), d.get("height"))
+                for n_id, d in nodes.items()
+            ]
+            
+            cursor.executemany("""
                 INSERT INTO nodes (node_id, quote, note, color, is_custom, pdf_path, page_num, manual_font_size, x, y, width, height)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (n_id, d.get("quote"), d.get("note"), d.get("color"), int(d.get("is_custom", 0)), 
-                  d.get("pdf_path"), d.get("page_num"), d.get("manual_font_size"),
-                  d.get("x"), d.get("y"), d.get("width"), d.get("height")))
+            """, node_insert_data)
                   
-        edges = workspace_data.get("edges", [])
-        for e in edges:
-            cursor.execute("""
+            edges = workspace_data.get("edges", [])
+            edge_insert_data = [
+                (e.get("id"), e.get("source"), e.get("target"), e.get("label"), e.get("color"))
+                for e in edges
+            ]
+            
+            cursor.executemany("""
                 INSERT INTO edges (edge_id, source_id, target_id, label, color)
                 VALUES (?, ?, ?, ?, ?)
-            """, (e.get("id"), e.get("source"), e.get("target"), e.get("label"), e.get("color")))
+            """, edge_insert_data)
             
-        self._conn.commit()
+            self._conn.commit()
+        except sqlite3.Error as e:
+            self._conn.rollback()
+            print(f"Error saving workspace data: {e}")
 
     def set_active_file(self, filepath):
         self.active_file = filepath
@@ -175,10 +198,11 @@ class ProjectManager:
         try:
             for doc in self.open_docs.values():
                 if not doc.is_closed: doc.close()
-            self.open_docs = {}
-            self.dirty_docs = set()
+            self.open_docs.clear()
+            self.dirty_docs.clear()
             self.active_file = None
-        except Exception as e: print(f"Error clearing cache: {e}")
+        except Exception as e: 
+            print(f"Error clearing cache: {e}")
 
     def get_doc(self, filepath):
         try:
@@ -197,12 +221,7 @@ class ProjectManager:
     def _evict_old_docs(self):
         try:
             while len(self.open_docs) >= self.max_cache_size:
-                evict_candidate = None
-                for path in self.open_docs:
-                    if path != self.active_file:
-                        evict_candidate = path
-                        break
-                
+                evict_candidate = next((p for p in self.open_docs if p != self.active_file), None)
                 if not evict_candidate: break 
                     
                 doc = self.open_docs.pop(evict_candidate)

@@ -25,6 +25,8 @@ class HelpDialog(QDialog):
         self.tabs.addTab(self._build_ai_features_tab(), "🤖 AI Features")
         self.tabs.addTab(self._build_other_features_tab(), "🛠️ Other Features")
         self.tabs.addTab(self._build_ai_info_tab(), "ℹ️ AI Info")
+        self.tabs.addTab(self._build_workspace_tab(),"Workspace Help")
+        self.tabs.addTab(self._build_ai_tips_tab(),"AI Tips")
         
         # 2. Setup Bottom Bar (Checkbox and Close Button)
         bottom_layout = QHBoxLayout()
@@ -147,42 +149,70 @@ class HelpDialog(QDialog):
     def _build_ai_features_tab(self):
         scroll, layout = self._create_scrollable_tab()
         
-        self._add_section(layout, "Chat with your PDF", 
-                          "Use the <b>LLM Chat</b> tool to ask questions about your currently active PDF. "
-                          "The AI uses advanced retrieval to find exactly what you need.","gui/components/examples/highlight.gif")
+        self._add_section(layout, "LLM Chat","Use the LLM chat tab to ask your local AI model questions about the projectʻs PDFs. Select which PDFs you wish the LLM to pull from")
         
         self._add_section(layout, "AI Annotations", 
                           "The AI can automatically highlight important sections and attach intelligent "
-                          "notes directly to your document workspace.<br><br>"
-                          "<i>Tip: Try asking the AI to 'Summarize the main points and highlight them'.</i>")
+                          "notes directly to your document workspace. AI notes are specifically labeled as such to be properly double-checked<br><br>")
+        self._add_section(layout,"Organize Selected Nodes","LLM categorizes selected workspace nodes based on user-provided criteria. Creates and attaches new categories to pre-existing notes, helping organize thoughts")
+        self._add_section(layout,"Find New Connections","Searches for potential missed connections amongst selected notes, and automatically applies them. AI generated connections are explictly labeled to ensure double checking")
+        self._add_section(layout,"Generate Outline","Generates a potential paper outline based on your existing nodes and connections. Helps organize abstract thoughts and connections into solid outline")
+        self._add_section(layout,"Identify Weakpoints","Examines existing nodes and connections to understand argument being made. Then points out aspects of argument that donʻt have enough reliable annotations connected to them, and identifies other considerations to address")
+        self._add_section(layout,"Fill out Graph","Create an outline of your claims and reasoning, and the LLM will scan the documents to find specific quotations to support your reasoning.")
         
         # Example of how to add an image:
         # self._add_section(layout, "Visual Map", "Here is how the AI maps data.", media_path="gui/assets/ai_map.png")
         
         return scroll
-
+    def _build_workspace_tab(self):
+        scroll, layout = self._create_scrollable_tab()
+        self._add_section(layout,"Connect","Connect two nodes by using connect button, or selecting a note and right clicking the one you wish to connect it to")
+        self._add_section(layout,"Resize","Drag the corner box to automatically scale text and box")
+        self._add_section(layout,"Note Options","Hover over a note to view the full quote attached to it, change text size, change color, jump to quote in PDF, or to edit the note")
+        self._add_section(layout,"Zoom","Use the buttons in the workspace to zoom, or hold shift and scroll")
+        self._add_section(layout,"Select","Hold Shift and Drag to select multiple notes at once")
+        self._add_section(layout,"Line Options","Write click a line to change itʻs color, size, or text")
+        self._add_section(layout,"Filter by PDF","Use the filter by PDF dropdown menu to only show notes from selected PDFs. All AI features will only reference PDFs actively displayed in Workspace")
+        self._add_section(layout,"Color by PDF","Use the color by PDF button to automatically make notes color coordinated with their respective PDFs")
+        self._add_section(layout,"Export as Image","Export your current workspace, or selected nodes, as a png")
+        self._add_section(layout,"Declutter","Select Notes and click declutter to organize notes more cleanly")
+        self._add_section(layout,"Delete Node","Right click on selected node(s) to delete")
+        self._add_section(layout,"Use AI tool","Use the buttons in the toolbar, or right click selected nodes to use an AI tool. Refer to the AI features tab for an explanation of each tool")
+        return scroll
     def _build_other_features_tab(self):
         scroll, layout = self._create_scrollable_tab()
-        
+
+        self._add_section(layout,"Universal Search", "Use Control F to search across all PDFs in a project at once")
+        self._add_section(layout, "Note Consolidator", "View highlights across all documents in one location. Click on a note to jump to that PDF, change highlight color, or delete the note")
+        self._add_section(layout,"Workspace","Click Workspace Button in Notes tab to enter the Workspace. Move, resize, recolor, edit, and organize notes")
+        self._add_section(layout,"Diagram","Connect Annotations and Nodes to map out your thoughts")
         self._add_section(layout, "Built-in OCR", 
                           "Automatically detect scanned documents. When prompted by the yellow banner, "
                           "run them through our optical character recognition engine to make the text selectable.")
                           
-        self._add_section(layout, "Workspace Notes", 
-                          "Visualize your highlights and notes in an interactive graph layout in the Notes tab. "
-                          "Clicking on a note will automatically scroll you to its location in the document.")
+        self._add_section(layout, "Text to Speech", 
+                          "create your own audiobook for a given PDF. Choose desired page range, voice, and speed")
+        self._add_section(layout,"Custom Themes","Choose from preset themes, or create your own custom one")
+        self._add_section(layout,"Projects","Create multiple projects to keep seperate work seperate")
                           
         return scroll
+    
+    def _build_ai_tips_tab(self):
+        scroll, layout = self._create_scrollable_tab()
+        self._add_section(layout,"Indexing","AI tools wonʻt work until the project is indexed. Press the index button in the LLM tab to build an index, and rebuild the index whenever a new PDF is added. Only indexed PDFs will be accesible to the AI")
+        self._add_section(layout,"Use as a tool","Our tools run best when used as tools, rather than as replacements for critical thinking. AI features are more effective the more specific the prompt is. Asking it to summarize the main points will return a less helpful result than identifying a main point yourself and asking about that specifically")
+        self._add_section(layout,"Batch Searching","For large projects with many PDFs, prompting the AI with only some of the PDFs selected, and then reprompting with the others selected will ensure a more accurate response")
+        self._add_section(layout,"Model","Some models may be better at using our tools than others. The recommended model is Gemma4:e2b")
+        self._add_section(layout,"Double Check","AI can make mistakes and carry biases. Our tools attempt to mitigate both mistakes and biases by having the AI answer only based on user provided documents, but all AI output should still be double checked. All AI generated notes are explicity labeled as such to ensure they can be double checked")
+        return scroll
+
 
     def _build_ai_info_tab(self):
         scroll, layout = self._create_scrollable_tab()
         
-        self._add_section(layout, "Privacy & Data Handling", 
-                          "Our application prioritizes your privacy. Documents are processed and indexed locally. "
-                          "If connecting to a remote LLM API, only the specifically relevant text snippets are sent.")
+        self._add_section(layout, "100 percent offline", "All AI features run locally. No data is shared with third parties, all documents remain on device and protected")
                           
-        self._add_section(layout, "Model Configuration", 
-                          "You can connect to Local AI models via systems like Ollama for completely offline functionality, "
-                          "or use cloud APIs for higher performance reasoning.")
+        self._add_section(layout, "Environmentally Friendly", "Using LLMs like ChatGPT and Gemini requires large data centers that drive up power prices, cause environmental damage, and use large amounts of water. All features in this app run offline and without these data centers")
+        self._add_section(layout,"Assists Human Thinking","Many AI tools are designed to replace human thinking. All our tools are designed to assist in organizing thoughts and supporting arguments.")
                           
         return scroll

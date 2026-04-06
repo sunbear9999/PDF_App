@@ -50,14 +50,18 @@ class Edge(QGraphicsLineItem):
         return path
 
     def update_position(self):
-        start = self.source_node.sceneBoundingRect().center()
-        end = self.dest_node.sceneBoundingRect().center()
-        self.setLine(QLineF(start, end))
-        
-        center_x = (start.x() + end.x()) / 2
-        center_y = (start.y() + end.y()) / 2
-        text_rect = self.text_item.boundingRect()
-        self.text_item.setPos(center_x - text_rect.width() / 2, center_y - text_rect.height() / 2 - 10)
+        try:
+            self.prepareGeometryChange()
+            start = self.source_node.sceneBoundingRect().center()
+            end = self.dest_node.sceneBoundingRect().center()
+            self.setLine(QLineF(start, end))
+            
+            center_x = (start.x() + end.x()) / 2
+            center_y = (start.y() + end.y()) / 2
+            text_rect = self.text_item.boundingRect()
+            self.text_item.setPos(center_x - text_rect.width() / 2, center_y - text_rect.height() / 2 - 10)
+        except Exception:
+            pass
 
     def trigger_edit(self):
         view = self.scene().view if self.scene() and hasattr(self.scene(), 'view') else None
@@ -74,8 +78,6 @@ class Edge(QGraphicsLineItem):
 
     def trigger_color_change(self):
         view = self.scene().view if self.scene() and hasattr(self.scene(), 'view') else None
-        
-        # Explicitly set the view as the parent so the dialog cannot hide or be suppressed
         color = QColorDialog.getColor(self.base_color, view, "Select Line Color")
         
         if color.isValid():
@@ -101,7 +103,6 @@ class Edge(QGraphicsLineItem):
     def itemChange(self, change, value):
         if change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:
             if self.isSelected():
-                # Fix: Don't turn the line white! Keep the chosen color but make it thicker to show selection
                 self.setPen(QPen(self.base_color, self.weight + 2, Qt.PenStyle.SolidLine))
             else:
                 self.setPen(QPen(self.base_color, self.weight, Qt.PenStyle.SolidLine))
@@ -114,19 +115,17 @@ class InPlaceTextItem(QGraphicsTextItem):
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Return and not (event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
-            self.clearFocus() # This now safely triggers focusOutEvent to commit the save
+            self.clearFocus() 
             return
         super().keyPressEvent(event)
 
     def focusOutEvent(self, event):
-        # Automatically save text whenever the user clicks away or loses focus
         super().focusOutEvent(event)
         self.node.finish_in_place_edit()
 
 class ResizeHandle(QGraphicsRectItem):
     def __init__(self, parent):
         super().__init__(0, 0, 16, 16, parent)
-        # Make the grabber slightly more visible and obvious
         self.setBrush(QBrush(QColor(100, 100, 100, 255)))
         self.setPen(QPen(QColor(255, 255, 255, 200), 1))
         self.setCursor(Qt.CursorShape.SizeFDiagCursor)
@@ -142,9 +141,9 @@ class ResizeHandle(QGraphicsRectItem):
     def itemChange(self, change, value):
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange and not self._is_resizing:
             parent = self.parentItem()
-            if parent:
+            # BUG FIX: Ensure the automated hover expansion isn't misinterpreted as a user drag
+            if parent and not getattr(parent, '_ignore_resize', False):
                 self._is_resizing = True
-                # Sit exactly at the outer boundary, making value.x/y the direct width/height
                 new_w = max(50, value.x())
                 new_h = max(30, value.y())
                 parent.update_size(new_w, new_h)
@@ -160,7 +159,6 @@ class Node(QGraphicsRectItem):
         self.quote = quote if quote else ""
         self.note = note if note else ""
         
-        # If no color is provided, default to theme's panel color
         theme = ThemeManager().get_theme()
         if not color or color == "#333333":
             color = theme['bg_panel']
@@ -175,13 +173,13 @@ class Node(QGraphicsRectItem):
         self.base_width = width
         self.base_height = height
         self.is_hovered = False
+        self._ignore_resize = False # Added safety lock for dynamic hover expansions
         
         self.setBrush(QBrush(QColor(self.color)))
         self.setPen(QPen(QColor("#555555"), 2))
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges)
-        # Fix: Disable clipping so the resize handle can sit completely outside the main box
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemClipsChildrenToShape, False)
         self.setAcceptHoverEvents(True)
         
@@ -196,7 +194,7 @@ class Node(QGraphicsRectItem):
         
         btn_edit = QPushButton("✏️ Edit")
         btn_color = QPushButton("🎨 Color")
-        btn_font = QPushButton("📐 Size")
+        btn_font = QPushButton("🔠 Size")
         btn_connect = QPushButton("🔗 Connect")
         
         buttons = [btn_edit, btn_color, btn_font, btn_connect]
@@ -274,7 +272,8 @@ class Node(QGraphicsRectItem):
                 return self.manual_font_size, text
             return self.manual_font_size, self.truncate_to_fit(text, max_w, max_h, self.manual_font_size)
             
-        for size in range(24, 7, -1):
+        # BUG FIX: Cap the max font at 12 so short notes don't become massive
+        for size in range(12, 7, -1):
             if check_fit(text, size):
                 return size, text
                 
@@ -304,61 +303,72 @@ class Node(QGraphicsRectItem):
         return best if best else "..."
 
     def refresh_layout(self):
-        margin = 8
-        text_color = QColor(get_text_color_for_bg(self.color))
-        
-        expanded_text = ""
-        if self.note:
-            expanded_text += self.note
+        try:
+            self.prepareGeometryChange()
+            margin = 8
+            text_color = QColor(get_text_color_for_bg(self.color))
             
-        if self.quote and self.quote != self.note and not self.is_custom:
-            if expanded_text:
-                expanded_text += "\n\n"
-            expanded_text += f'"{self.quote}"'
-            
-        if not expanded_text.strip():
-            expanded_text = "[Empty Note]"
-            
-        collapsed_text = self.note if self.note else (f'"{self.quote}"' if self.quote else "[Empty Note]")
-            
-        if self.is_hovered:
-            needed_width = max(self.base_width, 320) 
-            self.text_item.setTextWidth(needed_width - (margin * 2))
-            
-            font_size = self.manual_font_size if self.manual_font_size else 12
-            self.text_item.setFont(QFont("Arial", font_size))
-            
-            self.text_item.setDefaultTextColor(text_color)
-            self.text_item.setPlainText(expanded_text)
-            
-            doc_height = self.text_item.document().size().height()
-            needed_height = max(self.base_height, doc_height + (margin * 2) + 35)
-            
-            self.setRect(0, 0, needed_width, needed_height)
-            self.proxy_toolbar.setPos(margin, needed_height - 30)
-            self.proxy_toolbar.show()
-            
-            # Note: We completely removed `self.resize_handle.hide()` here!
-            
-        else:
-            self.proxy_toolbar.hide()
-            self.setRect(0, 0, self.base_width, self.base_height)
-            
-            max_w = max(10, self.base_width - (margin * 2))
-            max_h = max(10, self.base_height - (margin * 2))
-            self.text_item.setTextWidth(max_w)
-            
-            best_size, fitted_text = self.calculate_best_fit(collapsed_text, max_w, max_h)
-            self.text_item.setFont(QFont("Arial", best_size, QFont.Weight.Bold))
-            self.text_item.setDefaultTextColor(text_color)
-            self.text_item.setPlainText(fitted_text)
-            
-        # Ensure the resize handle is ALWAYS visible, pegged diagonally outside the bottom right edge
-        self.resize_handle.show()
-        self.resize_handle.setPos(self.rect().width(), self.rect().height())
-        self.resize_handle.setZValue(10)
+            expanded_text = ""
+            if self.note: expanded_text += self.note
+                
+            if self.quote and self.quote != self.note and not self.is_custom:
+                if expanded_text: expanded_text += "\n\n"
+                expanded_text += f'"{self.quote}"'
+                
+            if not expanded_text.strip():
+                expanded_text = "[Empty Note]"
+                
+            collapsed_text = self.note if self.note else (f'"{self.quote}"' if self.quote else "[Empty Note]")
+                
+            if self.is_hovered:
+                needed_width = max(self.base_width, 320) 
+                max_w = needed_width - (margin * 2)
+                self.text_item.setTextWidth(max_w)
+                
+                font_size = self.manual_font_size if self.manual_font_size else 12
+                self.text_item.setFont(QFont("Arial", font_size))
+                
+                self.text_item.setDefaultTextColor(text_color)
+                self.text_item.setPlainText(expanded_text)
+                
+                doc_height = self.text_item.document().size().height()
+                needed_height = doc_height + (margin * 2) + 35
+                
+                self.setRect(0, 0, needed_width, needed_height)
+                self.proxy_toolbar.setPos(margin, needed_height - 30)
+                self.proxy_toolbar.show()
+                
+            else:
+                self.proxy_toolbar.hide()
+                
+                max_w = max(10, self.base_width - (margin * 2))
+                max_h = max(10, self.base_height - (margin * 2))
+                self.text_item.setTextWidth(max_w)
+                
+                best_size, fitted_text = self.calculate_best_fit(collapsed_text, max_w, max_h)
+                self.text_item.setFont(QFont("Arial", best_size, QFont.Weight.Bold))
+                self.text_item.setDefaultTextColor(text_color)
+                self.text_item.setPlainText(fitted_text)
+                
+                # BUG FIX: Shrink-wrap the bounding box to the actively displayed text height 
+                # so short notes don't have massive empty space covering the workspace.
+                actual_h = self.text_item.document().size().height() + (margin * 2)
+                final_h = max(30, min(self.base_height, actual_h))
+                
+                self.setRect(0, 0, self.base_width, final_h)
+                
+            # BUG FIX: Safely lock the resize handler so moving it here programmatically
+            # doesn't trick it into saving the hovered dimensions as permanent
+            self._ignore_resize = True
+            self.resize_handle.show()
+            self.resize_handle.setPos(self.rect().width(), self.rect().height())
+            self._ignore_resize = False
+            self.resize_handle.setZValue(10)
+        except Exception as e:
+            print(f"Error refreshing layout for Node {self.node_id}: {e}")
 
     def update_size(self, width, height):
+        self.prepareGeometryChange()
         self.base_width = width
         self.base_height = height
         self.refresh_layout()
@@ -381,18 +391,22 @@ class Node(QGraphicsRectItem):
         super().hoverLeaveEvent(event)
 
     def itemChange(self, change, value):
-        if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
-            for edge in self.edges:
-                edge.update_position()
-            if self.scene() and hasattr(self.scene(), 'view'):
-                self.scene().view.main_window.project_manager.mark_dirty("workspace")
-        elif change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:
-            if self.isSelected():
-                self.setPen(QPen(QColor("#ffffff"), 4))
-                self.setZValue(150) 
-            else:
-                self.setPen(QPen(QColor("#555555"), 2))
-                self.setZValue(1 if not self.is_hovered else 100)
+        try:
+            if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
+                if self.scene(): 
+                    for edge in self.edges:
+                        edge.update_position()
+                if self.scene() and hasattr(self.scene(), 'view'):
+                    self.scene().view.main_window.project_manager.mark_dirty("workspace")
+            elif change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:
+                if self.isSelected():
+                    self.setPen(QPen(QColor("#ffffff"), 4))
+                    self.setZValue(150) 
+                else:
+                    self.setPen(QPen(QColor("#555555"), 2))
+                    self.setZValue(1 if not self.is_hovered else 100)
+        except Exception:
+            pass
         return super().itemChange(change, value)
 
     def trigger_connect(self):
@@ -408,7 +422,6 @@ class Node(QGraphicsRectItem):
         self.text_item.setFocus()
 
     def finish_in_place_edit(self):
-        # Guard clause: Prevents saving logic from firing twice if multiple events close the editor
         if not (self.text_item.textInteractionFlags() & Qt.TextInteractionFlag.TextEditorInteraction):
             return
             
