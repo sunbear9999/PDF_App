@@ -16,6 +16,8 @@ from gui.tabs.tts_tab import TTSTab
 from gui.tabs.llm_tab import LLMTab
 from gui.tabs.notes_tab import NotesTab
 from gui.theme import ThemeManager
+from gui.components.help_dialog import HelpDialog
+
 
 class PreloadWorker(QThread):
     def __init__(self, llm_manager, model, parent=None):
@@ -64,6 +66,14 @@ class MainWindow(QMainWindow):
             self._load_project(last_project)
 
         QTimer.singleShot(1500, self._trigger_background_preload)
+        if self.settings.value("show_help_on_startup", True, type=bool):
+            # Use a short timer so the main window finishes rendering before the dialog pops up
+            QTimer.singleShot(500, self.show_help_window)
+            
+    def show_help_window(self):
+        # We keep a reference to it so it doesn't get garbage collected
+        self.help_dialog = HelpDialog(self)
+        self.help_dialog.show()
 
     def _trigger_background_preload(self):
         try:
@@ -137,6 +147,10 @@ class MainWindow(QMainWindow):
         self.btn_edit_theme.clicked.connect(lambda: self.theme_manager.edit_custom_theme(self))
         menu_layout.addWidget(self.btn_edit_theme)
         
+        menu_layout.addSpacing(15)
+        self.btn_help = QPushButton("❓ Help")
+        self.btn_help.clicked.connect(self.show_help_window)
+        menu_layout.addWidget(self.btn_help)
         menu_layout.addSpacing(15)
 
         self.tool_group = QButtonGroup(self)
