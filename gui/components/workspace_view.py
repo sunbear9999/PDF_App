@@ -323,6 +323,7 @@ class WorkspaceView(QGraphicsView):
         tb_layout.addWidget(self.btn_export)
 
         self.btn_ai_tools = QPushButton("🤖 AI Tools")
+        self.ai_tools_locked = False
         self.ai_menu = self.create_ai_menu(self.btn_ai_tools)
         self.btn_ai_tools.setMenu(self.ai_menu)
         tb_layout.addWidget(self.btn_ai_tools)
@@ -348,7 +349,12 @@ class WorkspaceView(QGraphicsView):
         action_identify_weakpoints.triggered.connect(self.trigger_identify_weakpoints)
         action_fill_graph.triggered.connect(self.trigger_fill_graph)
         action_consolidate.triggered.connect(self.trigger_consolidate_notes)
-        
+
+        if self.ai_tools_locked:
+            for action in [action_categorize, action_find_connections, action_generate_outline, action_identify_weakpoints, action_fill_graph, action_consolidate]:
+                action.setEnabled(False)
+            menu.setTitle("🤖 AI Tools (Indexing...)" )
+            menu.setEnabled(False)
         return menu
 
     def update_theme(self, theme):
@@ -374,6 +380,18 @@ class WorkspaceView(QGraphicsView):
                 QMenu::item:selected {{ background-color: {theme['accent']}; color: #ffffff; }}
                 QMenu::item:disabled {{ color: {theme['text_muted']}; }}
             """)
+
+    def lock_ai_tools(self):
+        if hasattr(self, 'btn_ai_tools') and self.btn_ai_tools:
+            self.ai_tools_locked = True
+            self.btn_ai_tools.setEnabled(False)
+            self.btn_ai_tools.setText("⏳ AI Indexing...")
+
+    def unlock_ai_tools(self):
+        if hasattr(self, 'btn_ai_tools') and self.btn_ai_tools:
+            self.ai_tools_locked = False
+            self.btn_ai_tools.setEnabled(True)
+            self.btn_ai_tools.setText("🤖 AI Tools")
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

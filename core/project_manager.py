@@ -1,6 +1,6 @@
-# core/project_manager.py
 import sqlite3
 import json
+import logging
 import os
 import fitz
 
@@ -26,6 +26,7 @@ class ProjectManager:
             
             cursor.execute('''CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT)''')
             cursor.execute('''CREATE TABLE IF NOT EXISTS pdfs (path TEXT PRIMARY KEY)''')
+            cursor.execute('''CREATE TABLE IF NOT EXISTS document_maps (pdf_path TEXT PRIMARY KEY, json_map TEXT)''')
             cursor.execute('''CREATE TABLE IF NOT EXISTS nodes (
                 node_id TEXT PRIMARY KEY, quote TEXT, note TEXT, color TEXT, 
                 is_custom INTEGER, pdf_path TEXT, page_num INTEGER, 
@@ -118,6 +119,46 @@ class ProjectManager:
                     print(f"Error adding PDF to DB: {e}")
             return True
         return False
+
+    def save_document_map(self, pdf_path, json_map_str):
+        if not self._conn or not pdf_path:
+            return False
+        try:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                "INSERT OR REPLACE INTO document_maps (pdf_path, json_map) VALUES (?, ?)",
+                (pdf_path, json_map_str)
+            )
+            self._conn.commit()
+            return True
+        except sqlite3.Error as e:
+            print(f"Error saving document map for {pdf_path}: {e}")
+            return False
+
+    def get_document_map(self, pdf_path):
+        if not self._conn or not pdf_path:
+            return None
+        try:
+            cursor = self._conn.cursor()
+            cursor.execute("SELECT json_map FROM document_maps WHERE pdf_path = ?", (pdf_path,))
+            row = cursor.fetchone()
+            return row[0] if row else None
+        except sqlite3.Error as e:
+            print(f"Error reading document map for {pdf_path}: {e}")
+            return None
+
+    def get_unmapped_pdfs(self):
+        if not self._conn:
+            return []
+        try:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                "SELECT p.path FROM pdfs p LEFT JOIN document_maps m ON p.path = m.pdf_path WHERE m.pdf_path IS NULL"
+            )
+            return [row[0] for row in cursor.fetchall()]
+        except sqlite3.Error as e:
+            print(f"Error querying unmapped PDFs: {e}")
+            return []
 
     def get_workspace_data(self):
         if not self._conn: return {"nodes": {}, "edges": []}

@@ -10,6 +10,7 @@ from PyQt6.QtGui import QShortcut, QKeySequence
 from PyQt6.QtCore import Qt, QSettings, QTimer, QThread
 
 from core.project_manager import ProjectManager
+from core.ai_indexing_worker import AIIndexingWorker
 from gui.components.pdf_viewer import PDFViewer
 from gui.tabs.ocr_tab import OCRTab
 from gui.tabs.tts_tab import TTSTab
@@ -37,6 +38,7 @@ class MainWindow(QMainWindow):
         
         self.theme_manager = ThemeManager()
         self.project_manager = ProjectManager()
+        self.ai_indexing_worker = None
         self.current_file_path = None
         self.settings = QSettings("PDFMultitool", "Workspace")
 
@@ -46,10 +48,24 @@ class MainWindow(QMainWindow):
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
 
+        self.status_bar = self.statusBar()
+        self.status_bar.show()
+        self.status_bar.setVisible(True)
+        self.status_bar.setStyleSheet("padding: 4px 8px;")
+        self.indexing_status_label = QLabel("")
+        self.indexing_status_label.setStyleSheet("font-weight: bold; color: #ffaa00;")
+        self.indexing_status_label.setVisible(False)
+        self.status_bar.addPermanentWidget(self.indexing_status_label)
+        self.indexing_in_progress = False
+        self.status_bar.showMessage("Ready")
+        self.argument_map_banner = None
+        self.btn_generate_argument_map = None
+
         self.viewer = PDFViewer()
 
         self._build_top_menu()
         self._build_ocr_banner()
+        self._build_argument_map_banner()
         self._build_workspace()
         self._setup_shortcuts()
         
@@ -84,6 +100,83 @@ class MainWindow(QMainWindow):
             self.preload_worker.start()
         except Exception as e:
             print(f"Could not trigger preload: {e}")
+
+    def _show_indexing_status(self, message):
+        print(f"[DEBUG] Status update: {message}")
+        if not message:
+            return
+
+        if self.indexing_in_progress:
+            self.indexing_status_label.setText(message)
+            self.indexing_status_label.setVisible(True)
+        if hasattr(self, 'status_bar') and self.status_bar:
+            self.status_bar.showMessage(message, 0)
+        else:
+            self.statusBar().showMessage(message, 0)
+
+    def start_background_indexing(self, pdf_paths=None):
+        print("[DEBUG] start_background_indexing called")
+        if getattr(self, 'ai_indexing_worker', None) and self.ai_indexing_worker.isRunning():
+            print("[DEBUG] AI indexing worker already running")
+            return
+
+        if not self.project_manager.project_filepath:
+            print("[DEBUG] No project filepath set")
+            return
+
+        if pdf_paths:
+            queue = pdf_paths
+        else:
+            queue = self.project_manager.get_unmapped_pdfs()
+
+        if not queue:
+            self._show_indexing_status("✅ No PDFs selected for GraphRAG indexing.")
+            return
+
+        self.indexing_in_progress = True
+        self.indexing_status_label.setVisible(True)
+        model_name = self.tabs["LLM Chat"].model_combo.currentText()
+        print(f"[DEBUG] Starting AIIndexingWorker with model={model_name}, filepath={self.project_manager.project_filepath}, pdf_paths={queue}")
+        self.ai_indexing_worker = AIIndexingWorker(
+            self.tabs["LLM Chat"].llm_manager,
+            model_name,
+            self.project_manager.project_filepath,
+            pdf_paths=queue,
+            parent=self
+        )
+        self.ai_indexing_worker.progress.connect(self._show_indexing_status)
+        self.ai_indexing_worker.pdf_mapped.connect(lambda path: self._show_indexing_status(f"Mapped: {os.path.basename(path)}"))
+        self.ai_indexing_worker.finished_all.connect(self._on_indexing_finished)
+
+        if "Workspace" in self.tabs:
+            self.tabs["Workspace"].lock_ai_tools()
+            print("[DEBUG] Locked workspace AI tools")
+
+        if hasattr(self, 'status_bar'):
+            print("[DEBUG] Using status_bar for messages")
+        else:
+            print("[DEBUG] status_bar attribute missing")
+
+        self._show_indexing_status("⏳ Background AI indexing started...")
+        if "LLM Chat" in self.tabs and hasattr(self.tabs["LLM Chat"], 'lock_llm_tools'):
+            self.tabs["LLM Chat"].lock_llm_tools()
+        self.ai_indexing_worker.start()
+
+    def _on_indexing_finished(self, success, msg):
+        print(f"[DEBUG] _on_indexing_finished called success={success} msg={msg}")
+        if success:
+            self._show_indexing_status("✅ Background AI indexing complete.")
+        else:
+            self._show_indexing_status(f"❌ Background AI indexing failed: {msg}")
+
+        self.indexing_in_progress = False
+        self.indexing_status_label.setVisible(False)
+
+        if "Workspace" in self.tabs:
+            self.tabs["Workspace"].unlock_ai_tools()
+            print("[DEBUG] Unlocked workspace AI tools")
+        if "LLM Chat" in self.tabs and hasattr(self.tabs["LLM Chat"], 'unlock_llm_tools'):
+            self.tabs["LLM Chat"].unlock_llm_tools()
 
     def _setup_shortcuts(self):
         QShortcut(QKeySequence("Ctrl+="), self).activated.connect(self.viewer.zoom_in)
@@ -306,6 +399,7 @@ class MainWindow(QMainWindow):
             self.project_manager.add_pdf(path)
             
         if file_paths:
+            print(f"[DEBUG] Added PDFs: {file_paths}")
             self._refresh_pdf_dropdown()
             self.switch_to_pdf(file_paths[-1])
 
@@ -341,6 +435,7 @@ class MainWindow(QMainWindow):
             success = self.viewer.load_document(doc)
             if success:
                 self._check_needs_ocr()
+                self._check_needs_argument_map()
                 self._sync_tools_with_file(pdf_path)
             else:
                 QMessageBox.warning(self, "Error", "Failed to load the PDF document.")
@@ -468,11 +563,48 @@ class MainWindow(QMainWindow):
         self.main_layout.addWidget(self.ocr_banner)
         self.ocr_banner.hide()
 
+    def _build_argument_map_banner(self):
+        self.argument_map_banner = QFrame()
+        self.argument_map_banner.setFixedHeight(50)
+        banner_layout = QHBoxLayout(self.argument_map_banner)
+        banner_layout.setContentsMargins(20, 0, 10, 0)
+        self.lbl_argument_map_banner = QLabel(
+            "🧠 This PDF has no argument map. Generate one now — it takes about a minute and greatly improves LLM results."
+        )
+        banner_layout.addWidget(self.lbl_argument_map_banner)
+        banner_layout.addStretch()
+        self.btn_generate_argument_map_banner = QPushButton("Generate Argument Map")
+        self.btn_generate_argument_map_banner.setStyleSheet("background-color: white; color: black; border: none;")
+        self.btn_generate_argument_map_banner.clicked.connect(self._trigger_argument_map_generation)
+        banner_layout.addWidget(self.btn_generate_argument_map_banner)
+        btn_dismiss = QPushButton("Dismiss")
+        btn_dismiss.setStyleSheet("background-color: transparent; border: 1px solid #1e1e1e; color: #1e1e1e;")
+        btn_dismiss.clicked.connect(self.argument_map_banner.hide)
+        banner_layout.addWidget(btn_dismiss)
+        self.main_layout.addWidget(self.argument_map_banner)
+        self.argument_map_banner.hide()
+
     def _build_workspace(self):
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.main_layout.addWidget(self.splitter, 1)
 
-        self.splitter.addWidget(self.viewer)
+        self.viewer_container = QWidget()
+        viewer_layout = QHBoxLayout(self.viewer_container)
+        viewer_layout.setContentsMargins(0, 0, 0, 0)
+        viewer_layout.addWidget(self.viewer)
+
+        self.side_action_panel = QWidget()
+        side_layout = QVBoxLayout(self.side_action_panel)
+        side_layout.setContentsMargins(10, 10, 10, 10)
+        side_layout.setSpacing(8)
+        self.btn_generate_argument_map_side = QPushButton("Generate Argument Map")
+        self.btn_generate_argument_map_side.clicked.connect(self._trigger_argument_map_generation)
+        self.btn_generate_argument_map_side.hide()
+        side_layout.addWidget(self.btn_generate_argument_map_side)
+        side_layout.addStretch()
+        viewer_layout.addWidget(self.side_action_panel)
+
+        self.splitter.addWidget(self.viewer_container)
 
         self.tool_panel = QStackedWidget()
         
@@ -482,8 +614,11 @@ class MainWindow(QMainWindow):
             "Audio (TTS)": TTSTab(self.tool_panel, self),
             "LLM Chat": LLMTab(self.tool_panel, self)
         }
+        self.tabs["Workspace"] = self.tabs["Notes"].workspace_view
         
-        for tab in self.tabs.values():
+        for name, tab in self.tabs.items():
+            if name == "Workspace":
+                continue
             self.tool_panel.addWidget(tab)
             
         self.splitter.addWidget(self.tool_panel)
@@ -509,10 +644,37 @@ class MainWindow(QMainWindow):
                 self.ocr_banner.show()
         except: pass
 
+    def _check_needs_argument_map(self):
+        if not self.current_file_path:
+            self.argument_map_banner.hide()
+            if hasattr(self, 'btn_generate_argument_map_side'):
+                self.btn_generate_argument_map_side.hide()
+            return
+
+        has_map = self.project_manager.get_document_map(self.current_file_path) is not None
+        if has_map:
+            self.argument_map_banner.hide()
+            if hasattr(self, 'btn_generate_argument_map_side'):
+                self.btn_generate_argument_map_side.hide()
+        else:
+            self.argument_map_banner.show()
+            if hasattr(self, 'btn_generate_argument_map_side'):
+                self.btn_generate_argument_map_side.show()
+
     def _trigger_auto_ocr(self):
         self.ocr_banner.hide()
         self.tool_buttons["OCR"].setChecked(True)
         self.toggle_tool_panel("OCR")
+
+    def _trigger_argument_map_generation(self):
+        if not self.current_file_path:
+            return
+
+        self.argument_map_banner.hide()
+        if hasattr(self, 'btn_generate_argument_map_side'):
+            self.btn_generate_argument_map_side.hide()
+
+        self.start_background_indexing([self.current_file_path])
 
     def _sync_tools_with_file(self, file_path):
         self.tabs["Notes"].refresh_notes()

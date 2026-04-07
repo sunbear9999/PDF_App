@@ -28,7 +28,7 @@ class ChatWorker(QThread):
     chat_completed = pyqtSignal(str)
     agent_update = pyqtSignal(str)
     
-    def __init__(self, llm, question, model, allowed_docs, use_agents, rag_enabled=True, custom_system_prompt=None, existing_highlights=None, parent=None):
+    def __init__(self, llm, question, model, allowed_docs, use_agents, rag_enabled=True, document_map=None, custom_system_prompt=None, existing_highlights=None, parent=None):
         super().__init__(parent)
         self.llm = llm
         self.question = question
@@ -36,6 +36,7 @@ class ChatWorker(QThread):
         self.allowed_docs = allowed_docs
         self.use_agents = use_agents
         self.rag_enabled = rag_enabled
+        self.document_map = document_map
         self.custom_system_prompt = custom_system_prompt
         self.existing_highlights = existing_highlights or []
         
@@ -70,15 +71,31 @@ class ChatWorker(QThread):
                     self.token_received.emit(line + '\n')
 
         try:
+            if hasattr(self.llm, 'route_query_intent'):
+                intent = self.llm.route_query_intent(self.model, self.question)
+            else:
+                intent = "LOGICAL_ANALYSIS"
+
+            if intent == "GENERAL_CHAT":
+                self.rag_enabled = False
+                self.agent_update.emit("Routing query to general chat mode...")
+            elif intent == "FACT_RETRIEVAL":
+                self.rag_enabled = True
+                self.agent_update.emit("Routing query to fact retrieval mode...")
+            else:
+                self.rag_enabled = True
+                self.agent_update.emit("Routing query to logical analysis mode...")
+
             self.llm.query(
-                self.question, 
-                self.model, 
-                allowed_docs=self.allowed_docs, 
-                callback=handle_chunk, 
+                self.question,
+                self.model,
+                allowed_docs=self.allowed_docs,
+                callback=handle_chunk,
                 rag_enabled=self.rag_enabled,
                 use_agents=self.use_agents,
                 custom_system_prompt=self.custom_system_prompt,
-                existing_highlights=self.existing_highlights
+                existing_highlights=self.existing_highlights,
+                document_map=self.document_map
             )
         except Exception as e:
             handle_chunk(f"\n[System Error: {str(e)}]")
@@ -95,6 +112,7 @@ class LLMTab(QWidget):
         self.llm_manager = LocalLLMManager() 
         self.current_existing_quotes = []
         self.theme = None
+        self.llm_tools_locked = False
         
         layout = QVBoxLayout(self)
         
@@ -164,6 +182,9 @@ class LLMTab(QWidget):
                 item.setCheckState(Qt.CheckState.Checked) 
                 self.pdf_list.addItem(item)
                 
+        if self.llm_tools_locked:
+            return
+
         proj_path = self.main_window.project_manager.project_filepath
         if proj_path and hasattr(self, 'llm_manager'):
             self.llm_manager.set_project_database(proj_path)
@@ -185,6 +206,28 @@ class LLMTab(QWidget):
             if hasattr(self.main_window, '_trigger_background_preload'):
                 self.main_window._trigger_background_preload()
 
+    def lock_llm_tools(self):
+        self.llm_tools_locked = True
+        self.btn_index.setEnabled(False)
+        self.btn_refresh_models.setEnabled(False)
+        self.send_btn.setEnabled(False)
+        self.chat_input.setEnabled(False)
+        self.agent_checkbox.setEnabled(False)
+        self.status_lbl.setText("⏳ AI indexing in progress — chat disabled until complete.")
+        warn_color = self.theme['warning'] if self.theme else "#ffaa00"
+        self.status_lbl.setStyleSheet(f"font-weight: bold; color: {warn_color}; font-size: 14px;")
+
+    def unlock_llm_tools(self):
+        self.llm_tools_locked = False
+        self.btn_index.setEnabled(True)
+        self.btn_refresh_models.setEnabled(True)
+        self.send_btn.setEnabled(True)
+        self.chat_input.setEnabled(True)
+        self.agent_checkbox.setEnabled(True)
+        self.status_lbl.setText("🟢 Status: Ready")
+        suc_color = self.theme['success'] if self.theme else "#00cc66"
+        self.status_lbl.setStyleSheet(f"font-weight: bold; color: {suc_color}; font-size: 14px;")
+
     def start_indexing(self):
         paths_to_index = self.main_window.project_manager.pdfs
         if not paths_to_index:
@@ -192,6 +235,7 @@ class LLMTab(QWidget):
             return
             
         self.btn_index.setEnabled(False)
+        self.btn_refresh_models.setEnabled(False)
         self.idx_worker = IndexWorker(self.llm_manager, paths_to_index, parent=self)
         self.idx_worker.progress.connect(self._update_index_progress)
         self.idx_worker.finished_indexing.connect(self._on_index_complete)
@@ -202,6 +246,7 @@ class LLMTab(QWidget):
 
     def _on_index_complete(self, success, error_msg):
         self.btn_index.setEnabled(True)
+        self.btn_refresh_models.setEnabled(True)
         if success:
             self.status_lbl.setText("🟢 Status: Ready (Indexed to Vector DB)")
             color = self.theme['success'] if self.theme else "#00cc66"
@@ -212,6 +257,9 @@ class LLMTab(QWidget):
             self.status_lbl.setStyleSheet(f"font-weight: bold; color: {color}; font-size: 14px;")
 
     def send_message(self):
+        if self.llm_tools_locked:
+            QMessageBox.warning(self, "AI Indexing", "AI chat is temporarily disabled while background indexing is running.")
+            return
         user_text = self.chat_input.text().strip()
         if not user_text: return
         
@@ -259,6 +307,26 @@ class LLMTab(QWidget):
         
         model = self.model_combo.currentText()
         
+        active_pdf = None
+        if allowed_paths:
+            active_pdf = allowed_paths[0]
+        elif self.main_window.current_file_path:
+            active_pdf = self.main_window.current_file_path
+
+        document_map = None
+        missing_argument_map_note = False
+        if active_pdf:
+            document_map = self.main_window.project_manager.get_document_map(active_pdf)
+            if not document_map:
+                missing_argument_map_note = True
+
+        if missing_argument_map_note and use_agents:
+            self.status_lbl.setText(
+                "⚠️ No argument map exists for the active PDF. Using standard agentic RAG; generate one to improve future reasoning."
+            )
+            warn_color = self.theme['warning'] if self.theme else "#ffaa00"
+            self.status_lbl.setStyleSheet(f"font-weight: bold; color: {warn_color}; font-size: 14px;")
+
         self.chat_worker = ChatWorker(
             self.llm_manager, 
             user_text,
@@ -266,6 +334,7 @@ class LLMTab(QWidget):
             allowed_docs, 
             use_agents, 
             rag_enabled=True,
+            document_map=document_map,
             custom_system_prompt=None,
             existing_highlights=existing_quotes,
             parent=self

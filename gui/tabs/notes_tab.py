@@ -216,8 +216,11 @@ class NotesTab(QWidget):
 
     def toggle_view(self):
         try:
-            if self.stack.currentIndex() == 0:
-                self.stack.setCurrentIndex(1)
+            current_widget = self.stack.currentWidget()
+            print(f"[DEBUG] toggle_view current={current_widget} target={'workspace' if current_widget is self.list_view_widget else 'list'}")
+
+            if current_widget is self.list_view_widget:
+                self.stack.setCurrentWidget(self.workspace_view)
                 self.btn_toggle_view.setText("Switch to List")
                 self.btn_add_bubble.show()
                 self.btn_undo.show()
@@ -227,10 +230,10 @@ class NotesTab(QWidget):
                 self.btn_help.show()
                 self.scope_combo.hide()
                 self.update_undo_redo_buttons()
-                self._sync_workspace()
+                QTimer.singleShot(0, self._sync_workspace)
             else:
-                self.save_workspace_state() 
-                self.stack.setCurrentIndex(0)
+                self.save_workspace_state()
+                self.stack.setCurrentWidget(self.list_view_widget)
                 self.btn_toggle_view.setText("Switch to Workspace")
                 self.btn_add_bubble.hide()
                 self.btn_undo.hide()
@@ -239,7 +242,7 @@ class NotesTab(QWidget):
                 self.btn_zoom_out.hide()
                 self.btn_help.hide()
                 self.scope_combo.show()
-                self.refresh_notes()
+                QTimer.singleShot(0, self.refresh_notes)
         except Exception as e:
             print(f"Error toggling view: {e}")
 
@@ -278,11 +281,14 @@ class NotesTab(QWidget):
 
     def _sync_workspace(self):
         try:
-            if not self.main_window.project_manager.project_filepath: return
+            print("[DEBUG] _sync_workspace called")
+            if not self.main_window.project_manager.project_filepath:
+                print("[DEBUG] _sync_workspace no project filepath")
+                return
             
             workspace_data = self.main_window.project_manager.get_workspace_data()
             all_annots = self._get_all_project_annotations_for_workspace()
-            
+            print(f"[DEBUG] _sync_workspace loaded workspace_data nodes={len(workspace_data.get('nodes', {}))} annots={len(all_annots)}")
             self.workspace_view.sync_with_project(workspace_data, all_annots)
         except Exception as e:
             print(f"Error syncing workspace: {e}")

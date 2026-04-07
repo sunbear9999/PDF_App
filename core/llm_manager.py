@@ -109,6 +109,80 @@ class LocalLLMManager:
         # Fallback sequentially if the user has an older version of Ollama without /api/embed
         return [self.get_embedding(t) for t in texts]
 
+    def generate_response(self, prompt, selected_model, system_prompt=None, stream=False, options=None):
+        if not selected_model:
+            raise ValueError("No model specified for generation.")
+
+        payload = {
+            "model": selected_model,
+            "prompt": prompt,
+            "stream": stream,
+            "keep_alive": "60m"
+        }
+
+        if system_prompt:
+            payload["system"] = system_prompt
+
+        if options:
+            payload["options"] = options
+
+        try:
+            if stream:
+                with requests.post(f"{self.api_base}/generate", json=payload, stream=True, timeout=(15, 600)) as response:
+                    if response.status_code != 200:
+                        raise Exception(response.text)
+                    full_response = ""
+                    for line in response.iter_lines():
+                        if line:
+                            chunk = json.loads(line)
+                            if "error" in chunk:
+                                raise Exception(chunk["error"])
+                            full_response += chunk.get("response", "")
+                    return full_response
+            else:
+                response = requests.post(f"{self.api_base}/generate", json=payload, timeout=(15, 600))
+                if response.status_code == 200:
+                    return response.json().get("response", "")
+                raise Exception(f"Ollama API Error ({response.status_code}): {response.text}")
+        except Exception as e:
+            print(f"[System] Generation failed: {e}")
+            return ""
+
+    def route_query_intent(self, model_name, user_prompt):
+        if not model_name or not user_prompt:
+            return "LOGICAL_ANALYSIS"
+
+        system_prompt = (
+            "You are a query classification assistant. Classify the user's prompt into exactly one of these categories: "
+            "FACT_RETRIEVAL, LOGICAL_ANALYSIS, or GENERAL_CHAT. Output only the category name, with no explanation."
+        )
+
+        classification_prompt = (
+            "USER PROMPT:\n" + user_prompt + "\n\n" 
+            "Respond with exactly one category: FACT_RETRIEVAL, LOGICAL_ANALYSIS, or GENERAL_CHAT."
+        )
+
+        try:
+            raw = self.generate_response(classification_prompt, model_name, system_prompt=system_prompt, stream=False)
+            if not raw:
+                return "LOGICAL_ANALYSIS"
+
+            candidate = raw.strip().upper()
+            for category in ["FACT_RETRIEVAL", "LOGICAL_ANALYSIS", "GENERAL_CHAT"]:
+                if candidate.startswith(category) or f" {category} " in candidate or candidate == category:
+                    return category
+
+            if "GENERAL" in candidate or "CHAT" in candidate:
+                return "GENERAL_CHAT"
+            if "FACT" in candidate or "RETRIEVAL" in candidate:
+                return "FACT_RETRIEVAL"
+            if "LOGICAL" in candidate or "ANALYSIS" in candidate:
+                return "LOGICAL_ANALYSIS"
+        except Exception:
+            pass
+
+        return "LOGICAL_ANALYSIS"
+
     def index_documents(self, pdf_paths, progress_callback=None):
         if not self.collection:
             raise Exception("Vector Database not initialized. Please save the project first.")
@@ -189,7 +263,7 @@ class LocalLLMManager:
             progress_callback("Releasing embedding model from memory...")
         self.unload_all_models()
 
-    def query(self, question, selected_model, allowed_docs=None, callback=None, rag_enabled=True, use_agents=True, custom_system_prompt=None, existing_highlights=None):
+    def query(self, question, selected_model, allowed_docs=None, callback=None, rag_enabled=True, use_agents=True, custom_system_prompt=None, existing_highlights=None, document_map=None):
         context = ""
         system_prompt = ""
         
@@ -321,6 +395,8 @@ class LocalLLMManager:
                 context_pieces = [f"--- DOCUMENT: {d['doc_name']} | PAGE {d['page'] + 1} ---\n{d['text']}" for d in sorted_docs]
 
                 context = "\n\n".join(context_pieces)
+                if document_map:
+                    context = f"DOCUMENT LOGIC MAP:\n{document_map}\n\n{context}"
 
                 # Explicitly inject the strictly valid document names to prevent name hallucinations
                 available_docs_list = list(set([d['doc_name'] for d in sorted_docs]))
