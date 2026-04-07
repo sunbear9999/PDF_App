@@ -3,6 +3,7 @@ import pytesseract
 from PIL import Image
 import io
 import os
+import gc  # [PERF FIX] Garbage collection for memory management
 
 def run_ocr_on_pdf(pdf_path, mode="text", save_path=None, progress_callback=None):
     """
@@ -27,6 +28,9 @@ def run_ocr_on_pdf(pdf_path, mode="text", save_path=None, progress_callback=None
             pix = page.get_pixmap(matrix=mat)
             
             img_data = pix.tobytes("png")
+            # [PERF FIX] Explicitly free pixmap memory immediately
+            del pix
+            
             img = Image.open(io.BytesIO(img_data))
             
             if mode == "text":
@@ -41,6 +45,12 @@ def run_ocr_on_pdf(pdf_path, mode="text", save_path=None, progress_callback=None
                 
                 # Still grab the text for the UI preview
                 full_text += pytesseract.image_to_string(img) + "\n"
+            
+            # [PERF FIX] Clean up image data and trigger garbage collection periodically
+            del img
+            del img_data
+            if page_num % 5 == 0:  # Every 5 pages
+                gc.collect()
 
         doc.close()
 
@@ -48,6 +58,9 @@ def run_ocr_on_pdf(pdf_path, mode="text", save_path=None, progress_callback=None
             out_pdf.save(save_path)
             out_pdf.close()
 
+        # [PERF FIX] Final garbage collection
+        gc.collect()
+        
         return full_text
 
     except Exception as e:

@@ -2,6 +2,7 @@
 import os
 import uuid
 import json
+import weakref  # [PERF FIX] Avoid circular references
 from PyQt6.QtWidgets import (QGraphicsView, QGraphicsScene, QMenu, QMessageBox, 
                              QInputDialog, QFrame, QLabel, QVBoxLayout,
                              QHBoxLayout, QComboBox, QPushButton, QDialog,
@@ -276,7 +277,8 @@ class WorkspaceView(QGraphicsView):
         self.main_window = main_window
         self.scene_obj = QGraphicsScene(self)
         self.setScene(self.scene_obj)
-        self.scene_obj.view = self 
+        # [PERF FIX] Use weakref.proxy to avoid circular reference: scene -> view -> main_window -> scene
+        self.scene_obj.view = weakref.proxy(self)
         
         self.scene_obj.setSceneRect(-100000, -100000, 200000, 200000)
         

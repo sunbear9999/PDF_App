@@ -1,6 +1,7 @@
 # gui/components/annotation_manager.py
 import fitz
 import uuid
+import weakref  # [PERF FIX] Avoid circular references
 from PyQt6.QtWidgets import QGraphicsRectItem, QInputDialog, QWidget, QMenu, QDialog, QVBoxLayout, QTextEdit, QPushButton
 from PyQt6.QtGui import QColor, QBrush, QPen, QAction, QTextCursor
 from PyQt6.QtCore import Qt, QRectF, QObject, pyqtSignal, QThread
@@ -10,7 +11,8 @@ class AnnotationManager(QObject):
 
     def __init__(self, viewer):
         super().__init__()
-        self.viewer = viewer
+        # [PERF FIX] Use weakref to avoid circular reference with viewer
+        self.viewer_ref = weakref.ref(viewer)
         
         self.is_selecting = False
         self.start_word_idx = None
@@ -19,14 +21,30 @@ class AnnotationManager(QObject):
         self.temp_highlights = [] 
         self.selected_words = []
 
+    @property
+    def viewer(self):
+        # [PERF FIX] Safe access to viewer through weakref
+        v = self.viewer_ref()
+        if v is None:
+            raise RuntimeError("Viewer has been deleted")
+        return v
+
     def toggle_search(self):
         if hasattr(self.viewer, 'toggle_search_bar'):
             self.viewer.toggle_search_bar()
 
     def _get_page_at_pos(self, scene_pos):
-        for i, item in enumerate(self.viewer.page_items):
-            if item.sceneBoundingRect().contains(scene_pos):
-                return i, item
+        # [PERF FIX] Safely iterate page items which can be a dict now
+        page_items = self.viewer.page_items
+        if isinstance(page_items, dict):
+            for page_num in sorted(page_items.keys()):
+                item = page_items[page_num]
+                if item.sceneBoundingRect().contains(scene_pos):
+                    return page_num, item
+        else:
+            for i, item in enumerate(page_items):
+                if item.sceneBoundingRect().contains(scene_pos):
+                    return i, item
         return -1, None
 
     def _get_word_at_pos(self, local_pos, zoom):
@@ -50,12 +68,14 @@ class AnnotationManager(QObject):
         return best_idx if best_dist < 5000 else None
 
     def clear_selection(self):
+        # [PERF FIX] Safe cleanup of graphics items and list references
         for h in self.temp_highlights:
             try:
-                if h.scene():
+                if h and h.scene():
                     self.viewer.scene.removeItem(h)
-            except RuntimeError:
-                pass # The C++ object was already deleted, safe to ignore
+            except (RuntimeError, AttributeError):
+                pass  # Item already deleted, safely ignore
+        # [PERF FIX] Immediately clear references
         self.temp_highlights.clear()
         self.selected_words.clear()
         self.start_word_idx = None
@@ -67,9 +87,9 @@ class AnnotationManager(QObject):
         if not self.temp_highlights: return False
         for h in self.temp_highlights:
             try:
-                if h.sceneBoundingRect().contains(scene_pos):
+                if h and h.sceneBoundingRect().contains(scene_pos):
                     return True
-            except RuntimeError:
+            except (RuntimeError, AttributeError):
                 pass
         return False
 

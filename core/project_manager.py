@@ -24,6 +24,10 @@ class ProjectManager:
             self._conn = sqlite3.connect(self.project_filepath)
             cursor = self._conn.cursor()
             
+            # [PERF FIX] Enable WAL mode and relaxed synchronous mode for faster writes and reduced UI stutter
+            cursor.execute('PRAGMA journal_mode = WAL;')
+            cursor.execute('PRAGMA synchronous = NORMAL;')
+            
             cursor.execute('''CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT)''')
             cursor.execute('''CREATE TABLE IF NOT EXISTS pdfs (path TEXT PRIMARY KEY)''')
             cursor.execute('''CREATE TABLE IF NOT EXISTS document_maps (pdf_path TEXT PRIMARY KEY, json_map TEXT)''')
