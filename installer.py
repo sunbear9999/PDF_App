@@ -14,6 +14,7 @@ MODELS = {
     "Qwen 2.5 (7B) - Excellent Reasoning (Req: ~8GB RAM)": "qwen2.5:7b",
     "Mistral (7B) - Highly Efficient (Req: ~8GB RAM)": "mistral",
     "Llama 3 (70B) - Massive, High Accuracy (Req: 64GB+ RAM)": "llama3:70b",
+    "Gemma4:e2b (reccomended) Highly efficent (Req: ~8gb RAM)":"gemma4:e2b"
     "Skip Model Download": "skip"
 }
 

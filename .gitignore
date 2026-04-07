@@ -74,3 +74,6 @@ voices/en_US-lessac-medium.onnx
 voices/en_US-libritts-high.onnx.json
 voices/en_US-libritts-high.onnx
 test2.png
+gui/components/examples
+workspace_export.png
+gui/components/examples/highlight.gif

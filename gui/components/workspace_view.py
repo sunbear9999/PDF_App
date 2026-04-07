@@ -22,30 +22,24 @@ from core.layout_engine import calculate_radial_layout
 class CheckableComboBox(QComboBox):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.view().viewport().installEventFilter(self)
+        self.view().pressed.connect(self.handle_item_pressed)
         self._changed = False
 
-    def eventFilter(self, obj, event):
-        if obj == self.view().viewport():
-            if event.type() == event.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
-                index = self.view().indexAt(event.pos())
-                if index.isValid():
-                    item = self.model().itemFromIndex(index)
-                    if item:
-                        current_state = item.checkState()
-                        new_state = Qt.CheckState.Unchecked if current_state == Qt.CheckState.Checked else Qt.CheckState.Checked
-                        self.update_states(item, new_state)
-                    self._changed = True
-                return True 
-        return super().eventFilter(obj, event)
+    def handle_item_pressed(self, index):
+        item = self.model().itemFromIndex(index)
+        if not item: return
 
-    def update_states(self, item, new_state):
         clicked_data = item.data(Qt.ItemDataRole.UserRole)
-        all_item = self.model().item(0)
+        current_state = item.checkState()
+        new_state = Qt.CheckState.Unchecked if current_state == Qt.CheckState.Checked else Qt.CheckState.Checked
 
+        all_item = self.model().item(0) # 'All PDFs' is always at index 0
+
+        # Block signals so we can update multiple checkboxes silently without firing the filter 50 times
         self.model().blockSignals(True)
 
         if clicked_data == "ALL":
+            # If clicking ALL, force it to checked and uncheck everything else
             item.setCheckState(Qt.CheckState.Checked)
             for i in range(1, self.model().rowCount()):
                 self.model().item(i).setCheckState(Qt.CheckState.Unchecked)
@@ -53,9 +47,15 @@ class CheckableComboBox(QComboBox):
             item.setCheckState(new_state)
 
             if new_state == Qt.CheckState.Checked:
+                # If transitioning from "ALL" to a specific PDF, clear everything else out for a fresh start
                 if all_item and all_item.checkState() == Qt.CheckState.Checked:
                     all_item.setCheckState(Qt.CheckState.Unchecked)
+                    for i in range(1, self.model().rowCount()):
+                        other_item = self.model().item(i)
+                        if other_item != item:
+                            other_item.setCheckState(Qt.CheckState.Unchecked)
             else:
+                # If we unchecked a specific PDF, verify if we need to auto-fallback to "ALL"
                 any_checked = False
                 for i in range(1, self.model().rowCount()):
                     if self.model().item(i).checkState() == Qt.CheckState.Checked:
@@ -64,8 +64,10 @@ class CheckableComboBox(QComboBox):
                 if not any_checked and all_item:
                     all_item.setCheckState(Qt.CheckState.Checked)
 
+        self._changed = True
         self.model().blockSignals(False)
 
+        # Emit dataChanged once for the whole list to trigger the workspace filter and UI update instantly
         top_left = self.model().index(0, 0)
         bottom_right = self.model().index(self.model().rowCount() - 1, 0)
         self.model().dataChanged.emit(top_left, bottom_right)
@@ -76,6 +78,7 @@ class CheckableComboBox(QComboBox):
         self._changed = False
 
     def addItem(self, text, userData=None, checked=False):
+        # Force a QStandardItemModel if it isn't one already
         if not isinstance(self.model(), QStandardItemModel):
             self.setModel(QStandardItemModel(self))
             
@@ -99,9 +102,11 @@ class CheckableComboBox(QComboBox):
         model = self.model()
         if isinstance(model, QStandardItemModel):
             model.clear()
+            # CRITICAL FIX: model.clear() wipes columns. We must restore the column count so text renders!
             model.setColumnCount(1)
         else:
             super().clear()
+
 
 class OutlineDialog(QDialog):
     def __init__(self, outline_text, workspace_view, parent=None):
@@ -221,6 +226,7 @@ class WeakpointsDialog(QDialog):
         QMessageBox.information(self, "Success", "Analysis added as a new node to the workspace!")
         self.accept()
 
+
 class PDFColorDialog(QDialog):
     def __init__(self, pdfs, current_colors, parent=None):
         super().__init__(parent)
@@ -263,6 +269,7 @@ class PDFColorDialog(QDialog):
     def get_colors(self):
         return self.pdf_colors
 
+
 class WorkspaceView(QGraphicsView):
     def __init__(self, main_window):
         super().__init__()
@@ -273,14 +280,7 @@ class WorkspaceView(QGraphicsView):
         
         self.scene_obj.setSceneRect(-100000, -100000, 200000, 200000)
         
-        # Performance Restored: SmartViewportUpdate works safely again now that prepareGeometryChange is active
         self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.SmartViewportUpdate)
-        
-        # CRITICAL FIX: Ensure viewport strictly captures active mouse hovers even when no buttons are clicked
-        self.viewport().setAttribute(Qt.WidgetAttribute.WA_Hover, True)
-        self.setMouseTracking(True)
-        
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         
         self.nodes = {}
@@ -329,6 +329,7 @@ class WorkspaceView(QGraphicsView):
 
     def create_ai_menu(self, parent_widget):
         menu = QMenu("🤖 AI Tools", parent_widget)
+        # CRITICAL FIX: Ensure the submenu actively identifies itself with the correct title when nested
         menu.setTitle("🤖 AI Tools") 
         
         action_categorize = menu.addAction("✨ Organize Selected Nodes")
@@ -338,6 +339,7 @@ class WorkspaceView(QGraphicsView):
         action_fill_graph = menu.addAction("🕸️ Fill Out Graph")
         action_consolidate = menu.addAction("🏗️ Consolidate Notes")
         
+        # Make the Consolidate Notes action visibly disabled/unusable for now
         action_consolidate.setEnabled(False)
         
         action_categorize.triggered.connect(lambda: self.trigger_ai_organize([n for n in self.scene_obj.selectedItems() if isinstance(n, Node)]))
@@ -384,6 +386,7 @@ class WorkspaceView(QGraphicsView):
     def _refresh_pdf_list(self):
         checked_data = self.filter_combo.get_checked_items()
         
+        # Default all checked on first load if nothing exists
         if not checked_data and self.filter_combo.count() == 0:
             checked_data = ["ALL"]
             
@@ -410,17 +413,19 @@ class WorkspaceView(QGraphicsView):
         checked_pdfs = self.filter_combo.get_checked_items()
         show_all = "ALL" in checked_pdfs or not checked_pdfs
         
+        # Filter Nodes
         for node in self.nodes.values():
             if show_all:
                 node.show()
             else:
                 if node.pdf_path is None:
-                    node.show()
+                    node.show() # Always show custom structural nodes
                 elif node.pdf_path in checked_pdfs:
                     node.show()
                 else:
                     node.hide()
                     
+        # Filter Edges (hide edge if either connected node is hidden)
         for edge in self.edges:
             if edge.source_node.isVisible() and edge.dest_node.isVisible():
                 edge.show()
@@ -470,6 +475,7 @@ class WorkspaceView(QGraphicsView):
             QMessageBox.warning(self, "No Nodes", "Please add or select some nodes to declutter.")
             return
 
+        # Prepare layout data
         nodes_info = {}
         for node in target_nodes:
             nodes_info[node.node_id] = {
@@ -482,9 +488,11 @@ class WorkspaceView(QGraphicsView):
             if edge.source_node in target_nodes and edge.dest_node in target_nodes:
                 edges_info.append((edge.source_node.node_id, edge.dest_node.node_id))
 
+        # Calculate a center point based on the current user focus
         avg_x = sum(n.pos().x() + n.base_width / 2 for n in target_nodes) / len(target_nodes)
         avg_y = sum(n.pos().y() + n.base_height / 2 for n in target_nodes) / len(target_nodes)
 
+        # Call our mathematical layout engine
         new_positions = calculate_radial_layout(nodes_info, edges_info, avg_x, avg_y)
 
         if not new_positions:
@@ -492,17 +500,20 @@ class WorkspaceView(QGraphicsView):
 
         self.save_state_for_undo()
 
+        # Apply the mathematically generated positions to the nodes
         for node in target_nodes:
             if node.node_id in new_positions:
                 pos = new_positions[node.node_id]
                 node.setPos(pos['x'], pos['y'])
 
+        # Refresh all connections
         for edge in self.edges:
             if edge.source_node in target_nodes and edge.dest_node in target_nodes:
                 edge.update_position()
 
         self.main_window.project_manager.mark_dirty("workspace")
         
+        # Snap the viewport directly over the freshly organized nodes
         items_rect = self.scene_obj.itemsBoundingRect()
         self.centerOn(items_rect.center())
 
@@ -708,68 +719,30 @@ class WorkspaceView(QGraphicsView):
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
 
     def delete_edge(self, edge):
-        try:
-            if edge in edge.source_node.edges:
-                edge.source_node.edges.remove(edge)
-            if edge in edge.dest_node.edges:
-                edge.dest_node.edges.remove(edge)
-                
-            self.scene_obj.removeItem(edge)
-            if edge in self.edges:
-                self.edges.remove(edge)
-                
-            self.main_window.project_manager.mark_dirty("workspace")
-        except Exception as e:
-            print(f"Error deleting edge: {e}")
+        if edge in edge.source_node.edges:
+            edge.source_node.edges.remove(edge)
+        if edge in edge.dest_node.edges:
+            edge.dest_node.edges.remove(edge)
+            
+        self.scene_obj.removeItem(edge)
+        if edge in self.edges:
+            self.edges.remove(edge)
+            
+        self.main_window.project_manager.mark_dirty("workspace")
 
     def delete_node(self, node):
-        try:
-            for edge in list(node.edges):
-                self.delete_edge(edge)
-                
-            self.scene_obj.removeItem(node)
-            if node.node_id in self.nodes:
-                del self.nodes[node.node_id]
-                
-            if not node.is_custom and node.pdf_path is not None:
-                self.main_window.tabs["Notes"].save_workspace_state()
-                self.main_window.tabs["Notes"].delete_note(node.pdf_path, node.page_num, node.node_id)
-                
-            self.main_window.project_manager.mark_dirty("workspace")
-        except Exception as e:
-            print(f"Error deleting node: {e}")
-
-    def delete_nodes_batch(self, nodes_list):
-        if not nodes_list: return
-        
-        self.scene_obj.blockSignals(True)
-        self.setUpdatesEnabled(False)
-        
-        try:
-            pdf_notes_to_delete = []
-            for node in nodes_list:
-                for edge in list(node.edges):
-                    self.delete_edge(edge)
-                    
-                self.scene_obj.removeItem(node)
-                if node.node_id in self.nodes:
-                    del self.nodes[node.node_id]
-                    
-                if not node.is_custom and node.pdf_path is not None:
-                    pdf_notes_to_delete.append((node.pdf_path, node.page_num, node.node_id))
+        for edge in list(node.edges):
+            self.delete_edge(edge)
             
-            if pdf_notes_to_delete and "Notes" in self.main_window.tabs:
-                self.main_window.tabs["Notes"].save_workspace_state()
-                for path, page, n_id in pdf_notes_to_delete:
-                    self.main_window.tabs["Notes"].delete_note(path, page, n_id)
-                    
-            self.main_window.project_manager.mark_dirty("workspace")
-        except Exception as e:
-            print(f"Error in batch deletion: {e}")
-        finally:
-            self.setUpdatesEnabled(True)
-            self.scene_obj.blockSignals(False)
-            self.scene_obj.update()
+        self.scene_obj.removeItem(node)
+        if node.node_id in self.nodes:
+            del self.nodes[node.node_id]
+            
+        if not node.is_custom and node.pdf_path is not None:
+            self.main_window.tabs["Notes"].save_workspace_state()
+            self.main_window.tabs["Notes"].delete_note(node.pdf_path, node.page_num, node.node_id)
+            
+        self.main_window.project_manager.mark_dirty("workspace")
 
     def contextMenuEvent(self, event):
         item = self.itemAt(event.pos())
@@ -791,7 +764,8 @@ class WorkspaceView(QGraphicsView):
             action = menu.exec(event.globalPos())
             if action == del_action:
                 self.save_state_for_undo()
-                self.delete_nodes_batch(selected_nodes) 
+                for n in selected_nodes:
+                    self.delete_node(n)
             elif action == declutter_action:
                 self.trigger_declutter()
             return
@@ -851,6 +825,7 @@ class WorkspaceView(QGraphicsView):
                 self.delete_edge(item)
             return
 
+        # If empty canvas clicked, allow full tools menu
         if item is None:
             menu = QMenu(self)
             declutter_action = menu.addAction("🧹 Declutter All Notes")
@@ -1115,6 +1090,7 @@ class WorkspaceView(QGraphicsView):
             for btn in dialog.buttons:
                 btn.setStyleSheet(f"background-color: {theme['bg_panel']}; color: {theme['text_main']}; border: 1px solid {theme['border']}; padding: 8px; border-radius: 4px; font-weight: bold;")
                 
+            # Keep standard accent for the save node button, node background is handled in the dialog
             dialog.btn_save_node.setStyleSheet(f"background-color: {theme['accent']}; color: #ffffff; border: none; padding: 8px; border-radius: 4px; font-weight: bold;")
 
         dialog.exec()
@@ -1257,6 +1233,7 @@ class WorkspaceView(QGraphicsView):
         selected_nodes = [n for n in self.scene_obj.selectedItems() if isinstance(n, Node)]
         target_nodes = selected_nodes if selected_nodes else [n for n in self.nodes.values() if n.isVisible()]
 
+        # Remove ONLY custom structural nodes from the target group (and attached edges)
         for node in list(target_nodes):
             if node.is_custom:
                 self.delete_node(node)
@@ -1265,6 +1242,7 @@ class WorkspaceView(QGraphicsView):
                     if edge.source_node in target_nodes and edge.dest_node in target_nodes:
                         self.delete_edge(edge)
 
+        # Plot new custom nodes
         id_map = {}
         avg_x = sum(n.pos().x() for n in target_nodes) / len(target_nodes) if target_nodes else 0
         avg_y = sum(n.pos().y() for n in target_nodes) / len(target_nodes) if target_nodes else 0
@@ -1290,6 +1268,7 @@ class WorkspaceView(QGraphicsView):
             self.scene_obj.addItem(node)
             self.nodes[new_id] = node
 
+        # Attach new connections
         for e_data in result_dict.get("new_edges", []):
             src_id = e_data.get("source_id")
             tgt_id = e_data.get("target_id")
@@ -1337,7 +1316,13 @@ class WorkspaceView(QGraphicsView):
         self.nodes[node_id] = node
         self.main_window.project_manager.mark_dirty("workspace")
         
-        node.hoverEnterEvent(None)
+        # Select the newly created node visually
+        self.scene_obj.clearSelection()
+        node.setSelected(True)
+        
+        # Trigger hover properties and editor
+        node.is_hovered = True
+        node.refresh_layout()
         node.trigger_edit()
 
     def sync_with_project(self, workspace_data, pdf_annotations):
