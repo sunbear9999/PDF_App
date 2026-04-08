@@ -8,6 +8,8 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal, QRectF, QTimer
 
 from gui.components.annotation_manager import AnnotationManager
 from gui.components.search_bar_widget import SearchBarWidget
+from core.render_pool import RenderWorkerPool
+from core.lru_cache import LRUCache
 
 class RenderWorker(QThread):
     page_ready = pyqtSignal(int, QImage)
@@ -58,6 +60,11 @@ class PDFViewer(QGraphicsView):
         self.page_items = {}  # page_num -> QGraphicsPixmapItem or QGraphicsRectItem
         self.page_placeholders = {}  # page_num -> (width, height) dimensions
         self.active_workers = {}  # page_num -> RenderWorker
+        
+        # [PERF OPTIMIZATION] Object pool and LRU cache for rendering
+        self.render_pool = RenderWorkerPool(max_workers=3)  # Limit concurrent renders
+        self.pixmap_cache = LRUCache(capacity=20)  # Cache up to 20 rendered pages
+        
         self.annot_manager = AnnotationManager(self)
         
         self.pending_jump = None
@@ -451,34 +458,56 @@ class PDFViewer(QGraphicsView):
         if isinstance(item, QGraphicsPixmapItem):
             return  # Already rendered
         
-        # Start worker for this page
-        worker = RenderWorker(self.doc, self.base_zoom, page_num, parent=self)
+        # [PERF OPTIMIZATION] Check cache first
+        cache_key = f"{page_num}_{self.base_zoom}"
+        cached_pixmap = self.pixmap_cache.get(cache_key)
+        if cached_pixmap:
+            # Use cached pixmap
+            self._apply_cached_pixmap(page_num, cached_pixmap)
+            return
+        
+        # Start worker for this page using object pool
+        worker = self.render_pool.get_worker(self.doc, self.base_zoom, page_num, parent=self)
         worker.page_ready.connect(self._on_page_ready)
         worker.finished.connect(lambda pn=page_num: self._on_worker_finished(pn))
         self.active_workers[page_num] = worker
         worker.start()
 
-    def _on_page_ready(self, page_num, qimage):
+    def _apply_cached_pixmap(self, page_num, pixmap):
+        """Apply a cached pixmap to a page."""
         if page_num not in self.page_items or not self.doc:
             return
         
-        pixmap = QPixmap.fromImage(qimage)
         old_item = self.page_items[page_num]
         y_pos = old_item.y()
         
         # Remove old placeholder
         self.scene.removeItem(old_item)
         
-        # Add rendered pixmap
-        new_item = QGraphicsPixmapItem(pixmap)
-        new_item.setPos(0, y_pos)
-        self.scene.addItem(new_item)
-        self.page_items[page_num] = new_item
+        # Create new pixmap item
+        pixmap_item = QGraphicsPixmapItem(pixmap)
+        pixmap_item.setPos(0, y_pos)
+        self.scene.addItem(pixmap_item)
+        self.page_items[page_num] = pixmap_item
         
-        # Update scene rect to account for rendered page
+        # Add annotations for this page
+        self.annot_manager.add_annotations_for_page(page_num, pixmap_item)
+        return pixmap_item
+
+    def _on_page_ready(self, page_num, qimage):
+        if page_num not in self.page_items or not self.doc:
+            return
+        
+        pixmap = QPixmap.fromImage(qimage)
+        
+        # [PERF OPTIMIZATION] Cache the rendered pixmap
+        cache_key = f"{page_num}_{self.base_zoom}"
+        self.pixmap_cache.put(cache_key, pixmap)
+        
+        new_item = self._apply_cached_pixmap(page_num, pixmap)
         self.scene.setSceneRect(self.scene.itemsBoundingRect())
         
-        if self.search_hits and self.current_search_text:
+        if self.search_hits and self.current_search_text and new_item is not None:
             self._apply_search_highlights_to_page(page_num, new_item)
 
         if self.pending_jump and self.pending_jump[0] == page_num:

@@ -1,4 +1,5 @@
 import json
+import os
 from PyQt6.QtCore import QObject, pyqtSignal, QSettings, Qt
 from PyQt6.QtWidgets import (QApplication, QDialog, QVBoxLayout, QHBoxLayout, 
                              QLabel, QPushButton, QColorDialog, QScrollArea, 
@@ -203,8 +204,23 @@ class _ThemeManager(QObject):
             self.set_theme("Custom")
 
     def apply_global_style(self, app):
+        template_path = os.path.join(os.path.dirname(__file__), 'templates.qss')
+        try:
+            with open(template_path, 'r') as f:
+                qss_template = f.read()
+        except FileNotFoundError:
+            # Fallback to old inline style if template missing
+            qss_template = self._get_fallback_qss()
+
+        # Replace placeholders with theme values
+        for key, value in self.theme.items():
+            qss_template = qss_template.replace(f'{{{{{key}}}}}', value)
+
+        app.setStyleSheet(qss_template)
+
+    def _get_fallback_qss(self):
         t = self.theme
-        style = f"""
+        return f"""
             QMainWindow {{ background-color: {t['bg_main']}; color: {t['text_main']}; }}
             QWidget {{ color: {t['text_main']}; font-family: Arial; }}
             QPushButton {{ background-color: {t['bg_input']}; border-radius: 4px; padding: 6px 12px; font-weight: bold; border: 1px solid {t['border']}; color: {t['text_main']}; }}
@@ -228,7 +244,6 @@ class _ThemeManager(QObject):
             QTabBar::tab:selected {{ background: {t['bg_input']}; font-weight: bold; border-bottom: 2px solid {t['accent']}; }}
             QTabWidget::pane {{ border: 1px solid {t['border']}; background: {t['bg_main']}; }}
         """
-        app.setStyleSheet(style)
 
 
 # -------------------------------------------------------------

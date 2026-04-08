@@ -33,6 +33,10 @@ class AnnotationManager(QObject):
         if hasattr(self.viewer, 'toggle_search_bar'):
             self.viewer.toggle_search_bar()
 
+    def add_annotations_for_page(self, page_num, pixmap_item):
+        """Support cached page rendering without crashing if no annotation overlay is needed."""
+        return
+
     def _get_page_at_pos(self, scene_pos):
         # [PERF FIX] Safely iterate page items which can be a dict now
         page_items = self.viewer.page_items
