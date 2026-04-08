@@ -6,6 +6,7 @@ import requests
 import json
 import re
 import logging
+import subprocess  # Imported for backward-compatible test patching
 from core.ollama_client import OllamaClient
 from core.vector_store import VectorStore
 from core.prompts import Prompts
@@ -127,7 +128,10 @@ class LocalLLMManager:
 
     def index_documents(self, pdf_paths, progress_callback=None):
         """[REFACTOR] Delegate to VectorStore for document indexing."""
-        if not self.vector_store.is_ready():
+        # Indexing must be allowed on an empty-but-initialized collection.
+        # `VectorStore.is_ready()` currently implies existing content (count > 0),
+        # which breaks the "initialize DB then index documents" flow.
+        if self.vector_store.collection is None:
             raise Exception("Vector Database not initialized. Please save the project first.")
         
         if progress_callback:

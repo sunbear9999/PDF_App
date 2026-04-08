@@ -21,263 +21,13 @@ from core.ai_fill_graph_worker import AIFillGraphWorker
 from core.ai_consolidate_worker import AIConsolidateWorker
 from core.layout_engine import calculate_radial_layout
 from controllers.workspace_controller import WorkspaceController
-
-class CheckableComboBox(QComboBox):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.view().pressed.connect(self.handle_item_pressed)
-        self._changed = False
-
-    def handle_item_pressed(self, index):
-        item = self.model().itemFromIndex(index)
-        if not item: return
-
-        clicked_data = item.data(Qt.ItemDataRole.UserRole)
-        current_state = item.checkState()
-        new_state = Qt.CheckState.Unchecked if current_state == Qt.CheckState.Checked else Qt.CheckState.Checked
-
-        all_item = self.model().item(0) # 'All PDFs' is always at index 0
-
-        # Block signals so we can update multiple checkboxes silently without firing the filter 50 times
-        self.model().blockSignals(True)
-
-        if clicked_data == "ALL":
-            # If clicking ALL, force it to checked and uncheck everything else
-            item.setCheckState(Qt.CheckState.Checked)
-            for i in range(1, self.model().rowCount()):
-                self.model().item(i).setCheckState(Qt.CheckState.Unchecked)
-        else:
-            item.setCheckState(new_state)
-
-            if new_state == Qt.CheckState.Checked:
-                # If transitioning from "ALL" to a specific PDF, clear everything else out for a fresh start
-                if all_item and all_item.checkState() == Qt.CheckState.Checked:
-                    all_item.setCheckState(Qt.CheckState.Unchecked)
-                    for i in range(1, self.model().rowCount()):
-                        other_item = self.model().item(i)
-                        if other_item != item:
-                            other_item.setCheckState(Qt.CheckState.Unchecked)
-            else:
-                # If we unchecked a specific PDF, verify if we need to auto-fallback to "ALL"
-                any_checked = False
-                for i in range(1, self.model().rowCount()):
-                    if self.model().item(i).checkState() == Qt.CheckState.Checked:
-                        any_checked = True
-                        break
-                if not any_checked and all_item:
-                    all_item.setCheckState(Qt.CheckState.Checked)
-
-        self._changed = True
-        self.model().blockSignals(False)
-
-        # Emit dataChanged once for the whole list to trigger the workspace filter and UI update instantly
-        top_left = self.model().index(0, 0)
-        bottom_right = self.model().index(self.model().rowCount() - 1, 0)
-        self.model().dataChanged.emit(top_left, bottom_right)
-
-    def hidePopup(self):
-        if not self._changed:
-            super().hidePopup()
-        self._changed = False
-
-    def addItem(self, text, userData=None, checked=False):
-        # Force a QStandardItemModel if it isn't one already
-        if not isinstance(self.model(), QStandardItemModel):
-            self.setModel(QStandardItemModel(self))
-            
-        item = QStandardItem(text)
-        item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
-        item.setData(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked, Qt.ItemDataRole.CheckStateRole)
-        item.setData(userData, Qt.ItemDataRole.UserRole)
-        self.model().appendRow(item)
-
-    def get_checked_items(self):
-        checked = []
-        model = self.model()
-        if isinstance(model, QStandardItemModel):
-            for i in range(model.rowCount()):
-                item = model.item(i)
-                if item and item.checkState() == Qt.CheckState.Checked:
-                    checked.append(item.data(Qt.ItemDataRole.UserRole))
-        return checked
-
-    def clear(self):
-        model = self.model()
-        if isinstance(model, QStandardItemModel):
-            model.clear()
-            # CRITICAL FIX: model.clear() wipes columns. We must restore the column count so text renders!
-            model.setColumnCount(1)
-        else:
-            super().clear()
-
-
-class OutlineDialog(QDialog):
-    def __init__(self, outline_text, workspace_view, parent=None):
-        super().__init__(parent or workspace_view)
-        self.workspace_view = workspace_view
-        self.setWindowTitle("AI Generated Outline")
-        self.setMinimumSize(600, 700)
-        
-        layout = QVBoxLayout(self)
-        
-        self.text_edit = QTextEdit()
-        self.text_edit.setPlainText(outline_text)
-        layout.addWidget(self.text_edit)
-        
-        btn_layout = QHBoxLayout()
-        
-        self.btn_save_txt = QPushButton("💾 Save as .txt")
-        self.btn_save_txt.clicked.connect(self.save_as_txt)
-        
-        self.btn_save_node = QPushButton("📌 Save as Workspace Node")
-        self.btn_save_node.clicked.connect(self.save_as_node)
-        
-        self.btn_close = QPushButton("Close")
-        self.btn_close.clicked.connect(self.reject)
-        
-        self.buttons = [self.btn_save_txt, self.btn_save_node, self.btn_close]
-        
-        btn_layout.addWidget(self.btn_save_txt)
-        btn_layout.addWidget(self.btn_save_node)
-        btn_layout.addStretch()
-        btn_layout.addWidget(self.btn_close)
-        
-        layout.addLayout(btn_layout)
-        
-    def save_as_txt(self):
-        file_path, _ = QFileDialog.getSaveFileName(self, "Save Outline", "outline.txt", "Text Files (*.txt)")
-        if file_path:
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(self.text_edit.toPlainText())
-            QMessageBox.information(self, "Success", "Outline saved successfully!")
-            
-    def save_as_node(self):
-        text = self.text_edit.toPlainText().strip()
-        if not text: return
-        
-        self.workspace_view.save_state_for_undo()
-        
-        node_id = f"custom_{uuid.uuid4()}"
-        node = Node(node_id, quote="", note=text, color="#1e4034", is_custom=True, width=350, height=250)
-        
-        view_center = self.workspace_view.mapToScene(self.workspace_view.viewport().rect().center())
-        node.setPos(view_center)
-        
-        self.workspace_view.scene_obj.addItem(node)
-        self.workspace_view.nodes[node_id] = node
-        if self.workspace_view.controller:
-            self.workspace_view.controller.mark_dirty("workspace")
-        else:
-            self.workspace_view.main_window.persistence_controller.mark_dirty("workspace")
-        
-        QMessageBox.information(self, "Success", "Outline added as a new node to the workspace!")
-        self.accept()
-
-class WeakpointsDialog(QDialog):
-    def __init__(self, weakpoints_text, workspace_view, parent=None):
-        super().__init__(parent or workspace_view)
-        self.workspace_view = workspace_view
-        self.setWindowTitle("AI Weakpoint Analysis")
-        self.setMinimumSize(600, 700)
-        
-        layout = QVBoxLayout(self)
-        
-        self.text_edit = QTextEdit()
-        self.text_edit.setPlainText(weakpoints_text)
-        layout.addWidget(self.text_edit)
-        
-        btn_layout = QHBoxLayout()
-        
-        self.btn_save_txt = QPushButton("💾 Save as .txt")
-        self.btn_save_txt.clicked.connect(self.save_as_txt)
-        
-        self.btn_save_node = QPushButton("📌 Save as Workspace Node")
-        self.btn_save_node.clicked.connect(self.save_as_node)
-        
-        self.btn_close = QPushButton("Close")
-        self.btn_close.clicked.connect(self.reject)
-        
-        self.buttons = [self.btn_save_txt, self.btn_save_node, self.btn_close]
-        
-        btn_layout.addWidget(self.btn_save_txt)
-        btn_layout.addWidget(self.btn_save_node)
-        btn_layout.addStretch()
-        btn_layout.addWidget(self.btn_close)
-        
-        layout.addLayout(btn_layout)
-        
-    def save_as_txt(self):
-        file_path, _ = QFileDialog.getSaveFileName(self, "Save Analysis", "weakpoints.txt", "Text Files (*.txt)")
-        if file_path:
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(self.text_edit.toPlainText())
-            QMessageBox.information(self, "Success", "Analysis saved successfully!")
-            
-    def save_as_node(self):
-        text = self.text_edit.toPlainText().strip()
-        if not text: return
-        
-        self.workspace_view.save_state_for_undo()
-        
-        node_id = f"custom_{uuid.uuid4()}"
-        node = Node(node_id, quote="", note=text, color="#4a0e28", is_custom=True, width=350, height=250)
-        
-        view_center = self.workspace_view.mapToScene(self.workspace_view.viewport().rect().center())
-        node.setPos(view_center)
-        
-        self.workspace_view.scene_obj.addItem(node)
-        self.workspace_view.nodes[node_id] = node
-        if self.workspace_view.controller:
-            self.workspace_view.controller.mark_dirty("workspace")
-        else:
-            self.workspace_view.main_window.persistence_controller.mark_dirty("workspace")
-        
-        QMessageBox.information(self, "Success", "Analysis added as a new node to the workspace!")
-        self.accept()
-
-
-class PDFColorDialog(QDialog):
-    def __init__(self, pdfs, current_colors, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Organize by PDF Colors")
-        self.setMinimumSize(350, 400)
-        self.pdf_colors = dict(current_colors)
-        
-        layout = QVBoxLayout(self)
-        
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        self.scroll_widget = QWidget()
-        self.form = QFormLayout(self.scroll_widget)
-        
-        self.buttons = {}
-        for pdf in pdfs:
-            btn = QPushButton()
-            btn.setFixedSize(80, 30)
-            color = self.pdf_colors.get(pdf, "#2b2b2b")
-            btn.setStyleSheet(f"background-color: {color}; border: 1px solid #aaaaaa; border-radius: 4px;")
-            btn.clicked.connect(lambda checked, p=pdf, b=btn: self.pick_color(p, b))
-            self.buttons[pdf] = btn
-            self.form.addRow(os.path.basename(pdf), btn)
-            
-        scroll.setWidget(self.scroll_widget)
-        layout.addWidget(scroll)
-        
-        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        btns.accepted.connect(self.accept)
-        btns.rejected.connect(self.reject)
-        layout.addWidget(btns)
-        
-    def pick_color(self, pdf, btn):
-        initial = QColor(self.pdf_colors.get(pdf, "#2b2b2b"))
-        color = QColorDialog.getColor(initial, self, f"Select Color for {os.path.basename(pdf)}")
-        if color.isValid():
-            self.pdf_colors[pdf] = color.name()
-            btn.setStyleSheet(f"background-color: {color.name()}; border: 1px solid #aaaaaa; border-radius: 4px;")
-            
-    def get_colors(self):
-        return self.pdf_colors
-
+from gui.components.workspace.filters import CheckableComboBox
+from gui.components.workspace.dialogs import OutlineDialog, WeakpointsDialog, PDFColorDialog
+from gui.components.workspace.ai_tools import WorkspaceAITools
+from gui.components.workspace.state_manager import WorkspaceStateManager
+from gui.components.workspace.graph_editor import WorkspaceGraphEditor
+from gui.components.workspace.context_menu import WorkspaceContextMenu
+from gui.components.workspace.project_sync import WorkspaceProjectSync
 
 class WorkspaceView(QGraphicsView):
     def __init__(self, main_window):
@@ -304,6 +54,10 @@ class WorkspaceView(QGraphicsView):
         self.undo_stack = []
         self.redo_stack = []
         self.is_restoring = False
+        self.state_manager = WorkspaceStateManager(self)
+        self.graph_editor = WorkspaceGraphEditor(self)
+        self.context_menu = WorkspaceContextMenu(self)
+        self.project_sync = WorkspaceProjectSync(self)
 
         self.loading_overlay = QFrame(self)
         self.loading_overlay.hide()
@@ -337,6 +91,7 @@ class WorkspaceView(QGraphicsView):
 
         self.btn_ai_tools = QPushButton("🤖 AI Tools")
         self.ai_tools_locked = False
+        self.ai_tools = WorkspaceAITools(self)
         self.ai_menu = self.create_ai_menu(self.btn_ai_tools)
         self.btn_ai_tools.setMenu(self.ai_menu)
         tb_layout.addWidget(self.btn_ai_tools)
@@ -556,144 +311,22 @@ class WorkspaceView(QGraphicsView):
         self.centerOn(items_rect.center())
 
     def _export_workspace(self):
-        selected_nodes = [n for n in self.scene_obj.selectedItems() if isinstance(n, Node)]
-        
-        if selected_nodes:
-            target_nodes = selected_nodes
-        else:
-            target_nodes = [n for n in self.nodes.values() if n.isVisible()]
-
-        if not target_nodes:
-            QMessageBox.information(self, "Export", "Nothing to export! Ensure nodes are visible.")
-            return
-
-        target_edges = [e for e in self.edges if e.source_node in target_nodes and e.dest_node in target_nodes]
-
-        visibility_states = {}
-        for item in self.scene_obj.items():
-            if item.parentItem() is None: 
-                visibility_states[item] = item.isVisible()
-                if item not in target_nodes and item not in target_edges:
-                    item.setVisible(False)
-
-        original_selection = self.scene_obj.selectedItems()
-        self.scene_obj.clearSelection()
-
-        for node in target_nodes:
-            if hasattr(node, 'proxy_toolbar'):
-                node.proxy_toolbar.hide()
-            if hasattr(node, 'resize_handle'):
-                node.resize_handle.hide()
-
-        bounding_rect = QRectF()
-        for item in target_nodes + target_edges:
-            bounding_rect = bounding_rect.united(item.sceneBoundingRect())
-
-        padding = 40
-        bounding_rect.adjust(-padding, -padding, padding, padding)
-
-        file_path, _ = QFileDialog.getSaveFileName(
-            self, "Export Workspace", "workspace_export.png", "PNG Image (*.png);;JPEG Image (*.jpg)"
-        )
-
-        if file_path:
-            image = QImage(int(bounding_rect.width()), int(bounding_rect.height()), QImage.Format.Format_ARGB32)
-            
-            theme = self.main_window.theme_manager.get_theme() if hasattr(self.main_window, 'theme_manager') else {'canvas': '#1a1a1a'}
-            image.fill(QColor(theme['canvas']))
-
-            painter = QPainter(image)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-            
-            self.scene_obj.render(painter, QRectF(image.rect()), bounding_rect)
-            painter.end()
-
-            image.save(file_path)
-            QMessageBox.information(self, "Export Successful", f"Workspace exported successfully to:\n{file_path}")
-
-        for item, was_visible in visibility_states.items():
-            item.setVisible(was_visible)
-            
-        for item in original_selection:
-            item.setSelected(True)
-            
-        for node in target_nodes:
-            node.refresh_layout()
+        self.graph_editor.export_workspace()
 
     def save_state_for_undo(self):
-        if self.is_restoring: return
-        state = self.serialize_workspace()
-        state_str = json.dumps(state, sort_keys=True)
-        
-        if not self.undo_stack or self.undo_stack[-1][0] != state_str:
-            self.undo_stack.append((state_str, state))
-            if len(self.undo_stack) > 50:
-                self.undo_stack.pop(0)
-            self.redo_stack.clear()
-            self._update_buttons()
+        self.state_manager.save_state_for_undo()
 
     def _update_buttons(self):
-        if "Notes" in self.main_window.tabs:
-            self.main_window.tabs["Notes"].update_undo_redo_buttons()
+        self.state_manager._update_buttons()
 
     def undo(self):
-        if not self.undo_stack: return
-        self.is_restoring = True
-        current_state = self.serialize_workspace()
-        current_str = json.dumps(current_state, sort_keys=True)
-        self.redo_stack.append((current_str, current_state))
-        
-        _, prev_state = self.undo_stack.pop()
-        self.load_workspace_state(prev_state)
-        
-        self.is_restoring = False
-        self._update_buttons()
-        if self.controller:
-            self.controller.mark_dirty("workspace")
-        else:
-            self.main_window.persistence_controller.mark_dirty("workspace")
+        self.state_manager.undo()
 
     def redo(self):
-        if not self.redo_stack: return
-        self.is_restoring = True
-        current_state = self.serialize_workspace()
-        current_str = json.dumps(current_state, sort_keys=True)
-        self.undo_stack.append((current_str, current_state))
-        
-        _, next_state = self.redo_stack.pop()
-        self.load_workspace_state(next_state)
-        
-        self.is_restoring = False
-        self._update_buttons()
-        if self.controller:
-            self.controller.mark_dirty("workspace")
-        else:
-            self.main_window.persistence_controller.mark_dirty("workspace")
+        self.state_manager.redo()
 
     def load_workspace_state(self, state_data):
-        self.scene_obj.clear()
-        self.nodes.clear()
-        self.edges.clear()
-        
-        for n_id, data in state_data.get("nodes", {}).items():
-            node_data = NodeData.from_dict({**data, "node_id": n_id})
-            node = Node(node_data=node_data)
-            node.setPos(node_data.x, node_data.y)
-            self.scene_obj.addItem(node)
-            self.nodes[n_id] = node
-            
-        for edge_dict in state_data.get("edges", []):
-            if edge_dict["source"] in self.nodes and edge_dict["target"] in self.nodes:
-                src = self.nodes[edge_dict["source"]]
-                tgt = self.nodes[edge_dict["target"]]
-                edge_data = EdgeData.from_dict(edge_dict)
-                edge = Edge(src, tgt, edge_data=edge_data)
-                self.scene_obj.addItem(edge)
-                self.edges.append(edge)
-                
-        self._apply_filter()
+        self.state_manager.load_workspace_state(state_data)
 
     def keyPressEvent(self, event):
         if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
@@ -764,769 +397,68 @@ class WorkspaceView(QGraphicsView):
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
 
     def delete_edge(self, edge):
-        if edge in edge.source_node.edges:
-            edge.source_node.edges.remove(edge)
-        if edge in edge.dest_node.edges:
-            edge.dest_node.edges.remove(edge)
-            
-        self.scene_obj.removeItem(edge)
-        if edge in self.edges:
-            self.edges.remove(edge)
-            
-        if self.controller:
-            self.controller.mark_dirty("workspace")
-        else:
-            self.main_window.persistence_controller.mark_dirty("workspace")
+        self.graph_editor.delete_edge(edge)
 
     def delete_node(self, node):
-        for edge in list(node.edges):
-            self.delete_edge(edge)
-            
-        self.scene_obj.removeItem(node)
-        if node.node_id in self.nodes:
-            del self.nodes[node.node_id]
-            
-        if not node.is_custom and node.pdf_path is not None:
-            self.main_window.tabs["Notes"].save_workspace_state()
-            self.main_window.tabs["Notes"].delete_note(node.pdf_path, node.page_num, node.node_id)
-            
-        if self.controller:
-            self.controller.mark_dirty("workspace")
-        else:
-            self.main_window.persistence_controller.mark_dirty("workspace")
+        self.graph_editor.delete_node(node)
 
     def contextMenuEvent(self, event):
-        item = self.itemAt(event.pos())
-        
-        while item and not isinstance(item, (Node, Edge)):
-            item = item.parentItem()
+        self.context_menu.context_menu_event(event)
 
-        selected_nodes = [n for n in self.scene_obj.selectedItems() if isinstance(n, Node)]
-
-        if len(selected_nodes) > 1 and isinstance(item, Node) and item in selected_nodes:
-            menu = QMenu(self)
-            del_action = menu.addAction("🗑️ Delete Selected Nodes")
-            declutter_action = menu.addAction("🧹 Declutter Selected Nodes")
-            
-            menu.addSeparator()
-            ai_menu = self.create_ai_menu(menu)
-            menu.addMenu(ai_menu)
-            
-            action = menu.exec(event.globalPos())
-            if action == del_action:
-                self.save_state_for_undo()
-                for n in selected_nodes:
-                    self.delete_node(n)
-            elif action == declutter_action:
-                self.trigger_declutter()
-            return
-
-        if isinstance(item, Node):
-            menu = QMenu(self)
-            edit_action = menu.addAction("✏️ Edit Note Text")
-            color_action = menu.addAction("🎨 Change Color")
-            
-            connect_action = None
-            if len(selected_nodes) == 1 and item != selected_nodes[0]:
-                connect_action = menu.addAction("🔗 Connect Selected Node to This")
-                
-            del_action = menu.addAction("🗑️ Delete Note")
-            declutter_action = menu.addAction("🧹 Declutter Selected Node")
-            
-            menu.addSeparator()
-            ai_menu = self.create_ai_menu(menu)
-            menu.addMenu(ai_menu)
-            
-            action = menu.exec(event.globalPos())
-            if action == edit_action:
-                item.trigger_edit()
-            elif action == color_action:
-                item.trigger_color_change()
-            elif connect_action and action == connect_action:
-                self.save_state_for_undo()
-                self.connecting_node = selected_nodes[0]
-                self.finish_connection(item)
-            elif action == del_action:
-                self.save_state_for_undo()
-                self.delete_node(item)
-            elif action == declutter_action:
-                self.trigger_declutter()
-            return
-            
-        if isinstance(item, Edge):
-            menu = QMenu(self)
-            edit_action = menu.addAction("✏️ Edit Connection Text")
-            color_action = menu.addAction("🎨 Change Line Color")
-            weight_action = menu.addAction("📏 Change Line Weight")
-            del_action = menu.addAction("🗑️ Delete Connection")
-            
-            menu.addSeparator()
-            ai_menu = self.create_ai_menu(menu)
-            menu.addMenu(ai_menu)
-            
-            action = menu.exec(event.globalPos())
-            if action == edit_action:
-                item.trigger_edit()
-            elif action == color_action:
-                item.trigger_color_change()
-            elif action == weight_action:
-                item.trigger_weight_change()
-            elif action == del_action:
-                self.save_state_for_undo()
-                self.delete_edge(item)
-            return
-
-        # If empty canvas clicked, allow full tools menu
-        if item is None:
-            menu = QMenu(self)
-            declutter_action = menu.addAction("🧹 Declutter All Notes")
-            
-            menu.addSeparator()
-            ai_menu = self.create_ai_menu(menu)
-            menu.addMenu(ai_menu)
-            
-            action = menu.exec(event.globalPos())
-            if action == declutter_action:
-                self.trigger_declutter()
-            return
-
+    def _fallback_context_menu_event(self, event):
+        # Used by WorkspaceContextMenu for any unexpected fallback paths.
         super().contextMenuEvent(event)
 
     def trigger_ai_organize(self, selected_nodes):
-        if not self.loading_overlay.isHidden(): return
-
-        model = self.main_window.tabs["LLM Chat"].model_combo.currentText().strip()
-        if not model or "Error" in model or "running" in model:
-            QMessageBox.warning(self, "No Model Selected", "Please select a valid AI model in the LLM Chat tab first.")
-            return
-
-        instructions, ok = QInputDialog.getText(
-            self, 
-            "AI Organize Options", 
-            "Enter custom organization instructions (e.g., 'Group by Timeline' or 'Pros vs Cons'):\nLeave blank for default semantic grouping."
-        )
-        if not ok: return
-
-        nodes_data = [{"id": n.node_id, "text": n.note or n.quote} for n in selected_nodes]
-        llm_manager = self.main_window.tabs["LLM Chat"].llm_manager
-
-        self.loading_label.setText("✨ AI is analyzing and organizing your notes...\nThis may take a moment.")
-        self.loading_overlay.resize(self.viewport().size())
-        self.loading_overlay.show()
-
-        if getattr(self, 'worker', None) and self.worker.isRunning():
-            self.worker.stop()
-            self.worker.wait()
-
-        self.worker = AIOrganizeWorker(llm_manager, model, nodes_data, custom_instructions=instructions.strip(), parent=self)
-        self.worker.finished.connect(self._on_ai_organize_finished, Qt.ConnectionType.QueuedConnection)
-        
-        # Register worker with thread manager for centralized lifecycle management
-        self.main_window.thread_manager.register_worker("ai_organize_worker", self.worker)
-        
-        self.worker.start()
+        self.ai_tools.trigger_ai_organize(selected_nodes)
 
     def _on_ai_organize_finished(self, clusters, error_msg):
-        self.loading_overlay.hide()
-
-        if error_msg or not clusters:
-            QMessageBox.warning(self, "AI Organize Failed", error_msg)
-            return
-
-        self.save_state_for_undo()
-        
-        try:
-            processed_ids = []
-            for cluster in clusters:
-                processed_ids.extend(cluster.get("node_ids", []))
-                
-            selected_nodes = [self.nodes[nid] for nid in processed_ids if nid in self.nodes]
-            if not selected_nodes: return
-
-            avg_x = sum(n.pos().x() for n in selected_nodes) / len(selected_nodes)
-            avg_y = sum(n.pos().y() for n in selected_nodes) / len(selected_nodes)
-
-            start_x = avg_x - (len(clusters) * 125)
-            current_x = start_x
-            start_y = avg_y - 150
-
-            for cluster in clusters:
-                c_name = cluster.get("cluster_name", "Cluster")
-                n_ids = cluster.get("node_ids", [])
-                if not n_ids: continue
-
-                cluster_node_id = f"custom_{uuid.uuid4()}"
-                cluster_node = Node(cluster_node_id, quote="", note=c_name, color="#0078D7", is_custom=True, width=180, height=60)
-                cluster_node.setPos(current_x, start_y)
-                self.scene_obj.addItem(cluster_node)
-                self.nodes[cluster_node_id] = cluster_node
-
-                child_y = start_y + 120
-                for nid in n_ids:
-                    if nid in self.nodes:
-                        child = self.nodes[nid]
-                        child.setPos(current_x, child_y)
-                        child_y += child.base_height + 25
-                        
-                        edge = Edge(cluster_node, child, "")
-                        self.scene_obj.addItem(edge)
-                        self.edges.append(edge)
-                        
-                        child.setSelected(False) 
-
-            current_x += 280
-
-            if self.controller:
-                self.controller.mark_dirty("workspace")
-            else:
-                self.main_window.persistence_controller.mark_dirty("workspace")
-        except Exception as e:
-            QMessageBox.warning(self, "Layout Error", str(e))
+        self.ai_tools._on_ai_organize_finished(clusters, error_msg)
 
     def trigger_find_connections(self):
-        if not self.loading_overlay.isHidden(): return
-
-        model = self.main_window.tabs["LLM Chat"].model_combo.currentText().strip()
-        if not model or "Error" in model or "running" in model:
-            QMessageBox.warning(self, "No Model Selected", "Please select a valid AI model in the LLM Chat tab first.")
-            return
-
-        selected_nodes = [n for n in self.scene_obj.selectedItems() if isinstance(n, Node)]
-        target_nodes = selected_nodes if selected_nodes else [n for n in self.nodes.values() if n.isVisible()]
-
-        if len(target_nodes) < 2:
-            QMessageBox.warning(self, "Not Enough Nodes", "Please select at least 2 nodes to find connections between.")
-            return
-
-        nodes_data = [{"id": n.node_id, "text": f"{n.quote} \n {n.note}".strip()} for n in target_nodes]
-        edges_data = [{"source_id": e.source_node.node_id, "target_id": e.dest_node.node_id} 
-                      for e in self.edges if e.source_node in target_nodes and e.dest_node in target_nodes]
-
-        llm_manager = self.main_window.tabs["LLM Chat"].llm_manager
-
-        self.loading_label.setText("✨ AI is analyzing relationships and finding new connections...\nThis may take a moment.")
-        self.loading_overlay.resize(self.viewport().size())
-        self.loading_overlay.show()
-
-        if getattr(self, 'conn_worker', None) and self.conn_worker.isRunning():
-            self.conn_worker.stop()
-            self.conn_worker.wait()
-
-        self.conn_worker = AIFindConnectionsWorker(llm_manager, model, nodes_data, edges_data, parent=self)
-        self.conn_worker.finished.connect(self._on_find_connections_finished, Qt.ConnectionType.QueuedConnection)
-        
-        # Register worker with thread manager for centralized lifecycle management
-        self.main_window.thread_manager.register_worker("ai_connections_worker", self.conn_worker)
-        
-        self.conn_worker.start()
+        self.ai_tools.trigger_find_connections()
 
     def _on_find_connections_finished(self, new_connections, error_msg):
-        self.loading_overlay.hide()
-        self.loading_label.setText("✨ AI is analyzing and organizing your notes...\nThis may take a moment.")
-
-        if error_msg:
-            QMessageBox.warning(self, "AI Connection Failed", error_msg)
-            return
-
-        if not new_connections:
-            QMessageBox.information(self, "No Connections Found", "The AI did not find any strong new connections between these nodes.")
-            return
-
-        self.save_state_for_undo()
-        
-        added_count = 0
-        for conn in new_connections:
-            src_id = conn.get("source_id")
-            tgt_id = conn.get("target_id")
-            
-            if src_id in self.nodes and tgt_id in self.nodes and src_id != tgt_id:
-                src_node = self.nodes[src_id]
-                tgt_node = self.nodes[tgt_id]
-                
-                exists = False
-                for existing_edge in self.edges:
-                    if (existing_edge.source_node == src_node and existing_edge.dest_node == tgt_node) or \
-                       (existing_edge.source_node == tgt_node and existing_edge.dest_node == src_node):
-                        exists = True
-                        break
-                        
-                if not exists:
-                    label = conn.get("label", "AI Connection")
-                    weight = max(1, min(10, int(conn.get("weight", 3))))
-                    
-                    edge = Edge(src_node, tgt_node, label, color="#9c27b0", weight=weight)
-                    self.scene_obj.addItem(edge)
-                    self.edges.append(edge)
-                    added_count += 1
-
-        if added_count > 0:
-            if self.controller:
-                self.controller.mark_dirty("workspace")
-            else:
-                self.main_window.persistence_controller.mark_dirty("workspace")
-        else:
-            QMessageBox.information(self, "No Connections Added", "The AI suggested connections that already existed.")
+        self.ai_tools._on_find_connections_finished(new_connections, error_msg)
 
     def trigger_generate_outline(self):
-        if not self.loading_overlay.isHidden(): return
-
-        model = self.main_window.tabs["LLM Chat"].model_combo.currentText().strip()
-        if not model or "Error" in model or "running" in model:
-            QMessageBox.warning(self, "No Model Selected", "Please select a valid AI model in the LLM Chat tab first.")
-            return
-
-        selected_nodes = [n for n in self.scene_obj.selectedItems() if isinstance(n, Node)]
-        target_nodes = selected_nodes if selected_nodes else [n for n in self.nodes.values() if n.isVisible()]
-
-        if not target_nodes:
-            QMessageBox.warning(self, "No Nodes", "Please add or select some notes in the workspace first.")
-            return
-
-        nodes_data = [{"id": n.node_id, "type": "user_created" if n.is_custom else "pdf_note", "text": f"{n.quote} \n {n.note}".strip()} for n in target_nodes]
-        edges_data = [{"source_id": e.source_node.node_id, "target_id": e.dest_node.node_id, "label": e.label_text} 
-                      for e in self.edges if e.source_node in target_nodes and e.dest_node in target_nodes]
-
-        llm_manager = self.main_window.tabs["LLM Chat"].llm_manager
-
-        self.loading_label.setText("✨ AI is analyzing argument structure and drafting outline...\nThis may take a moment.")
-        self.loading_overlay.resize(self.viewport().size())
-        self.loading_overlay.show()
-
-        if getattr(self, 'outline_worker', None) and self.outline_worker.isRunning():
-            self.outline_worker.stop()
-            self.outline_worker.wait()
-
-        self.outline_worker = AIOutlineWorker(llm_manager, model, nodes_data, edges_data, parent=self)
-        self.outline_worker.finished.connect(self._on_generate_outline_finished, Qt.ConnectionType.QueuedConnection)
-        
-        # Register worker with thread manager for centralized lifecycle management
-        self.main_window.thread_manager.register_worker("ai_outline_worker", self.outline_worker)
-        
-        self.outline_worker.start()
+        self.ai_tools.trigger_generate_outline()
 
     def _on_generate_outline_finished(self, outline_text, error_msg):
-        self.loading_overlay.hide()
-        self.loading_label.setText("✨ AI is analyzing and organizing your notes...\nThis may take a moment.")
-
-        if error_msg:
-            QMessageBox.warning(self, "Outline Generation Failed", error_msg)
-            return
-
-        dialog = OutlineDialog(outline_text, self)
-        
-        if hasattr(self.main_window, 'theme_manager'):
-            theme = self.main_window.theme_manager.get_theme()
-            dialog.setStyleSheet(f"background-color: {theme['bg_main']}; color: {theme['text_main']};")
-            dialog.text_edit.setStyleSheet(f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']};")
-            for btn in dialog.buttons:
-                btn.setStyleSheet(f"background-color: {theme['bg_panel']}; color: {theme['text_main']}; border: 1px solid {theme['border']}; padding: 8px; border-radius: 4px; font-weight: bold;")
-                
-            dialog.btn_save_node.setStyleSheet(f"background-color: {theme['accent']}; color: #ffffff; border: none; padding: 8px; border-radius: 4px; font-weight: bold;")
-
-        dialog.exec()
+        self.ai_tools._on_generate_outline_finished(outline_text, error_msg)
 
     def trigger_identify_weakpoints(self):
-        if not self.loading_overlay.isHidden(): return
-
-        model = self.main_window.tabs["LLM Chat"].model_combo.currentText().strip()
-        if not model or "Error" in model or "running" in model:
-            QMessageBox.warning(self, "No Model Selected", "Please select a valid AI model in the LLM Chat tab first.")
-            return
-
-        selected_nodes = [n for n in self.scene_obj.selectedItems() if isinstance(n, Node)]
-        target_nodes = selected_nodes if selected_nodes else [n for n in self.nodes.values() if n.isVisible()]
-
-        if not target_nodes:
-            QMessageBox.warning(self, "No Nodes", "Please add or select some notes in the workspace to evaluate.")
-            return
-
-        nodes_data = [{"id": n.node_id, "type": "user_created" if n.is_custom else "pdf_note", "text": f"{n.quote} \n {n.note}".strip()} for n in target_nodes]
-        edges_data = [{"source_id": e.source_node.node_id, "target_id": e.dest_node.node_id, "label": e.label_text} 
-                      for e in self.edges if e.source_node in target_nodes and e.dest_node in target_nodes]
-
-        llm_manager = self.main_window.tabs["LLM Chat"].llm_manager
-
-        self.loading_label.setText("✨ AI is evaluating argument strength and identifying weak points...\nThis may take a moment.")
-        self.loading_overlay.resize(self.viewport().size())
-        self.loading_overlay.show()
-
-        if getattr(self, 'weakpoints_worker', None) and self.weakpoints_worker.isRunning():
-            self.weakpoints_worker.stop()
-            self.weakpoints_worker.wait()
-
-        self.weakpoints_worker = AIWeakpointsWorker(llm_manager, model, nodes_data, edges_data, parent=self)
-        self.weakpoints_worker.finished.connect(self._on_identify_weakpoints_finished)
-        self.weakpoints_worker.start()
+        self.ai_tools.trigger_identify_weakpoints()
 
     def _on_identify_weakpoints_finished(self, analysis_text, error_msg):
-        self.loading_overlay.hide()
-        self.loading_label.setText("✨ AI is analyzing and organizing your notes...\nThis may take a moment.")
-
-        if error_msg:
-            QMessageBox.warning(self, "Analysis Failed", error_msg)
-            return
-
-        dialog = WeakpointsDialog(analysis_text, self)
-        
-        if hasattr(self.main_window, 'theme_manager'):
-            theme = self.main_window.theme_manager.get_theme()
-            dialog.setStyleSheet(f"background-color: {theme['bg_main']}; color: {theme['text_main']};")
-            dialog.text_edit.setStyleSheet(f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']};")
-            for btn in dialog.buttons:
-                btn.setStyleSheet(f"background-color: {theme['bg_panel']}; color: {theme['text_main']}; border: 1px solid {theme['border']}; padding: 8px; border-radius: 4px; font-weight: bold;")
-                
-            # Keep standard accent for the save node button, node background is handled in the dialog
-            dialog.btn_save_node.setStyleSheet(f"background-color: {theme['accent']}; color: #ffffff; border: none; padding: 8px; border-radius: 4px; font-weight: bold;")
-
-        dialog.exec()
+        self.ai_tools._on_identify_weakpoints_finished(analysis_text, error_msg)
 
     def trigger_fill_graph(self):
-        if not self.loading_overlay.isHidden(): return
-
-        model = self.main_window.tabs["LLM Chat"].model_combo.currentText().strip()
-        if not model or "Error" in model or "running" in model:
-            QMessageBox.warning(self, "No Model Selected", "Please select a valid AI model in the LLM Chat tab first.")
-            return
-
-        selected_nodes = [n for n in self.scene_obj.selectedItems() if isinstance(n, Node)]
-        target_nodes = selected_nodes if selected_nodes else [n for n in self.nodes.values() if n.isVisible()]
-
-        if not target_nodes:
-            QMessageBox.warning(self, "No Nodes", "Please add or select some nodes in the workspace first.")
-            return
-
-        nodes_data = [{"id": n.node_id, "type": "user_created" if n.is_custom else "pdf_note", "text": f"{n.quote} \n {n.note}".strip()} for n in target_nodes]
-        edges_data = [{"source_id": e.source_node.node_id, "target_id": e.dest_node.node_id, "label": e.label_text} 
-                      for e in self.edges if e.source_node in target_nodes and e.dest_node in target_nodes]
-
-        allowed_docs = self.get_allowed_docs()
-
-        llm_manager = self.main_window.tabs["LLM Chat"].llm_manager
-
-        self.loading_label.setText("✨ AI is analyzing graph to find missing evidence...\nThis may take a moment.")
-        self.loading_overlay.resize(self.viewport().size())
-        self.loading_overlay.show()
-
-        if getattr(self, 'fill_worker', None) and self.fill_worker.isRunning():
-            self.fill_worker.stop()
-            self.fill_worker.wait()
-
-        self.fill_worker = AIFillGraphWorker(llm_manager, model, nodes_data, edges_data, allowed_docs, parent=self)
-        self.fill_worker.progress.connect(self._update_loading_label, Qt.ConnectionType.QueuedConnection)
-        self.fill_worker.finished.connect(self._on_fill_graph_finished, Qt.ConnectionType.QueuedConnection)
-        
-        # Register worker with thread manager for centralized lifecycle management
-        self.main_window.thread_manager.register_worker("ai_fill_graph_worker", self.fill_worker)
-        
-        self.fill_worker.start()
+        self.ai_tools.trigger_fill_graph()
 
     def _update_loading_label(self, text):
-        self.loading_label.setText(text + "\nThis may take a moment.")
+        self.ai_tools._update_loading_label(text)
 
     def _on_fill_graph_finished(self, evidence_items, error_msg):
-        self.loading_overlay.hide()
-        self.loading_label.setText("✨ AI is analyzing and organizing your notes...\nThis may take a moment.")
-
-        if error_msg:
-            QMessageBox.warning(self, "Fill Graph Failed", error_msg)
-            return
-
-        if not evidence_items:
-            QMessageBox.information(self, "No Evidence Found", "AI could not find or suggest new evidence for the selected graph.")
-            return
-
-        self.save_state_for_undo()
-        
-        allowed_paths = self.main_window.pdf_controller.get_pdf_paths() if self.main_window and hasattr(self.main_window, 'pdf_controller') else []
-        added_count = 0
-        new_annot_mappings = []
-
-        for item in evidence_items:
-            quote = item['quote']
-            note = item['note']
-            target_doc = item['doc']
-            target_node_id = item['target_node_id']
-            
-            new_annot_id = f"AINote|{uuid.uuid4()}"
-            
-            success = self.main_window.add_ai_annotation(quote, note, target_doc_name=target_doc, allowed_paths=allowed_paths, forced_annot_id=new_annot_id, emit_signal=False)
-            if success:
-                new_annot_mappings.append((new_annot_id, target_node_id))
-                added_count += 1
-                
-        if added_count > 0:
-            workspace_data = self.serialize_workspace()
-            
-            for new_annot_id, target_node_id in new_annot_mappings:
-                workspace_data["edges"].append({
-                    "id": str(uuid.uuid4()),
-                    "source": target_node_id,
-                    "target": new_annot_id,
-                    "label": "AI Evidence",
-                    "color": "#9c27b0",
-                    "weight": 3
-                })
-                
-            if self.controller:
-                self.controller.save_workspace_data(workspace_data)
-            else:
-                self.main_window.persistence_controller.save_workspace_data(workspace_data)
-                self.main_window.persistence_controller.mark_dirty("workspace")
-            
-            all_annots = self.main_window.tabs["Notes"]._get_all_project_annotations_for_workspace()
-            self.sync_with_project(workspace_data, all_annots)
-            
-            self.main_window.viewer.annot_manager.note_added.emit()
-            
-            QMessageBox.information(self, "Graph Filled", f"Successfully found and connected {added_count} piece(s) of evidence!")
-        else:
-            QMessageBox.information(self, "Graph Filled", "Searched for evidence but could not successfully highlight valid quotes in the documents.")
+        self.ai_tools._on_fill_graph_finished(evidence_items, error_msg)
 
     def trigger_consolidate_notes(self):
-        if not self.loading_overlay.isHidden(): return
-
-        model = self.main_window.tabs["LLM Chat"].model_combo.currentText().strip()
-        if not model or "Error" in model or "running" in model:
-            QMessageBox.warning(self, "No Model Selected", "Please select a valid AI model in the LLM Chat tab first.")
-            return
-
-        selected_nodes = [n for n in self.scene_obj.selectedItems() if isinstance(n, Node)]
-        target_nodes = selected_nodes if selected_nodes else [n for n in self.nodes.values() if n.isVisible()]
-
-        if not target_nodes:
-            QMessageBox.warning(self, "No Nodes", "Please add or select some nodes to consolidate.")
-            return
-
-        nodes_data = [{"id": n.node_id, "type": "user_created" if n.is_custom else "pdf_note", "text": f"{n.quote} \n {n.note}".strip()} for n in target_nodes]
-        edges_data = [{"source_id": e.source_node.node_id, "target_id": e.dest_node.node_id, "label": e.label_text} 
-                      for e in self.edges if e.source_node in target_nodes and e.dest_node in target_nodes]
-
-        llm_manager = self.main_window.tabs["LLM Chat"].llm_manager
-
-        self.loading_label.setText("✨ AI is restructuring and streamlining your argument...\nThis may take a moment.")
-        self.loading_overlay.resize(self.viewport().size())
-        self.loading_overlay.show()
-
-        if getattr(self, 'consolidate_worker', None) and self.consolidate_worker.isRunning():
-            self.consolidate_worker.stop()
-            self.consolidate_worker.wait()
-
-        self.consolidate_worker = AIConsolidateWorker(llm_manager, model, nodes_data, edges_data, parent=self)
-        self.consolidate_worker.progress.connect(self._update_loading_label, Qt.ConnectionType.QueuedConnection)
-        self.consolidate_worker.finished.connect(self._on_consolidate_finished, Qt.ConnectionType.QueuedConnection)
-        
-        # Register worker with thread manager for centralized lifecycle management
-        self.main_window.thread_manager.register_worker("ai_consolidate_worker", self.consolidate_worker)
-        
-        self.consolidate_worker.start()
+        self.ai_tools.trigger_consolidate_notes()
 
     def _on_consolidate_finished(self, result_dict, error_msg):
-        self.loading_overlay.hide()
-        self.loading_label.setText("✨ AI is analyzing and organizing your notes...\nThis may take a moment.")
-
-        if error_msg:
-            QMessageBox.warning(self, "Consolidation Failed", error_msg)
-            return
-
-        if not result_dict.get("new_custom_nodes") and not result_dict.get("new_edges"):
-            QMessageBox.information(self, "Consolidation Complete", "The AI didn't find any necessary structural changes.")
-            return
-
-        self.save_state_for_undo()
-        
-        selected_nodes = [n for n in self.scene_obj.selectedItems() if isinstance(n, Node)]
-        target_nodes = selected_nodes if selected_nodes else [n for n in self.nodes.values() if n.isVisible()]
-
-        # Remove ONLY custom structural nodes from the target group (and attached edges)
-        for node in list(target_nodes):
-            if node.is_custom:
-                self.delete_node(node)
-            else:
-                for edge in list(node.edges):
-                    if edge.source_node in target_nodes and edge.dest_node in target_nodes:
-                        self.delete_edge(edge)
-
-        # Plot new custom nodes
-        id_map = {}
-        avg_x = sum(n.pos().x() for n in target_nodes) / len(target_nodes) if target_nodes else 0
-        avg_y = sum(n.pos().y() for n in target_nodes) / len(target_nodes) if target_nodes else 0
-
-        new_nodes_data = result_dict.get("new_custom_nodes", [])
-        
-        start_x = avg_x - (len(new_nodes_data) * 120)
-        current_x = start_x
-        start_y = avg_y - 250
-
-        for n_data in new_nodes_data:
-            old_id = n_data.get("id")
-            text = n_data.get("text", "")
-            if not old_id: continue
-            
-            new_id = f"custom_{uuid.uuid4()}"
-            id_map[old_id] = new_id
-            
-            node = Node(new_id, quote="", note=text, color="#005577", is_custom=True, width=200, height=100)
-            node.setPos(current_x, start_y)
-            current_x += 240
-            
-            self.scene_obj.addItem(node)
-            self.nodes[new_id] = node
-
-        # Attach new connections
-        for e_data in result_dict.get("new_edges", []):
-            src_id = e_data.get("source_id")
-            tgt_id = e_data.get("target_id")
-            label = e_data.get("label", "Supports")
-            
-            src_id = id_map.get(src_id, src_id)
-            tgt_id = id_map.get(tgt_id, tgt_id)
-            
-            if src_id in self.nodes and tgt_id in self.nodes:
-                edge = Edge(self.nodes[src_id], self.nodes[tgt_id], label, color="#e91e63", weight=3)
-                self.scene_obj.addItem(edge)
-                self.edges.append(edge)
-                
-        if self.controller:
-            self.controller.mark_dirty("workspace")
-        else:
-            self.main_window.persistence_controller.mark_dirty("workspace")
-        QMessageBox.information(self, "Consolidated", "Workspace successfully restructured!")
+        self.ai_tools._on_consolidate_finished(result_dict, error_msg)
 
     def start_connection(self, node):
-        self.connecting_node = node
-        self.connecting_node.setPen(QPen(QColor("#00ff00"), 3, Qt.PenStyle.DashLine))
+        self.graph_editor.start_connection(node)
 
     def finish_connection(self, target_node):
-        text, ok = QInputDialog.getText(self, "Connection Label", "Enter text for connection:")
-        if ok:
-            edge = Edge(self.connecting_node, target_node, text)
-            self.scene_obj.addItem(edge)
-            self.edges.append(edge)
-            if self.controller:
-                self.controller.mark_dirty("workspace")
-            else:
-                self.main_window.persistence_controller.mark_dirty("workspace")
-            
-        if self.connecting_node.isSelected():
-            self.connecting_node.setPen(QPen(QColor("#ffffff"), 4))
-        else:
-            self.connecting_node.setPen(QPen(QColor("#555555"), 2))
-        self.connecting_node = None
+        self.graph_editor.finish_connection(target_node)
 
     def add_custom_bubble(self):
-        self.save_state_for_undo()
-        
-        node_id = f"custom_{uuid.uuid4()}"
-        node = Node(node_id, quote="", note="", color="#005577", is_custom=True, width=180, height=80)
-        
-        view_center = self.mapToScene(self.viewport().rect().center())
-        node.setPos(view_center)
-        
-        self.scene_obj.addItem(node)
-        self.nodes[node_id] = node
-        if self.controller:
-            self.controller.mark_dirty("workspace")
-        else:
-            self.main_window.persistence_controller.mark_dirty("workspace")
-        
-        # Select the newly created node visually
-        self.scene_obj.clearSelection()
-        node.setSelected(True)
-        
-        # Trigger hover properties and editor
-        node.is_hovered = True
-        node.refresh_layout()
-        node.trigger_edit()
+        self.project_sync.add_custom_bubble()
 
     def sync_with_project(self, workspace_data, pdf_annotations):
-        selected_ids = [n_id for n_id, n in self.nodes.items() if n.isSelected()]
-
-        self.scene_obj.clear()
-        self.nodes.clear()
-        self.edges.clear()
-
-        annot_dict = {a["id"]: a for a in pdf_annotations}
-
-        saved_nodes = workspace_data.get("nodes", {})
-        for n_id, data in saved_nodes.items():
-            quote = data.get("quote", "")
-            note = data.get("note", "")
-
-            if n_id in annot_dict:
-                quote = annot_dict[n_id]["subject"] or ""
-                note = annot_dict[n_id]["content"] or ""
-
-            node_data = NodeData.from_dict({**data, "node_id": n_id})
-            node = Node(node_data=node_data)
-            node.setPos(node_data.x, node_data.y)
-            self.scene_obj.addItem(node)
-            self.nodes[n_id] = node
-
-        y_offset = 50
-        for annot in pdf_annotations:
-            if annot["id"] not in self.nodes:
-                quote = annot["subject"] or ""
-                note = annot["content"] or ""
-                
-                l = len(note + quote)
-                w = 200 if l < 50 else (250 if l < 150 else 300)
-                h = 70 if l < 50 else (110 if l < 150 else 160)
-                
-                color = "#2d2238" if annot["id"].startswith("AINote") else "#2b2b2b"
-                
-                node = Node(annot["id"], quote, note, color=color, is_custom=False, 
-                            width=w, height=h, pdf_path=annot["pdf_path"], page_num=annot["page_num"])
-                node.setPos(50, y_offset)
-                y_offset += 100
-                self.scene_obj.addItem(node)
-                self.nodes[annot["id"]] = node
-
-        for edge_dict in workspace_data.get("edges", []):
-            if edge_dict["source"] in self.nodes and edge_dict["target"] in self.nodes:
-                src = self.nodes[edge_dict["source"]]
-                tgt = self.nodes[edge_dict["target"]]
-                edge_data = EdgeData.from_dict(edge_dict)
-                edge = Edge(src, tgt, edge_data=edge_data)
-                self.scene_obj.addItem(edge)
-                self.edges.append(edge)
-
-        for n_id in selected_ids:
-            if n_id in self.nodes:
-                self.nodes[n_id].setSelected(True)
-                
-        self._refresh_pdf_list()
-        self._apply_filter()
-
-        if self.nodes:
-            items_rect = self.scene_obj.itemsBoundingRect()
-            self.centerOn(items_rect.center())
+        self.project_sync.sync_with_project(workspace_data, pdf_annotations)
 
     def serialize_workspace(self):
-        data = {"nodes": {}, "edges": []}
-        for n_id, node in self.nodes.items():
-            node_data = NodeData(
-                node_id=n_id,
-                quote=node.quote,
-                note=node.note,
-                color=node.color,
-                is_custom=node.is_custom,
-                pdf_path=node.pdf_path,
-                page_num=node.page_num,
-                manual_font_size=node.manual_font_size,
-                x=node.pos().x(),
-                y=node.pos().y(),
-                width=node.base_width,
-                height=node.base_height,
-            )
-            data["nodes"][n_id] = node_data.to_dict()
-        for edge in self.edges:
-            edge_data = EdgeData(
-                edge_id=edge.edge_id,
-                source=edge.source_node.node_id,
-                target=edge.dest_node.node_id,
-                label=edge.label_text,
-                color=edge.base_color.name(),
-                weight=edge.weight,
-            )
-            data["edges"].append(edge_data.to_dict())
-        return data
+        return self.state_manager.serialize_workspace()

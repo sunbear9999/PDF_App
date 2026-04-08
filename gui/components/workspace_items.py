@@ -10,16 +10,11 @@ from models.workspace_models import EdgeData, NodeData
 
 from gui.theme import ThemeManager
 
-def get_text_color_for_bg(bg_color):
-    try:
-        if isinstance(bg_color, (tuple, list)):
-            c = QColor(int(bg_color[0]*255), int(bg_color[1]*255), int(bg_color[2]*255))
-        else:
-            c = QColor(bg_color)
-        brightness = (c.red() * 299 + c.green() * 587 + c.blue() * 114) / 1000
-        return "#000000" if brightness > 140 else "#ffffff"
-    except:
-        return "#ffffff"
+from gui.components.workspace.item_utils import (
+    get_text_color_for_bg,
+    InPlaceTextItem,
+    ResizeHandle,
+)
 
 class Edge(QGraphicsLineItem):
     def __init__(self, source_node, dest_node, label_text="", edge_id=None, color="#888888", weight=2, edge_data=None):
@@ -117,66 +112,6 @@ class Edge(QGraphicsLineItem):
             else:
                 self.setPen(QPen(self.base_color, self.weight, Qt.PenStyle.SolidLine))
         return super().itemChange(change, value)
-
-class InPlaceTextItem(QGraphicsTextItem):
-    def __init__(self, node, text=""):
-        super().__init__(text, node)
-        self.node = node
-
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key.Key_Return and not (event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
-            self.clearFocus() # This now safely triggers focusOutEvent to commit the save
-            return
-        super().keyPressEvent(event)
-
-    def focusOutEvent(self, event):
-        # Automatically save text whenever the user clicks away or loses focus
-        super().focusOutEvent(event)
-        self.node.finish_in_place_edit()
-
-class ResizeHandle(QGraphicsRectItem):
-    def __init__(self, parent):
-        super().__init__(0, 0, 16, 16, parent)
-        # Make the grabber slightly more visible and obvious
-        self.setBrush(QBrush(QColor(100, 100, 100, 255)))
-        self.setPen(QPen(QColor(255, 255, 255, 200), 1))
-        self.setCursor(Qt.CursorShape.SizeFDiagCursor)
-        # FIX: We no longer rely on Qt's ItemIsMovable flag because Qt will hijack the event 
-        # and drag the parent instead of resizing if the parent happens to be "selected".
-        self._is_resizing = False
-        self._start_pos = None
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._is_resizing = True
-            # Log initial sizes so we can add the mouse movement offsets directly
-            self._start_pos = self.parentItem().mapFromScene(event.scenePos())
-            self._start_w = self.parentItem().base_width
-            self._start_h = self.parentItem().base_height
-            if self.scene() and hasattr(self.scene(), 'view'):
-                self.scene().view.save_state_for_undo()
-            event.accept()
-        else:
-            super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        if self._is_resizing:
-            current_pos = self.parentItem().mapFromScene(event.scenePos())
-            delta = current_pos - self._start_pos
-            
-            new_w = max(50, self._start_w + delta.x())
-            new_h = max(30, self._start_h + delta.y())
-            self.parentItem().update_size(new_w, new_h)
-            event.accept()
-        else:
-            super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        if self._is_resizing and event.button() == Qt.MouseButton.LeftButton:
-            self._is_resizing = False
-            event.accept()
-        else:
-            super().mouseReleaseEvent(event)
 
 
 class Node(QGraphicsRectItem):

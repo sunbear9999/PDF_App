@@ -8,6 +8,7 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal, QRectF, QTimer
 
 from gui.components.annotation_manager import AnnotationManager
 from gui.components.search_bar_widget import SearchBarWidget
+from gui.components.pdf_viewer_search_logic import PDFViewerSearchLogic
 from core.render_pool import RenderWorkerPool
 from core.lru_cache import LRUCache
 
@@ -81,6 +82,8 @@ class PDFViewer(QGraphicsView):
         self.current_search_text = ""
         self.current_search_scope = ""
         self.current_match_case = False
+
+        self.search_logic = PDFViewerSearchLogic(self)
 
         self.search_debounce_timer = QTimer(self)
         self.search_debounce_timer.setSingleShot(True)
@@ -165,157 +168,37 @@ class PDFViewer(QGraphicsView):
             self.search_bar.search_input.selectAll()
 
     def _on_search_text_changed(self, text):
-        self.search_debounce_timer.start(400)
+        self.search_logic._on_search_text_changed(text)
 
     def _on_search_return_pressed(self):
-        if self.search_debounce_timer.isActive():
-            self.search_debounce_timer.stop()
-            self.trigger_search()
-        else:
-            self.next_search_hit()
+        self.search_logic._on_search_return_pressed()
 
     def trigger_search(self):
-        text = self.search_bar.search_input.text().strip()
-        scope = self.search_bar.scope_combo.currentText()
-        match_case = self.search_bar.chk_match_case.isChecked()
-        
-        if (text == self.current_search_text and 
-            scope == self.current_search_scope and 
-            match_case == self.current_match_case):
-            return 
-            
-        self.current_search_scope = scope
-        self.current_match_case = match_case
-        self.execute_search(text, scope, match_case)
+        self.search_logic.trigger_search()
 
     def execute_search(self, text, scope, match_case):
-        self.search_hits = []
-        self.current_hit_index = -1
-        self.current_search_text = text
-        
-        if not text:
-            self.clear_search_highlights()
-            self.search_bar.update_hits(0, 0)
-            return
-
-        main_window = self.window()
-        pdfs_to_search = []
-        if scope == "Entire Project" and main_window and hasattr(main_window, 'pdf_controller'):
-            pdfs_to_search = main_window.pdf_controller.get_pdf_paths()
-        else:
-            if main_window and main_window.current_file_path:
-                pdfs_to_search = [main_window.current_file_path]
-                
-        flags = fitz.TEXT_PRESERVE_LIGATURES | fitz.TEXT_PRESERVE_WHITESPACE
-        if match_case:
-            flags |= getattr(fitz, "TEXT_MATCH_CASE", 4)
-                
-        for pdf_path in pdfs_to_search:
-            doc = main_window.pdf_controller.get_doc(pdf_path) if main_window and hasattr(main_window, "pdf_controller") else None
-            if not doc: continue
-            for page_num in range(len(doc)):
-                page = doc.load_page(page_num)
-                quads = page.search_for(text, hit_max=999, quads=True, flags=flags)
-                for q in quads:
-                    self.search_hits.append({
-                        'pdf': pdf_path,
-                        'page': page_num,
-                        'rect': q.rect
-                    })
-                    
-        if self.search_hits:
-            self.current_hit_index = 0
-            self.search_bar.update_hits(1, len(self.search_hits))
-            self.navigate_to_current_hit()
-        else:
-            self.clear_search_highlights()
-            self.search_bar.update_hits(0, 0)
+        self.search_logic.execute_search(text, scope, match_case)
 
     def next_search_hit(self):
-        if not self.search_hits: return
-        self.current_hit_index = (self.current_hit_index + 1) % len(self.search_hits)
-        self.search_bar.update_hits(self.current_hit_index + 1, len(self.search_hits))
-        self.navigate_to_current_hit()
+        self.search_logic.next_search_hit()
 
     def prev_search_hit(self):
-        if not self.search_hits: return
-        self.current_hit_index = (self.current_hit_index - 1) % len(self.search_hits)
-        self.search_bar.update_hits(self.current_hit_index + 1, len(self.search_hits))
-        self.navigate_to_current_hit()
+        self.search_logic.prev_search_hit()
 
     def navigate_to_current_hit(self):
-        if not self.search_hits or self.current_hit_index < 0: return
-        
-        hit = self.search_hits[self.current_hit_index]
-        main_window = self.window()
-        
-        if hit['pdf'] != main_window.current_file_path:
-            self.pending_search_jump = hit
-            if main_window and hasattr(main_window, "pdf_controller"):
-                main_window.pdf_controller.switch_to_pdf(hit['pdf'])
-            else:
-                main_window.switch_to_pdf(hit['pdf'])
-        else:
-            self.render_search_highlights()
-            page_num = hit['page']
-            
-            if page_num in self.page_items:
-                self._execute_search_jump(hit)
-            else:
-                self.pending_search_jump = hit
-                # Trigger lazy load of this page
-                self._request_page_render(page_num)
+        self.search_logic.navigate_to_current_hit()
 
     def clear_search_highlights(self):
-        for h in self.search_highlight_items:
-            try:
-                if h.scene():
-                    self.scene.removeItem(h)
-            except RuntimeError:
-                pass
-        # [PERF FIX] Clear list reference immediately after removing items
-        self.search_highlight_items.clear()
+        self.search_logic.clear_search_highlights()
 
     def render_search_highlights(self):
-        self.clear_search_highlights()
-        if not self.search_hits: return
-        for page_num in self.page_items.keys():
-            self._apply_search_highlights_to_page(page_num, self.page_items[page_num])
+        self.search_logic.render_search_highlights()
 
     def _apply_search_highlights_to_page(self, page_num, page_item):
-        current_pdf = self.window().current_file_path
-        
-        for i, hit in enumerate(self.search_hits):
-            if hit['pdf'] == current_pdf and hit['page'] == page_num:
-                r = hit['rect']
-                z = self.base_zoom
-                qt_rect = QRectF(r.x0 * z, r.y0 * z, (r.x1 - r.x0) * z, (r.y1 - r.y0) * z)
-                
-                h_item = QGraphicsRectItem(qt_rect, page_item)
-                
-                if i == self.current_hit_index:
-                    h_item.setBrush(QBrush(QColor(255, 165, 0, 150))) 
-                    h_item.setPen(QPen(QColor(255, 140, 0), 2))
-                    h_item.setZValue(10)
-                else:
-                    h_item.setBrush(QBrush(QColor(255, 255, 0, 100))) 
-                    h_item.setPen(QPen(Qt.PenStyle.NoPen))
-                    h_item.setZValue(5)
-                    
-                self.search_highlight_items.append(h_item)
+        self.search_logic._apply_search_highlights_to_page(page_num, page_item)
 
     def _execute_search_jump(self, hit):
-        page_num = hit['page']
-        if page_num in self.page_items:
-            page_item = self.page_items[page_num]
-            r = hit['rect']
-            z = self.base_zoom
-            qt_rect = QRectF(r.x0 * z, r.y0 * z, (r.x1 - r.x0) * z, (r.y1 - r.y0) * z)
-            scene_rect = page_item.mapToScene(qt_rect).boundingRect()
-            
-            self.ensureVisible(scene_rect, 100, 100)
-
-
+        self.search_logic._execute_search_jump(hit)
 
     def _cleanup_workers(self):
         for page_num, worker in list(self.active_workers.items()):
@@ -565,152 +448,37 @@ class PDFViewer(QGraphicsView):
             self.search_bar.search_input.selectAll()
 
     def _on_search_text_changed(self, text):
-        self.search_debounce_timer.start(400)
+        self.search_logic._on_search_text_changed(text)
 
     def _on_search_return_pressed(self):
-        if self.search_debounce_timer.isActive():
-            self.search_debounce_timer.stop()
-            self.trigger_search()
-        else:
-            self.next_search_hit()
+        self.search_logic._on_search_return_pressed()
 
     def trigger_search(self):
-        text = self.search_bar.search_input.text().strip()
-        scope = self.search_bar.scope_combo.currentText()
-        match_case = self.search_bar.chk_match_case.isChecked()
-        
-        if (text == self.current_search_text and 
-            scope == self.current_search_scope and 
-            match_case == self.current_match_case):
-            return 
-            
-        self.current_search_scope = scope
-        self.current_match_case = match_case
-        self.execute_search(text, scope, match_case)
+        self.search_logic.trigger_search()
 
     def execute_search(self, text, scope, match_case):
-        self.search_hits = []
-        self.current_hit_index = -1
-        self.current_search_text = text
-        
-        if not text:
-            self.clear_search_highlights()
-            self.search_bar.update_hits(0, 0)
-            return
-
-        main_window = self.window()
-        pdfs_to_search = []
-        if scope == "Entire Project" and main_window and hasattr(main_window, 'pdf_controller'):
-            pdfs_to_search = main_window.pdf_controller.get_pdf_paths()
-        else:
-            if main_window and main_window.current_file_path:
-                pdfs_to_search = [main_window.current_file_path]
-                
-        flags = fitz.TEXT_PRESERVE_LIGATURES | fitz.TEXT_PRESERVE_WHITESPACE
-        if match_case:
-            flags |= getattr(fitz, "TEXT_MATCH_CASE", 4)
-                
-        for pdf_path in pdfs_to_search:
-            doc = main_window.pdf_controller.get_doc(pdf_path) if main_window and hasattr(main_window, "pdf_controller") else None
-            if not doc: continue
-            for page_num in range(len(doc)):
-                page = doc.load_page(page_num)
-                quads = page.search_for(text, hit_max=999, quads=True, flags=flags)
-                for q in quads:
-                    self.search_hits.append({
-                        'pdf': pdf_path,
-                        'page': page_num,
-                        'rect': q.rect
-                    })
-                    
-        if self.search_hits:
-            self.current_hit_index = 0
-            self.search_bar.update_hits(1, len(self.search_hits))
-            self.navigate_to_current_hit()
-        else:
-            self.clear_search_highlights()
-            self.search_bar.update_hits(0, 0)
+        self.search_logic.execute_search(text, scope, match_case)
 
     def next_search_hit(self):
-        if not self.search_hits: return
-        self.current_hit_index = (self.current_hit_index + 1) % len(self.search_hits)
-        self.search_bar.update_hits(self.current_hit_index + 1, len(self.search_hits))
-        self.navigate_to_current_hit()
+        self.search_logic.next_search_hit()
 
     def prev_search_hit(self):
-        if not self.search_hits: return
-        self.current_hit_index = (self.current_hit_index - 1) % len(self.search_hits)
-        self.search_bar.update_hits(self.current_hit_index + 1, len(self.search_hits))
-        self.navigate_to_current_hit()
+        self.search_logic.prev_search_hit()
 
     def navigate_to_current_hit(self):
-        if not self.search_hits or self.current_hit_index < 0: return
-        
-        hit = self.search_hits[self.current_hit_index]
-        main_window = self.window()
-        
-        if hit['pdf'] != main_window.current_file_path:
-            self.pending_search_jump = hit
-            if main_window and hasattr(main_window, "pdf_controller"):
-                main_window.pdf_controller.switch_to_pdf(hit['pdf'])
-            else:
-                main_window.switch_to_pdf(hit['pdf'])
-        else:
-            self.render_search_highlights()
-            page_num = hit['page']
-            
-            if page_num < len(self.page_items):
-                self._execute_search_jump(hit)
-            else:
-                self.pending_search_jump = hit
+        self.search_logic.navigate_to_current_hit()
 
     def clear_search_highlights(self):
-        for h in self.search_highlight_items:
-            try:
-                if h.scene():
-                    self.scene.removeItem(h)
-            except RuntimeError:
-                pass
-        self.search_highlight_items.clear()
+        self.search_logic.clear_search_highlights()
 
     def render_search_highlights(self):
-        self.clear_search_highlights()
-        if not self.search_hits: return
-        for page_num in range(len(self.page_items)):
-            self._apply_search_highlights_to_page(page_num, self.page_items[page_num])
+        self.search_logic.render_search_highlights()
 
     def _apply_search_highlights_to_page(self, page_num, page_item):
-        current_pdf = self.window().current_file_path
-        
-        for i, hit in enumerate(self.search_hits):
-            if hit['pdf'] == current_pdf and hit['page'] == page_num:
-                r = hit['rect']
-                z = self.base_zoom
-                qt_rect = QRectF(r.x0 * z, r.y0 * z, (r.x1 - r.x0) * z, (r.y1 - r.y0) * z)
-                
-                h_item = QGraphicsRectItem(qt_rect, page_item)
-                
-                if i == self.current_hit_index:
-                    h_item.setBrush(QBrush(QColor(255, 165, 0, 150))) 
-                    h_item.setPen(QPen(QColor(255, 140, 0), 2))
-                    h_item.setZValue(10)
-                else:
-                    h_item.setBrush(QBrush(QColor(255, 255, 0, 100))) 
-                    h_item.setPen(QPen(Qt.PenStyle.NoPen))
-                    h_item.setZValue(5)
-                    
-                self.search_highlight_items.append(h_item)
+        self.search_logic._apply_search_highlights_to_page(page_num, page_item)
 
     def _execute_search_jump(self, hit):
-        page_num = hit['page']
-        if 0 <= page_num < len(self.page_items):
-            page_item = self.page_items[page_num]
-            r = hit['rect']
-            z = self.base_zoom
-            qt_rect = QRectF(r.x0 * z, r.y0 * z, (r.x1 - r.x0) * z, (r.y1 - r.y0) * z)
-            scene_rect = page_item.mapToScene(qt_rect).boundingRect()
-            
-            self.ensureVisible(scene_rect, 100, 100)
+        self.search_logic._execute_search_jump(hit)
 
     def load_document(self, doc):
         self._cleanup_workers()

@@ -2,9 +2,12 @@
 import fitz
 import uuid
 import weakref  # [PERF FIX] Avoid circular references
-from PyQt6.QtWidgets import QGraphicsRectItem, QInputDialog, QWidget, QMenu, QDialog, QVBoxLayout, QTextEdit, QPushButton
-from PyQt6.QtGui import QColor, QBrush, QPen, QAction, QTextCursor
-from PyQt6.QtCore import Qt, QRectF, QObject, pyqtSignal, QThread
+from PyQt6.QtWidgets import QGraphicsRectItem
+from PyQt6.QtGui import QColor, QBrush, QPen
+from PyQt6.QtCore import Qt, QRectF, QObject, pyqtSignal
+
+from gui.components.annotation.reword import RewordDialog
+from gui.components.annotation.context_menu import AnnotationContextMenu
 
 class AnnotationManager(QObject):
     note_added = pyqtSignal()
@@ -20,6 +23,7 @@ class AnnotationManager(QObject):
         self.page_words = [] 
         self.temp_highlights = [] 
         self.selected_words = []
+        self.context_menu = AnnotationContextMenu(self)
 
     @property
     def viewer(self):
@@ -158,64 +162,10 @@ class AnnotationManager(QObject):
                 self.selected_words = self.page_words[lo:hi+1]
 
     def show_context_menu(self, global_pos):
-        menu = QMenu(self.viewer)
-        menu.setStyleSheet("""
-            QMenu { background-color: #2b2b2b; color: white; border: 1px solid #444; font-weight: bold; } 
-            QMenu::item:selected { background-color: #0078D7; }
-        """)
-        
-        colors = [
-            ("Yellow", (1.0, 0.9, 0.0)),
-            ("Green", (0.0, 0.8, 0.4)),
-            ("Blue", (0.2, 0.6, 1.0)),
-            ("Purple", (0.7, 0.4, 1.0)),
-            ("Red", (1.0, 0.3, 0.3))
-        ]
-        
-        hl_menu = menu.addMenu("🖍️ Highlight...")
-        for name, rgb in colors:
-            action = QAction(f"{name}", self.viewer)
-            action.triggered.connect(lambda checked, c=rgb: self.apply_highlight(c))
-            hl_menu.addAction(action)
-            
-        menu.addSeparator()
-        
-        ai_action = menu.addAction("🤖 Ask AI About Selection")
-        ai_action.triggered.connect(self.ask_ai_about_selection)
-        
-        reword_action = menu.addAction("✍️ Reword this")
-        reword_action.triggered.connect(self.reword_selection)
-        
-        menu.exec(global_pos)
+        self.context_menu.show_context_menu(global_pos)
 
     def apply_highlight(self, color_tuple):
-        if not self.selected_words: return
-        
-        extracted_text = " ".join(w[4] for w in self.selected_words)
-        text, ok = QInputDialog.getText(self.viewer, "Add Note", "Enter a note for this highlight (Optional):")
-        
-        if ok:
-            try:
-                page = self.viewer.doc.load_page(self.current_page_idx)
-                quads = [fitz.Rect(w[:4]).quad for w in self.selected_words]
-                
-                annot = page.add_highlight_annot(quads)
-                annot.set_colors(stroke=color_tuple)
-                
-                annot_info = {
-                    "title": f"UserNote|{uuid.uuid4()}",
-                    "content": text if text else "",
-                    "subject": extracted_text
-                }
-                annot.set_info(info=annot_info)
-                annot.update()
-                
-                self.viewer.reload_page(self.current_page_idx)
-                self.note_added.emit()
-            except Exception as e:
-                print(f"Error saving highlight: {e}")
-                
-        self.clear_selection()
+        self.context_menu.apply_highlight(color_tuple)
 
     def ask_ai_about_selection(self):
         if not self.selected_words: return
@@ -247,67 +197,3 @@ class AnnotationManager(QObject):
             self.reword_dialog.show()
         
         self.clear_selection()
-
-class RewordWorker(QThread):
-    token_received = pyqtSignal(str)
-    finished = pyqtSignal()
-
-    def __init__(self, llm_manager, model, text, parent=None):
-        super().__init__(parent)
-        self.llm_manager = llm_manager
-        self.model = model
-        self.text = text
-
-    def run(self):
-        system_prompt = (
-            "You are an expert editor. Rewrite the following text to make it easier "
-            "to understand and follow, while keeping all crucial information intact. "
-            "Respond ONLY with the reworded text. Do not include introductory phrases."
-        )
-        try:
-            def handle_chunk(chunk):
-                self.token_received.emit(chunk)
-
-            self.llm_manager.query(
-                question=f"\"{self.text}\"",
-                selected_model=self.model,
-                allowed_docs=[],
-                callback=handle_chunk,
-                rag_enabled=False,
-                use_agents=False,
-                custom_system_prompt=system_prompt
-            )
-        except Exception as e:
-            self.token_received.emit(f"\n[Error: {str(e)}]")
-        finally:
-            self.finished.emit()
-
-class RewordDialog(QDialog):
-    def __init__(self, original_text, llm_manager, model, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("AI Reword")
-        self.resize(450, 300)
-        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
-
-        layout = QVBoxLayout(self)
-
-        self.text_edit = QTextEdit()
-        self.text_edit.setReadOnly(True)
-        self.text_edit.setStyleSheet("background-color: #1e1e1e; color: #ddd; font-size: 14px; padding: 10px; border: 1px solid #444;")
-        layout.addWidget(self.text_edit)
-
-        self.close_btn = QPushButton("Close")
-        self.close_btn.setStyleSheet("background-color: #444; padding: 5px;")
-        self.close_btn.clicked.connect(self.accept)
-        layout.addWidget(self.close_btn)
-
-        # Start the worker thread
-        self.worker = RewordWorker(llm_manager, model, original_text, self)
-        self.worker.token_received.connect(self.append_text)
-        self.worker.start()
-
-    def append_text(self, token):
-        cursor = self.text_edit.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.End)
-        cursor.insertText(token)
-        self.text_edit.setTextCursor(cursor)
