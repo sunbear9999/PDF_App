@@ -129,9 +129,7 @@ class NotesDockWidget(QDockWidget):
         self.btn_help.clicked.connect(self.show_workspace_help)
         top_layout.addWidget(self.btn_help)
 
-        self.btn_add_node = QPushButton("+ Add Node")
-        self.btn_add_node.clicked.connect(self.add_node)
-        top_layout.addWidget(self.btn_add_node)
+        # Removed: Add Node button should be in workspace, not notes
 
         self.btn_open_workspace = QPushButton("Open Workspace")
         self.btn_open_workspace.clicked.connect(self.focus_workspace)
@@ -173,13 +171,13 @@ class NotesDockWidget(QDockWidget):
         QMessageBox.information(self, "Workspace Help", help_text)
 
     def focus_workspace(self):
-        if hasattr(self.main_window, 'workspace_view'):
-            self.main_window.workspace_view.setFocus()
-            self.main_window.dock_widgets["Notes"].show()
+        # Show workspace as a dock, not a separate window
+        if "Notes" in self.main_window.dock_widgets:
+            self.main_window.dock_widgets["Notes"].hide()
+        if "Workspace" in self.main_window.dock_widgets:
+            self.main_window.dock_widgets["Workspace"].show()
 
-    def add_node(self):
-        if hasattr(self.main_window, 'workspace_view'):
-            self.main_window.workspace_view.add_custom_bubble()
+    # Removed: Add Node button should be in workspace, not notes
 
     def refresh_notes(self):
         # Clear existing notes

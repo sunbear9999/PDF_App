@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (QGraphicsView, QGraphicsScene, QMenu, QMessageBox,
                              QInputDialog, QFrame, QLabel, QVBoxLayout,
                              QHBoxLayout, QComboBox, QPushButton, QDialog,
                              QScrollArea, QWidget, QFormLayout, QDialogButtonBox, 
-                             QColorDialog, QFileDialog, QTextEdit)
+                             QColorDialog, QFileDialog, QTextEdit, QSizePolicy)
 from PyQt6.QtCore import Qt, QRectF
 from PyQt6.QtGui import QColor, QPen, QBrush, QFont, QPainter, QImage, QStandardItemModel, QStandardItem
 
@@ -32,6 +32,10 @@ from gui.components.workspace.project_sync import WorkspaceProjectSync
 class WorkspaceView(QGraphicsView):
     def __init__(self, main_window):
         super().__init__()
+        self.setWindowTitle("Workspace")
+        self.resize(1200, 800)
+        self.setWindowFlags(Qt.WindowType.Window)
+        
         self.main_window = main_window
         self.controller = getattr(self.main_window, 'workspace_controller', None)
         if isinstance(self.controller, WorkspaceController):
@@ -72,6 +76,59 @@ class WorkspaceView(QGraphicsView):
         tb_layout = QHBoxLayout(self.toolbar_frame)
         tb_layout.setContentsMargins(10, 8, 10, 8)
         
+        # PDF selector
+        pdf_label = QLabel("Project:")
+        pdf_label.setStyleSheet("font-weight: bold;")
+        tb_layout.addWidget(pdf_label)
+        
+        self.pdf_selector = QComboBox()
+        self.pdf_selector.setFixedWidth(200)
+        if hasattr(self.main_window, '_on_pdf_dropdown_changed'):
+            self.pdf_selector.currentIndexChanged.connect(self.main_window._on_pdf_dropdown_changed)
+        tb_layout.addWidget(self.pdf_selector)
+        
+        # tb_layout.addSeparator()  # Removed: QHBoxLayout has no addSeparator
+        
+        # Zoom controls
+        self.btn_zoom_out = QPushButton("🔍-")
+        self.btn_zoom_out.clicked.connect(lambda: self.main_window.viewer.zoom_out() if hasattr(self.main_window, 'viewer') else None)
+        tb_layout.addWidget(self.btn_zoom_out)
+        
+        self.btn_fit_width = QPushButton("↔️ Fit Width")
+        self.btn_fit_width.clicked.connect(lambda: self.main_window.viewer.fit_width() if hasattr(self.main_window, 'viewer') else None)
+        tb_layout.addWidget(self.btn_fit_width)
+        
+        self.btn_zoom_in = QPushButton("🔍+")
+        self.btn_zoom_in.clicked.connect(lambda: self.main_window.viewer.zoom_in() if hasattr(self.main_window, 'viewer') else None)
+        tb_layout.addWidget(self.btn_zoom_in)
+        
+        # tb_layout.addSeparator()  # Removed: QHBoxLayout has no addSeparator
+        
+        # Tools button
+        self.btn_tools = QPushButton("🛠️ Tools")
+        tools_menu = QMenu(self.btn_tools)
+        
+        # Add dock toggle actions
+        if hasattr(self.main_window, 'dock_widgets'):
+            for dock_name in ["Notes", "OCR", "Audio (TTS)", "LLM Chat"]:
+                if dock_name in self.main_window.dock_widgets:
+                    tools_menu.addAction(self.main_window.dock_widgets[dock_name].toggleViewAction())
+        
+        tools_menu.addSeparator()
+        
+        # Theme selector
+        theme_menu = tools_menu.addMenu("🎨 Theme")
+        if hasattr(self.main_window, 'theme_manager'):
+            for theme_name in self.main_window.theme_manager.themes.keys():
+                action = theme_menu.addAction(theme_name)
+                action.triggered.connect(lambda checked, name=theme_name: self.main_window._on_theme_changed(name))
+        
+        self.btn_tools.setMenu(tools_menu)
+        tb_layout.addWidget(self.btn_tools)
+        
+        # tb_layout.addSeparator()  # Removed: QHBoxLayout has no addSeparator
+        
+        # Workspace-specific controls
         tb_layout.addWidget(QLabel("Filter View:"))
         self.filter_combo = CheckableComboBox()
         self.filter_combo.model().dataChanged.connect(self._apply_filter)
@@ -95,6 +152,9 @@ class WorkspaceView(QGraphicsView):
         self.ai_menu = self.create_ai_menu(self.btn_ai_tools)
         self.btn_ai_tools.setMenu(self.ai_menu)
         tb_layout.addWidget(self.btn_ai_tools)
+        
+        # Refresh PDF selector
+        self._refresh_pdf_selector()
 
     def create_ai_menu(self, parent_widget):
         menu = QMenu("🤖 AI Tools", parent_widget)
@@ -186,6 +246,15 @@ class WorkspaceView(QGraphicsView):
                 self.filter_combo.addItem(os.path.basename(pdf), pdf, checked=(pdf in checked_data))
                 
         self.filter_combo.blockSignals(False)
+
+    def _refresh_pdf_selector(self):
+        if hasattr(self, 'pdf_selector'):
+            self.pdf_selector.blockSignals(True)
+            self.pdf_selector.clear()
+            if self.main_window and hasattr(self.main_window, 'pdf_controller'):
+                for path in self.main_window.pdf_controller.get_pdf_paths():
+                    self.pdf_selector.addItem(os.path.basename(path), userData=path)
+            self.pdf_selector.blockSignals(False)
 
     def get_allowed_docs(self):
         checked = self.filter_combo.get_checked_items()

@@ -19,9 +19,8 @@ class WorkspaceStateManager:
         return self.view
 
     def _update_buttons(self):
-        v = self.v
-        if "Notes" in v.main_window.tabs:
-            v.main_window.tabs["Notes"].update_undo_redo_buttons()
+        # No undo/redo buttons in current UI
+        pass
 
     def serialize_workspace(self):
         v = self.v

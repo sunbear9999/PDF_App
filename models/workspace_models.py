@@ -76,6 +76,6 @@ class EdgeData:
             source=data.get("source", ""),
             target=data.get("target", ""),
             label=data.get("label", ""),
-            color=data.get("color", "#888888"),
+            color=data.get("color", "#000000"),
             weight=int(data.get("weight", 2)) if data.get("weight") is not None else 2,
         )
