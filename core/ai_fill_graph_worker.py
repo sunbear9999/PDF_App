@@ -62,8 +62,7 @@ class AIFillGraphWorker(BaseAIWorker):
             raise Exception(f"AI Analysis Failed:\n{structure_result.strip()}")
 
         # [REFACTOR] Use inherited JSON parsing utility
-        cleaned_result = BaseAIWorker.clean_and_parse_json(structure_result.strip())
-        claims_to_support = self.safe_parse_json(cleaned_result, default=[], json_mode=True)
+        claims_to_support = self.safe_parse_json(structure_result.strip(), default=[], json_mode=True)
 
         if not claims_to_support:
             raise ValueError("AI could not identify any claims needing support in the selected nodes.")

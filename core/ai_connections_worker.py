@@ -58,8 +58,6 @@ class AIFindConnectionsWorker(BaseAIWorker):
 
         self.emit_progress("Parsing connection results...")
 
-        # [REFACTOR] Use inherited JSON parsing utility
-        cleaned_response = BaseAIWorker.clean_and_parse_json(response.strip())
-        new_connections = self.safe_parse_json(cleaned_response, default=[], json_mode=True)
+        new_connections = self.safe_parse_json(response.strip(), default=[], json_mode=True)
 
         return new_connections

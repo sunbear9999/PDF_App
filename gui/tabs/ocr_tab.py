@@ -128,20 +128,15 @@ class OCRTab(QWidget):
                 msg += f" Saved to {os.path.basename(save_path)}"
                 
                 if ui_mode == "replace":
-                    pm = self.main_window.project_manager
-                    if save_path in pm.open_docs:
-                        if not pm.open_docs[save_path].is_closed:
-                            pm.open_docs[save_path].close()
-                        del pm.open_docs[save_path]
-                    
-                    new_doc = pm.get_doc(save_path)
+                    self.main_window.ocr_controller.refresh_document_cache(save_path)
+                    new_doc = self.main_window.ocr_controller.get_doc(save_path)
                     if new_doc:
-                        self.main_window.viewer.load_document(new_doc)
+                        self.main_window.ocr_controller.load_document_in_viewer(new_doc)
                         
                 elif ui_mode == "save_new":
-                    self.main_window.project_manager.add_pdf(save_path)
-                    self.main_window._refresh_pdf_dropdown()
-                    self.main_window.switch_to_pdf(save_path)
+                    self.main_window.ocr_controller.add_pdf_to_project(save_path)
+                    self.main_window.ocr_controller.refresh_pdf_dropdown()
+                    self.main_window.ocr_controller.switch_to_file(save_path)
                     
             self.status_label.setText(msg)
             color = self.theme['success'] if self.theme else "#00cc66"

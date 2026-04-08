@@ -18,6 +18,15 @@ from gui.tabs.llm_tab import LLMTab
 from gui.tabs.notes_tab import NotesTab
 from gui.theme import ThemeManager
 from gui.components.help_dialog import HelpDialog
+from services.workspace_service import WorkspaceService
+from services.pdf_service import PDFService
+from services.ocr_service import OCRService
+from services.persistence_service import PersistenceService
+from services.thread_manager import ThreadManager
+from controllers.workspace_controller import WorkspaceController
+from controllers.pdf_controller import PDFController
+from controllers.ocr_controller import OCRController
+from controllers.persistence_controller import PersistenceController
 
 
 class PreloadWorker(QThread):
@@ -38,6 +47,15 @@ class MainWindow(QMainWindow):
         
         self.theme_manager = ThemeManager()
         self.project_manager = ProjectManager()
+        self.workspace_service = WorkspaceService(self.project_manager)
+        self.workspace_controller = WorkspaceController(self.workspace_service)
+        self.pdf_service = PDFService(self.project_manager)
+        self.pdf_controller = PDFController(self.pdf_service, main_window=self)
+        self.ocr_service = OCRService(self.project_manager)
+        self.ocr_controller = OCRController(self.ocr_service, main_window=self)
+        self.persistence_service = PersistenceService(self.project_manager)
+        self.persistence_controller = PersistenceController(self.persistence_service)
+        self.thread_manager = ThreadManager(self)
         self.ai_indexing_worker = None
         self.current_file_path = None
         self.settings = QSettings("PDFMultitool", "Workspace")
@@ -120,14 +138,14 @@ class MainWindow(QMainWindow):
             print("[DEBUG] AI indexing worker already running")
             return
 
-        if not self.project_manager.project_filepath:
+        if not self.pdf_controller.project_filepath:
             print("[DEBUG] No project filepath set")
             return
 
         if pdf_paths:
             queue = pdf_paths
         else:
-            queue = self.project_manager.get_unmapped_pdfs()
+            queue = self.pdf_controller.get_unmapped_pdfs()
 
         if not queue:
             self._show_indexing_status("✅ No PDFs selected for GraphRAG indexing.")
@@ -136,11 +154,11 @@ class MainWindow(QMainWindow):
         self.indexing_in_progress = True
         self.indexing_status_label.setVisible(True)
         model_name = self.tabs["LLM Chat"].model_combo.currentText()
-        print(f"[DEBUG] Starting AIIndexingWorker with model={model_name}, filepath={self.project_manager.project_filepath}, pdf_paths={queue}")
+        print(f"[DEBUG] Starting AIIndexingWorker with model={model_name}, filepath={self.pdf_controller.project_filepath}, pdf_paths={queue}")
         self.ai_indexing_worker = AIIndexingWorker(
             self.tabs["LLM Chat"].llm_manager,
             model_name,
-            self.project_manager.project_filepath,
+            self.pdf_controller.project_filepath,
             pdf_paths=queue,
             parent=self
         )
@@ -171,6 +189,8 @@ class MainWindow(QMainWindow):
 
         self.indexing_in_progress = False
         self.indexing_status_label.setVisible(False)
+        self._set_argument_map_button_state(running=False)
+        self._check_needs_argument_map()
 
         if "Workspace" in self.tabs:
             self.tabs["Workspace"].unlock_ai_tools()
@@ -342,7 +362,7 @@ class MainWindow(QMainWindow):
             
             if "Notes" in self.tabs and hasattr(self.tabs["Notes"], "save_workspace_state"):
                 self.tabs["Notes"].save_workspace_state()
-            self.project_manager.save_all_docs()
+            self.pdf_controller.save_all_docs()
             
             if self.project_manager._conn:
                 self.project_manager._conn.close()
@@ -384,8 +404,9 @@ class MainWindow(QMainWindow):
             self.setWindowTitle(f"PDF Workspace - {self.project_manager.project_name}")
             self._refresh_pdf_dropdown()
             self.tabs["LLM Chat"].refresh_project_ui()
-            if self.project_manager.pdfs:
-                self.switch_to_pdf(self.project_manager.pdfs[0])
+            pdf_paths = self.pdf_controller.get_pdf_paths()
+            if pdf_paths:
+                self.switch_to_pdf(pdf_paths[0])
         else:
             QMessageBox.warning(self, "Error", "Failed to load project file.")
 
@@ -395,18 +416,16 @@ class MainWindow(QMainWindow):
             return
             
         file_paths, _ = QFileDialog.getOpenFileNames(self, "Add PDFs to Project", "", "PDF Files (*.pdf)")
-        for path in file_paths:
-            self.project_manager.add_pdf(path)
-            
         if file_paths:
-            print(f"[DEBUG] Added PDFs: {file_paths}")
+            added_paths = self.pdf_controller.add_pdfs(file_paths)
+            print(f"[DEBUG] Added PDFs: {added_paths}")
             self._refresh_pdf_dropdown()
-            self.switch_to_pdf(file_paths[-1])
+            self.switch_to_pdf(added_paths[-1] if added_paths else file_paths[-1])
 
     def _refresh_pdf_dropdown(self):
         self.pdf_selector.blockSignals(True)
         self.pdf_selector.clear()
-        for path in self.project_manager.pdfs:
+        for path in self.pdf_controller.get_pdf_paths():
             self.pdf_selector.addItem(os.path.basename(path), userData=path)
         self.pdf_selector.blockSignals(False)
 
@@ -428,9 +447,9 @@ class MainWindow(QMainWindow):
             return
 
         self.current_file_path = pdf_path
-        self.project_manager.set_active_file(pdf_path)
+        self.pdf_controller.set_active_file(pdf_path)
         
-        doc = self.project_manager.get_doc(pdf_path)
+        doc = self.pdf_controller.get_doc(pdf_path)
         if doc:
             success = self.viewer.load_document(doc)
             if success:
@@ -447,7 +466,7 @@ class MainWindow(QMainWindow):
             try:
                 if "Notes" in self.tabs and hasattr(self.tabs["Notes"], "save_workspace_state"):
                     self.tabs["Notes"].save_workspace_state()
-                self.project_manager.save_all_docs()
+                self.pdf_controller.save_all_docs()
             except Exception as e:
                 print(f"Background autosave failed: {e}")
 
@@ -457,7 +476,7 @@ class MainWindow(QMainWindow):
             if "Notes" in self.tabs and hasattr(self.tabs["Notes"], "save_workspace_state"):
                 self.tabs["Notes"].save_workspace_state()
                 
-            self.project_manager.save_all_docs()
+            self.pdf_controller.save_all_docs()
             QMessageBox.information(self, "Success", "Project and all highlights saved successfully!")
         except Exception as e:
             QMessageBox.warning(self, "Save Error", f"Error saving project: {str(e)}")
@@ -476,7 +495,7 @@ class MainWindow(QMainWindow):
                 chunk = " ".join(words[i:i+6])
                 if chunk.strip(): chunks.append(chunk)
 
-        search_paths = allowed_paths if allowed_paths else self.project_manager.pdfs
+        search_paths = allowed_paths if allowed_paths else self.pdf_controller.get_pdf_paths()
         
         if target_doc_name:
             filtered_paths = []
@@ -490,7 +509,7 @@ class MainWindow(QMainWindow):
 
         for path in search_paths:
             try:
-                doc = self.project_manager.get_doc(path)
+                doc = self.pdf_controller.get_doc(path)
                 if not doc: continue
                 
                 for page_num in range(len(doc)):
@@ -520,7 +539,7 @@ class MainWindow(QMainWindow):
                         annot.update()
                         
                         found_any = True
-                        self.project_manager.mark_dirty(path)
+                        self.pdf_controller.mark_dirty(path)
                         
                         if path == self.current_file_path:
                             self.viewer.reload_page(page_num)
@@ -542,7 +561,7 @@ class MainWindow(QMainWindow):
 
     def _mark_current_dirty(self):
         if self.current_file_path:
-            self.project_manager.mark_dirty(self.current_file_path)
+            self.pdf_controller.mark_dirty(self.current_file_path)
 
     def _build_ocr_banner(self):
         self.ocr_banner = QFrame()
@@ -581,7 +600,7 @@ class MainWindow(QMainWindow):
         btn_dismiss.setStyleSheet("background-color: transparent; border: 1px solid #1e1e1e; color: #1e1e1e;")
         btn_dismiss.clicked.connect(self.argument_map_banner.hide)
         banner_layout.addWidget(btn_dismiss)
-        self.main_layout.addWidget(self.argument_map_banner)
+        # Keep the banner hidden by default; primary UI is floating icon instead
         self.argument_map_banner.hide()
 
     def _build_workspace(self):
@@ -593,18 +612,26 @@ class MainWindow(QMainWindow):
         viewer_layout.setContentsMargins(0, 0, 0, 0)
         viewer_layout.addWidget(self.viewer)
 
-        self.side_action_panel = QWidget()
-        side_layout = QVBoxLayout(self.side_action_panel)
-        side_layout.setContentsMargins(10, 10, 10, 10)
-        side_layout.setSpacing(8)
-        self.btn_generate_argument_map_side = QPushButton("Generate Argument Map")
-        self.btn_generate_argument_map_side.clicked.connect(self._trigger_argument_map_generation)
-        self.btn_generate_argument_map_side.hide()
-        side_layout.addWidget(self.btn_generate_argument_map_side)
-        side_layout.addStretch()
-        viewer_layout.addWidget(self.side_action_panel)
-
         self.splitter.addWidget(self.viewer_container)
+
+        self.argument_map_overlay = QWidget(self.viewer_container)
+        self.argument_map_overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        self.argument_map_overlay.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.argument_map_overlay.setStyleSheet("background: transparent;")
+        overlay_layout = QHBoxLayout(self.argument_map_overlay)
+        overlay_layout.setContentsMargins(0, 0, 0, 0)
+        overlay_layout.addStretch()
+
+        self.btn_generate_argument_map_side = QPushButton("🧠 Generate Argument Map", self.argument_map_overlay)
+        self.btn_generate_argument_map_side.setFixedHeight(40)
+        self.btn_generate_argument_map_side.setToolTip("Generate Argument Map")
+        self.btn_generate_argument_map_side.setStyleSheet(
+            "QPushButton { background-color: rgba(255, 255, 255, 0.96); color: #1e1e1e; border: 1px solid rgba(0,0,0,0.16); border-radius: 20px; padding: 8px 14px; font-size: 13px; }"
+            "QPushButton:hover { background-color: rgba(255, 255, 255, 1.0); }"
+        )
+        self.btn_generate_argument_map_side.clicked.connect(self._toggle_argument_map_generation)
+        overlay_layout.addWidget(self.btn_generate_argument_map_side)
+        self.argument_map_overlay.hide()
 
         self.tool_panel = QStackedWidget()
         
@@ -648,18 +675,21 @@ class MainWindow(QMainWindow):
         if not self.current_file_path:
             self.argument_map_banner.hide()
             if hasattr(self, 'btn_generate_argument_map_side'):
-                self.btn_generate_argument_map_side.hide()
+                self.argument_map_overlay.hide()
             return
 
-        has_map = self.project_manager.get_document_map(self.current_file_path) is not None
+        has_map = self.pdf_controller.get_document_map(self.current_file_path) is not None
         if has_map:
             self.argument_map_banner.hide()
             if hasattr(self, 'btn_generate_argument_map_side'):
-                self.btn_generate_argument_map_side.hide()
+                self._set_argument_map_button_state(running=False)
+                self.argument_map_overlay.hide()
         else:
-            self.argument_map_banner.show()
+            self.argument_map_banner.hide()  # Hide banner, rely on floating button
             if hasattr(self, 'btn_generate_argument_map_side'):
-                self.btn_generate_argument_map_side.show()
+                self._set_argument_map_button_state(running=False)
+                self.argument_map_overlay.show()
+                self._position_argument_map_button()
 
     def _trigger_auto_ocr(self):
         self.ocr_banner.hide()
@@ -671,10 +701,47 @@ class MainWindow(QMainWindow):
             return
 
         self.argument_map_banner.hide()
-        if hasattr(self, 'btn_generate_argument_map_side'):
-            self.btn_generate_argument_map_side.hide()
-
+        self._set_argument_map_button_state(running=True)
         self.start_background_indexing([self.current_file_path])
+
+    def _toggle_argument_map_generation(self):
+        if getattr(self, 'ai_indexing_worker', None) and self.ai_indexing_worker.isRunning():
+            self.ai_indexing_worker.stop()
+            self.ai_indexing_worker.wait(3000)
+            self._show_indexing_status("⚠️ Argument map generation canceled.")
+            self._set_argument_map_button_state(running=False)
+            return
+
+        self._trigger_argument_map_generation()
+
+    def _set_argument_map_button_state(self, running: bool):
+        if not hasattr(self, 'btn_generate_argument_map_side'):
+            return
+        if running:
+            self.btn_generate_argument_map_side.setText("✖ Cancel")
+            self.btn_generate_argument_map_side.setToolTip("Cancel argument map generation")
+            self.btn_generate_argument_map_side.setStyleSheet(
+                "QPushButton { background-color: rgba(255, 255, 255, 0.96); color: #d32f2f; border: 1px solid rgba(211, 47, 47, 0.22); border-radius: 20px; padding: 8px 14px; font-size: 13px; }"
+                "QPushButton:hover { background-color: rgba(255, 255, 255, 1.0); }"
+            )
+            self.btn_generate_argument_map_side.show()
+            if hasattr(self, 'argument_map_overlay'):
+                self.argument_map_overlay.show()
+        else:
+            self.btn_generate_argument_map_side.setText("🧠 Generate Argument Map")
+            self.btn_generate_argument_map_side.setToolTip("Generate Argument Map")
+            self.btn_generate_argument_map_side.setStyleSheet(
+                "QPushButton { background-color: rgba(255, 255, 255, 0.96); color: #1e1e1e; border: 1px solid rgba(0,0,0,0.16); border-radius: 20px; padding: 8px 14px; font-size: 13px; }"
+                "QPushButton:hover { background-color: rgba(255, 255, 255, 1.0); }"
+            )
+            if self.current_file_path and self.pdf_controller.get_document_map(self.current_file_path) is None:
+                self.btn_generate_argument_map_side.show()
+                if hasattr(self, 'argument_map_overlay'):
+                    self.argument_map_overlay.show()
+            else:
+                self.btn_generate_argument_map_side.hide()
+                if hasattr(self, 'argument_map_overlay'):
+                    self.argument_map_overlay.hide()
 
     def _sync_tools_with_file(self, file_path):
         self.tabs["Notes"].refresh_notes()
@@ -693,3 +760,39 @@ class MainWindow(QMainWindow):
             current_sizes = self.splitter.sizes()
             if current_sizes[1] == 0:
                 self.splitter.setSizes([1000, 400])
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, 'btn_generate_argument_map_side') and self.btn_generate_argument_map_side.isVisible():
+            self._position_argument_map_button()
+
+    def _position_argument_map_button(self):
+        if not hasattr(self, 'btn_generate_argument_map_side'):
+            return
+        if not hasattr(self, 'argument_map_overlay') or not self.viewer_container:
+            return
+
+        margin = 18
+        width = self.argument_map_overlay.sizeHint().width()
+        height = self.argument_map_overlay.sizeHint().height()
+        container_width = self.viewer_container.width()
+        self.argument_map_overlay.setGeometry(
+            container_width - width - margin,
+            margin,
+            width,
+            height
+        )
+        self.btn_generate_argument_map_side.raise_()
+
+    def closeEvent(self, event):
+        """Ensure all background workers are stopped before closing the application."""
+        # Stop all managed workers
+        self.thread_manager.stop_all_workers()
+
+        # Stop any remaining unmanaged workers
+        if self.ai_indexing_worker and self.ai_indexing_worker.isRunning():
+            self.ai_indexing_worker.stop()
+            self.ai_indexing_worker.wait(3000)
+
+        # Accept the close event
+        event.accept()

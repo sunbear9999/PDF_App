@@ -58,8 +58,6 @@ class AIConsolidateWorker(BaseAIWorker):
 
         self.emit_progress("Parsing consolidation results...")
 
-        # [REFACTOR] Use inherited JSON parsing utility
-        cleaned_result = BaseAIWorker.clean_and_parse_json(result_text.strip())
-        result_dict = self.safe_parse_json(cleaned_result, default={}, json_mode=True)
+        result_dict = self.safe_parse_json(result_text.strip(), default={}, json_mode=True)
 
         return result_dict

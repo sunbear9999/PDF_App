@@ -3,7 +3,7 @@ import fitz
 import weakref
 from PyQt6.QtWidgets import (QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsRectItem,
                              QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox)
-from PyQt6.QtGui import QImage, QPixmap, QPainter, QColor, QBrush, QPen
+from PyQt6.QtGui import QImage, QPixmap, QPainter, QColor, QBrush, QPen, QIntValidator
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QRectF, QTimer
 
 from gui.components.annotation_manager import AnnotationManager
@@ -61,6 +61,8 @@ class PDFViewer(QGraphicsView):
         self.annot_manager = AnnotationManager(self)
         
         self.pending_jump = None
+        self.pending_page_jump = None
+        self.current_page = 0
 
         self.search_bar = SearchBarWidget(self)
         self.search_bar.hide()
@@ -85,9 +87,47 @@ class PDFViewer(QGraphicsView):
         self.search_bar.scope_combo.currentIndexChanged.connect(self.trigger_search)
         self.search_bar.chk_match_case.stateChanged.connect(self.trigger_search)
 
-        # [PERF FIX] Listen to scroll events for lazy loading
-        self.verticalScrollBar().valueChanged.connect(self._on_scroll)
+        self.scroll_debounce_timer = QTimer(self)
+        self.scroll_debounce_timer.setSingleShot(True)
+        self.scroll_debounce_timer.timeout.connect(self._on_scroll)
+
+        self.verticalScrollBar().valueChanged.connect(self._on_fast_scroll)
         self.last_visible_pages = set()
+
+        self.page_indicator_frame = QFrame(self.viewport())
+        self.page_indicator_frame.setObjectName("PageIndicator")
+        self.page_indicator_frame.setStyleSheet(
+            "QFrame#PageIndicator { background-color: rgba(30, 30, 30, 0.85); border-radius: 12px; }"
+            "QLabel { color: white; font-size: 12px; }"
+            "QLineEdit { color: #111111; background: rgba(255,255,255,0.98); border: 1px solid rgba(0,0,0,0.2); border-radius: 6px; padding: 4px 6px; }"
+            "QLineEdit:hover { background: rgba(255,255,255,1); }"
+            "QPushButton { background: rgba(255,255,255,0.96); color: #1e1e1e; border: 1px solid rgba(0,0,0,0.12); border-radius: 8px; padding: 4px 10px; }"
+        )
+        self.page_indicator_frame.hide()
+
+        page_indicator_layout = QHBoxLayout(self.page_indicator_frame)
+        page_indicator_layout.setContentsMargins(10, 6, 10, 6)
+        page_indicator_layout.setSpacing(8)
+
+        self.page_indicator_label = QLabel("Page 0 / 0")
+        self.page_indicator_label.setStyleSheet("font-weight: bold;")
+        page_indicator_layout.addWidget(self.page_indicator_label)
+
+        self.page_indicator_input = QLineEdit(self.page_indicator_frame)
+        self.page_indicator_input.setFixedWidth(50)
+        self.page_indicator_input.setPlaceholderText("Jump")
+        self.page_indicator_input.setValidator(QIntValidator(1, 9999, self.page_indicator_input))
+        self.page_indicator_input.setStyleSheet(
+            "color: #111111; background: rgba(255,255,255,0.95); border: 1px solid rgba(0,0,0,0.18); border-radius: 6px; padding: 4px 6px;"
+        )
+        self.page_indicator_input.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.page_indicator_input.returnPressed.connect(self._on_page_indicator_go)
+        page_indicator_layout.addWidget(self.page_indicator_input)
+
+        self.page_indicator_go = QPushButton("Go", self.page_indicator_frame)
+        self.page_indicator_go.setFixedHeight(26)
+        self.page_indicator_go.clicked.connect(self._on_page_indicator_go)
+        page_indicator_layout.addWidget(self.page_indicator_go)
 
     def update_theme(self, theme):
         self.search_bar.update_theme(theme)
@@ -99,6 +139,8 @@ class PDFViewer(QGraphicsView):
             self.search_bar.adjustSize()
             x_pos = self.viewport().width() - self.search_bar.width() - 20
             self.search_bar.move(x_pos, 20)
+        if hasattr(self, 'page_indicator_frame') and self.page_indicator_frame.isVisible():
+            self._position_page_indicator()
 
     def toggle_search_bar(self):
         if self.search_bar.isVisible():
@@ -151,10 +193,10 @@ class PDFViewer(QGraphicsView):
 
         main_window = self.window()
         pdfs_to_search = []
-        if scope == "Entire Project":
-            pdfs_to_search = main_window.project_manager.pdfs
+        if scope == "Entire Project" and main_window and hasattr(main_window, 'pdf_controller'):
+            pdfs_to_search = main_window.pdf_controller.get_pdf_paths()
         else:
-            if main_window.current_file_path:
+            if main_window and main_window.current_file_path:
                 pdfs_to_search = [main_window.current_file_path]
                 
         flags = fitz.TEXT_PRESERVE_LIGATURES | fitz.TEXT_PRESERVE_WHITESPACE
@@ -162,7 +204,7 @@ class PDFViewer(QGraphicsView):
             flags |= getattr(fitz, "TEXT_MATCH_CASE", 4)
                 
         for pdf_path in pdfs_to_search:
-            doc = main_window.project_manager.get_doc(pdf_path)
+            doc = main_window.pdf_controller.get_doc(pdf_path) if main_window and hasattr(main_window, "pdf_controller") else None
             if not doc: continue
             for page_num in range(len(doc)):
                 page = doc.load_page(page_num)
@@ -202,7 +244,10 @@ class PDFViewer(QGraphicsView):
         
         if hit['pdf'] != main_window.current_file_path:
             self.pending_search_jump = hit
-            main_window.switch_to_pdf(hit['pdf'])
+            if main_window and hasattr(main_window, "pdf_controller"):
+                main_window.pdf_controller.switch_to_pdf(hit['pdf'])
+            else:
+                main_window.switch_to_pdf(hit['pdf'])
         else:
             self.render_search_highlights()
             page_num = hit['page']
@@ -263,58 +308,27 @@ class PDFViewer(QGraphicsView):
             
             self.ensureVisible(scene_rect, 100, 100)
 
-    def load_document(self, doc):
-        # [PERF FIX] Clean up active workers without blocking on .wait()
-        self._cleanup_workers()
-        
-        self.doc = doc
-        
-        self.annot_manager.clear_selection()
-        self.clear_search_highlights()
-        
-        self.scene.clear()
-        self.page_items.clear()
-        self.page_placeholders.clear()
-        self.active_workers.clear()
-        self.pending_jump = None 
-        
-        if not doc or len(doc) == 0:
-            return True
-        
-        # [PERF FIX] Create placeholder layout for all pages without rendering
-        y_offset = 0
-        for page_num in range(len(doc)):
-            page = doc.load_page(page_num)
-            width = page.get_displaylist().rect.width * self.base_zoom
-            height = page.get_displaylist().rect.height * self.base_zoom
-            
-            # Store dimensions for lazy loading
-            self.page_placeholders[page_num] = (width, height)
-            
-            # Create placeholder rectangle
-            placeholder = QGraphicsRectItem(0, y_offset, width, height)
-            placeholder.setBrush(QBrush(QColor(240, 240, 240)))
-            placeholder.setPen(QPen(QColor(200, 200, 200)))
-            self.scene.addItem(placeholder)
-            self.page_items[page_num] = placeholder
-            
-            y_offset += height + 20
-        
-        self.scene.setSceneRect(self.scene.itemsBoundingRect())
-        
-        # Trigger initial visible page renders
-        QTimer.singleShot(100, self._on_scroll)
-        
-        return True
+
 
     def _cleanup_workers(self):
-        # [PERF FIX] Stop and clean up workers without blocking GUI thread
         for page_num, worker in list(self.active_workers.items()):
             if worker.isRunning():
                 worker.stop()
-                # Do NOT call .wait() - use deleteLater() instead
+                worker.wait()  # CRITICAL: Block until C++ thread exits to prevent core dump
                 worker.deleteLater()
             del self.active_workers[page_num]
+
+    def _on_fast_scroll(self):
+        if not self.doc:
+            return
+
+        visible_pages = self._get_visible_pages()
+        if visible_pages:
+            sorted_pages = sorted(visible_pages, key=lambda p: self.page_items[p].sceneBoundingRect().top())
+            self.current_page = sorted_pages[0]
+            self._update_page_indicator()
+
+        self.scroll_debounce_timer.start(10)
 
     def _on_scroll(self):
         # [PERF FIX] Determine visible pages and trigger lazy loading
@@ -326,8 +340,16 @@ class PDFViewer(QGraphicsView):
         # If no pages are visible (shouldn't happen, but safety check), load first page
         if not visible_pages and len(self.page_items) > 0:
             visible_pages.add(0)
+
+        if visible_pages:
+            sorted_pages = sorted(visible_pages, key=lambda p: self.page_items[p].sceneBoundingRect().top())
+            self.current_page = sorted_pages[0]
+        else:
+            self.current_page = 0
+
+        self._update_page_indicator()
         
-        # Load visible pages and buffer (+/- 1 page)
+        # Load visible pages and buffer (+/- 2 pages)
         pages_to_load = set()
         for page_num in visible_pages:
             pages_to_load.add(page_num)
@@ -335,15 +357,19 @@ class PDFViewer(QGraphicsView):
                 pages_to_load.add(page_num - 1)
             if page_num < len(self.doc) - 1:
                 pages_to_load.add(page_num + 1)
+            if page_num > 1:
+                pages_to_load.add(page_num - 2)
+            if page_num < len(self.doc) - 2:
+                pages_to_load.add(page_num + 2)
         
-        # Unload pages far from viewport
+        # Unload pages farther than 3 pages away from viewport
+        min_page = min(visible_pages) if visible_pages else 0
+        max_page = max(visible_pages) if visible_pages else 0
         for page_num in list(self.page_items.keys()):
-            if page_num not in pages_to_load and page_num in self.page_items:
+            if page_num < min_page - 3 or page_num > max_page + 3:
                 item = self.page_items[page_num]
                 if isinstance(item, QGraphicsPixmapItem):
-                    # [PERF FIX] Clear pixmap and revert to placeholder
-                    item.setPixmap(QPixmap())  # Clear memory
-                    # Replace with placeholder
+                    item.setPixmap(QPixmap())
                     if page_num in self.page_placeholders:
                         width, height = self.page_placeholders[page_num]
                         y_pos = item.y()
@@ -354,7 +380,7 @@ class PDFViewer(QGraphicsView):
                         placeholder.setPos(0, y_pos)
                         self.scene.addItem(placeholder)
                         self.page_items[page_num] = placeholder
-        
+
         # Request renders for visible pages
         for page_num in pages_to_load:
             if page_num not in self.active_workers:
@@ -375,6 +401,43 @@ class PDFViewer(QGraphicsView):
                 visible_pages.add(page_num)
         
         return visible_pages
+
+    def _position_page_indicator(self):
+        if not hasattr(self, 'page_indicator_frame'):
+            return
+        margin = 18
+        width = self.page_indicator_frame.width()
+        height = self.page_indicator_frame.height()
+        viewport_height = self.viewport().height()
+        # Position at bottom-left to avoid overlap with top-right argument map button
+        x = margin
+        y = viewport_height - height - margin
+        self.page_indicator_frame.move(x, y)
+        self.page_indicator_frame.raise_()
+
+    def _update_page_indicator(self):
+        if not self.doc:
+            self.page_indicator_frame.hide()
+            return
+
+        total_pages = len(self.doc)
+        current = max(1, min(self.current_page + 1, total_pages))
+        self.page_indicator_label.setText(f"Page {current} / {total_pages}")
+        self.page_indicator_frame.adjustSize()
+        self._position_page_indicator()
+        self.page_indicator_frame.show()
+
+    def _on_page_indicator_go(self):
+        if not self.doc:
+            return
+        text = self.page_indicator_input.text().strip()
+        if not text.isdigit():
+            return
+        page_num = int(text) - 1
+        if page_num < 0 or page_num >= len(self.doc):
+            return
+        self.jump_to_page(page_num)
+        self.page_indicator_input.clear()
 
     def _request_page_render(self, page_num):
         # [PERF FIX] Only render if not already rendering and page is placeholder
@@ -423,6 +486,10 @@ class PDFViewer(QGraphicsView):
             self.pending_jump = None
             QTimer.singleShot(100, lambda: self._execute_jump(p_num, a_id))
             
+        if self.pending_page_jump == page_num:
+            self.pending_page_jump = None
+            QTimer.singleShot(100, lambda: self.jump_to_page(page_num))
+
         if self.pending_search_jump and self.pending_search_jump['page'] == page_num:
             s_hit = self.pending_search_jump
             self.pending_search_jump = None
@@ -434,25 +501,35 @@ class PDFViewer(QGraphicsView):
             del self.active_workers[page_num]
 
     def reload_page(self, page_num):
-        if not self.doc or page_num < 0 or page_num >= len(self.doc): 
+        if not self.doc or page_num < 0 or page_num >= len(self.page_items): 
             return
-        # Force re-render by treating as unloaded
+        
+        # 1. Stop any active rendering for this page
         if page_num in self.active_workers:
-            self.active_workers[page_num].stop()
+            worker = self.active_workers[page_num]
+            worker.stop()
+            worker.wait()  # CRITICAL: Prevent QThread core dumps
+            worker.deleteLater()
             del self.active_workers[page_num]
         
+        # 2. Swap whatever is currently on screen back to a placeholder
         if page_num in self.page_items:
-            item = self.page_items[page_num]
-            self.scene.removeItem(item)
+            old_item = self.page_items[page_num]
+            self.scene.removeItem(old_item)
+            
             if page_num in self.page_placeholders:
                 width, height = self.page_placeholders[page_num]
-                y_pos = item.y() if hasattr(item, 'y') else 0
-                placeholder = QGraphicsRectItem(0, y_pos, width, height)
+                y_pos = old_item.y() if hasattr(old_item, 'y') else 0
+                
+                placeholder = QGraphicsRectItem(0, 0, width, height)
                 placeholder.setBrush(QBrush(QColor(240, 240, 240)))
                 placeholder.setPen(QPen(QColor(200, 200, 200)))
+                placeholder.setPos(0, y_pos)
+                
                 self.scene.addItem(placeholder)
                 self.page_items[page_num] = placeholder
         
+        # 3. Request a fresh render
         self._request_page_render(page_num)
 
     def mousePressEvent(self, event):
@@ -494,10 +571,10 @@ class PDFViewer(QGraphicsView):
 
         main_window = self.window()
         pdfs_to_search = []
-        if scope == "Entire Project":
-            pdfs_to_search = main_window.project_manager.pdfs
+        if scope == "Entire Project" and main_window and hasattr(main_window, 'pdf_controller'):
+            pdfs_to_search = main_window.pdf_controller.get_pdf_paths()
         else:
-            if main_window.current_file_path:
+            if main_window and main_window.current_file_path:
                 pdfs_to_search = [main_window.current_file_path]
                 
         flags = fitz.TEXT_PRESERVE_LIGATURES | fitz.TEXT_PRESERVE_WHITESPACE
@@ -505,7 +582,7 @@ class PDFViewer(QGraphicsView):
             flags |= getattr(fitz, "TEXT_MATCH_CASE", 4)
                 
         for pdf_path in pdfs_to_search:
-            doc = main_window.project_manager.get_doc(pdf_path)
+            doc = main_window.pdf_controller.get_doc(pdf_path) if main_window and hasattr(main_window, "pdf_controller") else None
             if not doc: continue
             for page_num in range(len(doc)):
                 page = doc.load_page(page_num)
@@ -545,7 +622,10 @@ class PDFViewer(QGraphicsView):
         
         if hit['pdf'] != main_window.current_file_path:
             self.pending_search_jump = hit
-            main_window.switch_to_pdf(hit['pdf'])
+            if main_window and hasattr(main_window, "pdf_controller"):
+                main_window.pdf_controller.switch_to_pdf(hit['pdf'])
+            else:
+                main_window.switch_to_pdf(hit['pdf'])
         else:
             self.render_search_highlights()
             page_num = hit['page']
@@ -604,14 +684,10 @@ class PDFViewer(QGraphicsView):
             self.ensureVisible(scene_rect, 100, 100)
 
     def load_document(self, doc):
-        # [PERF FIX] Clean up existing workers without blocking GUI
         self._cleanup_workers()
-
         self.doc = doc
-        
         self.annot_manager.clear_selection()
         self.clear_search_highlights()
-        
         self.scene.clear()
         self.page_items.clear()
         self.page_placeholders.clear()
@@ -620,38 +696,34 @@ class PDFViewer(QGraphicsView):
         if not doc or len(doc) == 0:
             return True
         
-        # [PERF FIX] Create placeholders for all pages without loading
-        # Use standard sizing to avoid slow page.rect calls
         y_offset = 0
         for page_num in range(len(doc)):
-            # Default placeholder size (standard letter at 1.5x zoom)
-            width = 612 * self.base_zoom
-            height = 792 * self.base_zoom
+            # ACCURATE SIZING: Use actual page rect to prevent overlapping
+            rect = doc[page_num].rect
+            width = rect.width * self.base_zoom
+            height = rect.height * self.base_zoom
             
             self.page_placeholders[page_num] = (width, height)
             
-            # Create placeholder rectangle
             placeholder = QGraphicsRectItem(0, 0, width, height)
-            placeholder.setBrush(QBrush(QColor(200, 200, 200)))
-            placeholder.setPen(QPen(QColor(150, 150, 150)))
+            placeholder.setBrush(QBrush(QColor(240, 240, 240)))
+            placeholder.setPen(QPen(QColor(200, 200, 200)))
             placeholder.setPos(0, y_offset)
+            
             self.scene.addItem(placeholder)
             self.page_items[page_num] = placeholder
             
-            y_offset += height + 20
+            y_offset += height + 20 # 20px buffer between pages
         
-        # Set scene rect
         self.scene.setSceneRect(self.scene.itemsBoundingRect())
+        self.current_page = 0
+        self._update_page_indicator()
         
-        # Request rendering for visible and nearby pages (lazy load with some buffering)
-        # Start with first 5 pages, let scroll event load more
         max_initial = min(5, len(doc))
         for page_num in range(max_initial):
             self._request_page_render(page_num)
         
-        # Let scroll handler determine what else to load
         QTimer.singleShot(50, self._on_scroll)
-        
         return True
     def _on_worker_finished(self, page_num):
         # [PERF FIX] Clean up worker reference after completion
@@ -662,12 +734,36 @@ class PDFViewer(QGraphicsView):
             del self.active_workers[page_num]
 
     def reload_page(self, page_num):
-        if not self.doc or page_num < 0 or page_num >= len(self.page_items): return
-        page = self.doc.load_page(page_num)
-        mat = fitz.Matrix(self.base_zoom, self.base_zoom)
-        pix = page.get_pixmap(matrix=mat)
-        img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888)
-        self.page_items[page_num].setPixmap(QPixmap.fromImage(img.copy()))
+        if not self.doc or page_num < 0 or page_num >= len(self.page_items): 
+            return
+        
+        # 1. Stop any active rendering for this page
+        if page_num in self.active_workers:
+            worker = self.active_workers[page_num]
+            worker.stop()
+            worker.wait()  # CRITICAL: Prevent QThread core dumps
+            worker.deleteLater()
+            del self.active_workers[page_num]
+        
+        # 2. Swap whatever is currently on screen back to a placeholder
+        if page_num in self.page_items:
+            old_item = self.page_items[page_num]
+            self.scene.removeItem(old_item)
+            
+            if page_num in self.page_placeholders:
+                width, height = self.page_placeholders[page_num]
+                y_pos = old_item.y() if hasattr(old_item, 'y') else 0
+                
+                placeholder = QGraphicsRectItem(0, 0, width, height)
+                placeholder.setBrush(QBrush(QColor(240, 240, 240)))
+                placeholder.setPen(QPen(QColor(200, 200, 200)))
+                placeholder.setPos(0, y_pos)
+                
+                self.scene.addItem(placeholder)
+                self.page_items[page_num] = placeholder
+        
+        # 3. Request a fresh render
+        self._request_page_render(page_num)
 
     def mousePressEvent(self, event):
         is_shift = event.modifiers() == Qt.KeyboardModifier.ShiftModifier
@@ -720,10 +816,20 @@ class PDFViewer(QGraphicsView):
         super().mouseReleaseEvent(event)
         
     def jump_to_page(self, page_num):
-        if 0 <= page_num < len(self.page_items):
+        if not self.doc or page_num < 0 or page_num >= len(self.page_items):
+            return
+
+        if page_num in self.page_items and isinstance(self.page_items[page_num], QGraphicsPixmapItem):
             target_item = self.page_items[page_num]
             top_edge = QRectF(target_item.scenePos().x(), target_item.scenePos().y(), target_item.boundingRect().width(), 1)
             self.ensureVisible(top_edge, 50, 10)
+            self.current_page = page_num
+            self._update_page_indicator()
+            return
+
+        # If page is not yet rendered, queue a jump and request render
+        self.pending_page_jump = page_num
+        self._request_page_render(page_num)
 
     def jump_to_annotation(self, page_num, annot_id):
         if page_num >= len(self.page_items):

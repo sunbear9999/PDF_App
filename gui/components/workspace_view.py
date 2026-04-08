@@ -12,6 +12,7 @@ from PyQt6.QtCore import Qt, QRectF
 from PyQt6.QtGui import QColor, QPen, QBrush, QFont, QPainter, QImage, QStandardItemModel, QStandardItem
 
 from gui.components.workspace_items import Node, Edge
+from models.workspace_models import EdgeData, NodeData
 from core.ai_organize_worker import AIOrganizeWorker
 from core.ai_connections_worker import AIFindConnectionsWorker
 from core.ai_outline_worker import AIOutlineWorker
@@ -19,6 +20,7 @@ from core.ai_weakpoints_worker import AIWeakpointsWorker
 from core.ai_fill_graph_worker import AIFillGraphWorker
 from core.ai_consolidate_worker import AIConsolidateWorker
 from core.layout_engine import calculate_radial_layout
+from controllers.workspace_controller import WorkspaceController
 
 class CheckableComboBox(QComboBox):
     def __init__(self, parent=None):
@@ -163,7 +165,10 @@ class OutlineDialog(QDialog):
         
         self.workspace_view.scene_obj.addItem(node)
         self.workspace_view.nodes[node_id] = node
-        self.workspace_view.main_window.project_manager.mark_dirty("workspace")
+        if self.workspace_view.controller:
+            self.workspace_view.controller.mark_dirty("workspace")
+        else:
+            self.workspace_view.main_window.persistence_controller.mark_dirty("workspace")
         
         QMessageBox.information(self, "Success", "Outline added as a new node to the workspace!")
         self.accept()
@@ -222,7 +227,10 @@ class WeakpointsDialog(QDialog):
         
         self.workspace_view.scene_obj.addItem(node)
         self.workspace_view.nodes[node_id] = node
-        self.workspace_view.main_window.project_manager.mark_dirty("workspace")
+        if self.workspace_view.controller:
+            self.workspace_view.controller.mark_dirty("workspace")
+        else:
+            self.workspace_view.main_window.persistence_controller.mark_dirty("workspace")
         
         QMessageBox.information(self, "Success", "Analysis added as a new node to the workspace!")
         self.accept()
@@ -275,6 +283,9 @@ class WorkspaceView(QGraphicsView):
     def __init__(self, main_window):
         super().__init__()
         self.main_window = main_window
+        self.controller = getattr(self.main_window, 'workspace_controller', None)
+        if isinstance(self.controller, WorkspaceController):
+            self.controller.set_view(self)
         self.scene_obj = QGraphicsScene(self)
         self.setScene(self.scene_obj)
         # [PERF FIX] Use weakref.proxy to avoid circular reference: scene -> view -> main_window -> scene
@@ -415,8 +426,8 @@ class WorkspaceView(QGraphicsView):
         
         self.filter_combo.addItem("All PDFs", "ALL", checked=("ALL" in checked_data))
         
-        if self.main_window and hasattr(self.main_window, 'project_manager') and self.main_window.project_manager:
-            for pdf in self.main_window.project_manager.pdfs:
+        if self.main_window and hasattr(self.main_window, 'pdf_controller'):
+            for pdf in self.main_window.pdf_controller.get_pdf_paths():
                 self.filter_combo.addItem(os.path.basename(pdf), pdf, checked=(pdf in checked_data))
                 
         self.filter_combo.blockSignals(False)
@@ -424,8 +435,8 @@ class WorkspaceView(QGraphicsView):
     def get_allowed_docs(self):
         checked = self.filter_combo.get_checked_items()
         if "ALL" in checked or not checked:
-            if self.main_window and hasattr(self.main_window, 'project_manager') and self.main_window.project_manager:
-                return [os.path.basename(p) for p in self.main_window.project_manager.pdfs]
+            if self.main_window and hasattr(self.main_window, 'pdf_controller'):
+                return [os.path.basename(p) for p in self.main_window.pdf_controller.get_pdf_paths()]
             return []
         return [os.path.basename(p) for p in checked if p != "ALL"]
 
@@ -453,7 +464,8 @@ class WorkspaceView(QGraphicsView):
                 edge.hide()
 
     def _open_color_by_pdf_dialog(self):
-        if not self.main_window.project_manager.pdfs:
+        pdf_paths = self.main_window.pdf_controller.get_pdf_paths() if self.main_window and hasattr(self.main_window, 'pdf_controller') else []
+        if not pdf_paths:
             QMessageBox.information(self, "No PDFs", "There are no PDFs in this project.")
             return
             
@@ -462,11 +474,11 @@ class WorkspaceView(QGraphicsView):
             if node.pdf_path and node.pdf_path not in current_colors:
                 current_colors[node.pdf_path] = node.color
                 
-        for pdf in self.main_window.project_manager.pdfs:
+        for pdf in pdf_paths:
             if pdf not in current_colors:
                 current_colors[pdf] = "#2b2b2b"
                 
-        dialog = PDFColorDialog(self.main_window.project_manager.pdfs, current_colors, self)
+        dialog = PDFColorDialog(pdf_paths, current_colors, self)
         
         if hasattr(self.main_window, 'theme_manager'):
             theme = self.main_window.theme_manager.get_theme()
@@ -483,7 +495,10 @@ class WorkspaceView(QGraphicsView):
                     node.setBrush(QBrush(QColor(node.color)))
                     node.refresh_layout()
                     
-            self.main_window.project_manager.mark_dirty("workspace")
+            if self.controller:
+                self.controller.mark_dirty("workspace")
+            else:
+                self.main_window.persistence_controller.mark_dirty("workspace")
             if "Notes" in self.main_window.tabs:
                 self.main_window.tabs["Notes"].save_workspace_state()
 
@@ -531,7 +546,10 @@ class WorkspaceView(QGraphicsView):
             if edge.source_node in target_nodes and edge.dest_node in target_nodes:
                 edge.update_position()
 
-        self.main_window.project_manager.mark_dirty("workspace")
+        if self.controller:
+            self.controller.mark_dirty("workspace")
+        else:
+            self.main_window.persistence_controller.mark_dirty("workspace")
         
         # Snap the viewport directly over the freshly organized nodes
         items_rect = self.scene_obj.itemsBoundingRect()
@@ -632,7 +650,10 @@ class WorkspaceView(QGraphicsView):
         
         self.is_restoring = False
         self._update_buttons()
-        self.main_window.project_manager.mark_dirty("workspace")
+        if self.controller:
+            self.controller.mark_dirty("workspace")
+        else:
+            self.main_window.persistence_controller.mark_dirty("workspace")
 
     def redo(self):
         if not self.redo_stack: return
@@ -646,7 +667,10 @@ class WorkspaceView(QGraphicsView):
         
         self.is_restoring = False
         self._update_buttons()
-        self.main_window.project_manager.mark_dirty("workspace")
+        if self.controller:
+            self.controller.mark_dirty("workspace")
+        else:
+            self.main_window.persistence_controller.mark_dirty("workspace")
 
     def load_workspace_state(self, state_data):
         self.scene_obj.clear()
@@ -654,17 +678,18 @@ class WorkspaceView(QGraphicsView):
         self.edges.clear()
         
         for n_id, data in state_data.get("nodes", {}).items():
-            node = Node(n_id, data["quote"], data["note"], data["color"], data["is_custom"], 
-                        data["width"], data["height"], data.get("pdf_path"), data.get("page_num"), data.get("manual_font_size"))
-            node.setPos(data["x"], data["y"])
+            node_data = NodeData.from_dict({**data, "node_id": n_id})
+            node = Node(node_data=node_data)
+            node.setPos(node_data.x, node_data.y)
             self.scene_obj.addItem(node)
             self.nodes[n_id] = node
             
-        for edge_data in state_data.get("edges", []):
-            if edge_data["source"] in self.nodes and edge_data["target"] in self.nodes:
-                src = self.nodes[edge_data["source"]]
-                tgt = self.nodes[edge_data["target"]]
-                edge = Edge(src, tgt, edge_data["label"], edge_data["id"], edge_data.get("color", "#888888"), edge_data.get("weight", 2))
+        for edge_dict in state_data.get("edges", []):
+            if edge_dict["source"] in self.nodes and edge_dict["target"] in self.nodes:
+                src = self.nodes[edge_dict["source"]]
+                tgt = self.nodes[edge_dict["target"]]
+                edge_data = EdgeData.from_dict(edge_dict)
+                edge = Edge(src, tgt, edge_data=edge_data)
                 self.scene_obj.addItem(edge)
                 self.edges.append(edge)
                 
@@ -748,7 +773,10 @@ class WorkspaceView(QGraphicsView):
         if edge in self.edges:
             self.edges.remove(edge)
             
-        self.main_window.project_manager.mark_dirty("workspace")
+        if self.controller:
+            self.controller.mark_dirty("workspace")
+        else:
+            self.main_window.persistence_controller.mark_dirty("workspace")
 
     def delete_node(self, node):
         for edge in list(node.edges):
@@ -762,7 +790,10 @@ class WorkspaceView(QGraphicsView):
             self.main_window.tabs["Notes"].save_workspace_state()
             self.main_window.tabs["Notes"].delete_note(node.pdf_path, node.page_num, node.node_id)
             
-        self.main_window.project_manager.mark_dirty("workspace")
+        if self.controller:
+            self.controller.mark_dirty("workspace")
+        else:
+            self.main_window.persistence_controller.mark_dirty("workspace")
 
     def contextMenuEvent(self, event):
         item = self.itemAt(event.pos())
@@ -883,8 +914,16 @@ class WorkspaceView(QGraphicsView):
         self.loading_overlay.resize(self.viewport().size())
         self.loading_overlay.show()
 
+        if getattr(self, 'worker', None) and self.worker.isRunning():
+            self.worker.stop()
+            self.worker.wait()
+
         self.worker = AIOrganizeWorker(llm_manager, model, nodes_data, custom_instructions=instructions.strip(), parent=self)
-        self.worker.finished.connect(self._on_ai_organize_finished)
+        self.worker.finished.connect(self._on_ai_organize_finished, Qt.ConnectionType.QueuedConnection)
+        
+        # Register worker with thread manager for centralized lifecycle management
+        self.main_window.thread_manager.register_worker("ai_organize_worker", self.worker)
+        
         self.worker.start()
 
     def _on_ai_organize_finished(self, clusters, error_msg):
@@ -937,7 +976,10 @@ class WorkspaceView(QGraphicsView):
 
             current_x += 280
 
-            self.main_window.project_manager.mark_dirty("workspace")
+            if self.controller:
+                self.controller.mark_dirty("workspace")
+            else:
+                self.main_window.persistence_controller.mark_dirty("workspace")
         except Exception as e:
             QMessageBox.warning(self, "Layout Error", str(e))
 
@@ -966,8 +1008,16 @@ class WorkspaceView(QGraphicsView):
         self.loading_overlay.resize(self.viewport().size())
         self.loading_overlay.show()
 
+        if getattr(self, 'conn_worker', None) and self.conn_worker.isRunning():
+            self.conn_worker.stop()
+            self.conn_worker.wait()
+
         self.conn_worker = AIFindConnectionsWorker(llm_manager, model, nodes_data, edges_data, parent=self)
-        self.conn_worker.finished.connect(self._on_find_connections_finished)
+        self.conn_worker.finished.connect(self._on_find_connections_finished, Qt.ConnectionType.QueuedConnection)
+        
+        # Register worker with thread manager for centralized lifecycle management
+        self.main_window.thread_manager.register_worker("ai_connections_worker", self.conn_worker)
+        
         self.conn_worker.start()
 
     def _on_find_connections_finished(self, new_connections, error_msg):
@@ -1010,7 +1060,10 @@ class WorkspaceView(QGraphicsView):
                     added_count += 1
 
         if added_count > 0:
-            self.main_window.project_manager.mark_dirty("workspace")
+            if self.controller:
+                self.controller.mark_dirty("workspace")
+            else:
+                self.main_window.persistence_controller.mark_dirty("workspace")
         else:
             QMessageBox.information(self, "No Connections Added", "The AI suggested connections that already existed.")
 
@@ -1039,8 +1092,16 @@ class WorkspaceView(QGraphicsView):
         self.loading_overlay.resize(self.viewport().size())
         self.loading_overlay.show()
 
+        if getattr(self, 'outline_worker', None) and self.outline_worker.isRunning():
+            self.outline_worker.stop()
+            self.outline_worker.wait()
+
         self.outline_worker = AIOutlineWorker(llm_manager, model, nodes_data, edges_data, parent=self)
-        self.outline_worker.finished.connect(self._on_generate_outline_finished)
+        self.outline_worker.finished.connect(self._on_generate_outline_finished, Qt.ConnectionType.QueuedConnection)
+        
+        # Register worker with thread manager for centralized lifecycle management
+        self.main_window.thread_manager.register_worker("ai_outline_worker", self.outline_worker)
+        
         self.outline_worker.start()
 
     def _on_generate_outline_finished(self, outline_text, error_msg):
@@ -1088,6 +1149,10 @@ class WorkspaceView(QGraphicsView):
         self.loading_label.setText("✨ AI is evaluating argument strength and identifying weak points...\nThis may take a moment.")
         self.loading_overlay.resize(self.viewport().size())
         self.loading_overlay.show()
+
+        if getattr(self, 'weakpoints_worker', None) and self.weakpoints_worker.isRunning():
+            self.weakpoints_worker.stop()
+            self.weakpoints_worker.wait()
 
         self.weakpoints_worker = AIWeakpointsWorker(llm_manager, model, nodes_data, edges_data, parent=self)
         self.weakpoints_worker.finished.connect(self._on_identify_weakpoints_finished)
@@ -1142,9 +1207,17 @@ class WorkspaceView(QGraphicsView):
         self.loading_overlay.resize(self.viewport().size())
         self.loading_overlay.show()
 
+        if getattr(self, 'fill_worker', None) and self.fill_worker.isRunning():
+            self.fill_worker.stop()
+            self.fill_worker.wait()
+
         self.fill_worker = AIFillGraphWorker(llm_manager, model, nodes_data, edges_data, allowed_docs, parent=self)
-        self.fill_worker.progress.connect(self._update_loading_label)
-        self.fill_worker.finished.connect(self._on_fill_graph_finished)
+        self.fill_worker.progress.connect(self._update_loading_label, Qt.ConnectionType.QueuedConnection)
+        self.fill_worker.finished.connect(self._on_fill_graph_finished, Qt.ConnectionType.QueuedConnection)
+        
+        # Register worker with thread manager for centralized lifecycle management
+        self.main_window.thread_manager.register_worker("ai_fill_graph_worker", self.fill_worker)
+        
         self.fill_worker.start()
 
     def _update_loading_label(self, text):
@@ -1164,7 +1237,7 @@ class WorkspaceView(QGraphicsView):
 
         self.save_state_for_undo()
         
-        allowed_paths = self.main_window.project_manager.pdfs
+        allowed_paths = self.main_window.pdf_controller.get_pdf_paths() if self.main_window and hasattr(self.main_window, 'pdf_controller') else []
         added_count = 0
         new_annot_mappings = []
 
@@ -1194,8 +1267,11 @@ class WorkspaceView(QGraphicsView):
                     "weight": 3
                 })
                 
-            self.main_window.project_manager.save_workspace_data(workspace_data)
-            self.main_window.project_manager.mark_dirty("workspace")
+            if self.controller:
+                self.controller.save_workspace_data(workspace_data)
+            else:
+                self.main_window.persistence_controller.save_workspace_data(workspace_data)
+                self.main_window.persistence_controller.mark_dirty("workspace")
             
             all_annots = self.main_window.tabs["Notes"]._get_all_project_annotations_for_workspace()
             self.sync_with_project(workspace_data, all_annots)
@@ -1231,9 +1307,17 @@ class WorkspaceView(QGraphicsView):
         self.loading_overlay.resize(self.viewport().size())
         self.loading_overlay.show()
 
+        if getattr(self, 'consolidate_worker', None) and self.consolidate_worker.isRunning():
+            self.consolidate_worker.stop()
+            self.consolidate_worker.wait()
+
         self.consolidate_worker = AIConsolidateWorker(llm_manager, model, nodes_data, edges_data, parent=self)
-        self.consolidate_worker.progress.connect(self._update_loading_label)
-        self.consolidate_worker.finished.connect(self._on_consolidate_finished)
+        self.consolidate_worker.progress.connect(self._update_loading_label, Qt.ConnectionType.QueuedConnection)
+        self.consolidate_worker.finished.connect(self._on_consolidate_finished, Qt.ConnectionType.QueuedConnection)
+        
+        # Register worker with thread manager for centralized lifecycle management
+        self.main_window.thread_manager.register_worker("ai_consolidate_worker", self.consolidate_worker)
+        
         self.consolidate_worker.start()
 
     def _on_consolidate_finished(self, result_dict, error_msg):
@@ -1302,7 +1386,10 @@ class WorkspaceView(QGraphicsView):
                 self.scene_obj.addItem(edge)
                 self.edges.append(edge)
                 
-        self.main_window.project_manager.mark_dirty("workspace")
+        if self.controller:
+            self.controller.mark_dirty("workspace")
+        else:
+            self.main_window.persistence_controller.mark_dirty("workspace")
         QMessageBox.information(self, "Consolidated", "Workspace successfully restructured!")
 
     def start_connection(self, node):
@@ -1315,7 +1402,10 @@ class WorkspaceView(QGraphicsView):
             edge = Edge(self.connecting_node, target_node, text)
             self.scene_obj.addItem(edge)
             self.edges.append(edge)
-            self.main_window.project_manager.mark_dirty("workspace")
+            if self.controller:
+                self.controller.mark_dirty("workspace")
+            else:
+                self.main_window.persistence_controller.mark_dirty("workspace")
             
         if self.connecting_node.isSelected():
             self.connecting_node.setPen(QPen(QColor("#ffffff"), 4))
@@ -1334,7 +1424,10 @@ class WorkspaceView(QGraphicsView):
         
         self.scene_obj.addItem(node)
         self.nodes[node_id] = node
-        self.main_window.project_manager.mark_dirty("workspace")
+        if self.controller:
+            self.controller.mark_dirty("workspace")
+        else:
+            self.main_window.persistence_controller.mark_dirty("workspace")
         
         # Select the newly created node visually
         self.scene_obj.clearSelection()
@@ -1363,9 +1456,9 @@ class WorkspaceView(QGraphicsView):
                 quote = annot_dict[n_id]["subject"] or ""
                 note = annot_dict[n_id]["content"] or ""
 
-            node = Node(n_id, quote, note, data["color"], data["is_custom"], 
-                        data["width"], data["height"], data.get("pdf_path"), data.get("page_num"), data.get("manual_font_size"))
-            node.setPos(data["x"], data["y"])
+            node_data = NodeData.from_dict({**data, "node_id": n_id})
+            node = Node(node_data=node_data)
+            node.setPos(node_data.x, node_data.y)
             self.scene_obj.addItem(node)
             self.nodes[n_id] = node
 
@@ -1388,11 +1481,12 @@ class WorkspaceView(QGraphicsView):
                 self.scene_obj.addItem(node)
                 self.nodes[annot["id"]] = node
 
-        for edge_data in workspace_data.get("edges", []):
-            if edge_data["source"] in self.nodes and edge_data["target"] in self.nodes:
-                src = self.nodes[edge_data["source"]]
-                tgt = self.nodes[edge_data["target"]]
-                edge = Edge(src, tgt, edge_data["label"], edge_data["id"], edge_data.get("color", "#888888"), edge_data.get("weight", 2))
+        for edge_dict in workspace_data.get("edges", []):
+            if edge_dict["source"] in self.nodes and edge_dict["target"] in self.nodes:
+                src = self.nodes[edge_dict["source"]]
+                tgt = self.nodes[edge_dict["target"]]
+                edge_data = EdgeData.from_dict(edge_dict)
+                edge = Edge(src, tgt, edge_data=edge_data)
                 self.scene_obj.addItem(edge)
                 self.edges.append(edge)
 
@@ -1410,26 +1504,29 @@ class WorkspaceView(QGraphicsView):
     def serialize_workspace(self):
         data = {"nodes": {}, "edges": []}
         for n_id, node in self.nodes.items():
-            data["nodes"][n_id] = {
-                "quote": node.quote,
-                "note": node.note,
-                "color": node.color,
-                "is_custom": node.is_custom,
-                "pdf_path": node.pdf_path,
-                "page_num": node.page_num,
-                "manual_font_size": node.manual_font_size,
-                "x": node.pos().x(),
-                "y": node.pos().y(),
-                "width": node.base_width,
-                "height": node.base_height
-            }
+            node_data = NodeData(
+                node_id=n_id,
+                quote=node.quote,
+                note=node.note,
+                color=node.color,
+                is_custom=node.is_custom,
+                pdf_path=node.pdf_path,
+                page_num=node.page_num,
+                manual_font_size=node.manual_font_size,
+                x=node.pos().x(),
+                y=node.pos().y(),
+                width=node.base_width,
+                height=node.base_height,
+            )
+            data["nodes"][n_id] = node_data.to_dict()
         for edge in self.edges:
-            data["edges"].append({
-                "id": edge.edge_id,
-                "source": edge.source_node.node_id,
-                "target": edge.dest_node.node_id,
-                "label": edge.label_text,
-                "color": edge.base_color.name(),
-                "weight": edge.weight
-            })
+            edge_data = EdgeData(
+                edge_id=edge.edge_id,
+                source=edge.source_node.node_id,
+                target=edge.dest_node.node_id,
+                label=edge.label_text,
+                color=edge.base_color.name(),
+                weight=edge.weight,
+            )
+            data["edges"].append(edge_data.to_dict())
         return data

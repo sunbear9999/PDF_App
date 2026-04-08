@@ -174,18 +174,17 @@ class LLMTab(QWidget):
         
     def refresh_project_ui(self):
         self.pdf_list.clear()
-        if self.main_window.project_manager.pdfs:
-            for pdf_path in self.main_window.project_manager.pdfs:
-                doc_name = os.path.basename(pdf_path)
-                item = QListWidgetItem(doc_name)
-                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                item.setCheckState(Qt.CheckState.Checked) 
-                self.pdf_list.addItem(item)
+        for pdf_path in self.main_window.pdf_controller.get_pdf_paths():
+            doc_name = os.path.basename(pdf_path)
+            item = QListWidgetItem(doc_name)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked) 
+            self.pdf_list.addItem(item)
                 
         if self.llm_tools_locked:
             return
 
-        proj_path = self.main_window.project_manager.project_filepath
+        proj_path = self.main_window.pdf_controller.project_filepath
         if proj_path and hasattr(self, 'llm_manager'):
             self.llm_manager.set_project_database(proj_path)
             if self.llm_manager.collection and self.llm_manager.collection.count() > 0:
@@ -229,7 +228,7 @@ class LLMTab(QWidget):
         self.status_lbl.setStyleSheet(f"font-weight: bold; color: {suc_color}; font-size: 14px;")
 
     def start_indexing(self):
-        paths_to_index = self.main_window.project_manager.pdfs
+        paths_to_index = self.main_window.pdf_controller.get_pdf_paths()
         if not paths_to_index:
             QMessageBox.warning(self, "Error", "No PDFs available in project to index.")
             return
@@ -237,8 +236,12 @@ class LLMTab(QWidget):
         self.btn_index.setEnabled(False)
         self.btn_refresh_models.setEnabled(False)
         self.idx_worker = IndexWorker(self.llm_manager, paths_to_index, parent=self)
-        self.idx_worker.progress.connect(self._update_index_progress)
-        self.idx_worker.finished_indexing.connect(self._on_index_complete)
+        self.idx_worker.progress.connect(self._update_index_progress, Qt.ConnectionType.QueuedConnection)
+        self.idx_worker.finished_indexing.connect(self._on_index_complete, Qt.ConnectionType.QueuedConnection)
+        
+        # Register worker with thread manager for centralized lifecycle management
+        self.main_window.thread_manager.register_worker("index_worker", self.idx_worker)
+        
         self.idx_worker.start()
 
     def _update_index_progress(self, msg):
@@ -287,14 +290,14 @@ class LLMTab(QWidget):
             if item.checkState() == Qt.CheckState.Checked:
                 doc_name = item.text()
                 allowed_docs.append(doc_name)
-                for p in self.main_window.project_manager.pdfs:
+                for p in self.main_window.pdf_controller.get_pdf_paths():
                     if os.path.basename(p) == doc_name:
                         allowed_paths.append(p)
                         break
         
         existing_quotes = []
         for path in allowed_paths:
-            doc = self.main_window.project_manager.get_doc(path)
+            doc = self.main_window.pdf_controller.get_doc(path)
             if doc:
                 for i in range(len(doc)):
                     try:
@@ -316,7 +319,7 @@ class LLMTab(QWidget):
         document_map = None
         missing_argument_map_note = False
         if active_pdf:
-            document_map = self.main_window.project_manager.get_document_map(active_pdf)
+            document_map = self.main_window.pdf_controller.get_document_map(active_pdf)
             if not document_map:
                 missing_argument_map_note = True
 
@@ -339,9 +342,13 @@ class LLMTab(QWidget):
             existing_highlights=existing_quotes,
             parent=self
         )
-        self.chat_worker.token_received.connect(self._on_chat_token)
-        self.chat_worker.agent_update.connect(self._on_agent_update)
-        self.chat_worker.chat_completed.connect(self._on_chat_complete)
+        self.chat_worker.token_received.connect(self._on_chat_token, Qt.ConnectionType.QueuedConnection)
+        self.chat_worker.agent_update.connect(self._on_agent_update, Qt.ConnectionType.QueuedConnection)
+        self.chat_worker.chat_completed.connect(self._on_chat_complete, Qt.ConnectionType.QueuedConnection)
+        
+        # Register worker with thread manager for centralized lifecycle management
+        self.main_window.thread_manager.register_worker("chat_worker", self.chat_worker)
+        
         self.chat_worker.start()
 
     def _on_agent_update(self, msg):
@@ -406,7 +413,7 @@ class LLMTab(QWidget):
             item = self.pdf_list.item(i)
             if item.checkState() == Qt.CheckState.Checked:
                 doc_name = item.text()
-                for p in self.main_window.project_manager.pdfs:
+                for p in self.main_window.pdf_controller.get_pdf_paths():
                     if os.path.basename(p) == doc_name:
                         allowed_paths.append(p)
                         break

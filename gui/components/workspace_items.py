@@ -6,6 +6,8 @@ from PyQt6.QtWidgets import (QGraphicsRectItem, QGraphicsTextItem, QGraphicsLine
 from PyQt6.QtCore import Qt, QLineF, QPointF, QTimer
 from PyQt6.QtGui import QColor, QPen, QBrush, QFont, QTextDocument
 
+from models.workspace_models import EdgeData, NodeData
+
 from gui.theme import ThemeManager
 
 def get_text_color_for_bg(bg_color):
@@ -20,14 +22,21 @@ def get_text_color_for_bg(bg_color):
         return "#ffffff"
 
 class Edge(QGraphicsLineItem):
-    def __init__(self, source_node, dest_node, label_text="", edge_id=None, color="#888888", weight=2):
+    def __init__(self, source_node, dest_node, label_text="", edge_id=None, color="#888888", weight=2, edge_data=None):
         super().__init__()
         self.source_node = source_node
         self.dest_node = dest_node
-        self.label_text = label_text
-        self.edge_id = edge_id or str(uuid.uuid4())
-        self.base_color = QColor(color)
-        self.weight = weight
+
+        if isinstance(edge_data, EdgeData):
+            self.label_text = label_text or edge_data.label
+            self.edge_id = edge_id or edge_data.edge_id
+            self.base_color = QColor(edge_data.color if color == "#888888" else color)
+            self.weight = weight if weight != 2 else edge_data.weight
+        else:
+            self.label_text = label_text
+            self.edge_id = edge_id or str(uuid.uuid4())
+            self.base_color = QColor(color)
+            self.weight = weight
         
         self.setZValue(-1) 
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
@@ -72,7 +81,7 @@ class Edge(QGraphicsLineItem):
             self.text_item.setPlainText(text)
             self.update_position()
             if view:
-                view.main_window.project_manager.mark_dirty("workspace")
+                view.main_window.persistence_controller.mark_dirty("workspace")
 
     def trigger_color_change(self):
         view = self.scene().view if self.scene() and hasattr(self.scene(), 'view') else None
@@ -86,7 +95,7 @@ class Edge(QGraphicsLineItem):
             self.base_color = color
             self.setPen(QPen(self.base_color, self.weight + 2 if self.isSelected() else self.weight, Qt.PenStyle.SolidLine))
             if view:
-                view.main_window.project_manager.mark_dirty("workspace")
+                view.main_window.persistence_controller.mark_dirty("workspace")
 
     def trigger_weight_change(self):
         view = self.scene().view if self.scene() and hasattr(self.scene(), 'view') else None
@@ -98,7 +107,7 @@ class Edge(QGraphicsLineItem):
             self.weight = weight
             self.setPen(QPen(self.base_color, self.weight + 2 if self.isSelected() else self.weight, Qt.PenStyle.SolidLine))
             if view:
-                view.main_window.project_manager.mark_dirty("workspace")
+                view.main_window.persistence_controller.mark_dirty("workspace")
 
     def itemChange(self, change, value):
         if change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:
@@ -171,9 +180,22 @@ class ResizeHandle(QGraphicsRectItem):
 
 
 class Node(QGraphicsRectItem):
-    def __init__(self, node_id, quote, note, color=None, is_custom=False, width=150, height=80, pdf_path=None, page_num=None, manual_font_size=None):
+    def __init__(self, node_id=None, quote="", note="", color=None, is_custom=False, width=150, height=80, pdf_path=None, page_num=None, manual_font_size=None, node_data=None):
+        if isinstance(node_data, NodeData):
+            data = node_data
+            node_id = data.node_id
+            quote = data.quote
+            note = data.note
+            color = data.color
+            is_custom = data.is_custom
+            width = data.width
+            height = data.height
+            pdf_path = data.pdf_path
+            page_num = data.page_num
+            manual_font_size = data.manual_font_size
+
         super().__init__(0, 0, width, height)
-        self.node_id = node_id
+        self.node_id = node_id or str(uuid.uuid4())
         self.is_custom = is_custom
         self.quote = quote if quote else ""
         self.note = note if note else ""
@@ -383,7 +405,7 @@ class Node(QGraphicsRectItem):
         self.base_height = height
         self.refresh_layout()
         if self.scene() and hasattr(self.scene(), 'view'):
-            self.scene().view.main_window.project_manager.mark_dirty("workspace")
+            self.scene().view.main_window.persistence_controller.mark_dirty("workspace")
 
     def hoverEnterEvent(self, event):
         self.is_hovered = True
@@ -407,7 +429,7 @@ class Node(QGraphicsRectItem):
             for edge in self.edges:
                 edge.update_position()
             if self.scene() and hasattr(self.scene(), 'view'):
-                self.scene().view.main_window.project_manager.mark_dirty("workspace")
+                self.scene().view.main_window.persistence_controller.mark_dirty("workspace")
         elif change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:
             if self.isSelected():
                 self.setPen(QPen(QColor("#ffffff"), 4))
@@ -451,7 +473,7 @@ class Node(QGraphicsRectItem):
             notes_tab._modify_note(self.pdf_path, self.page_num, self.node_id, action="edit_content", content=self.note, refresh=False)
             
         if self.scene() and hasattr(self.scene(), 'view'):
-            self.scene().view.main_window.project_manager.mark_dirty("workspace")
+            self.scene().view.main_window.persistence_controller.mark_dirty("workspace")
             
         self.hoverLeaveEvent(None)
 
@@ -472,7 +494,7 @@ class Node(QGraphicsRectItem):
                 notes_tab._modify_note(self.pdf_path, self.page_num, self.node_id, action="color", color=color.getRgbF()[:3], refresh=False)
                 
             if self.scene() and hasattr(self.scene(), 'view'):
-                self.scene().view.main_window.project_manager.mark_dirty("workspace")
+                self.scene().view.main_window.persistence_controller.mark_dirty("workspace")
 
     def trigger_font_size_change(self):
         current = self.manual_font_size if self.manual_font_size else 12
@@ -487,4 +509,4 @@ class Node(QGraphicsRectItem):
             self.manual_font_size = None
         self.refresh_layout()
         if self.scene() and hasattr(self.scene(), 'view'):
-            self.scene().view.main_window.project_manager.mark_dirty("workspace")
+            self.scene().view.main_window.persistence_controller.mark_dirty("workspace")

@@ -250,16 +250,14 @@ class NotesTab(QWidget):
         self.workspace_view.add_custom_bubble()
 
     def save_workspace_state(self):
-        if hasattr(self, 'workspace_view'):
-            data = self.workspace_view.serialize_workspace()
-            self.main_window.project_manager.save_workspace_data(data)
-            self.main_window.project_manager.mark_dirty("workspace")
+        if hasattr(self, 'workspace_view') and self.main_window and hasattr(self.main_window, 'workspace_controller'):
+            self.main_window.workspace_controller.save_workspace()
 
     def _get_all_project_annotations_for_workspace(self):
         annots = []
-        for path in self.main_window.project_manager.pdfs:
+        for path in self.main_window.pdf_controller.get_pdf_paths():
             try:
-                doc = self.main_window.project_manager.get_doc(path)
+                doc = self.main_window.pdf_controller.get_doc(path)
                 if not doc: continue
                 for i in range(len(doc)):
                     page = doc.load_page(i)
@@ -282,11 +280,11 @@ class NotesTab(QWidget):
     def _sync_workspace(self):
         try:
             print("[DEBUG] _sync_workspace called")
-            if not self.main_window.project_manager.project_filepath:
+            if not self.main_window.pdf_controller.project_filepath:
                 print("[DEBUG] _sync_workspace no project filepath")
                 return
             
-            workspace_data = self.main_window.project_manager.get_workspace_data()
+            workspace_data = self.main_window.workspace_controller.get_workspace_data() if hasattr(self.main_window, 'workspace_controller') else self.main_window.project_manager.get_workspace_data()
             all_annots = self._get_all_project_annotations_for_workspace()
             print(f"[DEBUG] _sync_workspace loaded workspace_data nodes={len(workspace_data.get('nodes', {}))} annots={len(all_annots)}")
             self.workspace_view.sync_with_project(workspace_data, all_annots)
@@ -305,7 +303,7 @@ class NotesTab(QWidget):
             if scope == "Current PDF" and self.main_window.current_file_path:
                 paths_to_check = [self.main_window.current_file_path]
             elif scope == "Entire Project":
-                paths_to_check = self.main_window.project_manager.pdfs
+                paths_to_check = self.main_window.pdf_controller.get_pdf_paths()
                 
             for path in paths_to_check:
                 self._load_notes_from_pdf(path)
@@ -317,7 +315,7 @@ class NotesTab(QWidget):
 
     def _load_notes_from_pdf(self, path):
         try:
-            doc = self.main_window.project_manager.get_doc(path)
+            doc = self.main_window.pdf_controller.get_doc(path)
             if not doc: return
             for i in range(len(doc)):
                 page = doc.load_page(i)
@@ -363,7 +361,7 @@ class NotesTab(QWidget):
 
     def _modify_note(self, pdf_path, page_num, annot_id, action, color=None, content=None, refresh=True):
         try:
-            doc = self.main_window.project_manager.get_doc(pdf_path)
+            doc = self.main_window.pdf_controller.get_doc(pdf_path)
             if not doc: return
             
             is_active = (pdf_path == self.main_window.current_file_path)
@@ -387,7 +385,7 @@ class NotesTab(QWidget):
             if is_active and self.viewer:
                 self.viewer.reload_page(page_num)
             
-            self.main_window.project_manager.mark_dirty(pdf_path)
+            self.main_window.pdf_controller.mark_dirty(pdf_path)
             
             if refresh:
                 self.refresh_notes()
