@@ -1,1 +1,0 @@
-# gui/dock_panels/__init__.py

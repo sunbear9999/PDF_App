@@ -14,7 +14,7 @@ MODELS = {
     "Qwen 2.5 (7B) - Excellent Reasoning (Req: ~8GB RAM)": "qwen2.5:7b",
     "Mistral (7B) - Highly Efficient (Req: ~8GB RAM)": "mistral",
     "Llama 3 (70B) - Massive, High Accuracy (Req: 64GB+ RAM)": "llama3:70b",
-    "Gemma4:e2b (reccomended) Highly efficent (Req: ~8gb RAM)":"gemma4:e2b"
+    "Gemma4:e2b (reccomended) Highly efficent (Req: ~8gb RAM)": "gemma4:e2b", # Fixed missing comma here!
     "Skip Model Download": "skip"
 }
 
@@ -39,7 +39,7 @@ class InstallerGUI(tk.Tk):
         
         # Header
         ttk.Label(self, text="PDF AI Workspace Setup", font=("Helvetica", 16, "bold")).pack(anchor="w", pady=(0, 10))
-        ttk.Label(self, text="This wizard will install all necessary dependencies, AI models, and create system shortcuts.", wraplength=600).pack(anchor="w", pady=(0, 20))
+        ttk.Label(self, text="This wizard will install all necessary AI models, background services, and create system shortcuts.", wraplength=600).pack(anchor="w", pady=(0, 20))
 
         # Model Selection
         ttk.Label(self, text="Select Primary Chat Model:", font=("Helvetica", 10, "bold")).pack(anchor="w")
@@ -73,7 +73,6 @@ class InstallerGUI(tk.Tk):
     def run_hidden_command(self, cmd, timeout=None):
         """Runs a command silently and waits for completion."""
         try:
-            # Use shell=True for windows pip commands to resolve correctly if paths are weird
             shell = True if platform.system() == "Windows" else False
             result = subprocess.run(cmd, capture_output=True, text=True, shell=shell, timeout=timeout)
             if result.returncode != 0:
@@ -96,44 +95,24 @@ class InstallerGUI(tk.Tk):
             return os.path.dirname(sys.executable)
         return os.path.abspath(os.path.dirname(__file__))
 
-    def get_python_cmd(self):
-        """Get the system python command (sys.executable might be the PyInstaller exe)."""
-        if getattr(sys, 'frozen', False):
-            return "python" if platform.system() == "Windows" else "python3"
-        return sys.executable
-
     def start_installation(self):
         self.install_btn.config(state="disabled", text="Installing... Please wait")
         self.model_dropdown.config(state="disabled")
         self.tts_dropdown.config(state="disabled")
         
-        # Run installation in a background thread to keep UI responsive
         threading.Thread(target=self.install_process, daemon=True).start()
 
     def install_process(self):
         self.log("=== Starting Installation ===")
         project_dir = self.get_project_dir()
-        python_cmd = self.get_python_cmd()
+        system = platform.system()
 
-        # 1. Install Dependencies
-        self.log("\n📦 Installing Python dependencies...")
-        req_file = os.path.join(project_dir, "requirements.txt")
-        if os.path.exists(req_file):
-            success = self.run_hidden_command([python_cmd, "-m", "pip", "install", "-r", req_file])
-            if success:
-                self.log("✅ Python dependencies installed successfully.")
-            else:
-                self.log("⚠️ Failed to install some dependencies. Ensure Python/pip is installed.")
-        else:
-            self.log(f"⚠️ requirements.txt not found at {req_file}. Skipping.")
-
-        # 2. Ollama Installation
+        # 1. Ollama Installation
         self.log("\n🦙 Checking Ollama Installation...")
         if self.is_ollama_installed():
             self.log("✅ Ollama is already installed on your system.")
         else:
             self.log("📥 Downloading Ollama... Please wait.")
-            system = platform.system()
             if system == "Windows":
                 installer_path = os.path.join(project_dir, "OllamaSetup.exe")
                 try:
@@ -153,10 +132,17 @@ class InstallerGUI(tk.Tk):
                     self.log("✅ Ollama installed successfully!")
                 except Exception as e:
                     self.log(f"❌ Failed to install Ollama: {e}")
+            elif system == "Darwin": # macOS
+                self.log("⚠️ Auto-install for Mac is limited. Opening browser to download Ollama...")
+                import webbrowser
+                webbrowser.open("https://ollama.com/download/mac")
+                self.log("👉 Please install Ollama from the downloaded zip file, run it, and then restart this installer.")
+                self.after(0, self._finish_ui_update)
+                return
             else:
                 self.log(f"⚠️ Auto-install not supported on {system}. Install manually from ollama.com.")
 
-        # 3. Download Models
+        # 2. Download Models
         if self.is_ollama_installed():
             self.log("\n🧠 Downloading embedding model (nomic-embed-text)... This may take a minute.")
             self.run_hidden_command(['ollama', 'pull', 'nomic-embed-text'])
@@ -178,7 +164,7 @@ class InstallerGUI(tk.Tk):
         else:
             self.log("\n⚠️ Ollama is not installed/running. Skipping model downloads.")
 
-        # 4. Download TTS Voices
+        # 3. Download TTS Voices
         voices_to_download = TTS_VOICES[self.tts_var.get()]
         if voices_to_download:
             self.log("\n🗣️ Downloading TTS Voices...")
@@ -198,22 +184,24 @@ class InstallerGUI(tk.Tk):
         else:
             self.log("\n⏭️ Skipping TTS voice download.")
 
-        # 5. Create System Shortcuts
+        # 4. Create System Shortcuts for Compiled App
         self.log("\n🖥️ Creating System Shortcuts...")
-        main_script = os.path.join(project_dir, "main.py")
         
-        if not os.path.exists(main_script):
-            self.log("⚠️ Could not find main.py in project directory. Skipping shortcut creation.")
-        else:
-            system = platform.system()
+        # Determine the name of the compiled application binary
+        app_exe_name = "main.exe" if system == "Windows" else "main"
+        app_exe_path = os.path.join(project_dir, app_exe_name)
+        
+        if not os.path.exists(app_exe_path):
+            # macOS .app bundle handling
+            if system == "Darwin" and os.path.exists(os.path.join(project_dir, "PDF Workspace.app")):
+                app_exe_path = os.path.join(project_dir, "PDF Workspace.app")
+            else:
+                self.log(f"⚠️ Could not find the compiled application '{app_exe_name}' in the installation directory. Skipping shortcut creation.")
+                app_exe_path = None
+
+        if app_exe_path:
             if system == "Windows":
                 try:
-                    # Prefer pythonw.exe to launch app without terminal
-                    exec_python = python_cmd
-                    if exec_python.endswith("python.exe"):
-                        pythonw = exec_python.replace("python.exe", "pythonw.exe")
-                        if os.path.exists(pythonw): exec_python = pythonw
-
                     appdata = os.environ.get('APPDATA', '')
                     desktop = os.environ.get('USERPROFILE', '') + "\\Desktop"
                     start_menu = os.path.join(appdata, "Microsoft\\Windows\\Start Menu\\Programs")
@@ -225,13 +213,12 @@ class InstallerGUI(tk.Tk):
                     
                     for spath in shortcut_paths:
                         vbs_path = os.path.join(project_dir, "create_shortcut.vbs")
-                        # Fixed: Using Chr(34) to safely wrap paths with spaces in quotes for VBScript
+                        # Notice we point TargetPath directly to the executable now!
                         vbs_content = f"""
 Set oWS = WScript.CreateObject("WScript.Shell")
 sLinkFile = "{spath}"
 Set oLink = oWS.CreateShortcut(sLinkFile)
-oLink.TargetPath = "{exec_python}"
-oLink.Arguments = Chr(34) & "{main_script}" & Chr(34)
+oLink.TargetPath = "{app_exe_path}"
 oLink.WorkingDirectory = "{project_dir}"
 oLink.Description = "AI-Powered PDF Workspace"
 oLink.WindowStyle = 1
@@ -252,11 +239,11 @@ oLink.Save
                     os.makedirs(desktop_dir, exist_ok=True)
                     desktop_file_path = os.path.join(desktop_dir, "pdf_ai_workspace.desktop")
                     
-                    # Fixed: Added quotes around {python_cmd} and {main_script} to handle spaces in paths
+                    # Target the compiled binary directly
                     desktop_content = f"""[Desktop Entry]
 Name=PDF AI Workspace
 Comment=AI-Powered PDF Workspace
-Exec="{python_cmd}" "{main_script}"
+Exec="{app_exe_path}"
 Path={project_dir}
 Icon=accessories-text-editor
 Terminal=false
@@ -269,12 +256,21 @@ Categories=Office;Utility;
                     self.log("✅ Created application entry in app launcher (~/.local/share/applications).")
                 except Exception as e:
                     self.log(f"❌ Failed to create Linux shortcut: {e}")
+                    
+            elif system == "Darwin": # macOS
+                try:
+                    desktop_dir = os.path.expanduser("~/Desktop")
+                    symlink_path = os.path.join(desktop_dir, "PDF AI Workspace")
+                    if not os.path.exists(symlink_path):
+                        os.symlink(app_exe_path, symlink_path)
+                    self.log("✅ Created a shortcut on your Desktop.")
+                except Exception as e:
+                    self.log(f"❌ Failed to create Mac shortcut: {e}")
 
         # Finish up
         self.log("\n🎉 Installation Complete!")
         self.log("You can now launch 'PDF AI Workspace' from your shortcuts, or close this window.")
         
-        # Update UI back to normal thread safely
         self.after(0, self._finish_ui_update)
 
     def _finish_ui_update(self):

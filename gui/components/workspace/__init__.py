@@ -1,2 +1,0 @@
-"""Workspace graph UI subpackage."""
-

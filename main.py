@@ -7,15 +7,6 @@ from PyQt6.QtCore import QSettings, QTimer
 
 from gui.main_window import MainWindow
 from gui.theme import ThemeManager
-from core.project_manager import ProjectManager
-from services.workspace_service import WorkspaceService
-from services.pdf_service import PDFService
-from services.ocr_service import OCRService
-from services.persistence_service import PersistenceService
-from controllers.workspace_controller import WorkspaceController
-from controllers.pdf_controller import PDFController
-from controllers.ocr_controller import OCRController
-from controllers.persistence_controller import PersistenceController
 
 def global_exception_handler(exc_type, exc_value, exc_traceback):
     """
@@ -60,18 +51,7 @@ def main():
     theme_manager.set_theme(saved_theme)
     theme_manager.apply_global_style(app)
     
-    # Instantiate core components
-    project_manager = ProjectManager()
-    workspace_service = WorkspaceService(project_manager)
-    workspace_controller = WorkspaceController(workspace_service)
-    pdf_service = PDFService(project_manager)
-    pdf_controller = PDFController(pdf_service)
-    ocr_service = OCRService(project_manager)
-    ocr_controller = OCRController(ocr_service)
-    persistence_service = PersistenceService(project_manager)
-    persistence_controller = PersistenceController(persistence_service)
-    
-    window = MainWindow(workspace_controller, pdf_controller, ocr_controller, persistence_controller)
+    window = MainWindow()
     window.show()
     sys.exit(app.exec())
 

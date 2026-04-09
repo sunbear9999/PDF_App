@@ -1,5 +1,4 @@
 import json
-import os
 from PyQt6.QtCore import QObject, pyqtSignal, QSettings, Qt
 from PyQt6.QtWidgets import (QApplication, QDialog, QVBoxLayout, QHBoxLayout, 
                              QLabel, QPushButton, QColorDialog, QScrollArea, 
@@ -161,6 +160,15 @@ class _ThemeManager(QObject):
                 "success": "#859900", "warning": "#b58900", "error": "#dc322f",
                 "ai_bubble": "#1a0b2e", "ai_bubble_border": "#6c71c4", "ai_bubble_hover": "#2a1b3e",
                 "user_bubble": "#073642", "user_bubble_border": "#586e75", "user_bubble_hover": "#002b36"
+            },
+            "Bubblegum": {
+                "bg_main": "#ffbe6f", "bg_panel": "#99c1f1", "bg_input": "#dc8add",
+                "text_main": "#e66100", "text_muted": "#aaaaa", "border": "#2ec27e",
+                "accent": "#0078d7", "accent_hover": "#0055ff", "canvas": "#8ff0a4",
+                "success": "#00cc66", "warning": "#ffaa00", "error": "#ff4444",
+                "ai_bubble": "#2d2238", "ai_bubble_border": "#b57edc", "ai_bubble_hover": "#38274a",
+                "user_bubble": "#ffa348", "user_bubble_border": "#c64600", "user_bubble_hover": "#333333",
+                "user_bubble": "#073642", "user_bubble_border": "#586e75", "user_bubble_hover": "#002b36"
             }
         }
         
@@ -204,23 +212,8 @@ class _ThemeManager(QObject):
             self.set_theme("Custom")
 
     def apply_global_style(self, app):
-        template_path = os.path.join(os.path.dirname(__file__), 'templates.qss')
-        try:
-            with open(template_path, 'r') as f:
-                qss_template = f.read()
-        except FileNotFoundError:
-            # Fallback to old inline style if template missing
-            qss_template = self._get_fallback_qss()
-
-        # Replace placeholders with theme values
-        for key, value in self.theme.items():
-            qss_template = qss_template.replace(f'{{{{{key}}}}}', value)
-
-        app.setStyleSheet(qss_template)
-
-    def _get_fallback_qss(self):
         t = self.theme
-        return f"""
+        style = f"""
             QMainWindow {{ background-color: {t['bg_main']}; color: {t['text_main']}; }}
             QWidget {{ color: {t['text_main']}; font-family: Arial; }}
             QPushButton {{ background-color: {t['bg_input']}; border-radius: 4px; padding: 6px 12px; font-weight: bold; border: 1px solid {t['border']}; color: {t['text_main']}; }}
@@ -244,6 +237,7 @@ class _ThemeManager(QObject):
             QTabBar::tab:selected {{ background: {t['bg_input']}; font-weight: bold; border-bottom: 2px solid {t['accent']}; }}
             QTabWidget::pane {{ border: 1px solid {t['border']}; background: {t['bg_main']}; }}
         """
+        app.setStyleSheet(style)
 
 
 # -------------------------------------------------------------

@@ -1,59 +1,63 @@
 import json
-from core.base_ai_worker import BaseAIWorker
-from core.prompts import Prompts
+import re
+from PyQt6.QtCore import QThread, pyqtSignal
 
-
-class AIOrganizeWorker(BaseAIWorker):
-    """[REFACTOR] Organize notes into logical clusters using BaseAIWorker.
-    
-    [AI OPTIMIZATION] Features:
-    - Temperature=0.0 for deterministic clustering
-    - Few-shot examples from centralized prompts
-    - JSON mode enforcement for structured output
-    """
+class AIOrganizeWorker(QThread):
+    finished = pyqtSignal(list, str)
 
     def __init__(self, llm_manager, model, nodes_data, custom_instructions="", parent=None):
-        super().__init__()
+        super().__init__(parent)
         self.llm_manager = llm_manager
         self.model = model
         self.nodes_data = nodes_data
         self.custom_instructions = custom_instructions
 
-    def execute_task(self):
-        """[REFACTOR] Execute organization task with optimized settings."""
+    def run(self):
         if not self.nodes_data:
-            raise ValueError("No nodes available.")
+            self.finished.emit([], "No nodes available.")
+            return
 
-        self.emit_progress("Analyzing node relationships...")
+        try:
+            system_prompt = (
+                "You are an expert AI assistant that organizes notes. "
+                "Group the provided nodes into logical clusters. "
+                "Return ONLY a valid JSON array of objects. "
+                "Format: [{\"cluster_name\": \"Name\", \"node_ids\": [\"id1\", \"id2\"]}]"
+            )
+            if self.custom_instructions:
+                system_prompt += f" User specific instruction: {self.custom_instructions}"
 
-        # [REFACTOR] Use centralized prompt with few-shot examples
-        system_prompt = Prompts.get_system_prompt('organize', self.custom_instructions)
+            prompt = f"Nodes Data:\n{json.dumps(self.nodes_data, indent=2)}\n\nGroup these nodes."
 
-        prompt = f"Nodes Data:\n{json.dumps(self.nodes_data, indent=2)}\n\nGroup these nodes."
+            response = ""
+            def handle_chunk(chunk):
+                nonlocal response
+                response += chunk
 
-        response = ""
-        def handle_chunk(chunk):
-            nonlocal response
-            response += chunk
+            self.llm_manager.query(
+                prompt,
+                self.model,
+                allowed_docs=[],
+                callback=handle_chunk,
+                rag_enabled=False,
+                use_agents=False,
+                custom_system_prompt=system_prompt
+            )
 
-        # [AI OPTIMIZATION] Query with temperature=0.0 for deterministic extraction
-        self.llm_manager.query(
-            prompt,
-            self.model,
-            allowed_docs=[],
-            callback=handle_chunk,
-            rag_enabled=False,
-            use_agents=False,
-            custom_system_prompt=system_prompt,
-            temperature=0.0  # [AI OPTIMIZATION] Deterministic clustering
-        )
+            # 🚨 ERROR CHECK
+            if "[Generation Error" in response or "[System Error" in response:
+                self.finished.emit([], f"AI Organization Failed:\n{response.strip()}")
+                return
 
-        # [REFACTOR] Error checking
-        if "[Generation Error" in response or "[System Error" in response:
-            raise Exception(f"AI Organization Failed:\n{response.strip()}")
+            cleaned_response = response.strip()
+            match = re.search(r'\[\s*\{.*?\}\s*\]', cleaned_response, re.DOTALL)
+            if match:
+                cleaned_response = match.group(0)
 
-        self.emit_progress("Parsing organization results...")
+            clusters = json.loads(cleaned_response)
+            self.finished.emit(clusters, "")
 
-        clusters = self.safe_parse_json(response.strip(), default=[], json_mode=True)
-
-        return clusters
+        except json.JSONDecodeError as e:
+            self.finished.emit([], f"Failed to parse AI response as JSON.\nResponse: {response}")
+        except Exception as e:
+            self.finished.emit([], f"An unexpected error occurred: {str(e)}")

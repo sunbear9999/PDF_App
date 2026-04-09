@@ -719,57 +719,29 @@ class WorkspaceView(QGraphicsView):
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
 
     def delete_edge(self, edge):
-        # Remove edge from source and destination node edge lists
         if edge in edge.source_node.edges:
             edge.source_node.edges.remove(edge)
         if edge in edge.dest_node.edges:
             edge.dest_node.edges.remove(edge)
-
-        # Remove from scene
+            
         self.scene_obj.removeItem(edge)
-
-        # Explicitly break circular references
-        edge.source_node = None
-        edge.dest_node = None
-
-        # Remove from internal edge list
         if edge in self.edges:
             self.edges.remove(edge)
-
-        # Schedule for deletion (deleteLater is available on QGraphicsItem)
-        if hasattr(edge, 'deleteLater'):
-            edge.deleteLater()
-        else:
-            # Fallback: schedule deletion via QTimer if needed
-            from PyQt6.QtCore import QTimer
-            QTimer.singleShot(0, lambda: edge.setParentItem(None))
-
+            
         self.main_window.project_manager.mark_dirty("workspace")
 
     def delete_node(self, node):
-        # Delete all connected edges first (shallow copy)
         for edge in list(node.edges):
             self.delete_edge(edge)
-
-        # Remove node from scene
+            
         self.scene_obj.removeItem(node)
-
-        # Explicitly break references and remove from internal structures
-        node.edges = []
         if node.node_id in self.nodes:
             del self.nodes[node.node_id]
-
+            
         if not node.is_custom and node.pdf_path is not None:
             self.main_window.tabs["Notes"].save_workspace_state()
             self.main_window.tabs["Notes"].delete_note(node.pdf_path, node.page_num, node.node_id)
-
-        # Schedule for deletion
-        if hasattr(node, 'deleteLater'):
-            node.deleteLater()
-        else:
-            from PyQt6.QtCore import QTimer
-            QTimer.singleShot(0, lambda: node.setParentItem(None))
-
+            
         self.main_window.project_manager.mark_dirty("workspace")
 
     def contextMenuEvent(self, event):

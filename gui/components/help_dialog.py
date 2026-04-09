@@ -4,11 +4,18 @@ from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QTabWidget,
 from PyQt6.QtCore import Qt, QSettings
 from PyQt6.QtGui import QPixmap, QFont, QMovie
 from gui.theme import ThemeManager
+import sys
+import os
+
+
+
+# Example usage in your code:
+# gif_path = resource_path("gui/components/examples/highlight.gif")
 
 class HelpDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Welcome to PDF Workspace - Help & Features")
+        self.setWindowTitle("Welcome to Papyrus - Help & Features")
         self.resize(850, 650)
         self.setModal(True) # Overlays the main window
         
@@ -47,6 +54,16 @@ class HelpDialog(QDialog):
         
         main_layout.addLayout(bottom_layout)
         self.apply_theme()
+
+    def resource_path(self,relative_path):
+        """ Get absolute path to resource, works for dev and for PyInstaller """
+        try:
+            # PyInstaller creates a temp folder and stores path in _MEIPASS
+            base_path = sys._MEIPASS
+        except Exception:
+            base_path = os.path.abspath(".")
+
+        return os.path.join(base_path, relative_path)
         
     def _save_startup_preference(self):
         self.settings.setValue("show_help_on_startup", self.startup_checkbox.isChecked())
@@ -149,13 +166,13 @@ class HelpDialog(QDialog):
     def _build_ai_features_tab(self):
         scroll, layout = self._create_scrollable_tab()
         
-        self._add_section(layout, "LLM Chat","Use the LLM chat tab to ask your local AI model questions about the projectʻs PDFs. Select which PDFs you wish the LLM to pull from","gui/components/examples/chat_annotation.gif")
+        self._add_section(layout, "LLM Chat","Use the LLM chat tab to ask your local AI model questions about the projectʻs PDFs. Select which PDFs you wish the LLM to pull from",self.resource_path("gui/components/examples/chat_annotation.gif"))
         
         self._add_section(layout, "AI Annotations", 
                           "The AI can automatically highlight important sections and attach intelligent "
-                          "notes directly to your document workspace. AI notes are specifically labeled as such to be properly double-checked<br><br>","gui/components/examples/chat_annotation.gif")
-        self._add_section(layout,"Organize Selected Nodes","LLM categorizes selected workspace nodes based on user-provided criteria. Creates and attaches new categories to pre-existing notes, helping organize thoughts","gui/components/examples/organize.gif")
-        self._add_section(layout,"Find New Connections","Searches for potential missed connections amongst selected notes, and automatically applies them. AI generated connections are explictly labeled to ensure double checking","gui/components/examples/findconnections.gif")
+                          "notes directly to your document workspace. AI notes are specifically labeled as such to be properly double-checked<br><br>",self.resource_path("gui/components/examples/chat_annotation.gif"))
+        self._add_section(layout,"Organize Selected Nodes","LLM categorizes selected workspace nodes based on user-provided criteria. Creates and attaches new categories to pre-existing notes, helping organize thoughts",self.resource_path("gui/components/examples/organize.gif"))
+        self._add_section(layout,"Find New Connections","Searches for potential missed connections amongst selected notes, and automatically applies them. AI generated connections are explictly labeled to ensure double checking",self.resource_path("gui/components/examples/findconnections.gif"))
         self._add_section(layout,"Generate Outline","Generates a potential paper outline based on your existing nodes and connections. Helps organize abstract thoughts and connections into solid outline")
         self._add_section(layout,"Identify Weakpoints","Examines existing nodes and connections to understand argument being made. Then points out aspects of argument that donʻt have enough reliable annotations connected to them, and identifies other considerations to address")
         self._add_section(layout,"Fill out Graph","Create an outline of your claims and reasoning, and the LLM will scan the documents to find specific quotations to support your reasoning.")
@@ -166,41 +183,41 @@ class HelpDialog(QDialog):
         return scroll
     def _build_workspace_tab(self):
         scroll, layout = self._create_scrollable_tab()
-        self._add_section(layout,"Connect","Connect two nodes by using connect button, or selecting a note and right clicking the one you wish to connect it to")
-        self._add_section(layout,"Resize","Drag the corner box to automatically scale text and box")
-        self._add_section(layout,"Note Options","Hover over a note to view the full quote attached to it, change text size, change color, jump to quote in PDF, or to edit the note")
-        self._add_section(layout,"Zoom","Use the buttons in the workspace to zoom, or hold shift and scroll")
-        self._add_section(layout,"Select","Hold Shift and Drag to select multiple notes at once")
-        self._add_section(layout,"Line Options","Write click a line to change itʻs color, size, or text")
-        self._add_section(layout,"Filter by PDF","Use the filter by PDF dropdown menu to only show notes from selected PDFs. All AI features will only reference PDFs actively displayed in Workspace")
-        self._add_section(layout,"Color by PDF","Use the color by PDF button to automatically make notes color coordinated with their respective PDFs")
-        self._add_section(layout,"Export as Image","Export your current workspace, or selected nodes, as a png")
-        self._add_section(layout,"Declutter","Select Notes and click declutter to organize notes more cleanly","gui/components/examples/declutter.gif")
-        self._add_section(layout,"Delete Node","Right click on selected node(s) to delete")
-        self._add_section(layout,"Use AI tool","Use the buttons in the toolbar, or right click selected nodes to use an AI tool. Refer to the AI features tab for an explanation of each tool")
+        self._add_section(layout,"Connect","Connect two nodes by using connect button, or selecting a note and right clicking the one you wish to connect it to",self.resource_path("gui/components/examples/connect.gif"))
+        self._add_section(layout,"Resize","Drag the corner box to automatically scale text and box",self.resource_path("gui/components/examples/resize.gif"))
+        self._add_section(layout,"Note Options","Hover over a note to view the full quote attached to it, change text size, change color, jump to quote in PDF, or to edit the note",self.resource_path("gui/components/examples/options.gif"))
+        self._add_section(layout,"Zoom","Use the buttons in the workspace to zoom, or hold shift and scroll",self.resource_path("gui/components/examples/zoom.gif"))
+        self._add_section(layout,"Select","Hold Shift and Drag to select multiple notes at once",self.resource_path("gui/components/examples/select.gif"))
+        self._add_section(layout,"Line Options","Write click a line to change itʻs color, size, or text",self.resource_path("gui/components/examples/lines.gif"))
+        self._add_section(layout,"Filter by PDF","Use the filter by PDF dropdown menu to only show notes from selected PDFs. All AI features will only reference PDFs actively displayed in Workspace",self.resource_path("gui/components/examples/filter.gif"))
+        self._add_section(layout,"Color by PDF","Use the color by PDF button to automatically make notes color coordinated with their respective PDFs",self.resource_path("gui/components/examples/color.gif"))
+        self._add_section(layout,"Export as Image","Export your current workspace, or selected nodes, as a png",self.resource_path("gui/components/examples/export.gif"))
+        self._add_section(layout,"Declutter","Select Notes and click declutter to organize notes more cleanly",self.resource_path("gui/components/examples/declutter.gif"))
+        self._add_section(layout,"Delete Node","Right click on selected node(s) to delete",self.resource_path("gui/components/examples/delete.gif"))
+        self._add_section(layout,"Use AI tool","Use the buttons in the toolbar, or right click selected nodes to use an AI tool. Refer to the AI features tab for an explanation of each tool",self.resource_path("gui/components/examples/ai_tool.gif"))
         return scroll
     def _build_other_features_tab(self):
         scroll, layout = self._create_scrollable_tab()
 
-        self._add_section(layout,"Universal Search", "Use Control F to search across all PDFs in a project at once","gui/components/examples/find.gif")
-        self._add_section(layout,"Annotate","Hold shift and drag or right click and drag to select text. Right click your selection to highlight and add notes","gui/components/examples/highlight.gif")
-        self._add_section(layout, "Note Consolidator", "View highlights across all documents in one location. Click on a note to jump to that PDF, change highlight color, or delete the note","gui/components/examples/notes.gif")
-        self._add_section(layout,"Workspace","Click Workspace Button in Notes tab to enter the Workspace. Move, resize, recolor, edit, and organize notes","gui/components/examples/workspace.gif")
-        self._add_section(layout,"Diagram","Connect Annotations and Nodes to map out your thoughts","gui/components/examples/diagram.gif")
+        self._add_section(layout,"Universal Search", "Use Control F to search across all PDFs in a project at once",self.resource_path("gui/components/examples/find.gif"))
+        self._add_section(layout,"Annotate","Hold shift and drag or right click and drag to select text. Right click your selection to highlight and add notes",self.resource_path("gui/components/examples/highlight.gif"))
+        self._add_section(layout, "Note Consolidator", "View highlights across all documents in one location. Click on a note to jump to that PDF, change highlight color, or delete the note",self.resource_path("gui/components/examples/notes.gif"))
+        self._add_section(layout,"Workspace","Click Workspace Button in Notes tab to enter the Workspace. Move, resize, recolor, edit, and organize notes",self.resource_path("gui/components/examples/workspace.gif"))
+        self._add_section(layout,"Diagram","Connect Annotations and Nodes to map out your thoughts",self.resource_path("gui/components/examples/diagram.gif"))
         self._add_section(layout, "Built-in OCR", 
                           "Automatically detect scanned documents. When prompted by the yellow banner, "
-                          "run them through our optical character recognition engine to make the text selectable.","gui/components/examples/ocr.gif")
+                          "run them through our optical character recognition engine to make the text selectable.",self.resource_path("gui/components/examples/ocr.gif"))
                           
         self._add_section(layout, "Text to Speech", 
-                          "create your own audiobook for a given PDF. Choose desired page range, voice, and speed","gui/components/examples/tts.gif")
-        self._add_section(layout,"Custom Themes","Choose from preset themes, or create your own custom one","gui/components/examples/themes.gif")
-        self._add_section(layout,"Projects","Create multiple projects to keep seperate work seperate","/gui/components/examples/projects.gif")
+                          "create your own audiobook for a given PDF. Choose desired page range, voice, and speed",self.resource_path("gui/components/examples/tts.gif"))
+        self._add_section(layout,"Custom Themes","Choose from preset themes, or create your own custom one",self.resource_path("gui/components/examples/themes.gif"))
+        self._add_section(layout,"Projects","Create multiple projects to keep seperate work seperate",self.resource_path("gui/components/examples/projects.gif"))
                           
         return scroll
     
     def _build_ai_tips_tab(self):
         scroll, layout = self._create_scrollable_tab()
-        self._add_section(layout,"Indexing","AI tools wonʻt work until the project is indexed. Press the index button in the LLM tab to build an index, and rebuild the index whenever a new PDF is added. Only indexed PDFs will be accesible to the AI","gui/components/examples/index.gif")
+        self._add_section(layout,"Indexing","AI tools wonʻt work until the project is indexed. Press the index button in the LLM tab to build an index, and rebuild the index whenever a new PDF is added. Only indexed PDFs will be accesible to the AI",self.resource_path("gui/components/examples/index.gif"))
         self._add_section(layout,"Use as a tool","Our tools run best when used as tools, rather than as replacements for critical thinking. AI features are more effective the more specific the prompt is. Asking it to summarize the main points will return a less helpful result than identifying a main point yourself and asking about that specifically")
         self._add_section(layout,"Batch Searching","For large projects with many PDFs, prompting the AI with only some of the PDFs selected, and then reprompting with the others selected will ensure a more accurate response")
         self._add_section(layout,"Model","Some models may be better at using our tools than others. The recommended model is Gemma4:e2b")

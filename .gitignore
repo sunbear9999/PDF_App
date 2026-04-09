@@ -1,79 +1,42 @@
-venv
-Reading 1 Te Awa Atua.wav
-output_audio.wav
-Reading 2 Te Awa Atua_ocr.wav
-core/__pycache__
-gui/__pycache__
-models/voice1.onnx
-models/voice1.onnx.json
-models/voice2.onnx
-models/voice2.onnx.json
-models/voice3.onnx
-models/voice3.onnx.json
-models/voice4.onnx
-models/voice4.onnx.json
-models/voice5.onnx
-models/voice5.onnx.json
-temp_tts_input.txt
-audio
-gui/components/__pycache__
-gui/tabs/__pycache__
-gui/tabs/__pycache__/notes_tab.cpython-312.pyc
-gui/tabs/__pycache__/notes_tab.cpython-312.pyc
-r.pdfproj
-projects
-gui/components/__pycache__/annotation_manager.cpython-312.pyc
-gui/tabs/__pycache__/__init__.cpython-312.pyc
-gui/tabs/__pycache__/llm_tab.cpython-312.pyc
-gui/tabs/__pycache__/notes_tab.cpython-312.pyc
-gui/tabs/__pycache__/ocr_tab.cpython-312.pyc
-gui/tabs/__pycache__/tts_tab.cpython-312.pyc
-gui/components/__pycache__/annotation_manager.cpython-312.pyc
-gui/tabs/__pycache__/__init__.cpython-312.pyc
-gui/tabs/__pycache__/llm_tab.cpython-312.pyc
-gui/tabs/__pycache__/notes_tab.cpython-312.pyc
-gui/tabs/__pycache__/ocr_tab.cpython-312.pyc
-gui/tabs/__pycache__/tts_tab.cpython-312.pyc
-gui/tabs/__pycache__/__init__.cpython-312.pyc
-gui/tabs/__pycache__/llm_tab.cpython-312.pyc
-gui/tabs/__pycache__/notes_tab.cpython-312.pyc
-gui/tabs/__pycache__/ocr_tab.cpython-312.pyc
-gui/tabs/__pycache__/tts_tab.cpython-312.pyc
-gui/tabs/__pycache__
-gui/components/__pycache__
-gui/components/__pycache__/annotation_manager.cpython-312.pyc
-gui/components/__pycache__/pdf_viewer.cpython-312.pyc
-gui/tabs/__pycache__/llm_tab.cpython-312.pyc
-gui/tabs/__pycache__/notes_tab.cpython-312.pyc
-test.pdfproj_chroma_db
-Unit3.pdfproj_chroma_db
-test.pdfproj.index.json
-knowledge tree test.pdfproj_chroma_db
-knowledge tree test.pdfproj
-Unit3.pdfproj
-gui/tabs/__pycache__/llm_tab.cpython-312.pyc
-gui/tabs/__pycache__/ocr_tab.cpython-312.pyc
-gui/components/__pycache__/pdf_viewer.cpython-312.pyc
-gui/components/__pycache__/pdf_viewer.cpython-312.pyc
-gui/tabs/__pycache__/llm_tab.cpython-312.pyc
-gui/tabs/__pycache__/ocr_tab.cpython-312.pyc
-goddesses.pdfproj
-icon.png
-goddesses.pdfproj_chroma_db/chroma.sqlite3
-.gitignore
-goddesses.pdfproj_chroma_db/96c6c4fd-4736-4dbd-bbd8-43a9b1994429/link_lists.bin
-goddesses.pdfproj_chroma_db/96c6c4fd-4736-4dbd-bbd8-43a9b1994429/length.bin
-.gitignore
-goddesses.pdfproj_chroma_db/96c6c4fd-4736-4dbd-bbd8-43a9b1994429/data_level0.bin
-gui/tabs/__pycache__/llm_tab.cpython-312.pyc
-gui/tabs/__pycache__/llm_tab.cpython-312.pyc
-tests/__pycache__/test_annotation_manager.cpython-312.pyc
-tests/__pycache__/test_llm_manager.cpython-312.pyc
-voices/en_US-lessac-medium.onnx.json
-voices/en_US-lessac-medium.onnx
-voices/en_US-libritts-high.onnx.json
-voices/en_US-libritts-high.onnx
-test2.png
-gui/components/examples
-workspace_export.png
-gui/components/examples/highlight.gif
+# 1. Ignore EVERYTHING by default
+*
+
+# 2. Un-ignore directories (so Git can traverse folders to find your files)
+!*/
+
+# 3. Un-ignore the specific file types and files you want to keep
+!*.py
+!*.spec
+!*.gif
+!icon.png
+!.gitignore
+
+# ====================================================================
+# 4. EXPLICITLY RE-IGNORE DEV/BUILD DIRECTORIES
+# (This prevents Git from tracking the .py files inside your virtual 
+# environment, PyInstaller build folders, or cache).
+# ====================================================================
+
+# Virtual environments
+venv/
+env/
+.env/
+
+# PyInstaller / PyArmor build outputs
+build/
+dist/
+
+# Python cache and compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# IDE folders
+.vscode/
+.idea/
+
+# Downloaded Assets / Generated Project Files (Specific to your app)
+voices/
+*.pdfproj
+OllamaSetup.exe
