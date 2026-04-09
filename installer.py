@@ -7,6 +7,7 @@ import time
 import threading
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
+import shutil
 
 # Data mappings for the UI
 MODELS = {
@@ -82,12 +83,34 @@ class InstallerGUI(tk.Tk):
             self.log(f"Command execution error: {e}")
             return False
 
+    def get_ollama_cmd(self):
+        """Finds the Ollama executable, even if it's not in the system PATH."""
+        # 1. Check standard system PATH first
+        cmd = shutil.which("ollama")
+        if cmd:
+            return cmd
+            
+        # 2. Fallbacks for macOS (App bundle or local bin)
+        if platform.system() == "Darwin":
+            mac_paths = [
+                "/usr/local/bin/ollama",
+                "/Applications/Ollama.app/Contents/Resources/ollama",
+                os.path.expanduser("~/Applications/Ollama.app/Contents/Resources/ollama")
+            ]
+            for p in mac_paths:
+                if os.path.exists(p):
+                    return p
+                    
+        # 3. Fallbacks for Windows (Default local app data location)
+        if platform.system() == "Windows":
+            win_path = os.path.expandvars(r"%LOCALAPPDATA%\Programs\Ollama\ollama.exe")
+            if os.path.exists(win_path):
+                return win_path
+                
+        return None
+
     def is_ollama_installed(self):
-        try:
-            subprocess.run(['ollama', '--version'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return True
-        except FileNotFoundError:
-            return False
+        return self.get_ollama_cmd() is not None
 
     def get_project_dir(self):
         """Get the base directory, supporting PyInstaller bundled executables."""
@@ -143,9 +166,12 @@ class InstallerGUI(tk.Tk):
                 self.log(f"⚠️ Auto-install not supported on {system}. Install manually from ollama.com.")
 
         # 2. Download Models
-        if self.is_ollama_installed():
+        ollama_cmd = self.get_ollama_cmd() # Grab the exact path we found
+        
+        if ollama_cmd:
             self.log("\n🧠 Downloading embedding model (nomic-embed-text)... This may take a minute.")
-            self.run_hidden_command(['ollama', 'pull', 'nomic-embed-text'])
+            # Use the ollama_cmd variable instead of the string 'ollama'
+            self.run_hidden_command([ollama_cmd, 'pull', 'nomic-embed-text']) 
             self.log("✅ Embedding model ready.")
 
             model_choice_text = self.model_var.get()
@@ -154,7 +180,8 @@ class InstallerGUI(tk.Tk):
             if model_id != "skip":
                 self.log(f"\n🧠 Downloading chat model ({model_id})...")
                 self.log("⏳ This is a large file (4GB+). It may take 5-15 minutes depending on your internet speed. Please wait...")
-                success = self.run_hidden_command(['ollama', 'pull', model_id])
+                # Use the ollama_cmd variable here too
+                success = self.run_hidden_command([ollama_cmd, 'pull', model_id])
                 if success:
                     self.log(f"✅ {model_id} downloaded successfully!")
                 else:
@@ -163,7 +190,6 @@ class InstallerGUI(tk.Tk):
                 self.log("\n⏭️ Skipping chat model download.")
         else:
             self.log("\n⚠️ Ollama is not installed/running. Skipping model downloads.")
-
         # 3. Download TTS Voices
         voices_to_download = TTS_VOICES[self.tts_var.get()]
         if voices_to_download:
@@ -242,7 +268,7 @@ oLink.Save
                     # Target the compiled binary directly
                     desktop_content = f"""[Desktop Entry]
 Name=PDF AI Workspace
-Comment=AI-Powered PDF Workspace
+Comment=Ethical, Offline Research Assistant
 Exec="{app_exe_path}"
 Path={project_dir}
 Icon=accessories-text-editor

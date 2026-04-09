@@ -237,8 +237,7 @@ class PDFViewer(QGraphicsView):
         else:
             self.render_search_highlights()
             page_num = hit['page']
-            
-            if page_num < len(self.page_items):
+            if page_num < len(self.page_pixmaps):
                 self._execute_search_jump(hit)
             else:
                 self.pending_search_jump = hit
@@ -255,8 +254,8 @@ class PDFViewer(QGraphicsView):
     def render_search_highlights(self):
         self.clear_search_highlights()
         if not self.search_hits: return
-        for page_num in range(len(self.page_items)):
-            self._apply_search_highlights_to_page(page_num, self.page_items[page_num])
+        for page_num in range(len(self.page_pixmaps)):
+            self._apply_search_highlights_to_page(page_num, self.page_pixmaps[page_num])
 
     def _apply_search_highlights_to_page(self, page_num, page_item):
         current_pdf = self.window().current_file_path
@@ -266,9 +265,7 @@ class PDFViewer(QGraphicsView):
                 r = hit['rect']
                 z = self.base_zoom
                 qt_rect = QRectF(r.x0 * z, r.y0 * z, (r.x1 - r.x0) * z, (r.y1 - r.y0) * z)
-                
                 h_item = QGraphicsRectItem(qt_rect, page_item)
-                
                 if i == self.current_hit_index:
                     h_item.setBrush(QBrush(QColor(255, 165, 0, 150))) 
                     h_item.setPen(QPen(QColor(255, 140, 0), 2))
@@ -277,18 +274,16 @@ class PDFViewer(QGraphicsView):
                     h_item.setBrush(QBrush(QColor(255, 255, 0, 100))) 
                     h_item.setPen(QPen(Qt.PenStyle.NoPen))
                     h_item.setZValue(5)
-                    
                 self.search_highlight_items.append(h_item)
 
     def _execute_search_jump(self, hit):
         page_num = hit['page']
-        if 0 <= page_num < len(self.page_items):
-            page_item = self.page_items[page_num]
+        if 0 <= page_num < len(self.page_pixmaps):
+            page_item = self.page_pixmaps[page_num]
             r = hit['rect']
             z = self.base_zoom
             qt_rect = QRectF(r.x0 * z, r.y0 * z, (r.x1 - r.x0) * z, (r.y1 - r.y0) * z)
             scene_rect = page_item.mapToScene(qt_rect).boundingRect()
-            
             self.ensureVisible(scene_rect, 100, 100)
 
     def load_document(self, doc):
@@ -354,6 +349,46 @@ class PDFViewer(QGraphicsView):
 
     def _on_page_ready(self, page_num, qimage):
         print(f"[DEBUG] _on_page_ready called for page {page_num}, image size: {qimage.width()}x{qimage.height()}")
+        # Replace placeholder with pixmap item (not as child)
+        if not (0 <= page_num < len(self.page_pixmaps)):
+            return
+
+        pixmap = QPixmap.fromImage(qimage)
+        if pixmap.isNull():
+            try:
+                import fitz
+                page = self.doc.load_page(page_num)
+                pix = page.get_pixmap(matrix=fitz.Matrix(self.base_zoom, self.base_zoom))
+                png_bytes = pix.tobytes("png")
+                pixmap = QPixmap()
+                pixmap.loadFromData(png_bytes, "PNG")
+            except Exception:
+                pass
+        self.page_pixmaps[page_num].setPixmap(pixmap)
+        self.page_pixmaps[page_num].setVisible(True)
+        self.page_pixmaps[page_num].setZValue(1)
+        self.page_placeholders[page_num].setVisible(False)
+        self.rendered_pages.add(page_num)
+        self.pages_in_flight.discard(page_num)
+
+        # Draw highlight annotations as overlays
+        if self.doc:
+            try:
+                page = self.doc.load_page(page_num)
+                for annot in page.annots():
+                    if annot.type[0] == 8:  # Highlight
+                        for quad in annot.vertices:
+                            xs = [p.x for p in quad]
+                            ys = [p.y for p in quad]
+                            x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
+                            z = self.base_zoom
+                            qt_rect = QRectF(x0 * z, y0 * z, (x1 - x0) * z, (y1 - y0) * z)
+                            h_item = QGraphicsRectItem(qt_rect, self.page_pixmaps[page_num])
+                            h_item.setBrush(QBrush(QColor(255, 255, 0, 80)))
+                            h_item.setPen(QPen(Qt.PenStyle.NoPen))
+                            h_item.setZValue(20)
+            except Exception as e:
+                print(f"[DEBUG] Failed to draw highlight overlays: {e}")
         # Replace placeholder with pixmap item (not as child)
         if not (0 <= page_num < len(self.page_pixmaps)):
             return
@@ -449,12 +484,12 @@ class PDFViewer(QGraphicsView):
 
 
     def reload_page(self, page_num):
-        if not self.doc or page_num < 0 or page_num >= len(self.page_items): return
+        if not self.doc or page_num < 0 or page_num >= len(self.page_pixmaps): return
         page = self.doc.load_page(page_num)
         mat = fitz.Matrix(self.base_zoom, self.base_zoom)
         pix = page.get_pixmap(matrix=mat)
         img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888)
-        self.page_items[page_num].setPixmap(QPixmap.fromImage(img.copy()))
+        self.page_pixmaps[page_num].setPixmap(QPixmap.fromImage(img.copy()))
 
     def mousePressEvent(self, event):
         is_shift = event.modifiers() == Qt.KeyboardModifier.ShiftModifier

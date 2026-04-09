@@ -106,6 +106,7 @@ class AnnotationManager(QObject):
                 self._draw_temp_selection(self.start_word_idx, end_word_idx)
 
     def _draw_temp_selection(self, start_idx, end_idx):
+        # Remove old temp highlights
         for h in self.temp_highlights:
             try:
                 if h.scene():
@@ -116,14 +117,15 @@ class AnnotationManager(QObject):
 
         lo, hi = sorted([start_idx, end_idx])
         zoom = self.viewer.base_zoom
-        
+
         for w in self.page_words[lo:hi+1]:
             qt_rect = QRectF(w[0] * zoom, w[1] * zoom, (w[2]-w[0]) * zoom, (w[3]-w[1]) * zoom)
             scene_rect = self.active_page_item.mapToScene(qt_rect).boundingRect()
-            
             h_item = QGraphicsRectItem(scene_rect)
-            h_item.setBrush(QBrush(QColor(51, 153, 255, 100))) 
+            # Use a more visible blue highlight for selection
+            h_item.setBrush(QBrush(QColor(51, 153, 255, 120)))
             h_item.setPen(QPen(Qt.PenStyle.NoPen))
+            h_item.setZValue(1000)  # Ensure highlight is above the page
             self.viewer.scene.addItem(h_item)
             self.temp_highlights.append(h_item)
 
