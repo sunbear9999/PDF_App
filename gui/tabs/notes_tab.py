@@ -276,13 +276,11 @@ class NotesTab(QWidget):
                 print(f"Error extracting annotations from {path}: {e}")
         return annots
 
-    def _sync_workspace(self):
+    def _sync_workspace(self, force_reload=False):
         try:
             if not self.main_window.project_manager.project_filepath: return
-            
             workspace_data = self.main_window.project_manager.get_workspace_data()
             all_annots = self._get_all_project_annotations_for_workspace()
-            
             self.workspace_view.sync_with_project(workspace_data, all_annots)
         except Exception as e:
             print(f"Error syncing workspace: {e}")
@@ -292,22 +290,25 @@ class NotesTab(QWidget):
             for i in reversed(range(self.scroll_layout.count())): 
                 widget = self.scroll_layout.itemAt(i).widget()
                 if widget: widget.deleteLater()
-                
+
             scope = self.scope_combo.currentText()
             paths_to_check = []
-            
+
             if scope == "Current PDF" and self.main_window.current_file_path:
                 paths_to_check = [self.main_window.current_file_path]
             elif scope == "Entire Project":
                 paths_to_check = self.main_window.project_manager.pdfs
-                
+
             for path in paths_to_check:
                 self._load_notes_from_pdf(path)
-                
+
+
+
             if self.stack.currentIndex() == 1:
                 self._sync_workspace()
         except Exception as e:
             print(f"Error refreshing notes: {e}")
+
 
     def _load_notes_from_pdf(self, path):
         try:

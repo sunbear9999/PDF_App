@@ -509,6 +509,8 @@ class MainWindow(QMainWindow):
         
         self.viewer.annot_manager.note_added.connect(self.tabs["Notes"].refresh_notes)
         self.viewer.annot_manager.note_added.connect(self._mark_current_dirty)
+        # Save workspace state after new highlight/note is added
+        self.viewer.annot_manager.note_added.connect(self.tabs["Notes"].save_workspace_state)
         self.viewer.annotation_clicked.connect(self._on_annotation_clicked)
 
     def _on_annotation_clicked(self, annot_id):

@@ -20,10 +20,8 @@ class ProjectManager:
         try:
             if self._conn:
                 self._conn.close()
-            
             self._conn = sqlite3.connect(self.project_filepath)
             cursor = self._conn.cursor()
-            
             cursor.execute('''CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT)''')
             cursor.execute('''CREATE TABLE IF NOT EXISTS pdfs (path TEXT PRIMARY KEY)''')
             cursor.execute('''CREATE TABLE IF NOT EXISTS nodes (
@@ -34,6 +32,15 @@ class ProjectManager:
             cursor.execute('''CREATE TABLE IF NOT EXISTS edges (
                 edge_id TEXT PRIMARY KEY, source_id TEXT, target_id TEXT, label TEXT, color TEXT
             )''')
+            # Migration: add weight column if missing
+            cursor.execute("PRAGMA table_info(edges)")
+            edge_columns = [col[1] for col in cursor.fetchall()]
+            if "weight" not in edge_columns:
+                try:
+                    cursor.execute("ALTER TABLE edges ADD COLUMN weight INTEGER DEFAULT 2")
+                except sqlite3.OperationalError as e:
+                    if "duplicate column name" not in str(e):
+                        print(f"Error adding weight column: {e}")
             self._conn.commit()
         except sqlite3.Error as e:
             print(f"Database initialization error: {e}")
@@ -135,14 +142,20 @@ class ProjectManager:
                 }
                 
             edges = []
+            cursor.execute("PRAGMA table_info(edges)")
+            edge_columns = [col[1] for col in cursor.fetchall()]
+            has_weight = "weight" in edge_columns
             cursor.execute("SELECT * FROM edges")
             for row in cursor.fetchall():
-                edge_id, source_id, target_id, label, color = row
+                if has_weight:
+                    edge_id, source_id, target_id, label, color, weight = row
+                else:
+                    edge_id, source_id, target_id, label, color = row
+                    weight = 2
                 edges.append({
                     "id": edge_id, "source": source_id, "target": target_id, 
-                    "label": label, "color": color
+                    "label": label, "color": color, "weight": weight
                 })
-                
             return {"nodes": nodes, "edges": edges}
         except sqlite3.Error as e:
             print(f"Error reading workspace data: {e}")
@@ -173,13 +186,12 @@ class ProjectManager:
                   
             edges = workspace_data.get("edges", [])
             edge_insert_data = [
-                (e.get("id"), e.get("source"), e.get("target"), e.get("label"), e.get("color"))
+                (e.get("id"), e.get("source"), e.get("target"), e.get("label"), e.get("color"), int(e.get("weight", 2)))
                 for e in edges
             ]
-            
             cursor.executemany("""
-                INSERT INTO edges (edge_id, source_id, target_id, label, color)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO edges (edge_id, source_id, target_id, label, color, weight)
+                VALUES (?, ?, ?, ?, ?, ?)
             """, edge_insert_data)
             
             self._conn.commit()

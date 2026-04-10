@@ -271,6 +271,17 @@ class PDFColorDialog(QDialog):
 
 
 class WorkspaceView(QGraphicsView):
+    def add_node_from_annotation(self, annot):
+        n_id = annot["id"]
+        quote = annot["subject"] or ""
+        note = annot["content"] or ""
+        color = "#2d2238" if n_id.startswith("AINote") else "#2b2b2b"
+        w = 200 if len(note + quote) < 50 else (250 if len(note + quote) < 150 else 300)
+        h = 70 if len(note + quote) < 50 else (110 if len(note + quote) < 150 else 160)
+        node = Node(n_id, quote, note, color=color, is_custom=False, width=w, height=h, pdf_path=annot["pdf_path"], page_num=annot["page_num"])
+        node.setPos(50, 50)
+        self.scene_obj.addItem(node)
+        self.nodes[n_id] = node
     def __init__(self, main_window):
         super().__init__()
         self.main_window = main_window
@@ -1353,7 +1364,8 @@ class WorkspaceView(QGraphicsView):
         node.refresh_layout()
         node.trigger_edit()
 
-    def sync_with_project(self, workspace_data, pdf_annotations):
+    def sync_with_project(self, workspace_data, pdf_annotations, force_reload=False):
+        # Always reload workspace when called (revert force_reload logic)
         selected_ids = [n_id for n_id, n in self.nodes.items() if n.isSelected()]
 
         self.scene_obj.clear()

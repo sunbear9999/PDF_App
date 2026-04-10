@@ -378,8 +378,16 @@ class PDFViewer(QGraphicsView):
                 for annot in page.annots():
                     if annot.type[0] == 8:  # Highlight
                         for quad in annot.vertices:
-                            xs = [p.x for p in quad]
-                            ys = [p.y for p in quad]
+                            # Handle both list of points and flat float lists
+                            if hasattr(quad[0], 'x') and hasattr(quad[0], 'y'):
+                                xs = [p.x for p in quad]
+                                ys = [p.y for p in quad]
+                            elif isinstance(quad[0], (float, int)) and len(quad) == 8:
+                                xs = [quad[i] for i in range(0, 8, 2)]
+                                ys = [quad[i] for i in range(1, 8, 2)]
+                            else:
+                                print(f"[DEBUG] Unexpected quad format: {quad}")
+                                continue
                             x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
                             z = self.base_zoom
                             qt_rect = QRectF(x0 * z, y0 * z, (x1 - x0) * z, (y1 - y0) * z)
