@@ -342,7 +342,18 @@ class WorkspaceView(QGraphicsView):
         menu = QMenu("🤖 AI Tools", parent_widget)
         # CRITICAL FIX: Ensure the submenu actively identifies itself with the correct title when nested
         menu.setTitle("🤖 AI Tools") 
-        
+        ai_enabled = False
+        try:
+            ai_enabled = self.main_window.tabs["LLM Chat"].llm_manager.ai_enabled
+        except: 
+            pass
+
+        if not ai_enabled:
+            disabled_action = menu.addAction("⚠️ AI Not Installed")
+            disabled_action.setEnabled(False)
+            menu.setEnabled(False)
+            menu.setToolTip("Run the installer to download local AI models.")
+            return menu
         action_categorize = menu.addAction("✨ Organize Selected Nodes")
         action_find_connections = menu.addAction("🔗 Find New Connections")
         action_generate_outline = menu.addAction("📝 Generate Outline")

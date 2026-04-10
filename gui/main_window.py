@@ -155,6 +155,8 @@ class MainWindow(QMainWindow):
         try:
             default_model = self.tabs["LLM Chat"].model_combo.currentText()
             llm_manager = self.tabs["LLM Chat"].llm_manager
+            if not llm_manager.ai_enabled: 
+                return
             
             self.preload_worker = PreloadWorker(llm_manager, default_model, parent=self)
             self.preload_worker.start()
@@ -587,6 +589,17 @@ class MainWindow(QMainWindow):
             "Audio (TTS)": TTSTab(self.tool_panel, self),
             "LLM Chat": LLMTab(self.tool_panel, self)
         }
+
+        if hasattr(self.tabs["LLM Chat"], "llm_manager") and not self.tabs["LLM Chat"].llm_manager.ai_enabled:
+            # Disable the LLM Chat top menu button
+            QMessageBox.information(self, "Standard Mode","Local Ollama Installation not detected. LLM features will not work without Ollama")
+            self.tool_buttons["LLM Chat"].setEnabled(False)
+            self.tool_buttons["LLM Chat"].setToolTip("Install local AI models (Ollama) to unlock.")
+            
+            # Disable the Workspace AI Toolbar button
+            if hasattr(self.tabs["Notes"], "workspace_view"):
+                self.tabs["Notes"].workspace_view.btn_ai_tools.setEnabled(False)
+                self.tabs["Notes"].workspace_view.btn_ai_tools.setToolTip("Install local AI models to unlock.")
         
         for tab in self.tabs.values():
             self.tool_panel.addWidget(tab)

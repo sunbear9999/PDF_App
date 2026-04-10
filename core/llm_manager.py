@@ -7,6 +7,8 @@ import os
 import time
 import chromadb
 import re
+import shutil     
+import platform
 from chromadb.config import Settings
 
 class LocalLLMManager:
@@ -15,14 +17,42 @@ class LocalLLMManager:
         self.embedding_model = "nomic-embed-text"
         self.chroma_client = None
         self.collection = None
+        self.ai_enabled = False  # Track if AI is available
         self.ensure_server_running()
 
     def ensure_server_running(self):
+        # 1. Safely check if Ollama is actually installed on the system
+        ollama_cmd = shutil.which("ollama")
+        if not ollama_cmd:
+            win_path = os.path.expandvars(r"%LOCALAPPDATA%\Programs\Ollama\ollama.exe")
+            if os.path.exists(win_path):
+                ollama_cmd = win_path
+            else:
+                print("[System] Ollama not found. Running in standard PDF mode.")
+                self.ai_enabled = False
+                return
+
+        # 2. Check if the server is already running in the background
         try:
             requests.get("http://localhost:11434/", timeout=2)
+            self.ai_enabled = True
         except requests.exceptions.ConnectionError:
-            subprocess.Popen(['ollama', 'serve'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            time.sleep(2) 
+            # 3. If it's not running, start it completely invisibly
+            if platform.system() == "Windows":
+                subprocess.Popen(
+                    [ollama_cmd, 'serve'], 
+                    stdout=subprocess.DEVNULL, 
+                    stderr=subprocess.DEVNULL, 
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+            else:
+                subprocess.Popen(
+                    [ollama_cmd, 'serve'], 
+                    stdout=subprocess.DEVNULL, 
+                    stderr=subprocess.DEVNULL
+                )
+            time.sleep(3) # Give it a second to bind to the port
+            self.ai_enabled = True
 
     def set_project_database(self, project_filepath):
         import gc
