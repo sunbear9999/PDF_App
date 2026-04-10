@@ -163,7 +163,7 @@ class _ThemeManager(QObject):
             },
             "Bubblegum": {
                 "bg_main": "#ffbe6f", "bg_panel": "#99c1f1", "bg_input": "#dc8add",
-                "text_main": "#e66100", "text_muted": "#aaaaa", "border": "#2ec27e",
+                "text_main": "#e66100", "text_muted": "#aaaaaa", "border": "#2ec27e",
                 "accent": "#0078d7", "accent_hover": "#0055ff", "canvas": "#8ff0a4",
                 "success": "#00cc66", "warning": "#ffaa00", "error": "#ff4444",
                 "ai_bubble": "#2d2238", "ai_bubble_border": "#b57edc", "ai_bubble_hover": "#38274a",

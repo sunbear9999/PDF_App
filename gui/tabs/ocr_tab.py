@@ -2,7 +2,8 @@
 import os
 import shutil
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-                             QRadioButton, QButtonGroup, QTextEdit, QPushButton)
+                             QRadioButton, QButtonGroup, QTextEdit, QPushButton,
+                             QScrollArea, QFrame)
 from PyQt6.QtCore import Qt, pyqtSignal, QThread
 
 class OCRWorker(QThread):
@@ -39,12 +40,22 @@ class OCRTab(QWidget):
         super().__init__(parent)
         self.main_window = main_window
         self.theme = None
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.tab_scroll_area = QScrollArea(self)
+        self.tab_scroll_area.setWidgetResizable(True)
+        self.tab_scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+
+        content_widget = QWidget()
+        layout = QVBoxLayout(content_widget)
 
         self.header = QLabel("OCR Engine")
         layout.addWidget(self.header)
 
-        top_layout = QHBoxLayout()
+        modes_layout = QVBoxLayout()
+        mode_row_1 = QHBoxLayout()
+        mode_row_2 = QHBoxLayout()
         self.mode_group = QButtonGroup(self)
         
         self.rb_text = QRadioButton("Extract Text")
@@ -56,11 +67,16 @@ class OCRTab(QWidget):
         self.mode_group.addButton(self.rb_new, 2)
         self.mode_group.addButton(self.rb_replace, 3)
 
-        top_layout.addWidget(self.rb_text)
-        top_layout.addWidget(self.rb_new)
-        top_layout.addWidget(self.rb_replace)
-        top_layout.addStretch()
-        layout.addLayout(top_layout)
+        mode_row_1.addWidget(self.rb_text)
+        mode_row_1.addWidget(self.rb_new)
+        mode_row_1.addStretch()
+
+        mode_row_2.addWidget(self.rb_replace)
+        mode_row_2.addStretch()
+
+        modes_layout.addLayout(mode_row_1)
+        modes_layout.addLayout(mode_row_2)
+        layout.addLayout(modes_layout)
 
         self.text_area = QTextEdit()
         self.text_area.setReadOnly(True)
@@ -75,6 +91,9 @@ class OCRTab(QWidget):
         control_layout.addWidget(self.status_label)
         control_layout.addStretch()
         layout.addLayout(control_layout)
+
+        self.tab_scroll_area.setWidget(content_widget)
+        outer_layout.addWidget(self.tab_scroll_area)
 
     def update_theme(self, theme):
         self.theme = theme

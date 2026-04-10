@@ -5,9 +5,10 @@ import fitz
 import shutil
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, 
                              QPushButton, QLabel, QSplitter, QStackedWidget, 
-                             QFileDialog, QFrame, QButtonGroup, QMessageBox, QComboBox, QMenu)
+                             QFileDialog, QFrame, QButtonGroup, QMessageBox, QComboBox, QMenu,
+                             QApplication)
 from PyQt6.QtGui import QShortcut, QKeySequence
-from PyQt6.QtCore import Qt, QSettings, QTimer, QThread
+from PyQt6.QtCore import Qt, QSettings, QTimer, QThread, QEvent
 
 from core.project_manager import ProjectManager
 from gui.components.pdf_viewer import PDFViewer
@@ -32,8 +33,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Papyrus - Ethical, Offline Research Assistant")
-        self.resize(1400, 900)
-        self.setMinimumSize(1000, 700)
+        self._apply_smart_window_size()
         
         self.theme_manager = ThemeManager()
         self.project_manager = ProjectManager()
@@ -75,6 +75,82 @@ class MainWindow(QMainWindow):
         self.help_dialog = HelpDialog(self)
         self.help_dialog.show()
 
+    def _apply_smart_window_size(self):
+        screen = QApplication.primaryScreen()
+        if not screen:
+            self.setMinimumSize(800, 600)
+            self.resize(1200, 800)
+            return
+
+        available = screen.availableGeometry()
+        min_width = max(780, int(available.width() * 0.6))
+        min_height = max(560, int(available.height() * 0.65))
+        self.setMinimumSize(min_width, min_height)
+
+        width = max(min_width, int(available.width() * 0.9))
+        height = max(min_height, int(available.height() * 0.9))
+        width = min(width, available.width())
+        height = min(height, available.height())
+
+        x = available.x() + (available.width() - width) // 2
+        y = available.y() + (available.height() - height) // 2
+        self.setGeometry(x, y, width, height)
+
+    def toggle_full_screen(self):
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
+        self._sync_full_screen_button()
+
+    def _sync_full_screen_button(self):
+        if hasattr(self, "btn_fullscreen"):
+            is_full = self.isFullScreen()
+            icon = "🗗" if is_full else "⛶"
+            label = "Exit Full Screen" if is_full else "Enter Full Screen"
+            self.btn_fullscreen.setToolTip(label)
+            self.btn_fullscreen.setProperty("compact_icon", icon)
+            self.btn_fullscreen.setProperty("expanded_text", f"{icon} {label}")
+            if not self.btn_fullscreen.property("hover_expanded"):
+                self.btn_fullscreen.setText(icon)
+
+    def _configure_hover_expand_button(self, button, icon, label, expanded_width=170, collapsed_width=44):
+        button.setText(icon)
+        button.setToolTip(label)
+        button.setProperty("compact_icon", icon)
+        button.setProperty("expanded_text", f"{icon} {label}")
+        button.setProperty("collapsed_width", collapsed_width)
+        button.setProperty("expanded_width", expanded_width)
+        button.setProperty("hover_expanded", False)
+        button.setMinimumWidth(collapsed_width)
+        button.setMaximumWidth(collapsed_width)
+        button.installEventFilter(self)
+
+    def _set_button_hover_state(self, button, expanded):
+        icon = button.property("compact_icon")
+        expanded_text = button.property("expanded_text")
+        collapsed_width = int(button.property("collapsed_width") or 44)
+        expanded_width = int(button.property("expanded_width") or 170)
+
+        if expanded:
+            button.setText(expanded_text or icon)
+            button.setMinimumWidth(expanded_width)
+            button.setMaximumWidth(expanded_width)
+            button.setProperty("hover_expanded", True)
+        else:
+            button.setText(icon)
+            button.setMinimumWidth(collapsed_width)
+            button.setMaximumWidth(collapsed_width)
+            button.setProperty("hover_expanded", False)
+
+    def eventFilter(self, watched, event):
+        if isinstance(watched, QPushButton) and watched.property("compact_icon"):
+            if event.type() == QEvent.Type.Enter:
+                self._set_button_hover_state(watched, True)
+            elif event.type() == QEvent.Type.Leave:
+                self._set_button_hover_state(watched, False)
+        return super().eventFilter(watched, event)
+
     def _trigger_background_preload(self):
         try:
             default_model = self.tabs["LLM Chat"].model_combo.currentText()
@@ -92,6 +168,7 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+0"), self).activated.connect(self.viewer.zoom_reset)
         QShortcut(QKeySequence("Ctrl+F"), self).activated.connect(self.viewer.annot_manager.toggle_search)
         QShortcut(QKeySequence("Ctrl+S"), self).activated.connect(self.save_project)
+        QShortcut(QKeySequence("F11"), self).activated.connect(self.toggle_full_screen)
 
     def _build_top_menu(self):
         from PyQt6.QtWidgets import QScrollArea, QHBoxLayout, QWidget
@@ -107,12 +184,14 @@ class MainWindow(QMainWindow):
         menu_layout.setContentsMargins(10, 5, 10, 5)
 
         # Feedback Button (opens a placeholder link)
-        self.btn_feedback = QPushButton("💬 Feedback")
+        self.btn_feedback = QPushButton()
+        self._configure_hover_expand_button(self.btn_feedback, "💬", "Feedback", expanded_width=120)
         self.btn_feedback.clicked.connect(lambda: self._open_feedback_link())
         menu_layout.addWidget(self.btn_feedback)
-        menu_layout.addSpacing(10)
+        menu_layout.addSpacing(4)
 
-        self.btn_project = QPushButton("📁 Project ▼")
+        self.btn_project = QPushButton()
+        self._configure_hover_expand_button(self.btn_project, "📁", "Project", expanded_width=120, collapsed_width=56)
         
         project_menu = QMenu(self)
         project_menu.addAction("New Project...", self._new_project)
@@ -122,7 +201,7 @@ class MainWindow(QMainWindow):
         project_menu.addAction("Add PDF to Project...", self._add_pdf)
         self.btn_project.setMenu(project_menu)
         menu_layout.addWidget(self.btn_project)
-        menu_layout.addSpacing(15)
+        menu_layout.addSpacing(8)
 
         menu_layout.addWidget(QLabel("Active PDF:"))
         self.pdf_selector = QComboBox()
@@ -130,8 +209,9 @@ class MainWindow(QMainWindow):
         self.pdf_selector.currentIndexChanged.connect(self._on_pdf_dropdown_changed)
         menu_layout.addWidget(self.pdf_selector)
         
-        menu_layout.addSpacing(15)
-        self.btn_save = QPushButton("💾 Save Project")
+        menu_layout.addSpacing(8)
+        self.btn_save = QPushButton()
+        self._configure_hover_expand_button(self.btn_save, "💾", "Save Project", expanded_width=140)
         self.btn_save.clicked.connect(self.save_project)
         menu_layout.addWidget(self.btn_save)
         menu_layout.addStretch()
@@ -142,10 +222,15 @@ class MainWindow(QMainWindow):
         self.btn_zoom_reset.clicked.connect(self.viewer.zoom_reset)
         self.btn_zoom_in = QPushButton("➕")
         self.btn_zoom_in.clicked.connect(self.viewer.zoom_in)
+
+        self.btn_fullscreen = QPushButton()
+        self._configure_hover_expand_button(self.btn_fullscreen, "⛶", "Enter Full Screen", expanded_width=180)
+        self.btn_fullscreen.clicked.connect(self.toggle_full_screen)
         
         menu_layout.addWidget(self.btn_zoom_out)
         menu_layout.addWidget(self.btn_zoom_reset)
         menu_layout.addWidget(self.btn_zoom_in)
+        menu_layout.addWidget(self.btn_fullscreen)
         menu_layout.addStretch()
 
         # Theme Selector
@@ -156,15 +241,17 @@ class MainWindow(QMainWindow):
         self.theme_selector.currentTextChanged.connect(self._on_theme_changed)
         menu_layout.addWidget(self.theme_selector)
         
-        self.btn_edit_theme = QPushButton("✏️ Edit Custom")
+        self.btn_edit_theme = QPushButton()
+        self._configure_hover_expand_button(self.btn_edit_theme, "✏️", "Edit Custom Theme", expanded_width=170)
         self.btn_edit_theme.clicked.connect(lambda: self.theme_manager.edit_custom_theme(self))
         menu_layout.addWidget(self.btn_edit_theme)
         
-        menu_layout.addSpacing(15)
-        self.btn_help = QPushButton("❓ Help")
+        menu_layout.addSpacing(8)
+        self.btn_help = QPushButton()
+        self._configure_hover_expand_button(self.btn_help, "❓", "Help", expanded_width=100)
         self.btn_help.clicked.connect(self.show_help_window)
         menu_layout.addWidget(self.btn_help)
-        menu_layout.addSpacing(15)
+        menu_layout.addSpacing(8)
 
         self.tool_group = QButtonGroup(self)
         self.tool_group.setExclusive(True)
@@ -492,6 +579,7 @@ class MainWindow(QMainWindow):
         self.splitter.addWidget(self.viewer)
 
         self.tool_panel = QStackedWidget()
+        self.tool_panel.setMinimumWidth(460)
         
         self.tabs = {
             "Notes": NotesTab(self.tool_panel, self.viewer, self),
@@ -506,6 +594,8 @@ class MainWindow(QMainWindow):
         self.splitter.addWidget(self.tool_panel)
         self.tool_panel.hide()
         self.splitter.setSizes([1400, 0])
+        self.splitter.setStretchFactor(0, 3)
+        self.splitter.setStretchFactor(1, 2)
         
         self.viewer.annot_manager.note_added.connect(self.tabs["Notes"].refresh_notes)
         self.viewer.annot_manager.note_added.connect(self._mark_current_dirty)
@@ -549,4 +639,10 @@ class MainWindow(QMainWindow):
             self.tool_panel.setCurrentWidget(self.tabs[tool_name])
             current_sizes = self.splitter.sizes()
             if current_sizes[1] == 0:
-                self.splitter.setSizes([1000, 400])
+                total = max(1, sum(current_sizes))
+                panel_width = max(460, int(total * 0.34))
+                if total > 900:
+                    panel_width = min(panel_width, total - 420)
+                else:
+                    panel_width = min(panel_width, total // 2)
+                self.splitter.setSizes([max(1, total - panel_width), panel_width])

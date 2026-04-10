@@ -2,7 +2,8 @@
 import re
 import os
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QTextEdit, QPushButton, QLabel, 
-                             QComboBox, QHBoxLayout, QLineEdit, QMessageBox, QListWidget, QListWidgetItem, QCheckBox)
+                             QComboBox, QHBoxLayout, QLineEdit, QMessageBox, QListWidget, QListWidgetItem, QCheckBox,
+                             QScrollArea, QFrame, QSizePolicy)
 from PyQt6.QtCore import pyqtSignal, QThread, Qt
 from PyQt6.QtGui import QTextCursor
 from core.llm_manager import LocalLLMManager
@@ -96,30 +97,42 @@ class LLMTab(QWidget):
         self.current_existing_quotes = []
         self.theme = None
         
-        layout = QVBoxLayout(self)
-        
-        top_layout = QHBoxLayout()
-        self.status_lbl = QLabel("🔴 Status: Unindexed")
-        top_layout.addWidget(self.status_lbl)
-        top_layout.addStretch()
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.agent_checkbox = QCheckBox("Use Advanced Agents (Slower, High Detail)")
+        self.tab_scroll_area = QScrollArea(self)
+        self.tab_scroll_area.setWidgetResizable(True)
+        self.tab_scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+
+        content_widget = QWidget()
+        layout = QVBoxLayout(content_widget)
+        
+        status_layout = QHBoxLayout()
+        self.status_lbl = QLabel("🔴 Status: Unindexed")
+        status_layout.addWidget(self.status_lbl)
+        status_layout.addStretch()
+
+        self.agent_checkbox = QCheckBox("Use Advanced Agents")
         self.agent_checkbox.setChecked(True)
-        top_layout.addWidget(self.agent_checkbox)
+        status_layout.addWidget(self.agent_checkbox)
+        layout.addLayout(status_layout)
+
+        model_layout = QHBoxLayout()
+        model_layout.addWidget(QLabel("Model:"))
         
         self.model_combo = QComboBox()
         models = self.llm_manager.get_available_models()
         self.model_combo.addItems(models if models else ["llama3 (Local)"])
+        self.model_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         
         self.btn_refresh_models = QPushButton("🔄")
         self.btn_refresh_models.setToolTip("Refresh Model List")
         self.btn_refresh_models.setFixedWidth(35)
         self.btn_refresh_models.clicked.connect(self.refresh_models)
 
-        top_layout.addWidget(QLabel("Model:"))
-        top_layout.addWidget(self.model_combo)
-        top_layout.addWidget(self.btn_refresh_models)
-        layout.addLayout(top_layout)
+        model_layout.addWidget(self.model_combo, 1)
+        model_layout.addWidget(self.btn_refresh_models)
+        layout.addLayout(model_layout)
 
         layout.addWidget(QLabel("Select PDFs to Include in AI Search:"))
         self.pdf_list = QListWidget()
@@ -138,6 +151,7 @@ class LLMTab(QWidget):
         self.chat_input = QLineEdit()
         self.chat_input.setPlaceholderText("Ask a question...")
         self.chat_input.returnPressed.connect(self.send_message)
+        self.chat_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         
         self.send_btn = QPushButton("Send")
         self.send_btn.clicked.connect(self.send_message)
@@ -145,6 +159,9 @@ class LLMTab(QWidget):
         input_layout.addWidget(self.chat_input)
         input_layout.addWidget(self.send_btn)
         layout.addLayout(input_layout)
+
+        self.tab_scroll_area.setWidget(content_widget)
+        outer_layout.addWidget(self.tab_scroll_area)
 
     def update_theme(self, theme):
         self.theme = theme

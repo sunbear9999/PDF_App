@@ -230,7 +230,7 @@ class InstallerGUI(tk.Tk):
         voices_to_download = TTS_VOICES[self.tts_var.get()]
         if voices_to_download:
             self.log("\n🗣️ Downloading TTS Voices...")
-            voices_dir = os.path.join(project_dir, "voices")
+            voices_dir = os.path.join(project_dir, "models")
             os.makedirs(voices_dir, exist_ok=True)
             
             for v_name in voices_to_download:

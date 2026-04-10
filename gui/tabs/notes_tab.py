@@ -105,7 +105,15 @@ class NotesTab(QWidget):
         super().__init__(parent)
         self.viewer = viewer
         self.main_window = main_window
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.tab_scroll_area = QScrollArea(self)
+        self.tab_scroll_area.setWidgetResizable(True)
+        self.tab_scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+
+        content_widget = QWidget()
+        layout = QVBoxLayout(content_widget)
         layout.setContentsMargins(5, 10, 5, 5)
         
         top_layout = QHBoxLayout()
@@ -181,6 +189,9 @@ class NotesTab(QWidget):
         self.btn_zoom_in.clicked.connect(lambda: self.workspace_view.zoom_in())
         
         layout.addWidget(self.stack)
+
+        self.tab_scroll_area.setWidget(content_widget)
+        outer_layout.addWidget(self.tab_scroll_area)
 
     def update_theme(self, theme):
         self.lbl.setStyleSheet(f"font-size: 16px; font-weight: bold; padding-left: 5px; color: {theme['text_main']};")

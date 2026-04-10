@@ -1,11 +1,14 @@
 import os
+import re
 import time
 import threading
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QTextEdit, QPushButton, QLabel, 
-                             QComboBox, QHBoxLayout, QCheckBox, QSpinBox, QMessageBox)
+                             QComboBox, QHBoxLayout, QCheckBox, QSpinBox, QMessageBox,
+                             QScrollArea, QFrame)
 from PyQt6.QtCore import pyqtSignal
 
 from core.pdf_utils import extract_filtered_blocks
+from core.text_utils import sanitize_extracted_text
 from core.tts_engine import generate_audio
 
 class TTSTab(QWidget):
@@ -16,15 +19,25 @@ class TTSTab(QWidget):
         super().__init__(parent)
         self.main_window = main_window
         self.theme = None
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.tab_scroll_area = QScrollArea(self)
+        self.tab_scroll_area.setWidgetResizable(True)
+        self.tab_scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+
+        content_widget = QWidget()
+        layout = QVBoxLayout(content_widget)
         
         self.instructions = QLabel("1. Extract Text from PDF:")
         layout.addWidget(self.instructions)
         
         # --- Extraction Controls ---
-        extract_layout = QHBoxLayout()
-        
-        extract_layout.addWidget(QLabel("Pages:"))
+        extract_layout = QVBoxLayout()
+        extract_row_1 = QHBoxLayout()
+        extract_row_2 = QHBoxLayout()
+
+        extract_row_1.addWidget(QLabel("Pages:"))
         self.spin_start = QSpinBox()
         self.spin_start.setMinimum(1)
         
@@ -32,19 +45,23 @@ class TTSTab(QWidget):
         self.spin_end.setMinimum(1)
         self.spin_end.setMaximum(9999)
         
-        extract_layout.addWidget(self.spin_start)
-        extract_layout.addWidget(QLabel("to"))
-        extract_layout.addWidget(self.spin_end)
-        
+        extract_row_1.addWidget(self.spin_start)
+        extract_row_1.addWidget(QLabel("to"))
+        extract_row_1.addWidget(self.spin_end)
+
         self.chk_ignore = QCheckBox("Ignore Headers/Footers")
         self.chk_ignore.setChecked(True)
-        extract_layout.addWidget(self.chk_ignore)
+        extract_row_2.addWidget(self.chk_ignore)
+        extract_row_2.addStretch()
         
         self.btn_fetch = QPushButton("⬇️ Pull Text")
         self.btn_fetch.clicked.connect(self.pull_text)
-        extract_layout.addWidget(self.btn_fetch)
+        extract_row_1.addWidget(self.btn_fetch)
         
-        extract_layout.addStretch()
+        extract_row_1.addStretch()
+
+        extract_layout.addLayout(extract_row_1)
+        extract_layout.addLayout(extract_row_2)
         layout.addLayout(extract_layout)
         
         # --- Text Editor ---
@@ -53,19 +70,26 @@ class TTSTab(QWidget):
         layout.addWidget(self.text_editor)
         
         # --- TTS Options ---
-        opts_layout = QHBoxLayout()
+        opts_layout = QVBoxLayout()
+        opts_row_1 = QHBoxLayout()
+        opts_row_2 = QHBoxLayout()
         
         self.voice_combo = QComboBox()
         self.voice_mapping = {} 
         self._load_voices()
         
-        opts_layout.addWidget(QLabel("Voice:"))
-        opts_layout.addWidget(self.voice_combo)
+        opts_row_1.addWidget(QLabel("Voice:"))
+        opts_row_1.addWidget(self.voice_combo)
+        opts_row_1.addStretch()
         
         self.speed_combo = QComboBox()
         self.speed_combo.addItems(["1.0x (Normal)", "1.2x (Fast)", "1.5x (Very Fast)"])
-        opts_layout.addWidget(QLabel("Speed:"))
-        opts_layout.addWidget(self.speed_combo)
+        opts_row_2.addWidget(QLabel("Speed:"))
+        opts_row_2.addWidget(self.speed_combo)
+        opts_row_2.addStretch()
+
+        opts_layout.addLayout(opts_row_1)
+        opts_layout.addLayout(opts_row_2)
         layout.addLayout(opts_layout)
         
         # --- Status & Actions ---
@@ -78,6 +102,9 @@ class TTSTab(QWidget):
 
         self.status_updated.connect(self._handle_status_update)
         self.generation_complete.connect(self._on_generation_complete)
+
+        self.tab_scroll_area.setWidget(content_widget)
+        outer_layout.addWidget(self.tab_scroll_area)
 
     def update_theme(self, theme):
         self.theme = theme
@@ -129,14 +156,20 @@ class TTSTab(QWidget):
         self.status_lbl.setStyleSheet(f"color: {color}; margin-top: 5px;")
         
         text = extract_filtered_blocks(self.main_window.current_file_path, ignore, start, end)
+        text = self.clean_text_for_tts(text)
         self.text_editor.setPlainText(text)
         
         self.status_lbl.setText(f"Extracted {len(text)} characters.")
         scolor = self.theme['success'] if self.theme else "#00cc66"
         self.status_lbl.setStyleSheet(f"color: {scolor}; margin-top: 5px;")
 
+    def clean_text_for_tts(self, raw_text):
+        """Scrubs hidden PDF annotation anchors and broken unicode before TTS."""
+        return sanitize_extracted_text(raw_text, collapse_whitespace=True)
+
     def start_generation_thread(self):
         text_to_read = self.text_editor.toPlainText().strip()
+        text_to_read = self.clean_text_for_tts(text_to_read)
         if not text_to_read:
             QMessageBox.warning(self, "Error", "No text to generate audio from. Pull text first.")
             return
