@@ -1,0 +1,42 @@
+# 1. Ignore EVERYTHING by default
+*
+
+# 2. Un-ignore directories (so Git can traverse folders to find your files)
+!*/
+
+# 3. Un-ignore the specific file types and files you want to keep
+!*.py
+!*.spec
+!*.gif
+!icon.png
+!.gitignore
+
+# ====================================================================
+# 4. EXPLICITLY RE-IGNORE DEV/BUILD DIRECTORIES
+# (This prevents Git from tracking the .py files inside your virtual 
+# environment, PyInstaller build folders, or cache).
+# ====================================================================
+
+# Virtual environments
+venv/
+env/
+.env/
+
+# PyInstaller / PyArmor build outputs
+build/
+dist/
+
+# Python cache and compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# IDE folders
+.vscode/
+.idea/
+
+# Downloaded Assets / Generated Project Files (Specific to your app)
+voices/
+*.pdfproj
+OllamaSetup.exe
