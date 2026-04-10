@@ -2,8 +2,12 @@
 import re
 import os
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QTextEdit, QPushButton, QLabel, 
+<<<<<<< HEAD
                              QComboBox, QHBoxLayout, QLineEdit, QMessageBox, QListWidget, QListWidgetItem, QCheckBox,
                              QScrollArea, QFrame, QSizePolicy)
+=======
+                             QComboBox, QHBoxLayout, QLineEdit, QMessageBox, QListWidget, QListWidgetItem, QCheckBox)
+>>>>>>> e7346c3e8bd3f0dbfd96400e56ce8826fed31f2b
 from PyQt6.QtCore import pyqtSignal, QThread, Qt
 from PyQt6.QtGui import QTextCursor
 from core.llm_manager import LocalLLMManager
@@ -97,6 +101,7 @@ class LLMTab(QWidget):
         self.current_existing_quotes = []
         self.theme = None
         
+<<<<<<< HEAD
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
 
@@ -119,20 +124,42 @@ class LLMTab(QWidget):
 
         model_layout = QHBoxLayout()
         model_layout.addWidget(QLabel("Model:"))
+=======
+        layout = QVBoxLayout(self)
+        
+        top_layout = QHBoxLayout()
+        self.status_lbl = QLabel("🔴 Status: Unindexed")
+        top_layout.addWidget(self.status_lbl)
+        top_layout.addStretch()
+
+        self.agent_checkbox = QCheckBox("Use Advanced Agents (Slower, High Detail)")
+        self.agent_checkbox.setChecked(True)
+        top_layout.addWidget(self.agent_checkbox)
+>>>>>>> e7346c3e8bd3f0dbfd96400e56ce8826fed31f2b
         
         self.model_combo = QComboBox()
         models = self.llm_manager.get_available_models()
         self.model_combo.addItems(models if models else ["llama3 (Local)"])
+<<<<<<< HEAD
         self.model_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+=======
+>>>>>>> e7346c3e8bd3f0dbfd96400e56ce8826fed31f2b
         
         self.btn_refresh_models = QPushButton("🔄")
         self.btn_refresh_models.setToolTip("Refresh Model List")
         self.btn_refresh_models.setFixedWidth(35)
         self.btn_refresh_models.clicked.connect(self.refresh_models)
 
+<<<<<<< HEAD
         model_layout.addWidget(self.model_combo, 1)
         model_layout.addWidget(self.btn_refresh_models)
         layout.addLayout(model_layout)
+=======
+        top_layout.addWidget(QLabel("Model:"))
+        top_layout.addWidget(self.model_combo)
+        top_layout.addWidget(self.btn_refresh_models)
+        layout.addLayout(top_layout)
+>>>>>>> e7346c3e8bd3f0dbfd96400e56ce8826fed31f2b
 
         layout.addWidget(QLabel("Select PDFs to Include in AI Search:"))
         self.pdf_list = QListWidget()
@@ -151,7 +178,10 @@ class LLMTab(QWidget):
         self.chat_input = QLineEdit()
         self.chat_input.setPlaceholderText("Ask a question...")
         self.chat_input.returnPressed.connect(self.send_message)
+<<<<<<< HEAD
         self.chat_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+=======
+>>>>>>> e7346c3e8bd3f0dbfd96400e56ce8826fed31f2b
         
         self.send_btn = QPushButton("Send")
         self.send_btn.clicked.connect(self.send_message)
@@ -160,6 +190,7 @@ class LLMTab(QWidget):
         input_layout.addWidget(self.send_btn)
         layout.addLayout(input_layout)
 
+<<<<<<< HEAD
         self.tab_scroll_area.setWidget(self.content_widget)
         outer_layout.addWidget(self.tab_scroll_area)
 
@@ -183,6 +214,12 @@ class LLMTab(QWidget):
         self.chat_input.setStyleSheet(
             f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']};"
         )
+=======
+    def update_theme(self, theme):
+        self.theme = theme
+        self.status_lbl.setStyleSheet(f"font-weight: bold; font-size: 14px; color: {theme['text_main']};")
+        self.agent_checkbox.setStyleSheet(f"color: {theme['text_muted']}; margin-right: 15px;")
+>>>>>>> e7346c3e8bd3f0dbfd96400e56ce8826fed31f2b
         self.btn_refresh_models.setStyleSheet(f"background-color: {theme['bg_input']}; font-weight: bold;")
         self.btn_index.setStyleSheet(f"background-color: {theme['bg_panel']}; padding: 6px; font-weight: bold; margin-bottom: 10px; border: 1px solid {theme['border']};")
         self.send_btn.setStyleSheet(f"background-color: {theme['accent']}; padding: 8px 20px; font-weight: bold; color: #ffffff; border-radius: 4px;")

@@ -3,8 +3,11 @@ import pytesseract
 from PIL import Image
 import io
 import os
+<<<<<<< HEAD
 import platform
 
+=======
+>>>>>>> e7346c3e8bd3f0dbfd96400e56ce8826fed31f2b
 
 def run_ocr_on_pdf(pdf_path, mode="text", save_path=None, progress_callback=None):
     """
@@ -30,11 +33,15 @@ def run_ocr_on_pdf(pdf_path, mode="text", save_path=None, progress_callback=None
             
             img_data = pix.tobytes("png")
             img = Image.open(io.BytesIO(img_data))
+<<<<<<< HEAD
             if platform.system() == "Windows":
                 # Explicitly tell pytesseract where the installer put the binary
                 tess_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
                 if os.path.exists(tess_path):
                     pytesseract.pytesseract.tesseract_cmd = tess_path
+=======
+            
+>>>>>>> e7346c3e8bd3f0dbfd96400e56ce8826fed31f2b
             if mode == "text":
                 text = pytesseract.image_to_string(img)
                 full_text += f"\n\n--- Page {page_num + 1} ---\n\n{text}"
