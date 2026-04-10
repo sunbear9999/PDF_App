@@ -33,7 +33,7 @@ TTS_VOICES = {
 class InstallerGUI(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("PDF AI Workspace - System Installer")
+        self.title("Papyrus Research - System Installer")
         self.geometry("650x550")
         self.resizable(False, False)
         
@@ -43,7 +43,7 @@ class InstallerGUI(tk.Tk):
         style.theme_use('clam')
         
         # Header
-        ttk.Label(self, text="PDF AI Workspace Setup", font=("Helvetica", 16, "bold")).pack(anchor="w", pady=(0, 10))
+        ttk.Label(self, text="Papyrus Research Setup", font=("Helvetica", 16, "bold")).pack(anchor="w", pady=(0, 10))
         ttk.Label(self, text="This wizard will install all necessary AI models, background services (like Ollama and Tesseract OCR), and create system shortcuts.", wraplength=600).pack(anchor="w", pady=(0, 20))
 
         # Model Selection
@@ -263,8 +263,8 @@ class InstallerGUI(tk.Tk):
         app_exe_path = os.path.join(project_dir, app_exe_name)
         
         if not os.path.exists(app_exe_path):
-            if system == "Darwin" and os.path.exists(os.path.join(project_dir, "PDF Workspace.app")):
-                app_exe_path = os.path.join(project_dir, "PDF Workspace.app")
+            if system == "Darwin" and os.path.exists(os.path.join(project_dir, "Papyrus Research.app")):
+                app_exe_path = os.path.join(project_dir, "Papyrus Research.app")
             else:
                 self.log(f"⚠️ Could not find the compiled application '{app_exe_name}' in the directory. Skipping shortcut creation.")
                 app_exe_path = None
@@ -277,8 +277,8 @@ class InstallerGUI(tk.Tk):
                     start_menu = os.path.join(appdata, "Microsoft\\Windows\\Start Menu\\Programs")
                     
                     shortcut_paths = [
-                        os.path.join(start_menu, "PDF AI Workspace.lnk"),
-                        os.path.join(desktop, "PDF AI Workspace.lnk")
+                        os.path.join(start_menu, "Papyrus Research.lnk"),
+                        os.path.join(desktop, "Papyrus Research.lnk")
                     ]
                     
                     for spath in shortcut_paths:
@@ -290,7 +290,7 @@ sLinkFile = "{spath}"
 Set oLink = oWS.CreateShortcut(sLinkFile)
 oLink.TargetPath = "{app_exe_path}"
 oLink.WorkingDirectory = "{project_dir}"
-oLink.Description = "AI-Powered PDF Workspace"
+oLink.Description = "Ethical, Offline AI-Powered PDF Research Assistant"
 oLink.WindowStyle = 1
 oLink.Save
                         """
@@ -307,11 +307,11 @@ oLink.Save
                 try:
                     desktop_dir = os.path.expanduser("~/.local/share/applications")
                     os.makedirs(desktop_dir, exist_ok=True)
-                    desktop_file_path = os.path.join(desktop_dir, "pdf_ai_workspace.desktop")
+                    desktop_file_path = os.path.join(desktop_dir, "papyrus_research.desktop")
                     
                     desktop_content = f"""[Desktop Entry]
-Name=PDF AI Workspace
-Comment=AI-Powered PDF Workspace
+Name=Papyrus
+Comment=Ethical, Offline AI-Powered PDF Research Assistant
 Exec="{app_exe_path}"
 Path={project_dir}
 Icon=accessories-text-editor
@@ -329,7 +329,7 @@ Categories=Office;Utility;
             elif system == "Darwin":
                 try:
                     desktop_dir = os.path.expanduser("~/Desktop")
-                    symlink_path = os.path.join(desktop_dir, "PDF AI Workspace")
+                    symlink_path = os.path.join(desktop_dir, "Papyrus Research")
                     if not os.path.exists(symlink_path):
                         os.symlink(app_exe_path, symlink_path)
                     self.log("✅ Created a shortcut on your Desktop.")
@@ -338,7 +338,7 @@ Categories=Office;Utility;
 
         # Finish up
         self.log("\n🎉 Installation Complete!")
-        self.log("You can now launch 'PDF AI Workspace' from your shortcuts, or close this window.")
+        self.log("You can now launch 'Papyrus Research' from your shortcuts, or close this window.")
         
         self.after(0, self._finish_ui_update)
 

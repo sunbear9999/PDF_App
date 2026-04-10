@@ -112,8 +112,8 @@ class NotesTab(QWidget):
         self.tab_scroll_area.setWidgetResizable(True)
         self.tab_scroll_area.setFrameShape(QFrame.Shape.NoFrame)
 
-        content_widget = QWidget()
-        layout = QVBoxLayout(content_widget)
+        self.content_widget = QWidget()
+        layout = QVBoxLayout(self.content_widget)
         layout.setContentsMargins(5, 10, 5, 5)
         
         top_layout = QHBoxLayout()
@@ -190,11 +190,26 @@ class NotesTab(QWidget):
         
         layout.addWidget(self.stack)
 
-        self.tab_scroll_area.setWidget(content_widget)
+        self.tab_scroll_area.setWidget(self.content_widget)
         outer_layout.addWidget(self.tab_scroll_area)
 
     def update_theme(self, theme):
+        self.setStyleSheet(f"background-color: {theme['bg_main']};")
+        self.tab_scroll_area.setStyleSheet("background: transparent; border: none;")
+        self.tab_scroll_area.viewport().setStyleSheet(f"background-color: {theme['bg_main']};")
+        self.content_widget.setStyleSheet(f"background-color: {theme['bg_main']};")
+        self.list_view_widget.setStyleSheet(f"background-color: {theme['bg_main']};")
+        self.scroll_area.setStyleSheet("background: transparent; border: none;")
+        self.scroll_area.viewport().setStyleSheet(f"background-color: {theme['bg_main']};")
+        self.scroll_content.setStyleSheet(f"background-color: {theme['bg_main']};")
+
         self.lbl.setStyleSheet(f"font-size: 16px; font-weight: bold; padding-left: 5px; color: {theme['text_main']};")
+        self.scope_combo.setStyleSheet(
+            f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']};"
+        )
+        self.btn_toggle_view.setStyleSheet(
+            f"background-color: {theme['bg_panel']}; color: {theme['text_main']}; border: 1px solid {theme['border']};"
+        )
         self.btn_add_bubble.setStyleSheet(f"background-color: {theme['accent']}; color: #ffffff; font-weight: bold; border: none; padding: 6px 12px; border-radius: 4px;")
         
         for i in range(self.scroll_layout.count()):

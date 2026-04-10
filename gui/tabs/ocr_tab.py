@@ -47,8 +47,8 @@ class OCRTab(QWidget):
         self.tab_scroll_area.setWidgetResizable(True)
         self.tab_scroll_area.setFrameShape(QFrame.Shape.NoFrame)
 
-        content_widget = QWidget()
-        layout = QVBoxLayout(content_widget)
+        self.content_widget = QWidget()
+        layout = QVBoxLayout(self.content_widget)
 
         self.header = QLabel("OCR Engine")
         layout.addWidget(self.header)
@@ -92,12 +92,19 @@ class OCRTab(QWidget):
         control_layout.addStretch()
         layout.addLayout(control_layout)
 
-        self.tab_scroll_area.setWidget(content_widget)
+        self.tab_scroll_area.setWidget(self.content_widget)
         outer_layout.addWidget(self.tab_scroll_area)
 
     def update_theme(self, theme):
         self.theme = theme
+        self.setStyleSheet(f"background-color: {theme['bg_main']};")
+        self.tab_scroll_area.setStyleSheet("background: transparent; border: none;")
+        self.tab_scroll_area.viewport().setStyleSheet(f"background-color: {theme['bg_main']};")
+        self.content_widget.setStyleSheet(f"background-color: {theme['bg_main']};")
         self.header.setStyleSheet(f"font-size: 24px; font-weight: bold; margin-bottom: 10px; color: {theme['text_main']};")
+        self.text_area.setStyleSheet(
+            f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']};"
+        )
         self.run_ocr_btn.setStyleSheet(f"background-color: {theme['success']}; color: #ffffff; padding: 10px 20px; font-weight: bold; border-radius: 4px; border: none;")
         if self.status_label.text() == "Ready" or self.status_label.text().startswith("Target:"):
             self.status_label.setStyleSheet(f"color: {theme['text_muted']}; font-size: 14px; margin-left: 10px;")

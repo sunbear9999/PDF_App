@@ -104,8 +104,8 @@ class LLMTab(QWidget):
         self.tab_scroll_area.setWidgetResizable(True)
         self.tab_scroll_area.setFrameShape(QFrame.Shape.NoFrame)
 
-        content_widget = QWidget()
-        layout = QVBoxLayout(content_widget)
+        self.content_widget = QWidget()
+        layout = QVBoxLayout(self.content_widget)
         
         status_layout = QHBoxLayout()
         self.status_lbl = QLabel("🔴 Status: Unindexed")
@@ -160,13 +160,29 @@ class LLMTab(QWidget):
         input_layout.addWidget(self.send_btn)
         layout.addLayout(input_layout)
 
-        self.tab_scroll_area.setWidget(content_widget)
+        self.tab_scroll_area.setWidget(self.content_widget)
         outer_layout.addWidget(self.tab_scroll_area)
 
     def update_theme(self, theme):
         self.theme = theme
+        self.setStyleSheet(f"background-color: {theme['bg_main']};")
+        self.tab_scroll_area.setStyleSheet("background: transparent; border: none;")
+        self.tab_scroll_area.viewport().setStyleSheet(f"background-color: {theme['bg_main']};")
+        self.content_widget.setStyleSheet(f"background-color: {theme['bg_main']};")
         self.status_lbl.setStyleSheet(f"font-weight: bold; font-size: 14px; color: {theme['text_main']};")
         self.agent_checkbox.setStyleSheet(f"color: {theme['text_muted']}; margin-right: 15px;")
+        self.model_combo.setStyleSheet(
+            f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']};"
+        )
+        self.pdf_list.setStyleSheet(
+            f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']};"
+        )
+        self.chat_history.setStyleSheet(
+            f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']};"
+        )
+        self.chat_input.setStyleSheet(
+            f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']};"
+        )
         self.btn_refresh_models.setStyleSheet(f"background-color: {theme['bg_input']}; font-weight: bold;")
         self.btn_index.setStyleSheet(f"background-color: {theme['bg_panel']}; padding: 6px; font-weight: bold; margin-bottom: 10px; border: 1px solid {theme['border']};")
         self.send_btn.setStyleSheet(f"background-color: {theme['accent']}; padding: 8px 20px; font-weight: bold; color: #ffffff; border-radius: 4px;")

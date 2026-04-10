@@ -26,8 +26,8 @@ class TTSTab(QWidget):
         self.tab_scroll_area.setWidgetResizable(True)
         self.tab_scroll_area.setFrameShape(QFrame.Shape.NoFrame)
 
-        content_widget = QWidget()
-        layout = QVBoxLayout(content_widget)
+        self.content_widget = QWidget()
+        layout = QVBoxLayout(self.content_widget)
         
         self.instructions = QLabel("1. Extract Text from PDF:")
         layout.addWidget(self.instructions)
@@ -103,12 +103,25 @@ class TTSTab(QWidget):
         self.status_updated.connect(self._handle_status_update)
         self.generation_complete.connect(self._on_generation_complete)
 
-        self.tab_scroll_area.setWidget(content_widget)
+        self.tab_scroll_area.setWidget(self.content_widget)
         outer_layout.addWidget(self.tab_scroll_area)
 
     def update_theme(self, theme):
         self.theme = theme
+        self.setStyleSheet(f"background-color: {theme['bg_main']};")
+        self.tab_scroll_area.setStyleSheet("background: transparent; border: none;")
+        self.tab_scroll_area.viewport().setStyleSheet(f"background-color: {theme['bg_main']};")
+        self.content_widget.setStyleSheet(f"background-color: {theme['bg_main']};")
         self.instructions.setStyleSheet(f"font-weight: bold; margin-bottom: 5px; color: {theme['text_main']};")
+        self.text_editor.setStyleSheet(
+            f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']};"
+        )
+        self.voice_combo.setStyleSheet(
+            f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']};"
+        )
+        self.speed_combo.setStyleSheet(
+            f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']};"
+        )
         self.btn_fetch.setStyleSheet(f"background-color: {theme['bg_input']}; padding: 6px; border: 1px solid {theme['border']};")
         self.btn_generate.setStyleSheet(f"background-color: {theme['accent']}; padding: 12px; font-weight: bold; font-size: 14px; margin-top: 5px; color: #ffffff;")
         if self.status_lbl.text() == "Ready":
