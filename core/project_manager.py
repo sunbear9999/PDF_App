@@ -300,26 +300,38 @@ class ProjectManager:
         try:
             temp_path = self._create_closed_temp_path(path, suffix=".tmp_save")
             doc.save(temp_path, garbage=3, deflate=True)
+            # Close before the atomic swap so Windows releases any file lock.
+            doc.close()
             self._safe_swap_file(temp_path, path)
             temp_path = None
             self.dirty_docs.discard(path)
         except Exception as e:
             print(f"Primary save failed for {path}: {e}")
-            try:
-                pdf_bytes = doc.write()
-                temp_path = self._create_closed_temp_path(path, suffix=".tmp_write")
-                with open(temp_path, "wb") as f:
-                    f.write(pdf_bytes)
-                    f.flush()
-                    os.fsync(f.fileno())
-                self._safe_swap_file(temp_path, path)
-                temp_path = None
-                self.dirty_docs.discard(path)
-            except Exception as fallback_e:
-                print(f"Full save fallback failed for {path}: {fallback_e}")
-            finally:
-                if temp_path and os.path.exists(temp_path):
-                    os.remove(temp_path)
+            if not doc.is_closed:
+                try:
+                    pdf_bytes = doc.write()
+                    doc.close()
+                    temp_path = self._create_closed_temp_path(path, suffix=".tmp_write")
+                    with open(temp_path, "wb") as f:
+                        f.write(pdf_bytes)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    self._safe_swap_file(temp_path, path)
+                    temp_path = None
+                    self.dirty_docs.discard(path)
+                except Exception as fallback_e:
+                    print(f"Full save fallback failed for {path}: {fallback_e}")
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
+        finally:
+            # If the path is still in the cache (i.e. not being evicted), reopen
+            # the freshly-written file so the cache holds a valid handle.
+            if path in self.open_docs:
+                try:
+                    self.open_docs[path] = fitz.open(path)
+                except Exception as reopen_e:
+                    print(f"Failed to reopen {path} after save: {reopen_e}")
+                    self.open_docs.pop(path, None)
 
     def save_all_docs(self):
         try:

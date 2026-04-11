@@ -105,6 +105,35 @@ class OCRTab(QWidget):
         self.text_area.setStyleSheet(
             f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']};"
         )
+        radio_style = f"""
+            QRadioButton {{
+                color: {theme['text_main']};
+                spacing: 8px;
+                padding: 2px 0;
+                background: transparent;
+            }}
+            QRadioButton::indicator {{
+                width: 14px;
+                height: 14px;
+                border-radius: 7px;
+                border: 2px solid {theme['border']};
+                background: {theme['bg_input']};
+            }}
+            QRadioButton::indicator:hover {{
+                border: 2px solid {theme['accent']};
+            }}
+            QRadioButton::indicator:checked {{
+                border: 2px solid {theme['accent']};
+                background: {theme['accent']};
+            }}
+            QRadioButton::indicator:disabled {{
+                border: 2px solid {theme['border']};
+                background: {theme['bg_panel']};
+            }}
+        """
+        self.rb_text.setStyleSheet(radio_style)
+        self.rb_new.setStyleSheet(radio_style)
+        self.rb_replace.setStyleSheet(radio_style)
         self.run_ocr_btn.setStyleSheet(f"background-color: {theme['success']}; color: #ffffff; padding: 10px 20px; font-weight: bold; border-radius: 4px; border: none;")
         if self.status_label.text() == "Ready" or self.status_label.text().startswith("Target:"):
             self.status_label.setStyleSheet(f"color: {theme['text_muted']}; font-size: 14px; margin-left: 10px;")

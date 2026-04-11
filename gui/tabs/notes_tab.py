@@ -54,11 +54,13 @@ class NoteBubble(QFrame):
         
         self.lbl_subj = QLabel(f'"{subject}"')
         self.lbl_subj.setWordWrap(True)
+        self.lbl_subj.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
         layout.addWidget(self.lbl_subj)
         
         if content:
             self.lbl_content = QLabel(content)
             self.lbl_content.setWordWrap(True)
+            self.lbl_content.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
             layout.addWidget(self.lbl_content)
 
         # Apply theme dynamically based on main window's theme manager
@@ -80,10 +82,14 @@ class NoteBubble(QFrame):
             """)
         
         self.lbl_page.setStyleSheet(f"font-weight: bold; color: {theme['text_muted']}; border: none;")
-        self.lbl_subj.setStyleSheet(f"font-style: italic; color: {theme['text_muted']}; border: none;")
+        self.lbl_subj.setStyleSheet(
+            f"font-style: italic; color: {theme['text_muted']}; border: none; background: transparent; padding: 0px;"
+        )
         
         if hasattr(self, 'lbl_content'):
-            self.lbl_content.setStyleSheet(f"font-weight: bold; color: {theme['text_main']}; margin-top: 5px; border: none;")
+            self.lbl_content.setStyleSheet(
+                f"font-weight: bold; color: {theme['text_main']}; margin-top: 5px; border: none; background: transparent; padding: 0px;"
+            )
             
         self.btn_del.setStyleSheet(f"""
             QPushButton {{ background-color: transparent; color: {theme['error']}; border: 1px solid {theme['error']}; border-radius: 4px; font-weight: bold; }}

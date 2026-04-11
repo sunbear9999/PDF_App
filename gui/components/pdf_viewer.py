@@ -127,6 +127,10 @@ class PDFViewer(QGraphicsView):
         self.copy_shortcut = QShortcut(QKeySequence("Ctrl+C"), self)
         self.copy_shortcut.activated.connect(self.copy_to_clipboard)
 
+    def _doc_valid(self):
+        """Return True only when self.doc exists and is not closed."""
+        return self.doc is not None and not self.doc.is_closed
+
     def update_theme(self, theme):
         self.search_bar.update_theme(theme)
         self.setBackgroundBrush(QBrush(QColor(theme['canvas'])))
@@ -393,7 +397,7 @@ class PDFViewer(QGraphicsView):
         self.pages_in_flight.discard(page_num)
 
         # Draw highlight annotations as overlays
-        if self.doc:
+        if self._doc_valid():
             try:
                 page = self.doc.load_page(page_num)
                 self.current_links = page.get_links()
@@ -501,6 +505,8 @@ class PDFViewer(QGraphicsView):
         if visible_indices:
             current_page = visible_indices[0]
             # Clamp current_page to valid range
+            if not self._doc_valid():
+                return
             if current_page >= len(self.doc):
                 current_page = len(self.doc) - 1
             if current_page < 0:
@@ -524,7 +530,7 @@ class PDFViewer(QGraphicsView):
 
 
     def reload_page(self, page_num):
-        if not self.doc or page_num < 0 or page_num >= len(self.page_pixmaps): return
+        if not self._doc_valid() or page_num < 0 or page_num >= len(self.page_pixmaps): return
         page = self.doc.load_page(page_num)
         dpi_scale = self._get_dpi_scale()
         mat = fitz.Matrix(self.base_zoom * dpi_scale, self.base_zoom * dpi_scale)
@@ -539,7 +545,7 @@ class PDFViewer(QGraphicsView):
         is_left = event.button() == Qt.MouseButton.LeftButton
 
         # Handle PDF links before selection/annotation behavior.
-        if is_left and self.doc:
+        if is_left and self._doc_valid():
             scene_pos = self._event_scene_pos(event)
             link = self._get_link_at_scene_pos(scene_pos)
             if link:
@@ -567,7 +573,7 @@ class PDFViewer(QGraphicsView):
             self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
             page_idx, page_item = self.annot_manager._get_page_at_pos(scene_pos)
             
-            if page_idx != -1 and self.doc:
+            if page_idx != -1 and self._doc_valid():
                 local_pos = page_item.mapFromScene(scene_pos)
                 pdf_x, pdf_y = local_pos.x() / self.base_zoom, local_pos.y() / self.base_zoom
                 point = fitz.Point(pdf_x, pdf_y)
@@ -583,7 +589,7 @@ class PDFViewer(QGraphicsView):
             self.annot_manager.update_selection(event)
         else:
             super().mouseMoveEvent(event)
-            if self.doc:
+            if self._doc_valid():
                 scene_pos = self._event_scene_pos(event)
                 link = self._get_link_at_scene_pos(scene_pos)
                 if link:
@@ -662,7 +668,7 @@ class PDFViewer(QGraphicsView):
         return self.mapToScene(p.toPoint() if hasattr(p, "toPoint") else p)
 
     def _get_link_at_scene_pos(self, scene_pos):
-        if not self.doc:
+        if not self._doc_valid():
             return None
 
         page_idx, page_item = self.annot_manager._get_page_at_pos(scene_pos)
@@ -711,7 +717,7 @@ class PDFViewer(QGraphicsView):
         return False
 
     def _resolve_internal_link_page(self, link):
-        if not self.doc or not hasattr(self.doc, "resolve_link"):
+        if not self._doc_valid() or not hasattr(self.doc, "resolve_link"):
             return None
 
         candidates = [link.get("to"), link.get("name"), link.get("uri")]
