@@ -2,7 +2,7 @@ import math
 import random
 from collections import defaultdict
 
-def calculate_force_directed_layout(nodes_info, edges_info, center_x=0, center_y=0, iterations=150, similarity_matrix=None):
+def calculate_force_directed_layout(nodes_info, edges_info, center_x=0, center_y=0, iterations=150, similarity_matrix=None,semantic_strength=1.0):
     """
     Physics-based force-directed layout.
     Uses similarity_matrix to weakly attract semantically similar nodes and reduce their repulsion.
@@ -22,7 +22,7 @@ def calculate_force_directed_layout(nodes_info, edges_info, center_x=0, center_y
         
         avg_w = sum(n['width'] for n in nodes_info.values()) / len(nodes_info)
         avg_h = sum(n['height'] for n in nodes_info.values()) / len(nodes_info)
-        k = max(avg_w, avg_h) * 1.5 
+        k = max(avg_w, avg_h) * 1.25
         
         radius = 50 * math.sqrt(len(nodes))
         for n in nodes:
@@ -56,9 +56,14 @@ def calculate_force_directed_layout(nodes_info, edges_info, center_x=0, center_y
 
                     sim = similarity_matrix.get(u, {}).get(v, 0.0)
                     
-                    # 1. Calculate Base Repulsion (Diminished by semantic similarity)
+                    # 1. Calculate Base Repulsion
                     repulse = (k ** 2) / dist
-                    repulsion_modifier = 1.0 - (sim * 0.8) # Up to 80% less repulsion for identical nodes
+                    
+                    # Apply User's Strength Multiplier to the semantic effect!
+                    # Max reduction is 80% multiplied by the user's slider setting
+                    effective_reduction = sim * 0.8 * semantic_strength
+                    repulsion_modifier = max(0.1, 1.0 - effective_reduction) # Never let it drop below 0.1
+                    
                     repulse *= repulsion_modifier
                     
                     # Hard collision override (prevents physical overlap)
@@ -75,7 +80,8 @@ def calculate_force_directed_layout(nodes_info, edges_info, center_x=0, center_y
 
                     # 2. Semantic Attraction (Invisible Springs)
                     if sim > 0.6:
-                        semantic_attract = ((dist ** 2) / k) * (sim * 0.1) 
+                        # Multiply the attraction strength by the user's slider setting
+                        semantic_attract = ((dist ** 2) / k) * (sim * 0.1) * semantic_strength
                         disp[u][0] -= (dx / dist) * semantic_attract
                         disp[u][1] -= (dy / dist) * semantic_attract
                         disp[v][0] += (dx / dist) * semantic_attract

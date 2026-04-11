@@ -6,10 +6,9 @@ from PyQt6.QtWidgets import (QGraphicsView, QGraphicsScene, QMenu, QMessageBox,
                              QInputDialog, QFrame, QLabel, QVBoxLayout,
                              QHBoxLayout, QComboBox, QPushButton, QDialog,
                              QScrollArea, QWidget, QFormLayout, QDialogButtonBox, 
-                             QColorDialog, QFileDialog, QTextEdit)
+                             QColorDialog, QFileDialog, QTextEdit,QCheckBox,QSlider,QLabel)
 from PyQt6.QtCore import Qt, QRectF
 from PyQt6.QtGui import QColor, QPen, QBrush, QFont, QPainter, QImage, QStandardItemModel, QStandardItem
-
 from gui.components.workspace_items import Node, Edge
 from core.ai_organize_worker import AIOrganizeWorker
 from core.ai_connections_worker import AIFindConnectionsWorker
@@ -168,6 +167,72 @@ class OutlineDialog(QDialog):
         QMessageBox.information(self, "Success", "Outline added as a new node to the workspace!")
         self.accept()
 
+class DeclutterSettingsDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Declutter Options")
+        self.setMinimumWidth(350)
+        
+        layout = QVBoxLayout(self)
+        
+        # Enable AI Checkbox
+        self.cb_enable_ai = QCheckBox("Enable Semantic Clustering")
+        self.cb_enable_ai.setChecked(True)
+        self.cb_enable_ai.toggled.connect(self._toggle_slider)
+        layout.addWidget(self.cb_enable_ai)
+        
+        # Strength Slider
+        self.slider_layout = QVBoxLayout()
+        self.lbl_strength = QLabel("Clustering Strength: Medium")
+        self.slider_layout.addWidget(self.lbl_strength)
+        
+        self.slider = QSlider(Qt.Orientation.Horizontal)
+        self.slider.setRange(0, 100)
+        self.slider.setValue(50) # Default to 50%
+        self.slider.valueChanged.connect(self._update_label)
+        self.slider_layout.addWidget(self.slider)
+        
+        layout.addLayout(self.slider_layout)
+        layout.addSpacing(15)
+        
+        # Buttons
+        btn_layout = QHBoxLayout()
+        self.btn_run = QPushButton("Run Declutter")
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_run.clicked.connect(self.accept)
+        self.btn_cancel.clicked.connect(self.reject)
+        
+        btn_layout.addWidget(self.btn_cancel)
+        btn_layout.addWidget(self.btn_run)
+        layout.addLayout(btn_layout)
+
+        # Apply theme colors if available from parent
+        try:
+            if hasattr(parent, 'main_window') and hasattr(parent.main_window, 'theme_manager'):
+                theme = parent.main_window.theme_manager.get_theme()
+                self.setStyleSheet(f"background-color: {theme['bg_main']}; color: {theme['text_main']};")
+                self.btn_run.setStyleSheet(f"background-color: {theme['accent']}; color: white; border-radius: 4px; padding: 6px;")
+                self.btn_cancel.setStyleSheet(f"background-color: {theme['bg_panel']}; color: {theme['text_main']}; border: 1px solid {theme['border']}; border-radius: 4px; padding: 6px;")
+        except:
+            pass
+
+    def _toggle_slider(self, checked):
+        self.slider.setEnabled(checked)
+        self.lbl_strength.setEnabled(checked)
+
+    def _update_label(self, value):
+        if value < 30: text = "Low (Loose groupings)"
+        elif value < 70: text = "Medium (Balanced)"
+        else: text = "High (Tight clusters)"
+        self.lbl_strength.setText(f"Clustering Strength: {text}")
+
+    def get_settings(self):
+        # Returns (use_ai: bool, strength_multiplier: float from 0.0 to 2.0)
+        use_ai = self.cb_enable_ai.isChecked()
+        # Map 0-100 slider to a 0.0 to 2.0 multiplier
+        strength = self.slider.value() / 50.0 
+        return use_ai, strength
+    
 class WeakpointsDialog(QDialog):
     def __init__(self, weakpoints_text, workspace_view, parent=None):
         super().__init__(parent or workspace_view)
@@ -289,9 +354,6 @@ class WorkspaceView(QGraphicsView):
         self.scene_obj = QGraphicsScene(self)
         self.setScene(self.scene_obj)
         self.scene_obj.view = self 
-        
-        self.scene_obj.setSceneRect(-100000, -100000, 200000, 200000)
-        
         self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         
@@ -338,6 +400,19 @@ class WorkspaceView(QGraphicsView):
         self.ai_menu = self.create_ai_menu(self.btn_ai_tools)
         self.btn_ai_tools.setMenu(self.ai_menu)
         tb_layout.addWidget(self.btn_ai_tools)
+        self.update_scene_bounds()
+
+    def update_scene_bounds(self):
+        """Dynamically resizes the canvas to wrap around the nodes with a healthy padding."""
+        if not self.nodes:
+            self.scene_obj.setSceneRect(-1500, -1500, 3000, 3000)
+            return
+            
+        rect = self.scene_obj.itemsBoundingRect()
+        # Add a 1500px buffer in every direction so they can always pan around the edges
+        buffer = 1500
+        rect.adjust(-buffer, -buffer, buffer, buffer)
+        self.scene_obj.setSceneRect(rect)
 
     def create_ai_menu(self, parent_widget):
         menu = QMenu("🤖 AI Tools", parent_widget)
@@ -499,27 +574,38 @@ class WorkspaceView(QGraphicsView):
             return
 
         # 1. Safely grab the LLM Manager (if AI is enabled)
-        llm_manager = None
-        try:
-            temp_manager = self.main_window.tabs["LLM Chat"].llm_manager
-            if temp_manager.ai_enabled:
-                llm_manager = temp_manager
-        except Exception:
-            pass
+        dialog = DeclutterSettingsDialog(self)
+        if not dialog.exec():
+            return # User hit cancel
+            
+        use_ai, semantic_strength = dialog.get_settings()
 
-        # 2. Gather text and IDs for embedding
+        # 2. Safely grab the LLM Manager
+        llm_manager = None
+        if use_ai:
+            try:
+                temp_manager = self.main_window.tabs["LLM Chat"].llm_manager
+                if temp_manager.ai_enabled:
+                    llm_manager = temp_manager
+                else:
+                    QMessageBox.information(self, "AI Disabled", "Ollama is not running. Falling back to standard math declutter.")
+            except Exception:
+                pass
+
+        # 3. Gather text and IDs 
         node_ids = []
         texts_to_embed = []
         for n in target_nodes:
             node_ids.append(n.node_id)
             texts_to_embed.append(f"{n.quote} {n.note}".strip())
 
-        # 3. Fetch Semantic Similarity (Fails gracefully to empty dict if offline)
+        # 4. Fetch Semantic Similarity ONLY if AI is enabled and manager is ready
         similarity_matrix = {}
         if llm_manager:
+            from core.text_utils import get_semantic_similarity_matrix
             similarity_matrix = get_semantic_similarity_matrix(node_ids, texts_to_embed, llm_manager)
 
-        # 4. Build info dicts for the physics engine
+        # 5. Build info dicts for the physics engine
         nodes_info = {n.node_id: {'width': n.base_width, 'height': n.base_height} for n in target_nodes}
         edges_info = [(e.source_node.node_id, e.dest_node.node_id) 
                       for e in self.edges 
@@ -528,23 +614,23 @@ class WorkspaceView(QGraphicsView):
         avg_x = sum(n.pos().x() + n.base_width / 2 for n in target_nodes) / len(target_nodes)
         avg_y = sum(n.pos().y() + n.base_height / 2 for n in target_nodes) / len(target_nodes)
 
-        # 5. Execute the Physics Layout Engine
+        # 6. Execute the Physics Layout Engine, passing the new strength multiplier
         self.save_state_for_undo()
         
-        # IMPORT CHANGED HERE: Make sure your layout_engine.py import matches this function name
         from core.layout_engine import calculate_force_directed_layout
         new_positions = calculate_force_directed_layout(
             nodes_info, 
             edges_info, 
             avg_x, 
             avg_y, 
-            similarity_matrix=similarity_matrix
+            similarity_matrix=similarity_matrix,
+            semantic_strength=semantic_strength  # <--- Pass the slider value!
         )
 
         if not new_positions:
             return
 
-        # 6. Apply new positions to the canvas
+        # 7. Apply new positions
         for node in target_nodes:
             if node.node_id in new_positions:
                 pos = new_positions[node.node_id]
@@ -556,7 +642,7 @@ class WorkspaceView(QGraphicsView):
 
         self.main_window.project_manager.mark_dirty("workspace")
         items_rect = self.scene_obj.itemsBoundingRect()
-        self.centerOn(items_rect.center())
+        self.update_scene_bounds()
 
     def _export_workspace(self):
         selected_nodes = [n for n in self.scene_obj.selectedItems() if isinstance(n, Node)]
@@ -758,6 +844,7 @@ class WorkspaceView(QGraphicsView):
     def mouseReleaseEvent(self, event):
         super().mouseReleaseEvent(event)
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.update_scene_bounds()
 
     def _mark_workspace_dirty(self, autosave=False):
         pm = self.main_window.project_manager if self.main_window and hasattr(self.main_window, "project_manager") else None
@@ -1408,7 +1495,8 @@ class WorkspaceView(QGraphicsView):
     def sync_with_project(self, workspace_data, pdf_annotations, force_reload=False):
         # Always reload workspace when called (revert force_reload logic)
         selected_ids = [n_id for n_id, n in self.nodes.items() if n.isSelected()]
-
+        h_scroll = self.horizontalScrollBar().value()
+        v_scroll = self.verticalScrollBar().value()
         self.scene_obj.clear()
         self.nodes.clear()
         self.edges.clear()
@@ -1463,10 +1551,11 @@ class WorkspaceView(QGraphicsView):
                 
         self._refresh_pdf_list()
         self._apply_filter()
+        self.update_scene_bounds()
+        self.horizontalScrollBar().setValue(h_scroll)
+        self.verticalScrollBar().setValue(v_scroll)
 
-        if self.nodes:
-            items_rect = self.scene_obj.itemsBoundingRect()
-            self.centerOn(items_rect.center())
+        
 
     def serialize_workspace(self):
         data = {"nodes": {}, "edges": []}
