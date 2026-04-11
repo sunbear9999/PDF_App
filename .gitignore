@@ -40,3 +40,4 @@ __pycache__/
 voices/
 *.pdfproj
 OllamaSetup.exe
+main.patched.spec

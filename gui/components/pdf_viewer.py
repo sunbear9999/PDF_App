@@ -1,8 +1,9 @@
 # gui/components/pdf_viewer.py
 import fitz
+import webbrowser
 from PyQt6.QtWidgets import (QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsRectItem,
-                             QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox)
-from PyQt6.QtGui import QImage, QPixmap, QPainter, QColor, QBrush, QPen
+                             QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox, QApplication)
+from PyQt6.QtGui import QImage, QPixmap, QPainter, QColor, QBrush, QPen, QShortcut, QKeySequence
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QRectF, QTimer
 from PyQt6.QtCore import QPointF, QPoint
 from PyQt6.QtCore import QEvent
@@ -78,6 +79,8 @@ class PDFViewer(QGraphicsView):
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
+        self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
         
         self.doc = None
         self.base_zoom = 1.5
@@ -94,6 +97,8 @@ class PDFViewer(QGraphicsView):
         self.current_hit_index = -1
         self.search_highlight_items = []
         self.pending_search_jump = None
+        self.current_links = []
+        self.page_links = {}
         
         self.current_search_text = ""
         self.current_search_scope = ""
@@ -118,6 +123,9 @@ class PDFViewer(QGraphicsView):
         # Remove invalid z-index property (not supported in Qt stylesheets)
         self.page_hud.btn_jump.clicked.connect(self._hud_jump_requested)
         self.page_hud.line_edit.returnPressed.connect(self._hud_jump_requested)
+
+        self.copy_shortcut = QShortcut(QKeySequence("Ctrl+C"), self)
+        self.copy_shortcut.activated.connect(self.copy_to_clipboard)
 
     def update_theme(self, theme):
         self.search_bar.update_theme(theme)
@@ -292,7 +300,7 @@ class PDFViewer(QGraphicsView):
             z = self.base_zoom
             qt_rect = QRectF(r.x0 * z, r.y0 * z, (r.x1 - r.x0) * z, (r.y1 - r.y0) * z)
             scene_rect = page_item.mapToScene(qt_rect).boundingRect()
-            self.ensureVisible(scene_rect, 100, 100)
+            self.centerOn(scene_rect.center())
 
     def load_document(self, doc):
         if self.worker and self.worker.isRunning():
@@ -306,6 +314,8 @@ class PDFViewer(QGraphicsView):
         self.page_placeholders.clear()
         self.page_pixmaps.clear()
         self.pending_jump = None
+        self.current_links = []
+        self.page_links = {}
 
         self.page_rects = []
         self.page_placeholders = []
@@ -386,6 +396,8 @@ class PDFViewer(QGraphicsView):
         if self.doc:
             try:
                 page = self.doc.load_page(page_num)
+                self.current_links = page.get_links()
+                self.page_links[page_num] = self.current_links
                 for annot in page.annots():
                     if annot.type[0] == 8:  # Highlight
                         for quad in annot.vertices:
@@ -525,6 +537,14 @@ class PDFViewer(QGraphicsView):
         is_shift = event.modifiers() == Qt.KeyboardModifier.ShiftModifier
         is_right = event.button() == Qt.MouseButton.RightButton
         is_left = event.button() == Qt.MouseButton.LeftButton
+
+        # Handle PDF links before selection/annotation behavior.
+        if is_left and self.doc:
+            scene_pos = self._event_scene_pos(event)
+            link = self._get_link_at_scene_pos(scene_pos)
+            if link:
+                if self._open_link_target(link):
+                    return
         
         if is_right and self.annot_manager.has_selection():
             scene_pos = self._event_scene_pos(event)
@@ -563,6 +583,16 @@ class PDFViewer(QGraphicsView):
             self.annot_manager.update_selection(event)
         else:
             super().mouseMoveEvent(event)
+            if self.doc:
+                scene_pos = self._event_scene_pos(event)
+                link = self._get_link_at_scene_pos(scene_pos)
+                if link:
+                    self.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
+                    link_tip = self._get_link_tooltip(link)
+                    self.viewport().setToolTip(link_tip if link_tip else "Link")
+                else:
+                    self.viewport().unsetCursor()
+                    self.viewport().setToolTip("")
 
     def mouseReleaseEvent(self, event):
         if self.annot_manager.is_selecting:
@@ -572,12 +602,8 @@ class PDFViewer(QGraphicsView):
         super().mouseReleaseEvent(event)
         
     def jump_to_page(self, page_num):
-        if 0 <= page_num < len(self.page_placeholders):
-            target_item = self.page_pixmaps[page_num] if self.page_pixmaps[page_num] is not None else self.page_placeholders[page_num]
-            # Scroll so the top of the page is visible
-            page_rect = target_item.sceneBoundingRect()
-            top_rect = QRectF(page_rect.left(), page_rect.top(), page_rect.width(), 10)  # 10px tall at top
-            self.ensureVisible(top_rect, 50, 10)
+        if 0 <= page_num < len(self.page_rects):
+            self._scroll_to_scene_y(self.page_rects[page_num].top())
             QTimer.singleShot(0, self._on_scroll)
             # Scroll event will reposition HUD and trigger buffer update
 
@@ -597,10 +623,18 @@ class PDFViewer(QGraphicsView):
                     z = self.base_zoom
                     qt_rect = QRectF(r.x0 * z, r.y0 * z, (r.x1 - r.x0) * z, (r.y1 - r.y0) * z)
                     scene_rect = target_item.mapToScene(qt_rect).boundingRect()
-                    self.ensureVisible(scene_rect, 300, 300)
                     self.centerOn(scene_rect.center())
                     return
             self.jump_to_page(page_num)
+
+    def _scroll_to_scene_y(self, scene_y):
+        scale_y = self.transform().m22()
+        if not scale_y:
+            scale_y = 1.0
+        target_value = int(scene_y * scale_y)
+        vbar = self.verticalScrollBar()
+        target_value = max(vbar.minimum(), min(target_value, vbar.maximum()))
+        vbar.setValue(target_value)
 
     def zoom_in(self): self.scale(1.2, 1.2)
     def zoom_out(self): self.scale(1 / 1.2, 1 / 1.2)
@@ -626,3 +660,100 @@ class PDFViewer(QGraphicsView):
         # Qt mouse events are in logical coordinates and mapToScene expects logical viewport coords.
         p = event.position() if hasattr(event, "position") else event.pos()
         return self.mapToScene(p.toPoint() if hasattr(p, "toPoint") else p)
+
+    def _get_link_at_scene_pos(self, scene_pos):
+        if not self.doc:
+            return None
+
+        page_idx, page_item = self.annot_manager._get_page_at_pos(scene_pos)
+        if page_idx == -1 or page_item is None:
+            return None
+
+        local_pos = page_item.mapFromScene(scene_pos)
+        pdf_x, pdf_y = local_pos.x() / self.base_zoom, local_pos.y() / self.base_zoom
+        point = fitz.Point(pdf_x, pdf_y)
+
+        links = self.page_links.get(page_idx)
+        if links is None:
+            page = self.doc.load_page(page_idx)
+            links = page.get_links()
+            self.page_links[page_idx] = links
+        self.current_links = links
+
+        for link in self.current_links:
+            link_rect = link.get("from")
+            if link_rect and link_rect.contains(point):
+                return link
+        return None
+
+    def _open_link_target(self, link):
+        kind = link.get("kind")
+
+        if kind == fitz.LINK_URI and link.get("uri"):
+            webbrowser.open(link["uri"])
+            return True
+
+        internal_kinds = {
+            getattr(fitz, "LINK_GOTO", -1),
+            getattr(fitz, "LINK_GOTOR", -2),
+            getattr(fitz, "LINK_NAMED", -3),
+        }
+        if kind in internal_kinds:
+            page = link.get("page")
+            if isinstance(page, int) and page >= 0:
+                self.jump_to_page(page)
+                return True
+            resolved_page = self._resolve_internal_link_page(link)
+            if isinstance(resolved_page, int) and resolved_page >= 0:
+                self.jump_to_page(resolved_page)
+                return True
+
+        return False
+
+    def _resolve_internal_link_page(self, link):
+        if not self.doc or not hasattr(self.doc, "resolve_link"):
+            return None
+
+        candidates = [link.get("to"), link.get("name"), link.get("uri")]
+        for candidate in candidates:
+            if not candidate:
+                continue
+            try:
+                resolved = self.doc.resolve_link(candidate)
+            except Exception:
+                continue
+
+            if isinstance(resolved, int):
+                return resolved
+            if isinstance(resolved, (tuple, list)) and resolved:
+                for value in resolved:
+                    if isinstance(value, int):
+                        return value
+            if isinstance(resolved, dict):
+                for key in ("page", "pno", "number"):
+                    value = resolved.get(key)
+                    if isinstance(value, int):
+                        return value
+
+        return None
+
+    def _get_link_tooltip(self, link):
+        kind = link.get("kind")
+        uri = link.get("uri")
+
+        if kind == fitz.LINK_URI and uri:
+            return f"Open: {uri}"
+
+        page = link.get("page")
+        if isinstance(page, int) and page >= 0:
+            return f"Go to page {page + 1}"
+
+        return "Follow link"
+
+    def copy_to_clipboard(self):
+        if not hasattr(self, 'annot_manager') or not self.annot_manager.selected_words:
+            return
+
+        selected_text = " ".join(w[4] for w in self.annot_manager.selected_words if len(w) > 4).strip()
+        if selected_text:
+            QApplication.clipboard().setText(selected_text)
