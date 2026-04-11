@@ -187,12 +187,21 @@ class InstallerGUI(tk.Tk):
                 except Exception as e:
                     self.log(f"❌ Failed to install Ollama: {e}")
             elif system == "Linux":
-                self.log("📥 Installing Ollama for Linux...")
+                self.log("📥 Installing Ollama for Linux (You may be prompted for your password)...")
                 try:
-                    os.system("curl -fsSL https://ollama.com/install.sh | sh")
-                    self.log("✅ Ollama installed successfully!")
+                    # pkexec summons the native Linux graphical password dialog
+                    cmd = ['pkexec', 'sh', '-c', 'curl -fsSL https://ollama.com/install.sh | sh']
+                    
+                    # We use subprocess.run so we can actually catch if the user hits "Cancel"
+                    result = subprocess.run(cmd, capture_output=True, text=True)
+                    
+                    if result.returncode == 0:
+                        self.log("✅ Ollama installed successfully!")
+                    else:
+                        self.log("❌ Failed to install Ollama (Password cancelled or network error).")
+                        self.log("👉 Please open a terminal and run manually: curl -fsSL https://ollama.com/install.sh | sh")
                 except Exception as e:
-                    self.log(f"❌ Failed to install Ollama: {e}")
+                    self.log(f"❌ Failed to trigger Linux installer: {e}")
             elif system == "Darwin":
                 self.log("⚠️ Auto-install for Mac is limited. Opening browser to download Ollama...")
                 import webbrowser
@@ -305,24 +314,39 @@ oLink.Save
 
             elif system == "Linux":
                 try:
+                    # 1. Set up the official Linux application and icon directories
                     desktop_dir = os.path.expanduser("~/.local/share/applications")
+                    icon_dir = os.path.expanduser("~/.local/share/icons")
                     os.makedirs(desktop_dir, exist_ok=True)
-                    desktop_file_path = os.path.join(desktop_dir, "papyrus_research.desktop")
+                    os.makedirs(icon_dir, exist_ok=True)
                     
+                    # 2. Copy your icon to the official system icon folder
+                    src_icon = os.path.join(project_dir, 'icon.png')
+                    dest_icon = os.path.join(icon_dir, 'papyrus_icon.png')
+                    if os.path.exists(src_icon):
+                        shutil.copy2(src_icon, dest_icon)
+                    else:
+                        self.log("⚠️ Warning: icon.png not found in the installer folder.")
+                        dest_icon = "accessories-text-editor" # Fallback
+
+                    # 3. Create the desktop entry pointing to the new, safe icon location
+                    desktop_file_path = os.path.join(desktop_dir, "papyrus_research.desktop")
                     desktop_content = f"""[Desktop Entry]
 Name=Papyrus
 Comment=Ethical, Offline AI-Powered PDF Research Assistant
 Exec="{app_exe_path}"
 Path={project_dir}
-Icon=accessories-text-editor
+Icon={dest_icon}
 Terminal=false
 Type=Application
 Categories=Office;Utility;
 """
                     with open(desktop_file_path, "w") as f:
                         f.write(desktop_content)
+                    
+                    # Make it executable
                     os.chmod(desktop_file_path, 0o755)
-                    self.log("✅ Created application entry in app launcher (~/.local/share/applications).")
+                    self.log("✅ Created application entry and installed icon.")
                 except Exception as e:
                     self.log(f"❌ Failed to create Linux shortcut: {e}")
                     

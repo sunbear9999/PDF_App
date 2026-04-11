@@ -196,10 +196,16 @@ class PDFViewer(QGraphicsView):
                 
         for pdf_path in pdfs_to_search:
             doc = main_window.project_manager.get_doc(pdf_path)
-            if not doc: continue
+            if not doc:
+                continue
             for page_num in range(len(doc)):
                 page = doc.load_page(page_num)
-                quads = page.search_for(text, hit_max=999, quads=True, flags=flags)
+                # PyMuPDF's search_for uses 'max' not 'hit_max' in recent versions
+                try:
+                    quads = page.search_for(text, max=999, quads=True, flags=flags)
+                except TypeError:
+                    # fallback for older versions without 'max' argument
+                    quads = page.search_for(text, quads=True, flags=flags)
                 for q in quads:
                     self.search_hits.append({
                         'pdf': pdf_path,
@@ -343,6 +349,9 @@ class PDFViewer(QGraphicsView):
         # Failsafe: force call to _on_scroll to ensure render_queue is filled
         self._on_scroll()
 
+        # Reset HUD page tracking to avoid out-of-range errors
+        self._last_hud_page = 0
+
         # Show and update HUD
         self.page_hud.setVisible(True)
         self.page_hud.update_hud(1, len(self.doc))
@@ -435,6 +444,8 @@ class PDFViewer(QGraphicsView):
             QTimer.singleShot(100, lambda: self._execute_search_jump(s_hit))
     def _on_scroll(self, *args):
         # Determine which pages are visible in the viewport
+        if not self.page_rects:
+            return
         viewport_rect = self.viewport().rect()
         scene_rect = self.mapToScene(viewport_rect).boundingRect()
         visible_indices = []
@@ -452,6 +463,8 @@ class PDFViewer(QGraphicsView):
 
         # Render buffered pages if not already rendered or in flight
         for idx in buffer_indices:
+            if idx >= len(self.page_pixmaps):
+                continue
             pixmap_item = self.page_pixmaps[idx]
             # If pixmap is empty (not just None), request render
             if (pixmap_item.pixmap().isNull() or not pixmap_item.isVisible()) and idx not in self.pages_in_flight:
@@ -464,17 +477,22 @@ class PDFViewer(QGraphicsView):
             max_buf = max(buffer_indices)
             for i in list(self.rendered_pages):
                 if i < min_buf - 2 or i > max_buf + 2:
-                    # Release VRAM instantly without touching the scene tree
-                    self.page_pixmaps[i].setPixmap(QPixmap())
-                    self.page_pixmaps[i].setVisible(False)
-                    self.page_placeholders[i].setVisible(True)
-                    self.page_placeholders[i].setBrush(QBrush(QColor(240, 240, 240)))
-                    self.page_placeholders[i].setZValue(0)
-                    self.rendered_pages.discard(i)
+                    if i < len(self.page_pixmaps):
+                        self.page_pixmaps[i].setPixmap(QPixmap())
+                        self.page_pixmaps[i].setVisible(False)
+                        self.page_placeholders[i].setVisible(True)
+                        self.page_placeholders[i].setBrush(QBrush(QColor(240, 240, 240)))
+                        self.page_placeholders[i].setZValue(0)
+                        self.rendered_pages.discard(i)
 
         # HUD: update if page changed
         if visible_indices:
             current_page = visible_indices[0]
+            # Clamp current_page to valid range
+            if current_page >= len(self.doc):
+                current_page = len(self.doc) - 1
+            if current_page < 0:
+                current_page = 0
             if not hasattr(self, '_last_hud_page') or self._last_hud_page != current_page:
                 self.page_hud.update_hud(current_page + 1, len(self.doc))
                 self._last_hud_page = current_page
