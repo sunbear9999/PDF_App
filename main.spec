@@ -7,7 +7,7 @@ a = Analysis(
     binaries=[],
     datas=[('gui/components/examples/*.gif', 'gui/components/examples'),
         ('icon.png', '.')],
-    hiddenimports=['chromadb.telemetry.product.posthog','chromadb.api.rust'],
+    hiddenimports=['chromadb.telemetry.product.posthog','chromadb.api.rust','piper-tts'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
