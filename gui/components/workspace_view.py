@@ -17,7 +17,7 @@ from core.ai_outline_worker import AIOutlineWorker
 from core.ai_weakpoints_worker import AIWeakpointsWorker
 from core.ai_fill_graph_worker import AIFillGraphWorker
 from core.ai_consolidate_worker import AIConsolidateWorker
-from core.layout_engine import calculate_radial_layout
+from core.layout_engine import calculate_force_directed_layout
 
 class CheckableComboBox(QComboBox):
     def __init__(self, parent=None):
@@ -515,7 +515,7 @@ class WorkspaceView(QGraphicsView):
         avg_y = sum(n.pos().y() + n.base_height / 2 for n in target_nodes) / len(target_nodes)
 
         # Call our mathematical layout engine
-        new_positions = calculate_radial_layout(nodes_info, edges_info, avg_x, avg_y)
+        new_positions = calculate_force_directed_layout(nodes_info, edges_info, avg_x, avg_y)
 
         if not new_positions:
             return

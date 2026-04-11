@@ -1,83 +1,141 @@
 import math
-from collections import defaultdict, deque
+import random
+from collections import defaultdict
 
-def calculate_radial_layout(nodes_info, edges_info, center_x=0, center_y=0):
+def calculate_force_directed_layout(nodes_info, edges_info, center_x=0, center_y=0, iterations=150):
     """
-    Calculates a mathematical radial layout for a graph of nodes.
-    Places the most connected node in the center and orbits the rest in concentric tiers.
+    Calculates a physics-based layout. Connected nodes pull together, 
+    all nodes repel each other, and bounding boxes are strictly separated.
     """
     if not nodes_info:
         return {}
+    if len(nodes_info) == 1:
+        n = list(nodes_info.keys())[0]
+        return {n: {'x': center_x - nodes_info[n]['width']/2, 'y': center_y - nodes_info[n]['height']/2}}
 
     try:
-        adj = defaultdict(list)
-        degrees = defaultdict(int)
-        for src, tgt in edges_info:
-            if src in nodes_info and tgt in nodes_info:
-                adj[src].append(tgt)
-                adj[tgt].append(src)
-                degrees[src] += 1
-                degrees[tgt] += 1
-
-        center_node = max(nodes_info.keys(), key=lambda n: degrees[n], default=list(nodes_info.keys())[0])
-
-        layers = defaultdict(list)
-        visited = set([center_node])
-        queue = deque([(center_node, 0)])
-
-        while queue:
-            curr, depth = queue.popleft()
-            layers[depth].append(curr)
-            for neighbor in adj[curr]:
-                if neighbor not in visited:
-                    visited.add(neighbor)
-                    queue.append((neighbor, depth + 1))
-
-        unvisited = set(nodes_info.keys()) - visited
-        if unvisited:
-            max_depth = max(layers.keys()) if layers else 0
-            layers[max_depth + 1] = list(unvisited)
-
-        positions = {}
-        positions[center_node] = {'x': center_x, 'y': center_y}
+        # 1. Initialize variables and starting positions
+        pos = {}
+        nodes = list(nodes_info.keys())
         
-        current_radius = 0
-        layer_padding = 250 
+        # Calculate ideal spring length based on average node size
+        avg_w = sum(n['width'] for n in nodes_info.values()) / len(nodes_info)
+        avg_h = sum(n['height'] for n in nodes_info.values()) / len(nodes_info)
+        k = max(avg_w, avg_h) * 1.5 
+        
+        # Initialize randomly around the center to break mathematical symmetry
+        radius = 50 * math.sqrt(len(nodes))
+        for n in nodes:
+            angle = random.uniform(0, 2 * math.pi)
+            r = random.uniform(0, radius)
+            pos[n] = [center_x + r * math.cos(angle), center_y + r * math.sin(angle)]
 
-        for depth in sorted(layers.keys()):
-            if depth == 0:
-                continue
-            
-            nodes_in_layer = layers[depth]
-            
-            total_arc_length = sum(math.hypot(nodes_info[n]['width'], nodes_info[n]['height']) + 150 for n in nodes_in_layer)
-            
-            required_radius = total_arc_length / (2 * math.pi) if len(nodes_in_layer) > 1 else layer_padding
-            current_radius = max(current_radius + layer_padding, required_radius)
-            
-            def get_parent_angle(n):
-                for neighbor in adj[n]:
-                    if neighbor in positions:
-                        px, py = positions[neighbor]['x'], positions[neighbor]['y']
-                        return math.atan2(py - center_y, px - center_x)
-                return 0.0
-            
-            nodes_in_layer.sort(key=get_parent_angle)
-            
-            angle_step = 2 * math.pi / len(nodes_in_layer)
-            for i, n in enumerate(nodes_in_layer):
-                angle = i * angle_step
-                x = center_x + current_radius * math.cos(angle)
-                y = center_y + current_radius * math.sin(angle)
-                
-                nx = x - nodes_info[n]['width'] / 2
-                ny = y - nodes_info[n]['height'] / 2
-                positions[n] = {'x': nx, 'y': ny}
-                
-        positions[center_node]['x'] -= nodes_info[center_node]['width'] / 2
-        positions[center_node]['y'] -= nodes_info[center_node]['height'] / 2
+        # Group edges for fast lookup
+        adj = defaultdict(list)
+        for u, v in edges_info:
+            if u in nodes_info and v in nodes_info:
+                adj[u].append(v)
+                adj[v].append(u)
 
-        return positions
+        # Temperature controls how far nodes can move per tick (Simulated Annealing)
+        t = k * 2.0 
+
+        # 2. Main Physics Loop
+        for i in range(iterations):
+            disp = {n: [0.0, 0.0] for n in nodes}
+
+            # A. Calculate Repulsive Forces (Push all nodes apart)
+            for idx_u in range(len(nodes)):
+                for idx_v in range(idx_u + 1, len(nodes)):
+                    u, v = nodes[idx_u], nodes[idx_v]
+                    dx = pos[u][0] - pos[v][0]
+                    dy = pos[u][1] - pos[v][1]
+                    
+                    if dx == 0 and dy == 0:
+                        dx, dy = random.uniform(-1, 1), random.uniform(-1, 1)
+
+                    dist = math.hypot(dx, dy)
+                    dist = max(dist, 0.01)
+
+                    repulse = (k ** 2) / dist
+                    
+                    # Add extra repulsion if they are getting close to overlapping
+                    pad = 50
+                    min_x = (nodes_info[u]['width'] + nodes_info[v]['width']) / 2 + pad
+                    min_y = (nodes_info[u]['height'] + nodes_info[v]['height']) / 2 + pad
+                    if abs(dx) < min_x and abs(dy) < min_y:
+                        repulse *= 5.0 # Strong multiplier
+
+                    disp[u][0] += (dx / dist) * repulse
+                    disp[u][1] += (dy / dist) * repulse
+                    disp[v][0] -= (dx / dist) * repulse
+                    disp[v][1] -= (dy / dist) * repulse
+
+            # B. Calculate Attractive Forces (Pull connected nodes together)
+            for u, v in edges_info:
+                if u in nodes_info and v in nodes_info:
+                    dx = pos[u][0] - pos[v][0]
+                    dy = pos[u][1] - pos[v][1]
+                    dist = math.hypot(dx, dy)
+                    dist = max(dist, 0.01)
+
+                    attract = (dist ** 2) / k
+
+                    disp[u][0] -= (dx / dist) * attract
+                    disp[u][1] -= (dy / dist) * attract
+                    disp[v][0] += (dx / dist) * attract
+                    disp[v][1] += (dy / dist) * attract
+
+            # C. Apply Displacements (Capped by temperature)
+            for n in nodes:
+                dx, dy = disp[n]
+                dist = math.hypot(dx, dy)
+                if dist > 0:
+                    pos[n][0] += (dx / dist) * min(abs(dx), t)
+                    pos[n][1] += (dy / dist) * min(abs(dy), t)
+
+            # Cool down temperature
+            t *= (1.0 - i / iterations)
+
+        # 3. Final Pass: Strict Rigid Body Anti-Overlap
+        # Runs a few quick checks to guarantee absolute zero overlap
+        for _ in range(10): 
+            for idx_u in range(len(nodes)):
+                for idx_v in range(idx_u + 1, len(nodes)):
+                    u, v = nodes[idx_u], nodes[idx_v]
+                    dx = pos[u][0] - pos[v][0]
+                    dy = pos[u][1] - pos[v][1]
+                    if dx == 0 and dy == 0: dx, dy = 1, 1
+
+                    pad = 35 # Minimum pixels between nodes
+                    min_x = (nodes_info[u]['width'] + nodes_info[v]['width']) / 2 + pad
+                    min_y = (nodes_info[u]['height'] + nodes_info[v]['height']) / 2 + pad
+
+                    if abs(dx) < min_x and abs(dy) < min_y:
+                        # Nodes overlap! Push them apart along the shortest escape vector
+                        overlap_x = min_x - abs(dx)
+                        overlap_y = min_y - abs(dy)
+
+                        if overlap_x < overlap_y:
+                            push_x = (overlap_x / 2.0) * math.copysign(1, dx)
+                            pos[u][0] += push_x
+                            pos[v][0] -= push_x
+                        else:
+                            push_y = (overlap_y / 2.0) * math.copysign(1, dy)
+                            pos[u][1] += push_y
+                            pos[v][1] -= push_y
+
+        # 4. Format Output
+        # Convert central coordinates back to Top-Left for PyQt drawing
+        final_positions = {}
+        for n in nodes:
+            final_positions[n] = {
+                'x': pos[n][0] - nodes_info[n]['width'] / 2,
+                'y': pos[n][1] - nodes_info[n]['height'] / 2
+            }
+
+        return final_positions
+
     except Exception as e:
         print(f"Error in mathematical layout engine: {e}")
-        return {} # Fails gracefully
+        return {}
