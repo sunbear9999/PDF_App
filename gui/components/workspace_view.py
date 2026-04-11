@@ -18,6 +18,7 @@ from core.ai_weakpoints_worker import AIWeakpointsWorker
 from core.ai_fill_graph_worker import AIFillGraphWorker
 from core.ai_consolidate_worker import AIConsolidateWorker
 from core.layout_engine import calculate_force_directed_layout
+from core.text_utils import get_semantic_similarity_matrix
 
 class CheckableComboBox(QComboBox):
     def __init__(self, parent=None):
@@ -497,45 +498,63 @@ class WorkspaceView(QGraphicsView):
             QMessageBox.warning(self, "No Nodes", "Please add or select some nodes to declutter.")
             return
 
-        # Prepare layout data
-        nodes_info = {}
-        for node in target_nodes:
-            nodes_info[node.node_id] = {
-                'width': node.base_width,
-                'height': node.base_height
-            }
+        # 1. Safely grab the LLM Manager (if AI is enabled)
+        llm_manager = None
+        try:
+            temp_manager = self.main_window.tabs["LLM Chat"].llm_manager
+            if temp_manager.ai_enabled:
+                llm_manager = temp_manager
+        except Exception:
+            pass
 
-        edges_info = []
-        for edge in self.edges:
-            if edge.source_node in target_nodes and edge.dest_node in target_nodes:
-                edges_info.append((edge.source_node.node_id, edge.dest_node.node_id))
+        # 2. Gather text and IDs for embedding
+        node_ids = []
+        texts_to_embed = []
+        for n in target_nodes:
+            node_ids.append(n.node_id)
+            texts_to_embed.append(f"{n.quote} {n.note}".strip())
 
-        # Calculate a center point based on the current user focus
+        # 3. Fetch Semantic Similarity (Fails gracefully to empty dict if offline)
+        similarity_matrix = {}
+        if llm_manager:
+            similarity_matrix = get_semantic_similarity_matrix(node_ids, texts_to_embed, llm_manager)
+
+        # 4. Build info dicts for the physics engine
+        nodes_info = {n.node_id: {'width': n.base_width, 'height': n.base_height} for n in target_nodes}
+        edges_info = [(e.source_node.node_id, e.dest_node.node_id) 
+                      for e in self.edges 
+                      if e.source_node in target_nodes and e.dest_node in target_nodes]
+        
         avg_x = sum(n.pos().x() + n.base_width / 2 for n in target_nodes) / len(target_nodes)
         avg_y = sum(n.pos().y() + n.base_height / 2 for n in target_nodes) / len(target_nodes)
 
-        # Call our mathematical layout engine
-        new_positions = calculate_force_directed_layout(nodes_info, edges_info, avg_x, avg_y)
+        # 5. Execute the Physics Layout Engine
+        self.save_state_for_undo()
+        
+        # IMPORT CHANGED HERE: Make sure your layout_engine.py import matches this function name
+        from core.layout_engine import calculate_force_directed_layout
+        new_positions = calculate_force_directed_layout(
+            nodes_info, 
+            edges_info, 
+            avg_x, 
+            avg_y, 
+            similarity_matrix=similarity_matrix
+        )
 
         if not new_positions:
             return
 
-        self.save_state_for_undo()
-
-        # Apply the mathematically generated positions to the nodes
+        # 6. Apply new positions to the canvas
         for node in target_nodes:
             if node.node_id in new_positions:
                 pos = new_positions[node.node_id]
                 node.setPos(pos['x'], pos['y'])
 
-        # Refresh all connections
         for edge in self.edges:
             if edge.source_node in target_nodes and edge.dest_node in target_nodes:
                 edge.update_position()
 
         self.main_window.project_manager.mark_dirty("workspace")
-        
-        # Snap the viewport directly over the freshly organized nodes
         items_rect = self.scene_obj.itemsBoundingRect()
         self.centerOn(items_rect.center())
 
