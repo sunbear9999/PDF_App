@@ -27,7 +27,8 @@ class AIFindConnectionsWorker(QThread):
                     "Rate the strength of each new connection on a scale of 1 to 10. "
                     "Provide a concise, descriptive label for the connection. "
                     "Respond ONLY with a valid JSON array of objects, with no markdown formatting or extra text. "
-                    "Format: [{\"source_id\": \"id1\", \"target_id\": \"id2\", \"label\": \"Reason for connection\", \"weight\": 7}]"
+                    # 🔥 ESCAPED JSON BRACES HERE
+                    "Format: [{{\"source_id\": \"id1\", \"target_id\": \"id2\", \"label\": \"Reason for connection\", \"weight\": 7}}]"
                 ),
             )
 
@@ -52,12 +53,17 @@ class AIFindConnectionsWorker(QThread):
                 custom_system_prompt=system_prompt
             )
 
-            # 🚨 ERROR CHECK
             if "[Generation Error" in response or "[System Error" in response:
                 self.finished.emit([], f"AI Processing Failed:\n{response.strip()}")
                 return
 
             cleaned_response = response.strip()
+            
+            if "```json" in cleaned_response.lower():
+                cleaned_response = cleaned_response.split("```json", 1)[-1].split("```")[0].strip()
+            elif "```" in cleaned_response:
+                cleaned_response = cleaned_response.split("```", 1)[-1].split("```")[0].strip()
+
             match = re.search(r'\[\s*\{.*?\}\s*\]', cleaned_response, re.DOTALL)
             if match:
                 cleaned_response = match.group(0)

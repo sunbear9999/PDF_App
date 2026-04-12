@@ -323,15 +323,7 @@ class PDFViewer(QGraphicsView):
                     h_item.setZValue(5)
                 self.search_highlight_items.append(h_item)
 
-    def _execute_search_jump(self, hit):
-        page_num = hit['page']
-        if 0 <= page_num < len(self.page_pixmaps):
-            page_item = self.page_pixmaps[page_num]
-            r = hit['rect']
-            z = self.base_zoom
-            qt_rect = QRectF(r.x0 * z, r.y0 * z, (r.x1 - r.x0) * z, (r.y1 - r.y0) * z)
-            scene_rect = page_item.mapToScene(qt_rect).boundingRect()
-            self.centerOn(scene_rect.center())
+    
 
     def load_document(self, doc):
         if self.worker and self.worker.isRunning():
@@ -381,7 +373,8 @@ class PDFViewer(QGraphicsView):
         self.rendered_pages = set()
         self.pages_in_flight = set()
         self.render_queue = Queue()
-        self.worker = RenderWorker(self.doc, self.base_zoom, self.render_queue, pixel_ratio=self._get_dpi_scale())
+        pdf_path = getattr(self.window(), 'current_file_path', None)
+        self.worker = RenderWorker(pdf_path, self.base_zoom, self.render_queue, pixel_ratio=self._get_dpi_scale())
         self.worker.page_ready.connect(self._on_page_ready)
         self.worker.start()
 
@@ -415,7 +408,8 @@ class PDFViewer(QGraphicsView):
                 break
                 
         # 3. Restart the background worker with the fresh document handle
-        self.worker = RenderWorker(self.doc, self.base_zoom, self.render_queue, pixel_ratio=self._get_dpi_scale())
+        pdf_path = getattr(self.window(), 'current_file_path', None)
+        self.worker = RenderWorker(pdf_path, self.base_zoom, self.render_queue, pixel_ratio=self._get_dpi_scale())
         self.worker.page_ready.connect(self._on_page_ready)
         self.worker.start()
         
@@ -423,60 +417,42 @@ class PDFViewer(QGraphicsView):
         self.rendered_pages.clear() 
         self._on_scroll()
     def _on_page_ready(self, page_num, qimage):
-        print(f"[DEBUG] _on_page_ready called for page {page_num}, image size: {qimage.width()}x{qimage.height()}")
-        # Replace placeholder with pixmap item (not as child)
-        if not (0 <= page_num < len(self.page_pixmaps)):
+        """Callback for when the background RenderWorker finishes a page."""
+        if not self._doc_valid() or not (0 <= page_num < len(self.page_pixmaps)):
             return
+            
+        try:
+            from PyQt6.QtGui import QPixmap
+            from PyQt6.QtCore import QTimer
+            
+            pixmap = QPixmap.fromImage(qimage)
+            self.page_pixmaps[page_num].setPixmap(pixmap)
+            self.page_pixmaps[page_num].setVisible(True)
+            self.page_pixmaps[page_num].setZValue(1)
+            self.page_placeholders[page_num].setVisible(False)
+            
+            if hasattr(self, 'rendered_pages'):
+                self.rendered_pages.add(page_num)
+            if hasattr(self, 'pages_in_flight'):
+                self.pages_in_flight.discard(page_num)
 
-        if self.dark_mode_enabled:
-            qimage.invertPixels(QImage.InvertMode.InvertRgb)
+            # 🔥 Cleanly render highlights using the new memory manager
+            self._draw_standard_highlights(page_num, self.page_pixmaps[page_num])
 
-        pixmap = QPixmap.fromImage(qimage)
-        if pixmap.isNull():
-            try:
-                import fitz
-                page = self.doc.load_page(page_num)
-                pix = page.get_pixmap(matrix=fitz.Matrix(self.base_zoom, self.base_zoom))
-                png_bytes = pix.tobytes("png")
-                pixmap = QPixmap()
-                pixmap.loadFromData(png_bytes, "PNG")
-            except Exception:
-                pass
-        self.page_pixmaps[page_num].setPixmap(pixmap)
-        self.page_pixmaps[page_num].setVisible(True)
-        self.page_pixmaps[page_num].setZValue(1)
-        self.page_placeholders[page_num].setVisible(False)
-        self.rendered_pages.add(page_num)
-        self.pages_in_flight.discard(page_num)
+            # Check if there is a pending jump waiting for this page to finish rendering
+            if getattr(self, 'pending_jump', None) and self.pending_jump[0] == page_num:
+                p_num, a_id = self.pending_jump
+                self.pending_jump = None
+                QTimer.singleShot(100, lambda: self._execute_jump(p_num, a_id))
 
-        # Draw highlight annotations as overlays
-        if self._doc_valid():
-            try:
-                page = self.doc.load_page(page_num)
-                self.current_links = page.get_links()
-                self.page_links[page_num] = self.current_links
-                for annot in page.annots():
-                    if annot.type[0] == 8:  # Highlight
-                        for quad in annot.vertices:
-                            # Handle both list of points and flat float lists
-                            if hasattr(quad[0], 'x') and hasattr(quad[0], 'y'):
-                                xs = [p.x for p in quad]
-                                ys = [p.y for p in quad]
-                            elif isinstance(quad[0], (float, int)) and len(quad) == 8:
-                                xs = [quad[i] for i in range(0, 8, 2)]
-                                ys = [quad[i] for i in range(1, 8, 2)]
-                            else:
-                                print(f"[DEBUG] Unexpected quad format: {quad}")
-                                continue
-                            x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
-                            z = self.base_zoom
-                            qt_rect = QRectF(x0 * z, y0 * z, (x1 - x0) * z, (y1 - y0) * z)
-                            h_item = QGraphicsRectItem(qt_rect, self.page_pixmaps[page_num])
-                            h_item.setBrush(QBrush(QColor(255, 255, 0, 80)))
-                            h_item.setPen(QPen(Qt.PenStyle.NoPen))
-                            h_item.setZValue(20)
-            except Exception as e:
-                print(f"[DEBUG] Failed to draw highlight overlays: {e}")
+            # Check if there is a pending search jump waiting for this page to finish rendering
+            if getattr(self, 'pending_search_jump', None) and self.pending_search_jump['page'] == page_num:
+                s_hit = self.pending_search_jump
+                self.pending_search_jump = None
+                QTimer.singleShot(100, lambda: self._execute_search_jump(s_hit))
+                
+        except Exception as e:
+            print(f"Error handling ready page {page_num}: {e}")
 
         if self.search_hits and self.current_search_text:
             self._apply_search_highlights_to_page(page_num, self.page_pixmaps[page_num])
@@ -672,9 +648,91 @@ class PDFViewer(QGraphicsView):
             self.pending_jump = (page_num, annot_id)
         else:
             self._execute_jump(page_num, annot_id)
+    def _render_page_sync(self, page_num):
+        """Synchronously renders a page immediately on the main thread to prevent ghost-jumping."""
+        if not self._doc_valid() or not (0 <= page_num < len(self.page_pixmaps)):
+            return
+            
+        try:
+            import fitz
+            from PyQt6.QtGui import QImage, QPixmap
+            
+            page = self.doc.load_page(page_num)
+            dpi_scale = getattr(self, '_get_dpi_scale', lambda: 1.0)()
+            mat = fitz.Matrix(self.base_zoom * dpi_scale, self.base_zoom * dpi_scale)
+            pix = page.get_pixmap(matrix=mat)
+            img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888).copy()
+            
+            if getattr(self, 'dark_mode_enabled', False):
+                img.invertPixels(QImage.InvertMode.InvertRgb)
+                
+            img.setDevicePixelRatio(dpi_scale)
+            
+            pixmap = QPixmap.fromImage(img)
+            self.page_pixmaps[page_num].setPixmap(pixmap)
+            self.page_pixmaps[page_num].setVisible(True)
+            self.page_pixmaps[page_num].setZValue(1)
+            self.page_placeholders[page_num].setVisible(False)
+            
+            if hasattr(self, 'rendered_pages'):
+                self.rendered_pages.add(page_num)
+            if hasattr(self, 'pages_in_flight'):
+                self.pages_in_flight.discard(page_num)
+            
+            # 🔥 Cleanly render highlights using the new memory manager
+            self._draw_standard_highlights(page_num, self.page_pixmaps[page_num])
 
+        except Exception as e:
+            print(f"Sync render failed for page {page_num}: {e}")
+    def _draw_standard_highlights(self, page_num, page_item):
+        """Safely renders permanent highlights while cleaning up old ones to prevent memory leaks."""
+        if not self._doc_valid(): return
+        
+        if not hasattr(self, 'pdf_highlight_items'):
+            self.pdf_highlight_items = {}
+            
+        # Clean up old standard highlights for this page to prevent infinite stacking on scroll
+        if page_num in self.pdf_highlight_items:
+            for old_h in self.pdf_highlight_items[page_num]:
+                if old_h.scene():
+                    self.scene.removeItem(old_h)
+            self.pdf_highlight_items[page_num].clear()
+        else:
+            self.pdf_highlight_items[page_num] = []
+            
+        try:
+            page = self.doc.load_page(page_num)
+            self.current_links = page.get_links()
+            self.page_links[page_num] = self.current_links
+            for annot in page.annots():
+                if annot.type[0] == 8:  # Highlight
+                    for quad in annot.vertices:
+                        if hasattr(quad[0], 'x') and hasattr(quad[0], 'y'):
+                            xs = [p.x for p in quad]
+                            ys = [p.y for p in quad]
+                        elif isinstance(quad[0], (float, int)) and len(quad) == 8:
+                            xs = [quad[i] for i in range(0, 8, 2)]
+                            ys = [quad[i] for i in range(1, 8, 2)]
+                        else:
+                            continue
+                        x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
+                        z = self.base_zoom
+                        qt_rect = QRectF(x0 * z, y0 * z, (x1 - x0) * z, (y1 - y0) * z)
+                        h_item = QGraphicsRectItem(qt_rect, page_item)
+                        h_item.setBrush(QBrush(QColor(255, 255, 0, 80)))
+                        h_item.setPen(QPen(Qt.PenStyle.NoPen))
+                        h_item.setZValue(20)
+                        self.pdf_highlight_items[page_num].append(h_item)
+        except Exception as e:
+            print(f"Failed to draw standard highlights: {e}")
     def _execute_jump(self, page_num, annot_id):
         if 0 <= page_num < len(self.page_placeholders) and self.doc:
+            if page_num not in getattr(self, 'rendered_pages', set()):
+                self._render_page_sync(page_num)
+                
+            from PyQt6.QtWidgets import QApplication
+            QApplication.processEvents()
+
             target_item = self.page_pixmaps[page_num] if self.page_pixmaps[page_num] is not None else self.page_placeholders[page_num]
             page = self.doc.load_page(page_num)
             for annot in page.annots():
@@ -683,9 +741,35 @@ class PDFViewer(QGraphicsView):
                     z = self.base_zoom
                     qt_rect = QRectF(r.x0 * z, r.y0 * z, (r.x1 - r.x0) * z, (r.y1 - r.y0) * z)
                     scene_rect = target_item.mapToScene(qt_rect).boundingRect()
-                    self.centerOn(scene_rect.center())
+                    
+                    # 🔥 FIX: Pan both X and Y axes to perfectly frame the highlight
+                    self.ensureVisible(scene_rect, 50, 150)
+                    
+                    if hasattr(self, 'page_hud'):
+                        self.page_hud.update_hud(page_num + 1, len(self.doc))
                     return
             self.jump_to_page(page_num)
+
+    def _execute_search_jump(self, hit):
+        page_num = hit['page']
+        if 0 <= page_num < len(self.page_pixmaps):
+            if page_num not in getattr(self, 'rendered_pages', set()):
+                self._render_page_sync(page_num)
+                
+            from PyQt6.QtWidgets import QApplication
+            QApplication.processEvents()
+            
+            page_item = self.page_pixmaps[page_num]
+            r = hit['rect']
+            z = self.base_zoom
+            qt_rect = QRectF(r.x0 * z, r.y0 * z, (r.x1 - r.x0) * z, (r.y1 - r.y0) * z)
+            scene_rect = page_item.mapToScene(qt_rect).boundingRect()
+            
+            # 🔥 FIX: Pan both X and Y axes to perfectly frame the search hit
+            self.ensureVisible(scene_rect, 50, 150)
+            
+            if hasattr(self, 'page_hud') and self.doc:
+                self.page_hud.update_hud(page_num + 1, len(self.doc))
 
     def _scroll_to_scene_y(self, scene_y):
         scale_y = self.transform().m22()

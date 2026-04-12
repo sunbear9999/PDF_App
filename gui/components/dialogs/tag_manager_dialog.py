@@ -18,6 +18,16 @@ from PyQt6.QtWidgets import (
 )
 
 
+# gui/components/dialogs/tag_manager_dialog.py
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor, QBrush
+from PyQt6.QtWidgets import (
+    QCheckBox, QColorDialog, QDialog, QDialogButtonBox,
+    QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QListWidgetItem, QMessageBox, QPushButton, QScrollArea,
+    QVBoxLayout, QWidget, QComboBox # <-- Added QComboBox
+)
+
 class TagManagerDialog(QDialog):
     def __init__(self, project_manager, parent=None):
         super().__init__(parent)
@@ -56,10 +66,25 @@ class TagManagerDialog(QDialog):
         self.docs_label = QLabel("Documents with selected tag")
         self.docs_label.setWordWrap(True)
         self.doc_list = QListWidget()
+        
+        # 🔥 NEW: Manual Document Assignment UI
+        assign_layout = QHBoxLayout()
+        self.assign_doc_combo = QComboBox()
+        self.btn_assign_doc = QPushButton("➕ Assign Doc")
+        self.btn_assign_doc.clicked.connect(self.assign_doc_to_current_tag)
+        
+        self.btn_remove_doc = QPushButton("➖ Remove Selected Doc")
+        self.btn_remove_doc.clicked.connect(self.remove_doc_from_current_tag)
+        
+        assign_layout.addWidget(self.assign_doc_combo, 1)
+        assign_layout.addWidget(self.btn_assign_doc)
+
         details_layout.addWidget(self.docs_label)
         details_layout.addWidget(self.doc_list, 1)
-        middle_row.addLayout(details_layout, 1)
+        details_layout.addWidget(self.btn_remove_doc)
+        details_layout.addLayout(assign_layout)
 
+        middle_row.addLayout(details_layout, 1)
         main_layout.addLayout(middle_row, 1)
 
         self.info_label = QLabel("Select a tag and click delete to remove it globally.")
@@ -120,6 +145,8 @@ class TagManagerDialog(QDialog):
 
     def update_tag_details(self):
         self.doc_list.clear()
+        self.assign_doc_combo.clear() # Clear the combo box on tag switch
+        
         item = self.tag_list.currentItem()
         if not item or not self.project_manager:
             self.docs_label.setText("Documents with selected tag")
@@ -128,6 +155,11 @@ class TagManagerDialog(QDialog):
         tag_name = item.text().strip() or "Selected Tag"
         tag_id = item.data(Qt.ItemDataRole.UserRole)
         self.docs_label.setText(f"Documents with '{tag_name}'")
+
+        # Populate the assignment combobox with all PDFs in the project
+        import os
+        for pdf_path in self.project_manager.pdfs:
+            self.assign_doc_combo.addItem(os.path.basename(pdf_path), pdf_path)
 
         docs = self.project_manager.get_docs_for_tag(tag_id)
         if not docs:
@@ -140,7 +172,30 @@ class TagManagerDialog(QDialog):
             entry = QListWidgetItem(doc_name)
             if doc_id:
                 entry.setToolTip(doc_id)
+                entry.setData(Qt.ItemDataRole.UserRole, doc_id) # Store doc path for removal
             self.doc_list.addItem(entry)
+
+    def assign_doc_to_current_tag(self):
+        item = self.tag_list.currentItem()
+        if not item: return
+        tag_id = item.data(Qt.ItemDataRole.UserRole)
+        doc_path = self.assign_doc_combo.currentData()
+        
+        if doc_path and self.project_manager:
+            self.project_manager.assign_tag_to_doc(doc_path, tag_id)
+            self.update_tag_details() # Instantly refresh the UI
+
+    def remove_doc_from_current_tag(self):
+        item = self.tag_list.currentItem()
+        doc_item = self.doc_list.currentItem()
+        if not item or not doc_item: return
+        
+        tag_id = item.data(Qt.ItemDataRole.UserRole)
+        doc_path = doc_item.data(Qt.ItemDataRole.UserRole)
+        
+        if doc_path and self.project_manager:
+            self.project_manager.remove_tag_from_doc(doc_path, tag_id)
+            self.update_tag_details() # Instantly refresh the UI
 
     def add_tag(self):
         name = self.tag_name_input.text().strip()
@@ -168,7 +223,6 @@ class TagManagerDialog(QDialog):
 
         self.project_manager.delete_tag(tag_id)
         self.load_tags()
-
 
 class TagAssignmentDialog(QDialog):
     def __init__(self, project_manager, target_id, target_type, parent=None):

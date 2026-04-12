@@ -43,11 +43,20 @@ class Edge(QGraphicsLineItem):
         self.update_position()
 
     def shape(self):
-        path = super().shape()
+        from PyQt6.QtGui import QPainterPath, QPainterPathStroker
+        path = QPainterPath()
+        path.moveTo(self.line().p1())
+        path.lineTo(self.line().p2())
+        
+        # 🔥 FIX 7: Create a fat, 15px invisible hitbox for easy right-clicking
+        stroker = QPainterPathStroker()
+        stroker.setWidth(15) 
+        stroked_path = stroker.createStroke(path)
+        
         if self.text_item.scene():
             text_rect = self.text_item.mapRectToParent(self.text_item.boundingRect())
-            path.addRect(text_rect)
-        return path
+            stroked_path.addRect(text_rect)
+        return stroked_path
 
     def update_position(self):
         # FIX: Map the center of the node's true rectangle to the scene.
@@ -270,21 +279,28 @@ class Node(QGraphicsRectItem):
     def trigger_jump(self):
         if self.pdf_path and self.page_num is not None:
             if self.scene() and hasattr(self.scene(), 'view'):
-                main_win = self.scene().view.main_window
-                pdf_path = self.pdf_path
-                page_num = self.page_num
-                annot_id = self.highlight_id or self.node_id
+                from PyQt6.QtCore import QTimer
+                view = self.scene().view
+                main_win = view.main_window
                 
-                if "Notes" in main_win.tabs:
-                    main_win.tabs["Notes"].save_workspace_state()
+                # 1. Save the workspace state directly!
+                if hasattr(view, 'save_workspace_state'):
+                    view.save_workspace_state()
+                
+                annot_id = getattr(self, 'highlight_id', None) or getattr(self, 'node_id', None)
                 
                 def do_jump():
-                    main_win.switch_to_pdf(pdf_path)
-                    if hasattr(main_win.viewer, "jump_to_annotation"):
-                        main_win.viewer.jump_to_annotation(page_num, annot_id)
-                    else:
-                        main_win.viewer.jump_to_page(page_num)
+                    # 2. Switch the PDF (takes exactly 1 argument: the path)
+                    if hasattr(main_win, 'switch_to_pdf'):
+                        main_win.switch_to_pdf(self.pdf_path)
                     
+                    # 3. Tell the viewer to jump to the coordinate
+                    if hasattr(main_win.viewer, "jump_to_annotation"):
+                        main_win.viewer.jump_to_annotation(self.page_num, annot_id)
+                    else:
+                        main_win.viewer.jump_to_page(self.page_num)
+                    
+                # Execute jump safely in the next event loop cycle
                 QTimer.singleShot(0, do_jump)
 
     def add_edge(self, edge):
@@ -335,6 +351,7 @@ class Node(QGraphicsRectItem):
                 
         return best if best else "..."
 
+    # gui/components/workspace_items.py -> Node class
     def refresh_layout(self):
         margin = 8
         text_color = QColor(get_text_color_for_bg(self.color))
@@ -348,10 +365,8 @@ class Node(QGraphicsRectItem):
                 expanded_text += "\n\n"
             expanded_text += f'"{self.quote}"'
             
-        if not expanded_text.strip():
-            expanded_text = "[Empty Note]"
-            
-        collapsed_text = self.note if self.note else (f'"{self.quote}"' if self.quote else "[Empty Note]")
+        # 🔥 FIX 6: Leave the string genuinely empty if there is no text
+        collapsed_text = self.note if self.note else (f'"{self.quote}"' if self.quote else "")
             
         if self.is_hovered:
             needed_width = max(self.base_width, 320) 
@@ -383,12 +398,10 @@ class Node(QGraphicsRectItem):
             self.text_item.setDefaultTextColor(text_color)
             self.text_item.setPlainText(fitted_text)
             
-        # Ensure the resize handle is ALWAYS visible, pegged diagonally outside the bottom right edge
         self.resize_handle.show()
         self.resize_handle.setPos(self.rect().width(), self.rect().height())
         self.resize_handle.setZValue(10)
         
-        # FIX: Since node size actively changes here when hovered/unhovered, force edges to reposition
         for edge in self.edges:
             edge.update_position()
 
@@ -426,23 +439,32 @@ class Node(QGraphicsRectItem):
         self._load_tag_colors()
         self.update()
 
+    # gui/components/workspace_items.py -> Node class
     def _get_tag_dot_regions(self):
         if not self._tag_colors_loaded:
             self._load_tag_colors()
 
         max_dots = 5
-        dot_d = 7
-        spacing = 3
+        spacing = 4
         shown = self.tag_badges[:max_dots]
-        total_w = len(shown) * dot_d + max(0, len(shown) - 1) * spacing
+        
+        # Calculate text widths to ensure hitboxes perfectly match the new pills
+        from PyQt6.QtGui import QFontMetrics, QFont
+        fm = QFontMetrics(QFont("Arial", 8, QFont.Weight.Bold))
+        pill_widths = [fm.horizontalAdvance(b.get("name", "")) + 12 for b in shown]
+        total_w = sum(pill_widths) + max(0, len(shown) - 1) * spacing
+        
         x = self.rect().right() - 6 - total_w
         y = self.rect().top() + 6
+        pill_h = 16
 
         regions = []
-        for badge in shown:
-            regions.append((QRectF(x, y, dot_d, dot_d), badge.get("name") or ""))
-            x += dot_d + spacing
+        for badge, p_width in zip(shown, pill_widths):
+            regions.append((QRectF(x, y, p_width, pill_h), badge.get("name") or ""))
+            x += p_width + spacing
         return regions
+
+   
 
     def _tag_name_at_pos(self, pos):
         for rect, tag_name in self._get_tag_dot_regions():
@@ -491,28 +513,56 @@ class Node(QGraphicsRectItem):
     def paint(self, painter, option, widget=None):
         super().paint(painter, option, widget)
 
+        # 🔥 FIX 6: Draw ghost placeholder text directly on the canvas if empty
+        if not self.quote and not self.note and not self.text_item.hasFocus():
+            painter.save()
+            painter.setPen(QPen(QColor(150, 150, 150, 150)))
+            font = QFont("Arial", 12, QFont.Weight.Bold)
+            font.setItalic(True)
+            painter.setFont(font)
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "[Empty Note]")
+            painter.restore()
+
         if not self._tag_colors_loaded:
             self._load_tag_colors()
 
-        if not self.tag_colors:
+        if not self.tag_badges:
             return
 
+        # 🔥 FIX 8: Render full pills with dynamic text contrast
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
         max_dots = 5
-        dot_d = 7
-        spacing = 3
-        shown = self.tag_colors[:max_dots]
-        total_w = len(shown) * dot_d + max(0, len(shown) - 1) * spacing
+        spacing = 4
+        shown = self.tag_badges[:max_dots]
+        
+        font = QFont("Arial", 8, QFont.Weight.Bold)
+        painter.setFont(font)
+        fm = painter.fontMetrics()
+        
+        pill_widths = [fm.horizontalAdvance(b.get("name", "")) + 12 for b in shown]
+        total_w = sum(pill_widths) + max(0, len(shown) - 1) * spacing
+        
         x = self.rect().right() - 6 - total_w
         y = self.rect().top() + 6
+        pill_h = 16
 
-        for color_hex in shown:
-            painter.setBrush(QBrush(QColor(color_hex)))
+        for badge, p_width in zip(shown, pill_widths):
+            color_hex = badge.get("color") or "#808080"
+            bg_color = QColor(color_hex)
+            # Reusing your existing luminance formula for the tag text!
+            text_color = QColor(get_text_color_for_bg(color_hex)) 
+            
+            painter.setBrush(QBrush(bg_color))
             painter.setPen(QPen(QColor("#ffffff"), 1))
-            painter.drawEllipse(QPointF(x + dot_d / 2.0, y + dot_d / 2.0), dot_d / 2.0, dot_d / 2.0)
-            x += dot_d + spacing
+            pill_rect = QRectF(x, y, p_width, pill_h)
+            painter.drawRoundedRect(pill_rect, pill_h/2, pill_h/2)
+            
+            painter.setPen(QPen(text_color))
+            painter.drawText(pill_rect, Qt.AlignmentFlag.AlignCenter, badge.get("name", ""))
+            
+            x += p_width + spacing
 
         painter.restore()
 
@@ -557,11 +607,26 @@ class Node(QGraphicsRectItem):
             self.refresh_layout() 
             
             if self.scene() and hasattr(self.scene(), 'view'):
-                self.scene().view.main_window.tabs["Notes"].save_workspace_state()
-            
-            if not self.is_custom and self.pdf_path is not None:
-                notes_tab = self.scene().view.main_window.tabs["Notes"]
-                notes_tab._modify_note(self.pdf_path, self.page_num, self.highlight_id or self.node_id, action="edit_content", content=self.note, refresh=False)
+                view = self.scene().view
+                main_window = view.main_window
+                
+                # 1. Save workspace state directly via the view
+                if hasattr(view, 'save_workspace_state'):
+                    view.save_workspace_state()
+                
+                # 2. Broadcast the content edit to all active Notes docks
+                if not getattr(self, 'is_custom', False) and getattr(self, 'pdf_path', None) is not None:
+                    annot_id = getattr(self, 'highlight_id', None) or getattr(self, 'node_id', None)
+                    if hasattr(main_window, 'notes_docks'):
+                        for notes_dock in main_window.notes_docks:
+                            notes_dock._modify_note(
+                                self.pdf_path, 
+                                self.page_num, 
+                                annot_id, 
+                                action="edit_content", 
+                                content=getattr(self, 'note', ''), 
+                                refresh=False
+                            )
                 
             if self.scene() and hasattr(self.scene(), 'view'):
                 self.scene().view.main_window.project_manager.mark_dirty("workspace")

@@ -3,8 +3,8 @@ import re
 from PyQt6.QtCore import QThread, pyqtSignal
 
 class AIFillGraphWorker(QThread):
-    finished = pyqtSignal(list, str) # Emits (evidence_items, error_msg)
-    progress = pyqtSignal(str) # Emits UI status updates
+    finished = pyqtSignal(list, str) 
+    progress = pyqtSignal(str) 
 
     def __init__(self, llm_manager, model, nodes_data, edges_data, allowed_docs, parent=None):
         super().__init__(parent)
@@ -22,9 +22,6 @@ class AIFillGraphWorker(QThread):
         try:
             self.progress.emit("✨ AI is analyzing your argument structure...")
             
-            # =================================================================
-            # PHASE 1: Logical Analysis & Claim Extraction (Multi-Query)
-            # =================================================================
             agent1_system = self.llm_manager.get_system_prompt(
                 "AI Fill Graph Worker - Claim Finder",
                 (
@@ -32,7 +29,8 @@ class AIFillGraphWorker(QThread):
                     "Identify which user-created nodes represent 'claims' or 'reasons' that could use concrete textual evidence from the documents to support them. "
                     "For each such claim, generate 2 to 3 highly specific search queries (3-8 words each, keywords only) to capture different ways the text might discuss this topic. "
                     "Return ONLY a valid JSON array of objects. "
-                    "Format: [{\"node_id\": \"id1\", \"claim\": \"The user's claim\", \"search_queries\": [\"keyword phrase one\", \"keyword phrase two\"]}]"
+                    # 🔥 ESCAPED JSON BRACES HERE
+                    "Format: [{{\"node_id\": \"id1\", \"claim\": \"The user's claim\", \"search_queries\": [\"keyword phrase one\", \"keyword phrase two\"]}}]"
                 ),
             )
             
@@ -57,13 +55,17 @@ class AIFillGraphWorker(QThread):
                 custom_system_prompt=agent1_system
             )
 
-            # Error Check
             if "[Generation Error" in structure_result or "[System Error" in structure_result:
                 self.finished.emit([], f"AI Analysis Failed:\n{structure_result.strip()}")
                 return
 
-            # Extract JSON Array robustly
             cleaned_result = structure_result.strip()
+            
+            if "```json" in cleaned_result.lower():
+                cleaned_result = cleaned_result.split("```json", 1)[-1].split("```")[0].strip()
+            elif "```" in cleaned_result:
+                cleaned_result = cleaned_result.split("```", 1)[-1].split("```")[0].strip()
+
             match = re.search(r'\[\s*\{.*?\}\s*\]', cleaned_result, re.DOTALL)
             if match:
                 cleaned_result = match.group(0)
@@ -78,9 +80,6 @@ class AIFillGraphWorker(QThread):
                 self.finished.emit([], "AI could not identify any claims needing support in the selected nodes.")
                 return
 
-            # =================================================================
-            # PHASE 2: Evidence Mining (Deep Manual RAG Pipeline)
-            # =================================================================
             if not self.llm_manager.collection or self.llm_manager.collection.count() == 0:
                 self.finished.emit([], "Please build the search index first in the LLM Chat tab.")
                 return
@@ -91,19 +90,16 @@ class AIFillGraphWorker(QThread):
                 node_id = claim_item.get("node_id")
                 claim_text = claim_item.get("claim")
                 
-                # Support both the old and new JSON schema gracefully
                 search_queries = claim_item.get("search_queries", [])
                 if not search_queries and claim_item.get("search_query"):
                     search_queries = [claim_item.get("search_query")]
                 
                 if not node_id or not search_queries: continue
                 
-                # Shorten for UI display
                 display_claim = claim_text[:35] + "..." if len(claim_text) > 35 else claim_text
                 self.progress.emit(f"🔍 Searching documents for evidence ({i+1}/{len(claims_to_support)}):\n'{display_claim}'")
                 
                 try:
-                    # 1. PURE SEMANTIC VECTOR SEARCH ACROSS MULTIPLE QUERIES
                     aggregated_docs = {}
                     docs_to_search = self.allowed_docs if self.allowed_docs else [None]
                     
@@ -114,7 +110,7 @@ class AIFillGraphWorker(QThread):
                             doc_where = {"doc_name": doc} if doc else None
                             results = self.llm_manager.collection.query(
                                 query_embeddings=[sq_emb],
-                                n_results=5, # Pull top 5 highly relevant chunks per document PER query
+                                n_results=5, 
                                 where=doc_where
                             )
                             if results.get('documents') and results['documents'][0]:
@@ -129,13 +125,12 @@ class AIFillGraphWorker(QThread):
                                         }
                     
                     if not aggregated_docs:
-                        continue # No context found in DB, skip to next claim
+                        continue 
                         
                     sorted_docs = sorted(aggregated_docs.values(), key=lambda x: (x['doc_name'], x['page']))
                     context_pieces = [f"--- DOCUMENT: {d['doc_name']} | PAGE {d['page'] + 1} ---\n{d['text']}" for d in sorted_docs]
                     context_str = "\n\n".join(context_pieces)
                     
-                    # 2. STRICT QUOTE EXTRACTION (Expanded bounds & multi-document emphasis)
                     system_prompt = self.llm_manager.get_system_prompt(
                         "AI Fill Graph Worker - Evidence Extractor",
                         (
@@ -157,13 +152,12 @@ class AIFillGraphWorker(QThread):
                         nonlocal rag_result
                         rag_result += chunk
                         
-                    # Execute the query using the deep context we just built
                     self.llm_manager.query(
                         prompt,
                         self.model,
                         allowed_docs=[],
                         callback=handle_chunk2,
-                        rag_enabled=False, # Disabled because we manually retrieved the context above!
+                        rag_enabled=False, 
                         use_agents=False,
                         custom_system_prompt=system_prompt
                     )
@@ -171,7 +165,6 @@ class AIFillGraphWorker(QThread):
                     if "[Generation Error" in rag_result or "[System Error" in rag_result:
                         continue
                     
-                    # Parse results robustly
                     for line in rag_result.split('\n'):
                         line = line.strip()
                         if '%%QUOTE' in line.upper():

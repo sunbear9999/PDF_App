@@ -830,7 +830,7 @@ class ProjectManager:
     def _sync_doc_tags_for_llm(self, doc_id):
         """Best-effort sync of document tags into Chroma metadata for tag filtering."""
         try:
-            llm_manager = self.main_window.tabs["LLM Chat"].llm_manager
+            llm_manager = self.main_window.shared_llm_manager
             llm_manager.sync_doc_tags(doc_id, self.get_tags_for_doc(doc_id))
         except Exception:
             # Keep SQLite tag updates resilient even if the UI/LLM layer is unavailable.

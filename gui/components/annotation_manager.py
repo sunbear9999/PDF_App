@@ -2,8 +2,10 @@
 import fitz
 import uuid
 from PyQt6.QtWidgets import QGraphicsRectItem, QInputDialog, QWidget, QMenu, QDialog, QVBoxLayout, QTextEdit, QPushButton
-from PyQt6.QtGui import QColor, QBrush, QPen, QAction, QTextCursor
-from PyQt6.QtCore import Qt, QRectF, QObject, pyqtSignal, QThread
+from PyQt6.QtGui import QColor, QBrush, QPen, QAction, QTextCursor, QDesktopServices
+from PyQt6.QtCore import Qt, QRectF, QObject, pyqtSignal, QThread, QUrl
+import re 
+
 
 class AnnotationManager(QObject):
     note_added = pyqtSignal()
@@ -149,12 +151,16 @@ class AnnotationManager(QObject):
                 lo, hi = sorted([self.start_word_idx, end_word_idx])
                 self.selected_words = self.page_words[lo:hi+1]
 
+   # gui/components/annotation_manager.py -> AnnotationManager class
     def show_context_menu(self, global_pos):
         menu = QMenu(self.viewer)
         menu.setStyleSheet("""
             QMenu { background-color: #2b2b2b; color: white; border: 1px solid #444; font-weight: bold; } 
             QMenu::item:selected { background-color: #0078D7; }
         """)
+        
+        # We need the extracted text right away so we can scan it for URLs
+        extracted_text = " ".join(w[4] for w in self.selected_words) if self.selected_words else ""
         
         colors = [
             ("Yellow", (1.0, 0.9, 0.0)),
@@ -169,6 +175,20 @@ class AnnotationManager(QObject):
             action = QAction(f"{name}", self.viewer)
             action.triggered.connect(lambda checked, c=rgb: self.apply_highlight(c))
             hl_menu.addAction(action)
+            
+        # 🔥 PHASE 2: Regex URL Extractor
+        if extracted_text:
+            urls = re.findall(r'(https?://[^\s]+)', extracted_text)
+            if urls:
+                menu.addSeparator()
+                for url in urls:
+                    # Strip trailing punctuation that might get caught in the regex block
+                    clean_url = url.rstrip('.,;:"\'()')
+                    # Shorten visually so it doesn't stretch the menu across the screen
+                    display_url = clean_url[:40] + "..." if len(clean_url) > 40 else clean_url
+                    url_action = menu.addAction(f"🌐 Open: {display_url}")
+                    # Use a default argument in the lambda (u=clean_url) to bind the loop variable safely
+                    url_action.triggered.connect(lambda checked, u=clean_url: QDesktopServices.openUrl(QUrl(u)))
             
         menu.addSeparator()
         
@@ -224,12 +244,16 @@ class AnnotationManager(QObject):
         extracted_text = " ".join(w[4] for w in self.selected_words)
         
         main_window = self.viewer.window()
-        main_window.tool_buttons["LLM Chat"].setChecked(True)
-        main_window.toggle_tool_panel("LLM Chat")
         
-        llm_tab = main_window.tabs["LLM Chat"]
-        llm_tab.chat_input.setText(f"Explain this text: \"{extracted_text}\"")
-        llm_tab.chat_input.setFocus()
+        # 1. Force the AI Chat dock to spawn or revive (since it's a strict singleton)
+        if hasattr(main_window, 'spawn_chat_dock'):
+            main_window.spawn_chat_dock()
+        
+        # 2. Push the extracted text into the input field
+        if hasattr(main_window, 'chat_docks') and main_window.chat_docks:
+            llm_tab = main_window.chat_docks[0]
+            llm_tab.chat_input.setText(f"Explain this text: \"{extracted_text}\"")
+            llm_tab.chat_input.setFocus()
         
         self.clear_selection()
 

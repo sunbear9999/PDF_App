@@ -11,6 +11,7 @@ from PyQt6.QtGui import QColor, QShortcut, QKeySequence
 from PyQt6.QtCore import Qt, QSettings, QTimer, QThread, QEvent
 
 from core.project_manager import ProjectManager
+from gui.components.dialogs.extract_pages_dialog import ExtractPagesDialog
 from gui.components.pdf_viewer import PDFViewer
 from gui.tabs.ocr_tab import OCRTab
 from gui.tabs.tts_tab import TTSTab
@@ -81,9 +82,12 @@ class MainWindow(QMainWindow):
         )
         self.setDockNestingEnabled(True)
         dummy_central = QWidget()
-        dummy_central.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        dummy_central.setFixedSize(0, 0)
+        dummy_central.hide() 
         self.setCentralWidget(dummy_central)
-
+        
+        # 4. Strict safety net to prevent the XFCE 0x0 crush bug
+        self.setMinimumSize(800, 600)
         # Track active tool instances
         self.workspace_docks = []
         self.notes_docks = []
@@ -212,7 +216,7 @@ class MainWindow(QMainWindow):
             if not hasattr(self, 'shared_llm_manager') or not self.shared_llm_manager.ai_enabled: 
                 return
             
-            default_model = self.chat_docks[0].model_combo.currentText() if self.chat_docks else "llama3"
+            default_model = self.chat_docks[0].model_combo.currentText() if self.chat_docks else "gemma4:e2b"
             self.preload_worker = PreloadWorker(self.shared_llm_manager, default_model, parent=self)
             self.preload_worker.start()
         except Exception as e:
@@ -294,7 +298,7 @@ class MainWindow(QMainWindow):
         self.theme_selector.setCurrentText(self.theme_manager.current_theme_name)
         self.theme_selector.currentTextChanged.connect(self._on_theme_changed)
         menu_layout.addWidget(self.theme_selector)
-        menu_layout.addSpacing(8)
+        menu_layout.addSpacing(10)
         self.btn_layouts = QPushButton()
         self._configure_hover_expand_button(self.btn_layouts, "🗔", "Window Layouts", expanded_width=140)
         
@@ -350,6 +354,13 @@ class MainWindow(QMainWindow):
         self.btn_spawn_scratch = QPushButton("➕ Scratchpad")
         self.btn_spawn_scratch.clicked.connect(self.spawn_scratchpad_dock)
         menu_layout.addWidget(self.btn_spawn_scratch)
+        self.btn_spawn_ocr = QPushButton("➕ OCR Scanner")
+        self.btn_spawn_ocr.clicked.connect(self.spawn_ocr_dock)
+        menu_layout.addWidget(self.btn_spawn_ocr)
+
+        self.btn_spawn_audio = QPushButton("➕ Audio (TTS)")
+        self.btn_spawn_audio.clicked.connect(self.spawn_audio_dock)
+        menu_layout.addWidget(self.btn_spawn_audio)
 
         self.top_menu_scroll.setWidget(self.top_menu)
         self.setMenuWidget(self.top_menu_scroll)
@@ -524,7 +535,7 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         rename_action = menu.addAction("✏️ Rename PDF")
         remove_action = menu.addAction("🗑️ Remove PDF from Project")
-        
+        extract_action = menu.addAction("✂️ Extract Pages to New PDF")
         chosen = menu.exec(self.doc_list.viewport().mapToGlobal(pos))
         if chosen == manage_tags_action:
             from gui.components.dialogs.tag_manager_dialog import TagAssignmentDialog
@@ -535,6 +546,11 @@ class MainWindow(QMainWindow):
             self._ui_rename_pdf(doc_path, row)
         elif chosen == remove_action:
             self._ui_remove_pdf(doc_path, row)
+        elif chosen == extract_action:
+            dialog = ExtractPagesDialog(doc_path, self.project_manager, self)
+            if dialog.exec():
+                # Refresh your document list UI if the user successfully extracted a PDF
+                self.refresh_doc_list()
     def _ui_rename_pdf(self, old_path, row):
         # 1. CRITICAL: Force save all current highlights/nodes to disk and DB BEFORE renaming
         # This guarantees physical highlights are baked into the PDF before the OS touches it.
@@ -564,21 +580,25 @@ class MainWindow(QMainWindow):
             item.setText(new_name)
             item.setData(Qt.ItemDataRole.UserRole, new_path)
             
-            # 4. Update the LLM Tab list & ChromaDB
-            if "LLM Chat" in self.tabs:
-                self.tabs["LLM Chat"].refresh_project_ui()
-                try:
-                    self.tabs["LLM Chat"].llm_manager.rename_document_in_index(old_path, new_path)
-                except Exception as e:
-                    print(f"Failed to tell ChromaDB about rename: {e}")
+            # 4. Update the LLM Chat Docks & ChromaDB
+            for c_dock in getattr(self, 'chat_docks', []):
+                c_dock.refresh_project_ui()
                 
-            # 5. Live-update nodes in the workspace so the "Filter by PDF" doesn't break
-            if "Notes" in self.tabs:
-                ws_view = self.tabs["Notes"].workspace_view
+            try:
+                if hasattr(self, 'shared_llm_manager'):
+                    self.shared_llm_manager.rename_document_in_index(old_path, new_path)
+            except Exception as e:
+                print(f"Failed to tell ChromaDB about rename: {e}")
+                
+            # 5. Live-update nodes in the workspaces so the "Filter by PDF" doesn't break
+            for ws_view in getattr(self, 'workspace_docks', []):
                 for node in ws_view.nodes.values():
-                    if node.pdf_path == old_path:
+                    if getattr(node, 'pdf_path', None) == old_path:
                         node.pdf_path = new_path
-                ws_view._refresh_pdf_list() # Re-populate the filter dropdown with the new name
+                
+                # Re-populate the filter dropdown with the new name
+                if hasattr(ws_view, '_refresh_pdf_list'):
+                    ws_view._refresh_pdf_list()
             
             # 6. Re-load the PDF in the viewer if it was the active one
             if self.current_file_path == old_path or self.current_file_path == new_path:
@@ -599,22 +619,24 @@ class MainWindow(QMainWindow):
             # 2. Update the Document Explorer Dock
             self.doc_list.takeItem(row)
             
-            # 3. Update LLM Tab & ChromaDB
-            if "LLM Chat" in self.tabs:
-                self.tabs["LLM Chat"].refresh_project_ui()
-                try:
-                    self.tabs["LLM Chat"].llm_manager.remove_document_from_index(doc_path)
-                except Exception as e:
-                    print(f"Failed to tell ChromaDB about removal: {e}")
+            # 3. Update LLM Chat & ChromaDB
+            for c_dock in getattr(self, 'chat_docks', []):
+                c_dock.refresh_project_ui()
+                
+            try:
+                if hasattr(self, 'shared_llm_manager'):
+                    self.shared_llm_manager.remove_document_from_index(doc_path)
+            except Exception as e:
+                print(f"Failed to tell ChromaDB about removal: {e}")
                     
             # 4. Clean up workspace nodes visually
-            if "Notes" in self.tabs:
-                ws_view = self.tabs["Notes"].workspace_view
-                nodes_to_delete = [n for n in ws_view.nodes.values() if n.pdf_path == doc_path]
+            for ws_view in getattr(self, 'workspace_docks', []):
+                nodes_to_delete = [n for n in ws_view.nodes.values() if getattr(n, 'pdf_path', None) == doc_path]
                 for node in nodes_to_delete:
                     ws_view.delete_node(node)
-                ws_view._refresh_pdf_list()
-                
+                if hasattr(ws_view, '_refresh_pdf_list'):
+                    ws_view._refresh_pdf_list()
+                    s
             # 5. Handle viewer state
             if self.current_file_path == doc_path:
                 self.current_file_path = None
@@ -736,7 +758,16 @@ class MainWindow(QMainWindow):
                 self.spawn_workspace_dock()
                 self.spawn_notes_dock()
                 self._reset_default_layout() # <-- ADD THIS LINE
-
+            text_data = self.project_manager.get_metadata("scratchpad_texts")
+            if text_data:
+                    try:
+                        saved_texts = json.loads(text_data)
+                        # Pair each saved text with its corresponding scratchpad dock
+                        for i, editor in enumerate(self.scratchpad_docks):
+                            if i < len(saved_texts):
+                                editor.setPlainText(saved_texts[i])
+                    except Exception as e:
+                        print(f"Error loading scratchpad text: {e}")
             state_str = self.project_manager.get_metadata("window_layout_state")
             if state_str:
                 from PyQt6.QtCore import QByteArray
@@ -955,6 +986,8 @@ class MainWindow(QMainWindow):
             }
             import json
             self.project_manager.set_metadata("open_docks_count", json.dumps(active_docks))
+            scratch_texts = [editor.toPlainText() for editor in self.scratchpad_docks]
+            self.project_manager.set_metadata("scratchpad_texts", json.dumps(scratch_texts))
             # -----------------------------------
 
             # Replace the old success/error boxes with these forced-on-top versions:
@@ -1083,20 +1116,11 @@ class MainWindow(QMainWindow):
         self.ocr_banner.hide()
 
     def _build_workspace(self):
-        # 1. Anchor: PDF Viewer Dock (Permanently Locked)
-        self.pdf_dock = QDockWidget("📄 PDF Viewer", self)
-        self.pdf_dock.setObjectName("PDFViewerDock")
-        self.pdf_dock.setWidget(self.viewer)
-        # NoDockWidgetFeatures strips the dragging handles and close buttons
-        self.pdf_dock.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures) 
-        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.pdf_dock)
-
-        # 2. Anchor: Document Explorer Dock (Permanently Locked)
+        # 1. Anchor: Document Explorer Dock (Permanently Locked)
         self.doc_dock = QDockWidget("📁 Document Explorer", self)
         self.doc_dock.setObjectName("DocExplorerDock")
         self.doc_dock.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
         
-        # Create a container widget to hold the list AND the Add button
         from PyQt6.QtWidgets import QWidget, QVBoxLayout, QListWidget
         doc_container = QWidget()
         doc_layout = QVBoxLayout(doc_container)
@@ -1111,16 +1135,32 @@ class MainWindow(QMainWindow):
             self.doc_list.itemClicked.connect(self._on_doc_list_clicked)
         doc_layout.addWidget(self.doc_list)
         
-        # The new inline Add PDF button
         self.btn_add_pdf_dock = QPushButton("➕ Add PDF to Project")
         self.btn_add_pdf_dock.clicked.connect(self._add_pdf)
-        # Give it a bit of padding so it looks like a nice bottom-anchored action
         self.btn_add_pdf_dock.setStyleSheet("padding: 10px; font-weight: bold; border: none; border-top: 1px solid #444;") 
         doc_layout.addWidget(self.btn_add_pdf_dock)
             
         self.doc_dock.setWidget(doc_container)
-        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.doc_dock)
         
+        # --- FIX: OS-AGNOSTIC PLACEMENT ---
+        # We explicitly add the Doc Dock FIRST to anchor the far left edge.
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.doc_dock)
+
+        # 2. Anchor: PDF Viewer Dock (Permanently Locked)
+        self.pdf_dock = QDockWidget("📄 PDF Viewer", self)
+        self.pdf_dock.setObjectName("PDFViewerDock")
+        self.pdf_dock.setWidget(self.viewer)
+        self.pdf_dock.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures) 
+        
+        # We then split the PDF Viewer explicitly to the RIGHT (Horizontal) of the Doc Dock
+        self.splitDockWidget(self.doc_dock, self.pdf_dock, Qt.Orientation.Horizontal)
+        self.resizeDocks([self.doc_dock, self.pdf_dock], [250, 1000], Qt.Orientation.Horizontal)
+        # ----------------------------------
+
+        # 3. Connect Master PDF Signals to broadcast dynamically
+        self.viewer.annot_manager.note_added.connect(self.broadcast_note_added)
+        self.viewer.annot_manager.highlight_created.connect(self.broadcast_highlight_created)
+        self.viewer.annotation_clicked.connect(self.broadcast_annotation_clicked)
     
 
     def broadcast_note_added(self):
@@ -1150,9 +1190,17 @@ class MainWindow(QMainWindow):
             self.notes_docks[0].scroll_to_note(annot_id)
 
     def _on_annotation_clicked(self, annot_id):
-        self.tool_buttons["Notes"].setChecked(True)
-        self.toggle_tool_panel("Notes")
-        self.tabs["Notes"].scroll_to_note(annot_id)
+        # 1. Ensure at least one Notes dock is spawned and visible
+        if not self.notes_docks: 
+            self.spawn_notes_dock()
+            
+        # 2. Scroll the first available Notes dock to the specific note
+        if self.notes_docks:
+            notes_dock = self.notes_docks[0]
+            if notes_dock.parentWidget() and not notes_dock.parentWidget().isVisible():
+                notes_dock.parentWidget().show()
+                notes_dock.parentWidget().raise_()
+            notes_dock.scroll_to_note(annot_id)
 
     def _check_needs_ocr(self):
         self.ocr_banner.hide()
@@ -1166,8 +1214,7 @@ class MainWindow(QMainWindow):
 
     def _trigger_auto_ocr(self):
         self.ocr_banner.hide()
-        self.tool_buttons["OCR"].setChecked(True)
-        self.toggle_tool_panel("OCR")
+        self.spawn_ocr_dock()
 
     def _sync_tools_with_file(self, file_path):
         for n in self.notes_docks: n.refresh_notes()

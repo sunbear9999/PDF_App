@@ -106,7 +106,7 @@ class LocalLLMManager:
         except Exception as e:
             print(f"[System] Warning during model unload: {e}")
 
-    def preload_model(self, model_name="llama3"):
+    def preload_model(self, model_name="gemma4:e2b"):
         if not model_name: return
         try:
             payload = {"model": model_name, "keep_alive": "60m"}
@@ -345,29 +345,24 @@ class LocalLLMManager:
 
             try:
                 search_queries = [question]
-                where_clause = None
-
                 tag_filters = [str(t).strip() for t in (tag_filters or []) if str(t).strip()]
-                tag_where = None
-                if tag_filters:
-                    tag_where = {
-                        "$and": [
-                            {f"tag_{tag_name}": {"$eq": True}}
-                            for tag_name in tag_filters
-                        ]
-                    }
                 
+                # 🔥 FIX: Build the global where_clause safely without empty or single-item $and operators
+                global_conditions = []
                 if allowed_docs:
                     if len(allowed_docs) == 1:
-                        where_clause = {"doc_name": allowed_docs[0]}
+                        global_conditions.append({"doc_name": allowed_docs[0]})
                     else:
-                        where_clause = {"doc_name": {"$in": allowed_docs}}
-
-                if tag_where:
-                    if where_clause:
-                        where_clause = {"$and": [where_clause, tag_where]}
-                    else:
-                        where_clause = tag_where
+                        global_conditions.append({"doc_name": {"$in": allowed_docs}})
+                        
+                for t in tag_filters:
+                    global_conditions.append({f"tag_{t}": True})
+                    
+                where_clause = None
+                if len(global_conditions) == 1:
+                    where_clause = global_conditions[0]
+                elif len(global_conditions) > 1:
+                    where_clause = {"$and": global_conditions}
 
                 if use_agents:
                     if callback: callback("@@AGENT@@🔍 Performing initial scan based on your query...")
@@ -428,16 +423,24 @@ class LocalLLMManager:
                     try:
                         sq_emb = self.get_embedding(sq)
                         for doc in docs_to_search:
-                            doc_where = {"doc_name": doc} if doc else None
-                            if tag_where:
-                                if doc_where:
-                                    doc_where = {"$and": [doc_where, tag_where]}
-                                else:
-                                    doc_where = tag_where
+                            
+                            # 🔥 FIX: Build the specific where clause for this exact document iteration safely
+                            local_conditions = []
+                            if doc:
+                                local_conditions.append({"doc_name": doc})
+                            for t in tag_filters:
+                                local_conditions.append({f"tag_{t}": True})
+                                
+                            final_doc_where = None
+                            if len(local_conditions) == 1:
+                                final_doc_where = local_conditions[0]
+                            elif len(local_conditions) > 1:
+                                final_doc_where = {"$and": local_conditions}
+
                             results = self.collection.query(
                                 query_embeddings=[sq_emb],
-                                n_results=3 if use_agents else 6, # Fetch equal chunks per document (reduced slightly to save context window)
-                                where=doc_where
+                                n_results=3 if use_agents else 6,
+                                where=final_doc_where
                             )
                             if results.get('documents') and results['documents'][0]:
                                 for idx, doc_text in enumerate(results['documents'][0]):
@@ -449,7 +452,8 @@ class LocalLLMManager:
                                             "doc_name": meta['doc_name'],
                                             "page": meta['page']
                                         }
-                    except Exception:
+                    except Exception as e:
+                        print(f"[System] Search error for query '{sq}': {e}") # Prints to console so it no longer fails silently!
                         continue
 
                 if not aggregated_docs:

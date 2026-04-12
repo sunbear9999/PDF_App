@@ -28,7 +28,8 @@ class AIOrganizeWorker(QThread):
                     "You are an expert AI assistant that organizes notes. "
                     "Group the provided nodes into logical clusters. "
                     "Return ONLY a valid JSON array of objects. "
-                    "Format: [{\"cluster_name\": \"Name\", \"node_ids\": [\"id1\", \"id2\"]}]"
+                    # 🔥 ESCAPED JSON BRACES HERE
+                    "Format: [{{\"cluster_name\": \"Name\", \"node_ids\": [\"id1\", \"id2\"]}}]"
                     "{custom_instructions_block}"
                 ),
                 custom_instructions_block=custom_instructions_block,
@@ -51,12 +52,17 @@ class AIOrganizeWorker(QThread):
                 custom_system_prompt=system_prompt
             )
 
-            # 🚨 ERROR CHECK
             if "[Generation Error" in response or "[System Error" in response:
                 self.finished.emit([], f"AI Organization Failed:\n{response.strip()}")
                 return
 
             cleaned_response = response.strip()
+            
+            if "```json" in cleaned_response.lower():
+                cleaned_response = cleaned_response.split("```json", 1)[-1].split("```")[0].strip()
+            elif "```" in cleaned_response:
+                cleaned_response = cleaned_response.split("```", 1)[-1].split("```")[0].strip()
+
             match = re.search(r'\[\s*\{.*?\}\s*\]', cleaned_response, re.DOTALL)
             if match:
                 cleaned_response = match.group(0)

@@ -361,7 +361,8 @@ class WorkspaceView(QGraphicsView):
         self._updating_ghost_links = False
         self.connecting_node = None
         self.worker = None
-
+        self.is_llm_busy = False
+        self.is_dialog_open = False
         self.undo_stack = []
         self.redo_stack = []
         self.is_restoring = False
@@ -384,7 +385,20 @@ class WorkspaceView(QGraphicsView):
         self._paste_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self._paste_sc.activated.connect(self.paste_selection)
         self._paste_sc.activatedAmbiguously.connect(self.paste_selection)
+        self._refresh_sc = QShortcut(QKeySequence("Ctrl+R"), self)
+        self._refresh_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._refresh_sc.activated.connect(self._sync_workspace)
+        self._refresh_sc.activatedAmbiguously.connect(self._sync_workspace)
 
+        self._new_node_sc = QShortcut(QKeySequence("Ctrl+N"), self)
+        self._new_node_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._new_node_sc.activated.connect(self.add_custom_bubble)
+        self._new_node_sc.activatedAmbiguously.connect(self.add_custom_bubble)
+
+        self._declutter_sc = QShortcut(QKeySequence("Ctrl+D"), self)
+        self._declutter_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._declutter_sc.activated.connect(self.trigger_declutter)
+        self._declutter_sc.activatedAmbiguously.connect(self.trigger_declutter)
         self.loading_overlay = QFrame(self)
         self.loading_overlay.hide()
         
@@ -398,7 +412,9 @@ class WorkspaceView(QGraphicsView):
         tb_layout = QHBoxLayout(self.toolbar_frame)
         tb_layout.setContentsMargins(10, 6, 10, 6)
         tb_layout.setSpacing(4)
+        
 
+    
         # Filter section — collapses to 🔽, expands to show label + combo on hover
         filter_content = QWidget()
         filter_content.setStyleSheet("background: transparent;")
@@ -414,7 +430,9 @@ class WorkspaceView(QGraphicsView):
         self.tag_filter_combo = CheckableComboBox()
         self.tag_filter_combo.model().dataChanged.connect(self._apply_filter)
         filter_inner.addWidget(self.tag_filter_combo)
-
+        self.btn_add_main_idea = CollapsingButton("💡", "💡 New Main Idea")
+        self.btn_add_main_idea.clicked.connect(self.add_custom_bubble)
+        tb_layout.addWidget(self.btn_add_main_idea)
         # Standalone action buttons (icon-only, expand text on hover)
         self.btn_color_pdf = CollapsingButton("🎨", "🎨 Color by PDF")
         self.btn_color_pdf.clicked.connect(self._open_color_by_pdf_dialog)
@@ -487,6 +505,22 @@ class WorkspaceView(QGraphicsView):
         tb_layout.addWidget(self.btn_add_workspace)
 
         self.update_scene_bounds()
+    def get_active_ai_model(self):
+        """Safely fetches the selected model from the LLM Chat dock, with 'gemma' as the fallback."""
+        if hasattr(self.main_window, 'chat_docks') and self.main_window.chat_docks:
+            try:
+                # Attempt to read the model combo box in the first LLM dock
+                combo = self.main_window.chat_docks[0].model_combo
+                selected = combo.currentText().strip()
+                
+                # Make sure it's a real model name and not a UI placeholder
+                if selected and "Error" not in selected and "Select" not in selected and "running" not in selected:
+                    return selected
+            except AttributeError:
+                pass # Dock might be initializing or missing the combo attribute
+                
+        # 🔥 The new global default fallback!
+        return "gemma4:e2b"
     def _queue_background_embedding(self, node):
         """Dispatches node text to the global thread pool for embedding."""
         try:
@@ -1326,7 +1360,13 @@ class WorkspaceView(QGraphicsView):
         self.update_ghost_connections()
         self.update_scene_bounds()
 
+   # gui/components/workspace_view.py -> WorkspaceView class
     def keyPressEvent(self, event):
+        # 🔥 FIX 5: If the text editor has focus, let the editor handle Backspace/Delete!
+        if self.scene_obj.focusItem() is not None:
+            super().keyPressEvent(event)
+            return
+
         if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
             if event.key() == Qt.Key.Key_Z:
                 self.undo()
@@ -1334,22 +1374,13 @@ class WorkspaceView(QGraphicsView):
             elif event.key() == Qt.Key.Key_Y:
                 self.redo()
                 return
-            elif event.key() == Qt.Key.Key_C:
-                self.copy_selection()
-                event.accept()
-                return
-            elif event.key() == Qt.Key.Key_X:
-                self.cut_selection()
-                event.accept()
-                return
-            elif event.key() == Qt.Key.Key_V:
-                self.paste_selection()
-                event.accept()
-                return
+            # Cut/Copy/Paste logic removed from here—your QShortcuts handle this natively now!
+
         if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             self.delete_selected_nodes()
             event.accept()
             return
+            
         super().keyPressEvent(event)
 
     def wheelEvent(self, event):
@@ -1677,9 +1708,12 @@ class WorkspaceView(QGraphicsView):
         super().contextMenuEvent(event)
 
     def trigger_ai_organize(self, selected_nodes):
+        if self.is_llm_busy:
+            QMessageBox.warning(self, "AI Busy", "The AI is currently processing another request.")
+            return
         if not self.loading_overlay.isHidden(): return
 
-        model = (self.main_window.chat_docks[0].model_combo.currentText().strip() if hasattr(self.main_window, 'chat_docks') and self.main_window.chat_docks else "llama3")
+        model = self.get_active_ai_model()
         if not model or "Error" in model or "running" in model:
             QMessageBox.warning(self, "No Model Selected", "Please select a valid AI model in the LLM Chat tab first.")
             return
@@ -1784,9 +1818,12 @@ class WorkspaceView(QGraphicsView):
             QMessageBox.warning(self, "Layout Error", str(e))
 
     def trigger_find_connections(self):
+        if self.is_llm_busy:
+            QMessageBox.warning(self, "AI Busy", "The AI is currently processing another request.")
+            return
         if not self.loading_overlay.isHidden(): return
 
-        model = (self.main_window.chat_docks[0].model_combo.currentText().strip() if hasattr(self.main_window, 'chat_docks') and self.main_window.chat_docks else "llama3")
+        model = self.get_active_ai_model()
         if not model or "Error" in model or "running" in model:
             QMessageBox.warning(self, "No Model Selected", "Please select a valid AI model in the LLM Chat tab first.")
             return
@@ -1807,12 +1844,13 @@ class WorkspaceView(QGraphicsView):
         self.loading_label.setText("✨ AI is analyzing relationships and finding new connections...\nThis may take a moment.")
         self.loading_overlay.resize(self.viewport().size())
         self.loading_overlay.show()
-
+        self.is_llm_busy = True
         self.conn_worker = AIFindConnectionsWorker(llm_manager, model, nodes_data, edges_data, parent=self)
         self.conn_worker.finished.connect(self._on_find_connections_finished)
         self.conn_worker.start()
 
     def _on_find_connections_finished(self, new_connections, error_msg):
+        self.is_llm_busy = False
         self.loading_overlay.hide()
         self.loading_label.setText("✨ AI is analyzing and organizing your notes...\nThis may take a moment.")
 
@@ -1857,9 +1895,12 @@ class WorkspaceView(QGraphicsView):
             QMessageBox.information(self, "No Connections Added", "The AI suggested connections that already existed.")
 
     def trigger_generate_outline(self):
+        if self.is_llm_busy:
+            QMessageBox.warning(self, "AI Busy", "The AI is currently processing another request.")
+            return
         if not self.loading_overlay.isHidden(): return
 
-        model = (self.main_window.chat_docks[0].model_combo.currentText().strip() if hasattr(self.main_window, 'chat_docks') and self.main_window.chat_docks else "llama3")
+        model = self.get_active_ai_model()
         if not model or "Error" in model or "running" in model:
             QMessageBox.warning(self, "No Model Selected", "Please select a valid AI model in the LLM Chat tab first.")
             return
@@ -1880,12 +1921,13 @@ class WorkspaceView(QGraphicsView):
         self.loading_label.setText("✨ AI is analyzing argument structure and drafting outline...\nThis may take a moment.")
         self.loading_overlay.resize(self.viewport().size())
         self.loading_overlay.show()
-
+        self.is_llm_busy = True
         self.outline_worker = AIOutlineWorker(llm_manager, model, nodes_data, edges_data, parent=self)
         self.outline_worker.finished.connect(self._on_generate_outline_finished)
         self.outline_worker.start()
 
     def _on_generate_outline_finished(self, outline_text, error_msg):
+        self.is_llm_busy = False
         self.loading_overlay.hide()
         self.loading_label.setText("✨ AI is analyzing and organizing your notes...\nThis may take a moment.")
 
@@ -1907,9 +1949,12 @@ class WorkspaceView(QGraphicsView):
         dialog.exec()
 
     def trigger_identify_weakpoints(self):
+        if self.is_llm_busy:
+            QMessageBox.warning(self, "AI Busy", "The AI is currently processing another request.")
+            return
         if not self.loading_overlay.isHidden(): return
 
-        model = (self.main_window.chat_docks[0].model_combo.currentText().strip() if hasattr(self.main_window, 'chat_docks') and self.main_window.chat_docks else "llama3")
+        model = self.get_active_ai_model()
         if not model or "Error" in model or "running" in model:
             QMessageBox.warning(self, "No Model Selected", "Please select a valid AI model in the LLM Chat tab first.")
             return
@@ -1930,12 +1975,13 @@ class WorkspaceView(QGraphicsView):
         self.loading_label.setText("✨ AI is evaluating argument strength and identifying weak points...\nThis may take a moment.")
         self.loading_overlay.resize(self.viewport().size())
         self.loading_overlay.show()
-
+        self.is_llm_busy = True
         self.weakpoints_worker = AIWeakpointsWorker(llm_manager, model, nodes_data, edges_data, parent=self)
         self.weakpoints_worker.finished.connect(self._on_identify_weakpoints_finished)
         self.weakpoints_worker.start()
 
     def _on_identify_weakpoints_finished(self, analysis_text, error_msg):
+        self.is_llm_busy = False
         self.loading_overlay.hide()
         self.loading_label.setText("✨ AI is analyzing and organizing your notes...\nThis may take a moment.")
 
@@ -1958,9 +2004,12 @@ class WorkspaceView(QGraphicsView):
         dialog.exec()
 
     def trigger_fill_graph(self):
+        if self.is_llm_busy:
+            QMessageBox.warning(self, "AI Busy", "The AI is currently processing another request.")
+            return
         if not self.loading_overlay.isHidden(): return
 
-        model = (self.main_window.chat_docks[0].model_combo.currentText().strip() if hasattr(self.main_window, 'chat_docks') and self.main_window.chat_docks else "llama3")
+        model = self.get_active_ai_model()
         if not model or "Error" in model or "running" in model:
             QMessageBox.warning(self, "No Model Selected", "Please select a valid AI model in the LLM Chat tab first.")
             return
@@ -1983,7 +2032,7 @@ class WorkspaceView(QGraphicsView):
         self.loading_label.setText("✨ AI is analyzing graph to find missing evidence...\nThis may take a moment.")
         self.loading_overlay.resize(self.viewport().size())
         self.loading_overlay.show()
-
+        self.is_llm_busy = True
         self.fill_worker = AIFillGraphWorker(llm_manager, model, nodes_data, edges_data, allowed_docs, parent=self)
         self.fill_worker.progress.connect(self._update_loading_label)
         self.fill_worker.finished.connect(self._on_fill_graph_finished)
@@ -1993,6 +2042,7 @@ class WorkspaceView(QGraphicsView):
         self.loading_label.setText(text + "\nThis may take a moment.")
 
     def _on_fill_graph_finished(self, evidence_items, error_msg):
+        self.is_llm_busy = False
         self.loading_overlay.hide()
         self.loading_label.setText("✨ AI is analyzing and organizing your notes...\nThis may take a moment.")
 
@@ -2049,9 +2099,12 @@ class WorkspaceView(QGraphicsView):
             QMessageBox.information(self, "Graph Filled", "Searched for evidence but could not successfully highlight valid quotes in the documents.")
 
     def trigger_consolidate_notes(self):
+        if self.is_llm_busy:
+            QMessageBox.warning(self, "AI Busy", "The AI is currently processing another request.")
+            return
         if not self.loading_overlay.isHidden(): return
 
-        model = (self.main_window.chat_docks[0].model_combo.currentText().strip() if hasattr(self.main_window, 'chat_docks') and self.main_window.chat_docks else "llama3")
+        model = self.get_active_ai_model()
         if not model or "Error" in model or "running" in model:
             QMessageBox.warning(self, "No Model Selected", "Please select a valid AI model in the LLM Chat tab first.")
             return
@@ -2072,7 +2125,7 @@ class WorkspaceView(QGraphicsView):
         self.loading_label.setText("✨ AI is restructuring and streamlining your argument...\nThis may take a moment.")
         self.loading_overlay.resize(self.viewport().size())
         self.loading_overlay.show()
-
+        self.is_llm_busy = True
         self.consolidate_worker = AIConsolidateWorker(llm_manager, model, nodes_data, edges_data, parent=self)
         self.consolidate_worker.progress.connect(self._update_loading_label)
         self.consolidate_worker.finished.connect(self._on_consolidate_finished)
@@ -2083,12 +2136,35 @@ class WorkspaceView(QGraphicsView):
         self.main_window.project_manager.save_workspace_data(data, self.current_workspace_id)
         self._mark_workspace_dirty(autosave=True)
 
+    # gui/components/workspace_view.py -> WorkspaceView class
     def handle_highlight_created(self, highlight_data):
-        """Auto-spawns a bubble on THIS specific workspace when a highlight is made in the PDF."""
-        if highlight_data.get("id") in self.nodes: return
-        # Force it into the currently active workspace of this dock instance
-        self.add_node_from_annotation(highlight_data, persist=True, target_workspace_id=self.current_workspace_id)
+        """Auto-spawns a bubble STRICTLY on the Main Board (Workspace 1) when a highlight is made in the PDF."""
+        if highlight_data.get("id") in self.nodes and self.current_workspace_id == 1: 
+            return
+            
+        # 🔥 FIX 1: Ensure new notes ALWAYS pop up in the main workspace, never bleeding into others.
+        if self.current_workspace_id == 1:
+            self.add_node_from_annotation(highlight_data, persist=True, target_workspace_id=1)
+        else:
+            # Save silently to Workspace 1's database without rendering it on the current canvas
+            pm = self.main_window.project_manager
+            if pm:
+                quote = highlight_data.get("subject") or highlight_data.get("text_content") or ""
+                note = highlight_data.get("content") or highlight_data.get("note_text") or ""
+                color = highlight_data.get("color") or "#2b2b2b"
+                w = 200 if len(note + quote) < 50 else (250 if len(note + quote) < 150 else 300)
+                h = 70 if len(note + quote) < 50 else (110 if len(note + quote) < 150 else 160)
+                pm.upsert_node_record({
+                    "id": highlight_data["id"], "highlight_id": highlight_data["id"],
+                    "quote": quote, "note": note, "color": color,
+                    "is_custom": False,
+                    "pdf_path": highlight_data.get("pdf_path") or highlight_data.get("doc_id"),
+                    "page_num": highlight_data.get("page_num"),
+                    "manual_font_size": None,
+                    "x": 0.0, "y": 0.0, "width": w, "height": h,
+                }, 1) # <--- Force route to Workspace 1
     def _on_consolidate_finished(self, result_dict, error_msg):
+        self.is_llm_busy = False
         self.loading_overlay.hide()
         self.loading_label.setText("✨ AI is analyzing and organizing your notes...\nThis may take a moment.")
 
