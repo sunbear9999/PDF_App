@@ -92,10 +92,10 @@ class ChatWorker(QThread):
         self.chat_completed.emit(full_response)
 
 class LLMTab(QWidget):
-    def __init__(self, parent=None, main_window=None):
+    def __init__(self, shared_llm_manager, parent=None, main_window=None): # <-- Added parameter
         super().__init__(parent)
         self.main_window = main_window
-        self.llm_manager = LocalLLMManager() 
+        self.llm_manager = shared_llm_manager # <-- Use the shared instance
         self.current_existing_quotes = []
         self.theme = None
         

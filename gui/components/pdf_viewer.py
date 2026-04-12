@@ -398,7 +398,30 @@ class PDFViewer(QGraphicsView):
         self.page_hud.update_hud(1, len(self.doc))
         self.resizeEvent(None)
         return True
-
+    def swap_document_handle(self, new_doc):
+        """Safely updates the document handle and restarts the background thread."""
+        # 1. Stop the active render thread safely
+        if self.worker and self.worker.isRunning():
+            self.worker.stop()
+            self.worker.wait()
+            
+        self.doc = new_doc
+        
+        # 2. Clear out the old render queue to prevent stale requests
+        while not self.render_queue.empty():
+            try:
+                self.render_queue.get_nowait()
+            except:
+                break
+                
+        # 3. Restart the background worker with the fresh document handle
+        self.worker = RenderWorker(self.doc, self.base_zoom, self.render_queue, pixel_ratio=self._get_dpi_scale())
+        self.worker.page_ready.connect(self._on_page_ready)
+        self.worker.start()
+        
+        # 4. Force re-render of currently visible pages (so the deleted highlight disappears)
+        self.rendered_pages.clear() 
+        self._on_scroll()
     def _on_page_ready(self, page_num, qimage):
         print(f"[DEBUG] _on_page_ready called for page {page_num}, image size: {qimage.width()}x{qimage.height()}")
         # Replace placeholder with pixmap item (not as child)

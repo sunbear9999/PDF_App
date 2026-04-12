@@ -125,78 +125,24 @@ class NotesTab(QWidget):
         layout.setContentsMargins(5, 10, 5, 5)
         
         top_layout = QHBoxLayout()
-        self.lbl = QLabel("Notes:")
+        self.lbl = QLabel("Linear Notes List:")
         top_layout.addWidget(self.lbl)
         
         self.scope_combo = QComboBox()
         self.scope_combo.addItems(["Current PDF", "Entire Project"])
         self.scope_combo.currentIndexChanged.connect(self.refresh_notes)
         top_layout.addWidget(self.scope_combo)
-        
         top_layout.addStretch()
-        
-        self.btn_help = QPushButton("❓")
-        self.btn_help.clicked.connect(self.show_workspace_help)
-        self.btn_help.hide()
-        
-        self.btn_undo = QPushButton("↩️ Undo")
-        self.btn_undo.hide()
-        
-        self.btn_redo = QPushButton("↪️ Redo")
-        self.btn_redo.hide()
-
-        self.btn_zoom_out = QPushButton("➖")
-        self.btn_zoom_out.hide()
-        
-        self.btn_zoom_in = QPushButton("➕")
-        self.btn_zoom_in.hide()
-        
-        top_layout.addWidget(self.btn_help)
-        top_layout.addWidget(self.btn_undo)
-        top_layout.addWidget(self.btn_redo)
-        top_layout.addWidget(self.btn_zoom_out)
-        top_layout.addWidget(self.btn_zoom_in)
-        
-        self.btn_add_bubble = QPushButton("+ Main Idea")
-        self.btn_add_bubble.clicked.connect(self.add_bubble)
-        self.btn_add_bubble.hide()
-        top_layout.addWidget(self.btn_add_bubble)
-        
-        self.btn_toggle_view = QPushButton("Switch to Workspace")
-        self.btn_toggle_view.clicked.connect(self.toggle_view)
-        top_layout.addWidget(self.btn_toggle_view)
-        
         layout.addLayout(top_layout)
-        
-        self.stack = QStackedWidget()
-        
-        self.list_view_widget = QWidget()
-        list_layout = QVBoxLayout(self.list_view_widget)
-        list_layout.setContentsMargins(0, 0, 0, 0)
         
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.verticalScrollBar().valueChanged.connect(self.scroll_area.viewport().update)
-        self.scroll_area.horizontalScrollBar().valueChanged.connect(self.scroll_area.viewport().update)
-        
         self.scroll_content = QWidget()
         self.scroll_layout = QVBoxLayout(self.scroll_content)
         self.scroll_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.scroll_layout.setContentsMargins(5, 5, 5, 5)
         self.scroll_area.setWidget(self.scroll_content)
-        list_layout.addWidget(self.scroll_area)
-        
-        self.stack.addWidget(self.list_view_widget)
-        
-        self.workspace_view = WorkspaceView(self.main_window)
-        self.stack.addWidget(self.workspace_view)
-        
-        self.btn_undo.clicked.connect(self.workspace_view.undo)
-        self.btn_redo.clicked.connect(self.workspace_view.redo)
-        self.btn_zoom_out.clicked.connect(lambda: self.workspace_view.zoom_out())
-        self.btn_zoom_in.clicked.connect(lambda: self.workspace_view.zoom_in())
-        
-        layout.addWidget(self.stack)
+        layout.addWidget(self.scroll_area)
 
         self.tab_scroll_area.setWidget(self.content_widget)
         outer_layout.addWidget(self.tab_scroll_area)
@@ -206,146 +152,16 @@ class NotesTab(QWidget):
         self.tab_scroll_area.setStyleSheet("background: transparent; border: none;")
         self.tab_scroll_area.viewport().setStyleSheet(f"background-color: {theme['bg_main']};")
         self.content_widget.setStyleSheet(f"background-color: {theme['bg_main']};")
-        self.list_view_widget.setStyleSheet(f"background-color: {theme['bg_main']};")
         self.scroll_area.setStyleSheet("background: transparent; border: none;")
         self.scroll_area.viewport().setStyleSheet(f"background-color: {theme['bg_main']};")
         self.scroll_content.setStyleSheet(f"background-color: {theme['bg_main']};")
-
         self.lbl.setStyleSheet(f"font-size: 16px; font-weight: bold; padding-left: 5px; color: {theme['text_main']};")
-        self.scope_combo.setStyleSheet(
-            f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']};"
-        )
-        self.btn_toggle_view.setStyleSheet(
-            f"background-color: {theme['bg_panel']}; color: {theme['text_main']}; border: 1px solid {theme['border']};"
-        )
-        self.btn_add_bubble.setStyleSheet(f"background-color: {theme['accent']}; color: #ffffff; font-weight: bold; border: none; padding: 6px 12px; border-radius: 4px;")
+        self.scope_combo.setStyleSheet(f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']};")
         
         for i in range(self.scroll_layout.count()):
             widget = self.scroll_layout.itemAt(i).widget()
             if isinstance(widget, NoteBubble):
                 widget.apply_theme(theme)
-                
-        if hasattr(self, 'workspace_view'):
-            self.workspace_view.update_theme(theme)
-
-    def show_workspace_help(self):
-        self.help_dialog = HelpDialog(self,initial_tab_index=3)
-        self.help_dialog.show()
-
-    def update_undo_redo_buttons(self):
-        if hasattr(self, 'workspace_view'):
-            self.btn_undo.setEnabled(len(self.workspace_view.undo_stack) > 0)
-            self.btn_redo.setEnabled(len(self.workspace_view.redo_stack) > 0)
-
-    def toggle_view(self):
-        try:
-            if self.stack.currentIndex() == 0:
-                self.stack.setCurrentIndex(1)
-                self.btn_toggle_view.setText("Switch to List")
-                self.btn_add_bubble.show()
-                self.btn_undo.show()
-                self.btn_redo.show()
-                self.btn_zoom_in.show()
-                self.btn_zoom_out.show()
-                self.btn_help.show()
-                self.scope_combo.hide()
-                self.update_undo_redo_buttons()
-                self._sync_workspace()
-            else:
-                self.save_workspace_state() 
-                self.stack.setCurrentIndex(0)
-                self.btn_toggle_view.setText("Switch to Workspace")
-                self.btn_add_bubble.hide()
-                self.btn_undo.hide()
-                self.btn_redo.hide()
-                self.btn_zoom_in.hide()
-                self.btn_zoom_out.hide()
-                self.btn_help.hide()
-                self.scope_combo.show()
-                self.refresh_notes()
-        except Exception as e:
-            print(f"Error toggling view: {e}")
-
-    def add_bubble(self):
-        self.workspace_view.add_custom_bubble()
-
-    def save_workspace_state(self):
-        if hasattr(self, 'workspace_view'):
-            data = self.workspace_view.serialize_workspace()
-            ws_id = self.workspace_view.current_workspace_id
-            self.main_window.project_manager.save_workspace_data(data, ws_id)
-            self.main_window.project_manager.mark_dirty("workspace")
-
-    def handle_highlight_created(self, highlight_data):
-        pm = self.main_window.project_manager
-        pm.upsert_highlight({
-            "id": highlight_data.get("id"),
-            "doc_id": highlight_data.get("pdf_path"),
-            "page_num": highlight_data.get("page_num"),
-            "rect_coords": highlight_data.get("rect_coords"),
-            "text_content": highlight_data.get("subject", ""),
-            "color": highlight_data.get("color"),
-        })
-
-        if not hasattr(self, "workspace_view"):
-            return
-
-        if highlight_data.get("id") in self.workspace_view.nodes:
-            return
-
-        self.workspace_view.add_node_from_annotation(highlight_data, persist=True, target_workspace_id=1)
-        pm.set_metadata("workspace_nodes_initialized", "1")
-
-    def _get_all_project_annotations_for_workspace(self):
-        annots = []
-        for path in self.main_window.project_manager.pdfs:
-            try:
-                doc = self.main_window.project_manager.get_doc(path)
-                if not doc: continue
-                for i in range(len(doc)):
-                    page = doc.load_page(i)
-                    for annot in page.annots():
-                        info = annot.info
-                        if info:
-                            title = info.get("title", "")
-                            if title.startswith("UserNote") or title.startswith("AINote"):
-                                stroke = annot.colors.get("stroke")
-                                color_hex = None
-                                if isinstance(stroke, tuple) and len(stroke) >= 3:
-                                    color_hex = QColor(int(stroke[0] * 255), int(stroke[1] * 255), int(stroke[2] * 255)).name()
-                                annot_data = {
-                                    "id": title,
-                                    "subject": info.get("subject", ""),
-                                    "content": info.get("content", ""),
-                                    "pdf_path": path,
-                                    "page_num": i,
-                                    "rect_coords": json.dumps(list(annot.rect)),
-                                    "color": color_hex,
-                                }
-                                self.main_window.project_manager.upsert_highlight({
-                                    "id": annot_data["id"],
-                                    "doc_id": annot_data["pdf_path"],
-                                    "page_num": annot_data["page_num"],
-                                    "rect_coords": annot_data["rect_coords"],
-                                    "text_content": annot_data["subject"],
-                                    "color": annot_data["color"],
-                                })
-                                annots.append(annot_data)
-            except Exception as e: 
-                print(f"Error extracting annotations from {path}: {e}")
-        return annots
-
-    def _sync_workspace(self, force_reload=False):
-        try:
-            if not self.main_window.project_manager.project_filepath: return
-            self._get_all_project_annotations_for_workspace()
-            ws_id = self.workspace_view.current_workspace_id
-            workspace_data = self.main_window.project_manager.get_workspace_data(ws_id)
-            all_annots = self.main_window.project_manager.get_highlights()
-            self.workspace_view._populate_workspace_tabs()
-            self.workspace_view.sync_with_project(workspace_data, all_annots)
-        except Exception as e:
-            print(f"Error syncing workspace: {e}")
 
     def refresh_notes(self):
         try:
@@ -354,23 +170,12 @@ class NotesTab(QWidget):
                 if widget: widget.deleteLater()
 
             scope = self.scope_combo.currentText()
-            paths_to_check = []
-
-            if scope == "Current PDF" and self.main_window.current_file_path:
-                paths_to_check = [self.main_window.current_file_path]
-            elif scope == "Entire Project":
-                paths_to_check = self.main_window.project_manager.pdfs
+            paths_to_check = [self.main_window.current_file_path] if scope == "Current PDF" and self.main_window.current_file_path else self.main_window.project_manager.pdfs
 
             for path in paths_to_check:
                 self._load_notes_from_pdf(path)
-
-
-
-            if self.stack.currentIndex() == 1:
-                self._sync_workspace()
         except Exception as e:
             print(f"Error refreshing notes: {e}")
-
 
     def _load_notes_from_pdf(self, path):
         try:
@@ -379,37 +184,21 @@ class NotesTab(QWidget):
             for i in range(len(doc)):
                 page = doc.load_page(i)
                 for annot in page.annots():
-                    info = annot.info
-                    if info:
-                        title = info.get("title", "")
-                        if title.startswith("UserNote") or title.startswith("AINote"):
-                            is_ai = title.startswith("AINote")
-                            bubble = NoteBubble(self, path, i, title, info.get("subject", ""), info.get("content", ""), annot.colors.get("stroke"), is_ai=is_ai)
-                            self.scroll_layout.addWidget(bubble)
+                    if annot.info and (annot.info.get("title", "").startswith("UserNote") or annot.info.get("title", "").startswith("AINote")):
+                        bubble = NoteBubble(self, path, i, annot.info.get("title"), annot.info.get("subject", ""), annot.info.get("content", ""), annot.colors.get("stroke"), is_ai=annot.info.get("title").startswith("AINote"))
+                        self.scroll_layout.addWidget(bubble)
         except Exception as e:
             print(f"Error loading notes from {path}: {e}")
 
     def scroll_to_note(self, annot_id):
-        if self.stack.currentIndex() == 1:
-            self.toggle_view()
-            
         for i in range(self.scroll_layout.count()):
             widget = self.scroll_layout.itemAt(i).widget()
             if isinstance(widget, NoteBubble) and widget.annot_id == annot_id:
                 self.scroll_area.ensureWidgetVisible(widget)
-                
-                # Dynamic border focus based on theme
                 theme = self.main_window.theme_manager.get_theme()
                 original_style = widget.styleSheet()
                 widget.setStyleSheet(original_style + f"\nNoteBubble {{ border: 2px solid {theme['accent']}; background-color: {theme['bg_input']}; }}")
-                
-                def revert_style(w=widget, s=original_style):
-                    try:
-                        w.setStyleSheet(s)
-                    except RuntimeError:
-                        pass
-                        
-                QTimer.singleShot(1500, revert_style)
+                QTimer.singleShot(1500, lambda w=widget, s=original_style: w.setStyleSheet(s) if hasattr(w, 'setStyleSheet') else None)
                 break
 
     def delete_note(self, pdf_path, page_num, annot_id):
@@ -422,31 +211,19 @@ class NotesTab(QWidget):
         try:
             doc = self.main_window.project_manager.get_doc(pdf_path)
             if not doc: return
-            
-            is_active = (pdf_path == self.main_window.current_file_path)
             page = doc.load_page(page_num)
-            
             for annot in page.annots():
-                info = annot.info
-                if info and info.get("title") == annot_id:
-                    if action == "delete": 
-                        page.delete_annot(annot)
-                    elif action == "color":
-                        annot.set_colors(stroke=color)
-                        annot.update()
+                if annot.info and annot.info.get("title") == annot_id:
+                    if action == "delete": page.delete_annot(annot)
+                    elif action == "color": annot.set_colors(stroke=color); annot.update()
                     elif action == "edit_content":
-                        new_info = dict(info)
+                        new_info = dict(annot.info)
                         new_info["content"] = str(content)
                         annot.set_info(info=new_info)
                         annot.update()
                     break
-                    
-            if is_active and self.viewer:
+            if pdf_path == self.main_window.current_file_path and self.viewer:
                 self.viewer.reload_page(page_num)
-            
             self.main_window.project_manager.mark_dirty(pdf_path)
-            
-            if refresh:
-                self.refresh_notes()
-        except Exception as e:
-            print(f"Error applying annotation modification: {e}")
+            if refresh: self.refresh_notes()
+        except Exception as e: print(f"Error applying annotation modification: {e}")

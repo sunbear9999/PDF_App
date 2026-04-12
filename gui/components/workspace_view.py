@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (QGraphicsView, QGraphicsScene, QMenu, QMessageBox,
                              QColorDialog, QFileDialog, QTextEdit, QCheckBox, QSlider,
                              QGraphicsLineItem, QGraphicsTextItem, QListWidget,
                              QListWidgetItem)
-from PyQt6.QtCore import Qt, QRectF
+from PyQt6.QtCore import Qt, QRectF, QRunnable, QThreadPool, pyqtSlot
 from PyQt6.QtGui import QColor, QPen, QBrush, QFont, QPainter, QImage, QStandardItemModel, QStandardItem, QCursor, QPainterPath, QPainterPathStroker, QShortcut, QKeySequence
 from gui.components.workspace_items import Node, Edge
 from core.ai_organize_worker import AIOrganizeWorker
@@ -256,7 +256,30 @@ class UnusedHighlightsDialog(QDialog):
 
     def get_selected_highlight_ids(self):
         return [item.data(Qt.ItemDataRole.UserRole) for item in self.list_widget.selectedItems()]
+class NodeEmbeddingTask(QRunnable):
+    """
+    Background worker that fetches embeddings from Ollama without freezing the UI.
+    Inheriting from QRunnable ensures it safely hands off to C++ QThreadPool.
+    """
+    def __init__(self, node_id, text, llm_manager, project_manager):
+        super().__init__()
+        self.node_id = node_id
+        self.text = text
+        self.llm_manager = llm_manager
+        self.project_manager = project_manager
 
+    @pyqtSlot()
+    def run(self):
+        if not self.text.strip() or not self.llm_manager or not self.llm_manager.ai_enabled:
+            return
+            
+        try:
+            vector = self.llm_manager.get_embedding(self.text)
+            if vector:
+                # Use the new threadsafe method!
+                self.project_manager.save_node_embedding_threadsafe(self.node_id, vector)
+        except Exception as e:
+            pass
 
 
 
@@ -315,6 +338,7 @@ class WorkspaceView(QGraphicsView):
         if persist:
             self._mark_workspace_dirty(autosave=True)
             self.update_ghost_connections()
+            self._queue_background_embedding(node)
         return node
     def __init__(self, main_window):
         super().__init__()
@@ -411,7 +435,13 @@ class WorkspaceView(QGraphicsView):
         self.btn_clear_filters = CollapsingButton("✖", "✖ Clear Filters")
         self.btn_clear_filters.clicked.connect(self.reset_filters)
         tb_layout.addWidget(self.btn_clear_filters)
+        self.btn_undo = CollapsingButton("↩️", "↩️ Undo")
+        self.btn_undo.clicked.connect(self.undo)
+        tb_layout.addWidget(self.btn_undo)
 
+        self.btn_redo = CollapsingButton("↪️", "↪️ Redo")
+        self.btn_redo.clicked.connect(self.redo)
+        tb_layout.addWidget(self.btn_redo)
         # Ghost links section — collapses to 👻, expands to show checkbox + slider on hover
         ghost_content = QWidget()
         ghost_content.setStyleSheet("background: transparent;")
@@ -457,6 +487,17 @@ class WorkspaceView(QGraphicsView):
         tb_layout.addWidget(self.btn_add_workspace)
 
         self.update_scene_bounds()
+    def _queue_background_embedding(self, node):
+        """Dispatches node text to the global thread pool for embedding."""
+        try:
+            llm_manager = self.main_window.shared_llm_manager
+            pm = self.main_window.project_manager
+            text = f"{node.quote} {node.note}".strip()
+            
+            task = NodeEmbeddingTask(node.node_id, text, llm_manager, pm)
+            QThreadPool.globalInstance().start(task)
+        except Exception:
+            pass
 
     def update_scene_bounds(self):
         """Dynamically resizes the canvas to wrap around the nodes with a healthy padding."""
@@ -479,7 +520,7 @@ class WorkspaceView(QGraphicsView):
         menu.setTitle("🤖 AI Tools") 
         ai_enabled = False
         try:
-            ai_enabled = self.main_window.tabs["LLM Chat"].llm_manager.ai_enabled
+            ai_enabled = self.main_window.shared_llm_manager.ai_enabled
         except: 
             pass
 
@@ -668,7 +709,7 @@ class WorkspaceView(QGraphicsView):
 
         llm_manager = None
         try:
-            temp_manager = self.main_window.tabs["LLM Chat"].llm_manager
+            temp_manager = self.main_window.shared_llm_manager
             if temp_manager and temp_manager.ai_enabled:
                 llm_manager = temp_manager
         except Exception:
@@ -677,9 +718,14 @@ class WorkspaceView(QGraphicsView):
         if not llm_manager:
             return
 
+        # Ensure we have the text strings
         node_ids = [n.node_id for n in node_items]
         texts_to_embed = [f"{n.quote} {n.note}".strip() for n in node_items]
-        self.similarity_matrix = get_semantic_similarity_matrix(node_ids, texts_to_embed, llm_manager)
+
+        # NEW LOGIC: Pass the project_manager to the utility function
+        pm = self.main_window.project_manager
+        from core.text_utils import get_semantic_similarity_matrix
+        self.similarity_matrix = get_semantic_similarity_matrix(node_ids, texts_to_embed, llm_manager, pm)
 
     def update_ghost_connections(self):
         if self._updating_ghost_links:
@@ -756,6 +802,22 @@ class WorkspaceView(QGraphicsView):
         if not hasattr(self, "chk_show_ghost_links") or not self.chk_show_ghost_links.isChecked():
             return
         self.update_ghost_connections()
+
+    def _sync_workspace(self):
+        """Loads the current workspace data from SQLite and populates the canvas."""
+        pm = getattr(self.main_window, 'project_manager', None)
+        if not pm or not pm.project_filepath:
+            return
+            
+        try:
+            ws_id = getattr(self, 'current_workspace_id', 1)
+            workspace_data = pm.get_workspace_data(ws_id)
+            all_annots = pm.get_highlights()
+            
+            self._populate_workspace_tabs()
+            self.sync_with_project(workspace_data, all_annots)
+        except Exception as e:
+            print(f"Error syncing workspace: {e}")
 
     def _convert_ghost_to_edge(self, source_id, target_id, sim_score):
         """Convert a ghost similarity line into a persistent Edge."""
@@ -932,7 +994,7 @@ class WorkspaceView(QGraphicsView):
                     
             self.main_window.project_manager.mark_dirty("workspace")
             if "Notes" in self.main_window.tabs:
-                self.main_window.tabs["Notes"].save_workspace_state()
+                self.save_workspace_state()
 
     def trigger_declutter(self):
         selected_nodes = [n for n in self.scene_obj.selectedItems() if isinstance(n, Node)]
@@ -953,7 +1015,7 @@ class WorkspaceView(QGraphicsView):
         llm_manager = None
         if use_ai:
             try:
-                temp_manager = self.main_window.tabs["LLM Chat"].llm_manager
+                temp_manager = self.main_window.shared_llm_manager
                 if temp_manager.ai_enabled:
                     llm_manager = temp_manager
                 else:
@@ -972,7 +1034,8 @@ class WorkspaceView(QGraphicsView):
         similarity_matrix = {}
         if llm_manager:
             from core.text_utils import get_semantic_similarity_matrix
-            similarity_matrix = get_semantic_similarity_matrix(node_ids, texts_to_embed, llm_manager)
+            pm = self.main_window.project_manager
+            similarity_matrix = get_semantic_similarity_matrix(node_ids, texts_to_embed, llm_manager, pm)
 
         # 5. Build info dicts for the physics engine
         nodes_info = {n.node_id: {'width': n.base_width, 'height': n.base_height} for n in target_nodes}
@@ -1093,8 +1156,10 @@ class WorkspaceView(QGraphicsView):
             self._update_buttons()
 
     def _update_buttons(self):
-        if "Notes" in self.main_window.tabs:
-            self.main_window.tabs["Notes"].update_undo_redo_buttons()
+        if hasattr(self, 'btn_undo'):
+            self.btn_undo.setEnabled(len(self.undo_stack) > 0)
+        if hasattr(self, 'btn_redo'):
+            self.btn_redo.setEnabled(len(self.redo_stack) > 0)
 
     def undo(self):
         if not self.undo_stack: return
@@ -1219,6 +1284,7 @@ class WorkspaceView(QGraphicsView):
             self.scene_obj.addItem(node)
             self.nodes[new_id] = node
             new_nodes.append(node)
+            self._queue_background_embedding(node) # <--- ADD THIS
             pm.upsert_node_record({
                 'id': new_id,
                 'highlight_id': data['highlight_id'],
@@ -1476,7 +1542,9 @@ class WorkspaceView(QGraphicsView):
             page_num = nodes_to_remove[0].page_num
 
         if pdf_path is not None and page_num is not None:
-            self.main_window.tabs["Notes"].delete_note(pdf_path, page_num, highlight_id)
+            if hasattr(self.main_window, 'notes_docks'):
+                for n_dock in self.main_window.notes_docks:
+                    n_dock.delete_note(pdf_path, page_num, highlight_id)
 
         self.main_window.project_manager.delete_highlight_record(highlight_id)
         self._similarity_signature = None
@@ -1611,7 +1679,7 @@ class WorkspaceView(QGraphicsView):
     def trigger_ai_organize(self, selected_nodes):
         if not self.loading_overlay.isHidden(): return
 
-        model = self.main_window.tabs["LLM Chat"].model_combo.currentText().strip()
+        model = (self.main_window.chat_docks[0].model_combo.currentText().strip() if hasattr(self.main_window, 'chat_docks') and self.main_window.chat_docks else "llama3")
         if not model or "Error" in model or "running" in model:
             QMessageBox.warning(self, "No Model Selected", "Please select a valid AI model in the LLM Chat tab first.")
             return
@@ -1624,7 +1692,7 @@ class WorkspaceView(QGraphicsView):
         if not ok: return
 
         nodes_data = [{"id": n.node_id, "text": n.note or n.quote} for n in selected_nodes]
-        llm_manager = self.main_window.tabs["LLM Chat"].llm_manager
+        llm_manager = self.main_window.shared_llm_manager
 
         self.loading_label.setText("✨ AI is analyzing and organizing your notes...\nThis may take a moment.")
         self.loading_overlay.resize(self.viewport().size())
@@ -1718,7 +1786,7 @@ class WorkspaceView(QGraphicsView):
     def trigger_find_connections(self):
         if not self.loading_overlay.isHidden(): return
 
-        model = self.main_window.tabs["LLM Chat"].model_combo.currentText().strip()
+        model = (self.main_window.chat_docks[0].model_combo.currentText().strip() if hasattr(self.main_window, 'chat_docks') and self.main_window.chat_docks else "llama3")
         if not model or "Error" in model or "running" in model:
             QMessageBox.warning(self, "No Model Selected", "Please select a valid AI model in the LLM Chat tab first.")
             return
@@ -1734,7 +1802,7 @@ class WorkspaceView(QGraphicsView):
         edges_data = [{"source_id": e.source_node.node_id, "target_id": e.dest_node.node_id} 
                       for e in self.edges if e.source_node in target_nodes and e.dest_node in target_nodes]
 
-        llm_manager = self.main_window.tabs["LLM Chat"].llm_manager
+        llm_manager = self.main_window.shared_llm_manager
 
         self.loading_label.setText("✨ AI is analyzing relationships and finding new connections...\nThis may take a moment.")
         self.loading_overlay.resize(self.viewport().size())
@@ -1791,7 +1859,7 @@ class WorkspaceView(QGraphicsView):
     def trigger_generate_outline(self):
         if not self.loading_overlay.isHidden(): return
 
-        model = self.main_window.tabs["LLM Chat"].model_combo.currentText().strip()
+        model = (self.main_window.chat_docks[0].model_combo.currentText().strip() if hasattr(self.main_window, 'chat_docks') and self.main_window.chat_docks else "llama3")
         if not model or "Error" in model or "running" in model:
             QMessageBox.warning(self, "No Model Selected", "Please select a valid AI model in the LLM Chat tab first.")
             return
@@ -1807,7 +1875,7 @@ class WorkspaceView(QGraphicsView):
         edges_data = [{"source_id": e.source_node.node_id, "target_id": e.dest_node.node_id, "label": e.label_text} 
                       for e in self.edges if e.source_node in target_nodes and e.dest_node in target_nodes]
 
-        llm_manager = self.main_window.tabs["LLM Chat"].llm_manager
+        llm_manager = self.main_window.shared_llm_manager
 
         self.loading_label.setText("✨ AI is analyzing argument structure and drafting outline...\nThis may take a moment.")
         self.loading_overlay.resize(self.viewport().size())
@@ -1841,7 +1909,7 @@ class WorkspaceView(QGraphicsView):
     def trigger_identify_weakpoints(self):
         if not self.loading_overlay.isHidden(): return
 
-        model = self.main_window.tabs["LLM Chat"].model_combo.currentText().strip()
+        model = (self.main_window.chat_docks[0].model_combo.currentText().strip() if hasattr(self.main_window, 'chat_docks') and self.main_window.chat_docks else "llama3")
         if not model or "Error" in model or "running" in model:
             QMessageBox.warning(self, "No Model Selected", "Please select a valid AI model in the LLM Chat tab first.")
             return
@@ -1857,7 +1925,7 @@ class WorkspaceView(QGraphicsView):
         edges_data = [{"source_id": e.source_node.node_id, "target_id": e.dest_node.node_id, "label": e.label_text} 
                       for e in self.edges if e.source_node in target_nodes and e.dest_node in target_nodes]
 
-        llm_manager = self.main_window.tabs["LLM Chat"].llm_manager
+        llm_manager = self.main_window.shared_llm_manager
 
         self.loading_label.setText("✨ AI is evaluating argument strength and identifying weak points...\nThis may take a moment.")
         self.loading_overlay.resize(self.viewport().size())
@@ -1892,7 +1960,7 @@ class WorkspaceView(QGraphicsView):
     def trigger_fill_graph(self):
         if not self.loading_overlay.isHidden(): return
 
-        model = self.main_window.tabs["LLM Chat"].model_combo.currentText().strip()
+        model = (self.main_window.chat_docks[0].model_combo.currentText().strip() if hasattr(self.main_window, 'chat_docks') and self.main_window.chat_docks else "llama3")
         if not model or "Error" in model or "running" in model:
             QMessageBox.warning(self, "No Model Selected", "Please select a valid AI model in the LLM Chat tab first.")
             return
@@ -1910,7 +1978,7 @@ class WorkspaceView(QGraphicsView):
 
         allowed_docs = self.get_allowed_docs()
 
-        llm_manager = self.main_window.tabs["LLM Chat"].llm_manager
+        llm_manager = self.main_window.shared_llm_manager
 
         self.loading_label.setText("✨ AI is analyzing graph to find missing evidence...\nThis may take a moment.")
         self.loading_overlay.resize(self.viewport().size())
@@ -1971,7 +2039,7 @@ class WorkspaceView(QGraphicsView):
             self.main_window.project_manager.save_workspace_data(workspace_data, self.current_workspace_id)
             self.main_window.project_manager.mark_dirty("workspace")
 
-            all_annots = self.main_window.tabs["Notes"]._get_all_project_annotations_for_workspace()
+            all_annots = self.main_window.project_manager.get_highlights()
             self.sync_with_project(workspace_data, all_annots)
             
             self.main_window.viewer.annot_manager.note_added.emit()
@@ -1983,7 +2051,7 @@ class WorkspaceView(QGraphicsView):
     def trigger_consolidate_notes(self):
         if not self.loading_overlay.isHidden(): return
 
-        model = self.main_window.tabs["LLM Chat"].model_combo.currentText().strip()
+        model = (self.main_window.chat_docks[0].model_combo.currentText().strip() if hasattr(self.main_window, 'chat_docks') and self.main_window.chat_docks else "llama3")
         if not model or "Error" in model or "running" in model:
             QMessageBox.warning(self, "No Model Selected", "Please select a valid AI model in the LLM Chat tab first.")
             return
@@ -1999,7 +2067,7 @@ class WorkspaceView(QGraphicsView):
         edges_data = [{"source_id": e.source_node.node_id, "target_id": e.dest_node.node_id, "label": e.label_text} 
                       for e in self.edges if e.source_node in target_nodes and e.dest_node in target_nodes]
 
-        llm_manager = self.main_window.tabs["LLM Chat"].llm_manager
+        llm_manager = self.main_window.shared_llm_manager
 
         self.loading_label.setText("✨ AI is restructuring and streamlining your argument...\nThis may take a moment.")
         self.loading_overlay.resize(self.viewport().size())
@@ -2009,7 +2077,17 @@ class WorkspaceView(QGraphicsView):
         self.consolidate_worker.progress.connect(self._update_loading_label)
         self.consolidate_worker.finished.connect(self._on_consolidate_finished)
         self.consolidate_worker.start()
+    def save_workspace_state(self):
+        """Standalone save method for independent dock instances."""
+        data = self.serialize_workspace()
+        self.main_window.project_manager.save_workspace_data(data, self.current_workspace_id)
+        self._mark_workspace_dirty(autosave=True)
 
+    def handle_highlight_created(self, highlight_data):
+        """Auto-spawns a bubble on THIS specific workspace when a highlight is made in the PDF."""
+        if highlight_data.get("id") in self.nodes: return
+        # Force it into the currently active workspace of this dock instance
+        self.add_node_from_annotation(highlight_data, persist=True, target_workspace_id=self.current_workspace_id)
     def _on_consolidate_finished(self, result_dict, error_msg):
         self.loading_overlay.hide()
         self.loading_label.setText("✨ AI is analyzing and organizing your notes...\nThis may take a moment.")
@@ -2120,6 +2198,7 @@ class WorkspaceView(QGraphicsView):
         node.is_hovered = True
         node.refresh_layout()
         node.trigger_edit()
+        self._queue_background_embedding(node)
 
     def sync_with_project(self, workspace_data, pdf_annotations, force_reload=False):
         # Always reload workspace when called (revert force_reload logic)

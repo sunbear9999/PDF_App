@@ -55,6 +55,15 @@ class ProjectManager:
                 except sqlite3.OperationalError as e:
                     if "duplicate column name" not in str(e):
                         print(f"Error adding workspace_id to edges: {e}")
+            # Migration: add embedding_vector to nodes
+            cursor.execute("PRAGMA table_info(nodes)")
+            node_columns = [col[1] for col in cursor.fetchall()]
+            if "embedding_vector" not in node_columns:
+                try:
+                    cursor.execute("ALTER TABLE nodes ADD COLUMN embedding_vector TEXT")
+                except sqlite3.OperationalError as e:
+                    if "duplicate column name" not in str(e):
+                        print(f"Error adding embedding_vector column: {e}")
 
             cursor.execute('''CREATE TABLE IF NOT EXISTS tags (
                 id INTEGER PRIMARY KEY,
@@ -89,6 +98,45 @@ class ProjectManager:
                 x REAL, y REAL, width REAL, height REAL
             )''')
             return
+    def save_node_embedding_threadsafe(self, node_id, vector):
+        """Opens a short-lived, localized connection to bypass SQLite thread restrictions."""
+        if not self.project_filepath: return
+        try:
+            # Connect specifically for this thread with a timeout to respect locking
+            conn = sqlite3.connect(self.project_filepath, timeout=10.0)
+            vector_str = json.dumps(vector)
+            conn.execute("UPDATE nodes SET embedding_vector = ? WHERE id = ?", (vector_str, node_id))
+            conn.commit()
+            conn.close()
+        except sqlite3.Error as e:
+            print(f"Error saving node embedding in background: {e}")
+
+    def save_node_embedding(self, node_id, vector):
+        """Standard main-thread save."""
+        if not self._conn: return
+        try:
+            vector_str = json.dumps(vector)
+            self._conn.execute("UPDATE nodes SET embedding_vector = ? WHERE id = ?", (vector_str, node_id))
+            self._conn.commit()
+        except sqlite3.Error as e:
+            print(f"Error saving node embedding: {e}")
+
+    def get_node_embeddings_batch(self, node_ids):
+        """Fetches multiple cached embeddings at once to speed up the physics engine."""
+        if not self._conn or not node_ids: return {}
+        try:
+            placeholders = ",".join("?" for _ in node_ids)
+            cursor = self._conn.cursor()
+            cursor.execute(f"SELECT id, embedding_vector FROM nodes WHERE id IN ({placeholders})", tuple(node_ids))
+            
+            results = {}
+            for row in cursor.fetchall():
+                n_id, vec_str = row
+                if vec_str:
+                    results[n_id] = json.loads(vec_str)
+            return results
+        except sqlite3.Error:
+            return {}
 
         cursor.execute("PRAGMA table_info(nodes)")
         columns = [col[1] for col in cursor.fetchall()]
@@ -200,7 +248,15 @@ class ProjectManager:
             self._conn.commit()
         except Exception as e:
             print(f"Error creating project: {e}")
-
+    def _halt_viewer_if_active(self, path):
+        """Safely stops the background render thread if the file is currently open in the UI."""
+        if hasattr(self, 'main_window') and self.main_window and self.main_window.current_file_path == path:
+            viewer = getattr(self.main_window, 'viewer', None)
+            if viewer and viewer.worker and viewer.worker.isRunning():
+                viewer.worker.stop()
+                viewer.worker.wait()
+                return viewer
+        return None
     def load_project(self, filepath):
         try:
             filepath = filepath.strip()
@@ -305,6 +361,85 @@ class ProjectManager:
                     print(f"Error adding PDF to DB: {e}")
             return True
         return False
+    def remove_pdf(self, pdf_path):
+        """Safely closes handles and removes a PDF from the project, SQLite, and releases it."""
+        # 1. Halt the UI background thread first
+        self._halt_viewer_if_active(pdf_path)
+        
+        # 2. Force close PyMuPDF handle to break the OS file lock
+        if pdf_path in self.open_docs:
+            doc = self.open_docs.pop(pdf_path)
+            if not doc.is_closed:
+                doc.close()
+        self.dirty_docs.discard(pdf_path)
+        
+        # ... (keep the rest of the remove_pdf code exactly as it is) ...
+        
+        # 2. Remove from active tracking list
+        if pdf_path in self.pdfs:
+            self.pdfs.remove(pdf_path)
+            
+        # 3. Wipe all traces from SQLite
+        if self._conn:
+            try:
+                cursor = self._conn.cursor()
+                cursor.execute("BEGIN TRANSACTION")
+                cursor.execute("DELETE FROM pdfs WHERE path = ?", (pdf_path,))
+                cursor.execute("DELETE FROM highlights WHERE doc_id = ?", (pdf_path,))
+                cursor.execute("DELETE FROM nodes WHERE pdf_path = ?", (pdf_path,))
+                self._conn.commit()
+            except sqlite3.Error as e:
+                self._conn.rollback()
+                print(f"Error removing PDF from DB: {e}")
+                
+        if self.active_file == pdf_path:
+            self.active_file = None
+            
+        return True
+
+    def rename_pdf(self, old_path, new_path):
+        """Renames a PDF file safely, avoiding PyMuPDF lock crashes and updating the DB."""
+        if old_path not in self.pdfs: 
+            return False
+        
+        # 1. Force close and save if dirty to drop the lock
+        if old_path in self.open_docs:
+            doc = self.open_docs.pop(old_path)
+            if old_path in self.dirty_docs:
+                self._save_single_doc(doc, old_path)
+            if not doc.is_closed:
+                doc.close()
+        self.dirty_docs.discard(old_path)
+        
+        # 2. Perform actual file system rename
+        try:
+            os.rename(old_path, new_path)
+        except Exception as e:
+            print(f"OS Rename failed: {e}")
+            return False
+            
+        # 3. Update active list
+        idx = self.pdfs.index(old_path)
+        self.pdfs[idx] = new_path
+        
+        # 4. Update SQLite Cascade
+        if self._conn:
+            try:
+                cursor = self._conn.cursor()
+                cursor.execute("BEGIN TRANSACTION")
+                cursor.execute("UPDATE pdfs SET path = ? WHERE path = ?", (new_path, old_path))
+                cursor.execute("UPDATE highlights SET doc_id = ? WHERE doc_id = ?", (new_path, old_path))
+                cursor.execute("UPDATE nodes SET pdf_path = ? WHERE pdf_path = ?", (new_path, old_path))
+                self._conn.commit()
+            except sqlite3.Error as e:
+                self._conn.rollback()
+                print(f"Error renaming PDF in DB: {e}")
+                return False
+                
+        if self.active_file == old_path:
+            self.active_file = new_path
+            
+        return True
 
     def get_workspace_data(self, workspace_id=1):
         if not self._conn: return {"nodes": {}, "edges": []}
@@ -841,12 +976,15 @@ class ProjectManager:
     def _save_single_doc(self, doc, path):
         if not doc or doc.is_closed:
             return
+            
+        # 1. HALT background thread before touching file locks
+        viewer = self._halt_viewer_if_active(path)
+
         temp_path = None
         try:
             temp_path = self._create_closed_temp_path(path, suffix=".tmp_save")
             doc.save(temp_path, garbage=3, deflate=True)
-            # Close before the atomic swap so Windows releases any file lock.
-            doc.close()
+            doc.close() # Now totally safe, no background thread is reading it
             self._safe_swap_file(temp_path, path)
             temp_path = None
             self.dirty_docs.discard(path)
@@ -869,11 +1007,13 @@ class ProjectManager:
             if temp_path and os.path.exists(temp_path):
                 os.remove(temp_path)
         finally:
-            # If the path is still in the cache (i.e. not being evicted), reopen
-            # the freshly-written file so the cache holds a valid handle.
-            if path in self.open_docs:
+            # 2. Reopen and RESUME the background thread with the fresh handle
+            if path in self.open_docs or viewer: 
                 try:
-                    self.open_docs[path] = fitz.open(path)
+                    new_doc = fitz.open(path)
+                    self.open_docs[path] = new_doc
+                    if viewer:
+                        viewer.swap_document_handle(new_doc)
                 except Exception as reopen_e:
                     print(f"Failed to reopen {path} after save: {reopen_e}")
                     self.open_docs.pop(path, None)

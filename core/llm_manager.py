@@ -166,6 +166,30 @@ class LocalLLMManager:
             
         # Fallback sequentially if the user has an older version of Ollama without /api/embed
         return [self.get_embedding(t) for t in texts]
+    
+    def remove_document_from_index(self, pdf_path):
+        """Purges a specific document's embeddings from ChromaDB."""
+        if not self.collection: return
+        try:
+            # Find all chunks associated with this doc_id
+            results = self.collection.get(where={"doc_id": pdf_path})
+            ids_to_delete = results.get("ids", [])
+            
+            # Fallback for older project databases
+            if not ids_to_delete:
+                fallback_name = os.path.basename(pdf_path)
+                results = self.collection.get(where={"doc_name": fallback_name})
+                ids_to_delete = results.get("ids", [])
+                
+            if ids_to_delete:
+                self.collection.delete(ids=ids_to_delete)
+                print(f"[System] Purged {len(ids_to_delete)} vectors for {os.path.basename(pdf_path)}.")
+        except Exception as e:
+            print(f"[System] Failed to remove document from index: {e}")
+
+    def rename_document_in_index(self, old_path, new_path):
+        """Wipes the old embeddings. The next indexing pass will automatically re-embed the new path."""
+        self.remove_document_from_index(old_path)
 
     def index_documents(self, pdf_paths, progress_callback=None):
         if not self.collection:
@@ -175,14 +199,12 @@ class LocalLLMManager:
             progress_callback("Clearing VRAM to prioritize embedding engine...")
             
         self.unload_all_models()
-
-        # 1. Guarantee the embedding model is downloaded and ready
         self.check_and_pull_embedding_model(progress_callback)
 
-        existing_ids = self.collection.get()["ids"]
-        if existing_ids:
-            self.collection.delete(ids=existing_ids)
-        
+        # DELTA FIX: Grab all existing chunk IDs so we don't re-embed them
+        existing_data = self.collection.get(include=["metadatas"])
+        existing_ids = set(existing_data.get("ids", []))
+
         chunks = []
         metadatas = []
         ids = []
@@ -198,9 +220,6 @@ class LocalLLMManager:
                 
                 chunk_counter = 0
                 for page_num in range(total_pages):
-                    if progress_callback: 
-                        progress_callback(f"[{doc_name}] Extracting Page {page_num+1}/{total_pages}...")
-                    
                     page = doc.load_page(page_num)
                     text = page.get_text("text").replace('\n', ' ').strip()
                     text = re.sub(r'\s+', ' ', text) 
@@ -208,18 +227,23 @@ class LocalLLMManager:
                     words = text.split(' ')
                     
                     for i in range(0, len(words), chunk_word_size - overlap_words):
-                        chunk_text = ' '.join(words[i:i + chunk_word_size])
-                        if len(chunk_text) > 50: 
-                            chunks.append(chunk_text)
-                            metadatas.append({"doc_name": doc_name, "doc_id": pdf_path, "page": page_num})
-                            ids.append(f"{doc_name}_p{page_num}_c{chunk_counter}")
-                            chunk_counter += 1
+                        chunk_id = f"{doc_name}_p{page_num}_c{chunk_counter}"
+                        
+                        # DELTA FIX: Only process if the chunk isn't already in ChromaDB
+                        if chunk_id not in existing_ids:
+                            chunk_text = ' '.join(words[i:i + chunk_word_size])
+                            if len(chunk_text) > 50: 
+                                chunks.append(chunk_text)
+                                metadatas.append({"doc_name": doc_name, "doc_id": pdf_path, "page": page_num})
+                                ids.append(chunk_id)
+                        chunk_counter += 1
                 doc.close()
             except Exception as e: 
                 print(f"Failed to index {doc_name}: {e}")
-                    
+                
         total_chunks = len(chunks)
         if total_chunks == 0:
+            if progress_callback: progress_callback("Search index is already up to date!")
             return
 
         batch_size = 100 
