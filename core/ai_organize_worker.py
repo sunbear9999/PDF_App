@@ -18,14 +18,21 @@ class AIOrganizeWorker(QThread):
             return
 
         try:
-            system_prompt = (
-                "You are an expert AI assistant that organizes notes. "
-                "Group the provided nodes into logical clusters. "
-                "Return ONLY a valid JSON array of objects. "
-                "Format: [{\"cluster_name\": \"Name\", \"node_ids\": [\"id1\", \"id2\"]}]"
-            )
+            custom_instructions_block = ""
             if self.custom_instructions:
-                system_prompt += f" User specific instruction: {self.custom_instructions}"
+                custom_instructions_block = f" User specific instruction: {self.custom_instructions}"
+
+            system_prompt = self.llm_manager.get_system_prompt(
+                "AI Organize Worker",
+                (
+                    "You are an expert AI assistant that organizes notes. "
+                    "Group the provided nodes into logical clusters. "
+                    "Return ONLY a valid JSON array of objects. "
+                    "Format: [{\"cluster_name\": \"Name\", \"node_ids\": [\"id1\", \"id2\"]}]"
+                    "{custom_instructions_block}"
+                ),
+                custom_instructions_block=custom_instructions_block,
+            )
 
             prompt = f"Nodes Data:\n{json.dumps(self.nodes_data, indent=2)}\n\nGroup these nodes."
 

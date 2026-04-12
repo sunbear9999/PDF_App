@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QTextEdit, QPushButton, QLabe
                              QComboBox, QHBoxLayout, QLineEdit, QMessageBox, QListWidget, QListWidgetItem, QCheckBox,
                              QScrollArea, QFrame, QSizePolicy)
 from PyQt6.QtCore import pyqtSignal, QThread, Qt
-from PyQt6.QtGui import QTextCursor
+from PyQt6.QtGui import QTextCursor, QColor
 from core.llm_manager import LocalLLMManager
 
 class IndexWorker(QThread):
@@ -29,12 +29,13 @@ class ChatWorker(QThread):
     chat_completed = pyqtSignal(str)
     agent_update = pyqtSignal(str)
     
-    def __init__(self, llm, question, model, allowed_docs, use_agents, rag_enabled=True, custom_system_prompt=None, existing_highlights=None, parent=None):
+    def __init__(self, llm, question, model, allowed_docs, tag_filters, use_agents, rag_enabled=True, custom_system_prompt=None, existing_highlights=None, parent=None):
         super().__init__(parent)
         self.llm = llm
         self.question = question
         self.model = model
         self.allowed_docs = allowed_docs
+        self.tag_filters = tag_filters or []
         self.use_agents = use_agents
         self.rag_enabled = rag_enabled
         self.custom_system_prompt = custom_system_prompt
@@ -75,6 +76,7 @@ class ChatWorker(QThread):
                 self.question, 
                 self.model, 
                 allowed_docs=self.allowed_docs, 
+                tag_filters=self.tag_filters,
                 callback=handle_chunk, 
                 rag_enabled=self.rag_enabled,
                 use_agents=self.use_agents,
@@ -138,6 +140,11 @@ class LLMTab(QWidget):
         self.pdf_list = QListWidget()
         self.pdf_list.setFixedHeight(100)
         layout.addWidget(self.pdf_list)
+
+        layout.addWidget(QLabel("Filter by Tags (optional, all selected tags required):"))
+        self.tag_filter_list = QListWidget()
+        self.tag_filter_list.setFixedHeight(90)
+        layout.addWidget(self.tag_filter_list)
         
         self.btn_index = QPushButton("Build / Rebuild Search Index")
         self.btn_index.clicked.connect(self.start_indexing)
@@ -177,6 +184,9 @@ class LLMTab(QWidget):
         self.pdf_list.setStyleSheet(
             f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']};"
         )
+        self.tag_filter_list.setStyleSheet(
+            f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']};"
+        )
         self.chat_history.setStyleSheet(
             f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']};"
         )
@@ -196,6 +206,8 @@ class LLMTab(QWidget):
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 item.setCheckState(Qt.CheckState.Checked) 
                 self.pdf_list.addItem(item)
+
+        self.refresh_tag_filters()
                 
         proj_path = self.main_window.project_manager.project_filepath
         if proj_path and hasattr(self, 'llm_manager'):
@@ -208,6 +220,21 @@ class LLMTab(QWidget):
                 self.status_lbl.setText("🔴 Status: Needs Indexing")
                 color = self.theme['warning'] if self.theme else "#ffaa00"
                 self.status_lbl.setStyleSheet(f"font-weight: bold; color: {color}; font-size: 14px;")
+
+    def refresh_tag_filters(self):
+        self.tag_filter_list.clear()
+        pm = self.main_window.project_manager if self.main_window and hasattr(self.main_window, "project_manager") else None
+        tags = pm.get_all_tags() if pm else []
+
+        for tag in tags:
+            tag_name = tag.get("name", "")
+            tag_color = tag.get("color") or "#808080"
+            item = QListWidgetItem(tag_name)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked)
+            item.setData(Qt.ItemDataRole.UserRole, tag_name)
+            item.setForeground(QColor(tag_color))
+            self.tag_filter_list.addItem(item)
 
     def refresh_models(self):
         models = self.llm_manager.get_available_models()
@@ -276,6 +303,12 @@ class LLMTab(QWidget):
                     if os.path.basename(p) == doc_name:
                         allowed_paths.append(p)
                         break
+
+        selected_tag_filters = []
+        for i in range(self.tag_filter_list.count()):
+            item = self.tag_filter_list.item(i)
+            if item.checkState() == Qt.CheckState.Checked:
+                selected_tag_filters.append(item.data(Qt.ItemDataRole.UserRole))
         
         existing_quotes = []
         for path in allowed_paths:
@@ -297,6 +330,7 @@ class LLMTab(QWidget):
             user_text,
             model, 
             allowed_docs, 
+            selected_tag_filters,
             use_agents, 
             rag_enabled=True,
             custom_system_prompt=None,

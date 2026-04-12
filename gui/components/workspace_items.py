@@ -3,8 +3,8 @@ import uuid
 from PyQt6.QtWidgets import (QGraphicsRectItem, QGraphicsTextItem, QGraphicsLineItem, QGraphicsItem, 
                              QInputDialog, QColorDialog, QGraphicsProxyWidget,
                              QPushButton, QHBoxLayout, QWidget)
-from PyQt6.QtCore import Qt, QLineF, QPointF, QTimer
-from PyQt6.QtGui import QColor, QPen, QBrush, QFont, QTextDocument
+from PyQt6.QtCore import Qt, QLineF, QPointF, QTimer, QRectF
+from PyQt6.QtGui import QColor, QPen, QBrush, QFont, QTextDocument, QPainter
 
 from gui.theme import ThemeManager
 
@@ -174,9 +174,10 @@ class ResizeHandle(QGraphicsRectItem):
 
 
 class Node(QGraphicsRectItem):
-    def __init__(self, node_id, quote, note, color=None, is_custom=False, width=150, height=80, pdf_path=None, page_num=None, manual_font_size=None):
+    def __init__(self, node_id, quote, note, color=None, is_custom=False, width=150, height=80, pdf_path=None, page_num=None, manual_font_size=None, highlight_id=None):
         super().__init__(0, 0, width, height)
         self.node_id = node_id
+        self.highlight_id = highlight_id
         self.is_custom = is_custom
         self.quote = quote if quote else ""
         self.note = note if note else ""
@@ -196,6 +197,9 @@ class Node(QGraphicsRectItem):
         self.base_width = width
         self.base_height = height
         self.is_hovered = False
+        self.tag_colors = []
+        self.tag_badges = []
+        self._tag_colors_loaded = False
         
         self.setBrush(QBrush(QColor(self.color)))
         self.setPen(QPen(QColor("#555555"), 2))
@@ -246,6 +250,13 @@ class Node(QGraphicsRectItem):
 
     def mousePressEvent(self, event):
         view = self.scene().view if self.scene() and hasattr(self.scene(), 'view') else None
+        if view and event and event.button() == Qt.MouseButton.LeftButton:
+            clicked_tag = self._tag_name_at_pos(event.pos())
+            if clicked_tag:
+                view.apply_tag_filter(clicked_tag)
+                event.accept()
+                return
+
         if view:
             if view.connecting_node and view.connecting_node != self:
                 view.save_state_for_undo()
@@ -262,7 +273,7 @@ class Node(QGraphicsRectItem):
                 main_win = self.scene().view.main_window
                 pdf_path = self.pdf_path
                 page_num = self.page_num
-                annot_id = self.node_id
+                annot_id = self.highlight_id or self.node_id
                 
                 if "Notes" in main_win.tabs:
                     main_win.tabs["Notes"].save_workspace_state()
@@ -387,6 +398,58 @@ class Node(QGraphicsRectItem):
         self.refresh_layout()
         self._mark_workspace_dirty(autosave=True)
 
+    def _load_tag_colors(self):
+        badges = []
+        try:
+            view = self.scene().view if self.scene() and hasattr(self.scene(), "view") else None
+            pm = view.main_window.project_manager if view and hasattr(view.main_window, "project_manager") else None
+            if pm:
+                tags = pm.get_tags_for_node(self.node_id)
+                badges = [
+                    {"name": t.get("name") or "", "color": t.get("color") or "#808080"}
+                    for t in tags
+                ]
+        except Exception:
+            badges = []
+
+        self.tag_badges = badges
+        self.tag_colors = [b.get("color") or "#808080" for b in badges]
+        self._tag_colors_loaded = True
+
+    def get_tag_names(self):
+        if not self._tag_colors_loaded:
+            self._load_tag_colors()
+        return [b.get("name") for b in self.tag_badges if b.get("name")]
+
+    def refresh_tag_badges(self):
+        self._tag_colors_loaded = False
+        self._load_tag_colors()
+        self.update()
+
+    def _get_tag_dot_regions(self):
+        if not self._tag_colors_loaded:
+            self._load_tag_colors()
+
+        max_dots = 5
+        dot_d = 7
+        spacing = 3
+        shown = self.tag_badges[:max_dots]
+        total_w = len(shown) * dot_d + max(0, len(shown) - 1) * spacing
+        x = self.rect().right() - 6 - total_w
+        y = self.rect().top() + 6
+
+        regions = []
+        for badge in shown:
+            regions.append((QRectF(x, y, dot_d, dot_d), badge.get("name") or ""))
+            x += dot_d + spacing
+        return regions
+
+    def _tag_name_at_pos(self, pos):
+        for rect, tag_name in self._get_tag_dot_regions():
+            if tag_name and rect.contains(pos):
+                return tag_name
+        return None
+
     def _mark_workspace_dirty(self, autosave=True):
         view = self.scene().view if self.scene() and hasattr(self.scene(), "view") else None
         if view and hasattr(view, "_mark_workspace_dirty"):
@@ -424,6 +487,34 @@ class Node(QGraphicsRectItem):
                 self.setPen(QPen(QColor("#555555"), 2))
                 self.setZValue(1 if not self.is_hovered else 100)
         return super().itemChange(change, value)
+
+    def paint(self, painter, option, widget=None):
+        super().paint(painter, option, widget)
+
+        if not self._tag_colors_loaded:
+            self._load_tag_colors()
+
+        if not self.tag_colors:
+            return
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        max_dots = 5
+        dot_d = 7
+        spacing = 3
+        shown = self.tag_colors[:max_dots]
+        total_w = len(shown) * dot_d + max(0, len(shown) - 1) * spacing
+        x = self.rect().right() - 6 - total_w
+        y = self.rect().top() + 6
+
+        for color_hex in shown:
+            painter.setBrush(QBrush(QColor(color_hex)))
+            painter.setPen(QPen(QColor("#ffffff"), 1))
+            painter.drawEllipse(QPointF(x + dot_d / 2.0, y + dot_d / 2.0), dot_d / 2.0, dot_d / 2.0)
+            x += dot_d + spacing
+
+        painter.restore()
 
     def trigger_connect(self):
         if self.scene() and hasattr(self.scene(), 'view'):
@@ -470,7 +561,7 @@ class Node(QGraphicsRectItem):
             
             if not self.is_custom and self.pdf_path is not None:
                 notes_tab = self.scene().view.main_window.tabs["Notes"]
-                notes_tab._modify_note(self.pdf_path, self.page_num, self.node_id, action="edit_content", content=self.note, refresh=False)
+                notes_tab._modify_note(self.pdf_path, self.page_num, self.highlight_id or self.node_id, action="edit_content", content=self.note, refresh=False)
                 
             if self.scene() and hasattr(self.scene(), 'view'):
                 self.scene().view.main_window.project_manager.mark_dirty("workspace")

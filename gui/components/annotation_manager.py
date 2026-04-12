@@ -7,6 +7,7 @@ from PyQt6.QtCore import Qt, QRectF, QObject, pyqtSignal, QThread
 
 class AnnotationManager(QObject):
     note_added = pyqtSignal()
+    highlight_created = pyqtSignal(dict)
 
     def __init__(self, viewer):
         super().__init__()
@@ -200,6 +201,16 @@ class AnnotationManager(QObject):
                 }
                 annot.set_info(info=annot_info)
                 annot.update()
+
+                self.highlight_created.emit({
+                    "id": annot_info["title"],
+                    "subject": annot_info["subject"],
+                    "content": annot_info["content"],
+                    "pdf_path": self.viewer.window().current_file_path,
+                    "page_num": self.current_page_idx,
+                    "rect_coords": repr(list(annot.rect)),
+                    "color": QColor(int(color_tuple[0] * 255), int(color_tuple[1] * 255), int(color_tuple[2] * 255)).name(),
+                })
                 
                 self.viewer.reload_page(self.current_page_idx)
                 self.note_added.emit()

@@ -11,6 +11,11 @@ import shutil
 import platform
 from chromadb.config import Settings
 
+try:
+    from core.prompt_manager import PromptManager
+except ImportError:
+    from .prompt_manager import PromptManager
+
 class LocalLLMManager:
     def __init__(self):
         self.api_base = "http://localhost:11434/api"
@@ -18,7 +23,18 @@ class LocalLLMManager:
         self.chroma_client = None
         self.collection = None
         self.ai_enabled = False  # Track if AI is available
+        self.prompt_manager = PromptManager()
         self.ensure_server_running()
+
+    def _format_prompt_template(self, tool_name, fallback_template, **kwargs):
+        template = self.prompt_manager.get_prompt(tool_name) or fallback_template
+        try:
+            return template.format(**kwargs)
+        except Exception:
+            return fallback_template.format(**kwargs)
+
+    def get_system_prompt(self, tool_name, fallback_template, **kwargs):
+        return self._format_prompt_template(tool_name, fallback_template, **kwargs)
 
     def ensure_server_running(self):
         # 1. Safely check if Ollama is actually installed on the system
@@ -195,7 +211,7 @@ class LocalLLMManager:
                         chunk_text = ' '.join(words[i:i + chunk_word_size])
                         if len(chunk_text) > 50: 
                             chunks.append(chunk_text)
-                            metadatas.append({"doc_name": doc_name, "page": page_num})
+                            metadatas.append({"doc_name": doc_name, "doc_id": pdf_path, "page": page_num})
                             ids.append(f"{doc_name}_p{page_num}_c{chunk_counter}")
                             chunk_counter += 1
                 doc.close()
@@ -231,7 +247,44 @@ class LocalLLMManager:
             progress_callback("Releasing embedding model from memory...")
         self.unload_all_models()
 
-    def query(self, question, selected_model, allowed_docs=None, callback=None, rag_enabled=True, use_agents=True, custom_system_prompt=None, existing_highlights=None):
+    def sync_doc_tags(self, doc_id, current_tags):
+        """Sync SQLite document tags into flat Chroma metadata keys (tag_<name>: True)."""
+        if not self.collection or not doc_id:
+            return
+
+        try:
+            fetched = self.collection.get(where={"doc_id": doc_id}, include=["metadatas"])
+            ids = fetched.get("ids") or []
+            metadatas = fetched.get("metadatas") or []
+
+            # Backward compatibility for projects indexed before doc_id metadata existed.
+            if not ids:
+                fallback_name = os.path.basename(doc_id)
+                fetched = self.collection.get(where={"doc_name": fallback_name}, include=["metadatas"])
+                ids = fetched.get("ids") or []
+                metadatas = fetched.get("metadatas") or []
+
+            if not ids:
+                return
+
+            new_tag_keys = {}
+            for tag in (current_tags or []):
+                tag_name = str(tag.get("name", "")).strip()
+                if tag_name:
+                    new_tag_keys[f"tag_{tag_name}"] = True
+
+            updated_metadatas = []
+            for meta in metadatas:
+                base_meta = dict(meta or {})
+                cleaned = {k: v for k, v in base_meta.items() if not str(k).startswith("tag_")}
+                cleaned.update(new_tag_keys)
+                updated_metadatas.append(cleaned)
+
+            self.collection.update(ids=ids, metadatas=updated_metadatas)
+        except Exception as e:
+            print(f"[System] Failed to sync tags for doc '{doc_id}': {e}")
+
+    def query(self, question, selected_model, allowed_docs=None, callback=None, rag_enabled=True, use_agents=True, custom_system_prompt=None, existing_highlights=None, tag_filters=None):
         context = ""
         system_prompt = ""
         
@@ -269,12 +322,28 @@ class LocalLLMManager:
             try:
                 search_queries = [question]
                 where_clause = None
+
+                tag_filters = [str(t).strip() for t in (tag_filters or []) if str(t).strip()]
+                tag_where = None
+                if tag_filters:
+                    tag_where = {
+                        "$and": [
+                            {f"tag_{tag_name}": {"$eq": True}}
+                            for tag_name in tag_filters
+                        ]
+                    }
                 
                 if allowed_docs:
                     if len(allowed_docs) == 1:
                         where_clause = {"doc_name": allowed_docs[0]}
                     else:
                         where_clause = {"doc_name": {"$in": allowed_docs}}
+
+                if tag_where:
+                    if where_clause:
+                        where_clause = {"$and": [where_clause, tag_where]}
+                    else:
+                        where_clause = tag_where
 
                 if use_agents:
                     if callback: callback("@@AGENT@@🔍 Performing initial scan based on your query...")
@@ -336,6 +405,11 @@ class LocalLLMManager:
                         sq_emb = self.get_embedding(sq)
                         for doc in docs_to_search:
                             doc_where = {"doc_name": doc} if doc else None
+                            if tag_where:
+                                if doc_where:
+                                    doc_where = {"$and": [doc_where, tag_where]}
+                                else:
+                                    doc_where = tag_where
                             results = self.collection.query(
                                 query_embeddings=[sq_emb],
                                 n_results=3 if use_agents else 6, # Fetch equal chunks per document (reduced slightly to save context window)
@@ -374,26 +448,36 @@ class LocalLLMManager:
                 return f"[System Error: {str(e)}]"
 
             if use_agents:
-                system_prompt = (
-                    "You are an expert AI research agent.\n"
-                    "Provide comprehensive, highly detailed answers using ONLY the provided context.\n"
-                    "CRITICAL: Follow this exact structure to simulate your thought process. Do NOT deviate:\n\n"
-                    "--- AGENT REASONING ---\n"
-                    "(Write your step-by-step thoughts here. Analyze the context, plan your answer, and brainstorm VERBATIM quotes. Realize if a document lacks relevant quotes, you should skip it.)\n\n"
-                    "--- FINAL ANSWER ---\n"
-                    "(Provide a high-level conceptual summary answering the user's prompt. DO NOT use quotation marks. DO NOT output specific quotes here. All quotes belong in the highlights section.)\n\n"
-                    f"{highlight_rules}\n\n"
-                    f"CONTEXT:\n{context}"
+                system_prompt = self._format_prompt_template(
+                    "RAG Agent Mode",
+                    (
+                        "You are an expert AI research agent.\n"
+                        "Provide comprehensive, highly detailed answers using ONLY the provided context.\n"
+                        "CRITICAL: Follow this exact structure to simulate your thought process. Do NOT deviate:\n\n"
+                        "--- AGENT REASONING ---\n"
+                        "(Write your step-by-step thoughts here. Analyze the context, plan your answer, and brainstorm VERBATIM quotes. Realize if a document lacks relevant quotes, you should skip it.)\n\n"
+                        "--- FINAL ANSWER ---\n"
+                        "(Provide a high-level conceptual summary answering the user's prompt. DO NOT use quotation marks. DO NOT output specific quotes here. All quotes belong in the highlights section.)\n\n"
+                        "{highlight_rules}\n\n"
+                        "CONTEXT:\n{context}"
+                    ),
+                    highlight_rules=highlight_rules,
+                    context=context,
                 )
             else:
-                system_prompt = (
-                    "You are an expert AI research assistant.\n"
-                    "Provide comprehensive answers using ONLY the provided context.\n"
-                    f"{highlight_rules}\n\n"
-                    f"CONTEXT:\n{context}"
+                system_prompt = self._format_prompt_template(
+                    "RAG Assistant Mode",
+                    (
+                        "You are an expert AI research assistant.\n"
+                        "Provide comprehensive answers using ONLY the provided context.\n"
+                        "{highlight_rules}\n\n"
+                        "CONTEXT:\n{context}"
+                    ),
+                    highlight_rules=highlight_rules,
+                    context=context,
                 )
         else:
-            system_prompt = custom_system_prompt or "You are an intelligent AI assistant interacting with a user's workspace software. Follow their instructions exactly."
+            system_prompt = custom_system_prompt or self.prompt_manager.get_prompt("General Assistant")
 
         payload = {
             "model": selected_model, 

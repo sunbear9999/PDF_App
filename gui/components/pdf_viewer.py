@@ -84,6 +84,7 @@ class PDFViewer(QGraphicsView):
         
         self.doc = None
         self.base_zoom = 1.5
+        self.dark_mode_enabled = False
         self.page_placeholders = []  # QGraphicsRectItem for each page
         self.page_pixmaps = [None] * 0  # QGraphicsPixmapItem for each page, or None
         self.worker = None
@@ -124,6 +125,29 @@ class PDFViewer(QGraphicsView):
         self.page_hud.btn_jump.clicked.connect(self._hud_jump_requested)
         self.page_hud.line_edit.returnPressed.connect(self._hud_jump_requested)
 
+        # Viewer toolbar
+        self.viewer_toolbar = QFrame(self.viewport())
+        self.viewer_toolbar.setStyleSheet("""
+            background-color: rgba(30, 30, 30, 200);
+            border-radius: 8px;
+            color: white;
+            padding: 4px;
+        """)
+        toolbar_layout = QHBoxLayout(self.viewer_toolbar)
+        toolbar_layout.setContentsMargins(8, 4, 8, 4)
+        self.dark_mode_btn = QPushButton("Dark Mode", self.viewer_toolbar)
+        self.dark_mode_btn.setCheckable(True)
+        self.dark_mode_btn.setStyleSheet("""
+            background: #444;
+            color: white;
+            border-radius: 4px;
+            padding: 2px 8px;
+        """)
+        self.dark_mode_btn.clicked.connect(self.toggle_dark_mode)
+        toolbar_layout.addWidget(self.dark_mode_btn)
+        self.viewer_toolbar.setLayout(toolbar_layout)
+        self.viewer_toolbar.setVisible(True)
+
         self.copy_shortcut = QShortcut(QKeySequence("Ctrl+C"), self)
         self.copy_shortcut.activated.connect(self.copy_to_clipboard)
 
@@ -137,6 +161,9 @@ class PDFViewer(QGraphicsView):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if hasattr(self, 'viewer_toolbar') and self.viewer_toolbar.isVisible():
+            self.viewer_toolbar.adjustSize()
+            self.viewer_toolbar.move(20, 20)
         if hasattr(self, 'search_bar') and self.search_bar.isVisible():
             self.search_bar.adjustSize()
             x_pos = self.viewport().width() - self.search_bar.width() - 20
@@ -378,6 +405,9 @@ class PDFViewer(QGraphicsView):
         if not (0 <= page_num < len(self.page_pixmaps)):
             return
 
+        if self.dark_mode_enabled:
+            qimage.invertPixels(QImage.InvertMode.InvertRgb)
+
         pixmap = QPixmap.fromImage(qimage)
         if pixmap.isNull():
             try:
@@ -424,27 +454,6 @@ class PDFViewer(QGraphicsView):
                             h_item.setZValue(20)
             except Exception as e:
                 print(f"[DEBUG] Failed to draw highlight overlays: {e}")
-        # Replace placeholder with pixmap item (not as child)
-        if not (0 <= page_num < len(self.page_pixmaps)):
-            return
-
-        pixmap = QPixmap.fromImage(qimage)
-        if pixmap.isNull():
-            try:
-                import fitz
-                page = self.doc.load_page(page_num)
-                pix = page.get_pixmap(matrix=fitz.Matrix(self.base_zoom, self.base_zoom))
-                png_bytes = pix.tobytes("png")
-                pixmap = QPixmap()
-                pixmap.loadFromData(png_bytes, "PNG")
-            except Exception:
-                pass
-        self.page_pixmaps[page_num].setPixmap(pixmap)
-        self.page_pixmaps[page_num].setVisible(True)
-        self.page_pixmaps[page_num].setZValue(1)
-        self.page_placeholders[page_num].setVisible(False)
-        self.rendered_pages.add(page_num)
-        self.pages_in_flight.discard(page_num)
 
         if self.search_hits and self.current_search_text:
             self._apply_search_highlights_to_page(page_num, self.page_pixmaps[page_num])
@@ -536,8 +545,30 @@ class PDFViewer(QGraphicsView):
         mat = fitz.Matrix(self.base_zoom * dpi_scale, self.base_zoom * dpi_scale)
         pix = page.get_pixmap(matrix=mat)
         img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888).copy()
+        if self.dark_mode_enabled:
+            img.invertPixels(QImage.InvertMode.InvertRgb)
         img.setDevicePixelRatio(dpi_scale)
         self.page_pixmaps[page_num].setPixmap(QPixmap.fromImage(img))
+
+    def toggle_dark_mode(self):
+        self.dark_mode_enabled = not self.dark_mode_enabled
+        if hasattr(self, 'dark_mode_btn'):
+            self.dark_mode_btn.setChecked(self.dark_mode_enabled)
+
+        if not self._doc_valid() or not self.page_pixmaps:
+            return
+
+        # Apply to all currently rendered pages; off-screen pages rendered later
+        # will follow self.dark_mode_enabled in _on_page_ready.
+        for pixmap_item in self.page_pixmaps:
+            if pixmap_item is None:
+                continue
+            pixmap = pixmap_item.pixmap()
+            if pixmap.isNull():
+                continue
+            img = pixmap.toImage()
+            img.invertPixels(QImage.InvertMode.InvertRgb)
+            pixmap_item.setPixmap(QPixmap.fromImage(img))
 
     def mousePressEvent(self, event):
         is_shift = event.modifiers() == Qt.KeyboardModifier.ShiftModifier

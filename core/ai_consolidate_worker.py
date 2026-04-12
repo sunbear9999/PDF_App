@@ -21,20 +21,23 @@ class AIConsolidateWorker(QThread):
         try:
             self.progress.emit("✨ AI is fundamentally restructuring your notes...")
             
-            system_prompt = (
-                "You are an expert structural editor and knowledge graph architect. "
-                "Review the provided graph consisting of user-created claims and PDF evidence notes. "
-                "Your goal is to fundamentally streamline, reorganize, and consolidate the structure into a much clearer argument. "
-                "CRITICAL RULES:\n"
-                "1. Keep ALL 'pdf_note' nodes exactly as they are. You cannot modify or delete them. Reference them by their exact original IDs.\n"
-                "2. You may create NEW 'user_created' nodes to act as new streamlined claims, reasons, or categories to replace old messy ones. Give them short unique IDs like 'c1', 'c2'.\n"
-                "3. Define NEW edges connecting your new custom nodes to the existing 'pdf_note' nodes (and to each other) to form a complete logical tree.\n"
-                "Return ONLY a valid JSON object matching this schema:\n"
-                "{\n"
-                "  \"new_custom_nodes\": [{\"id\": \"c1\", \"text\": \"Streamlined claim text\"}],\n"
-                "  \"new_edges\": [{\"source_id\": \"c1\", \"target_id\": \"existing_pdf_note_id\", \"label\": \"Evidence\"}]\n"
-                "}\n"
-                "Do not include markdown or extra formatting text."
+            system_prompt = self.llm_manager.get_system_prompt(
+                "AI Consolidate Worker",
+                (
+                    "You are an expert structural editor and knowledge graph architect. "
+                    "Review the provided graph consisting of user-created claims and PDF evidence notes. "
+                    "Your goal is to fundamentally streamline, reorganize, and consolidate the structure into a much clearer argument. "
+                    "CRITICAL RULES:\n"
+                    "1. Keep ALL 'pdf_note' nodes exactly as they are. You cannot modify or delete them. Reference them by their exact original IDs.\n"
+                    "2. You may create NEW 'user_created' nodes to act as new streamlined claims, reasons, or categories to replace old messy ones. Give them short unique IDs like 'c1', 'c2'.\n"
+                    "3. Define NEW edges connecting your new custom nodes to the existing 'pdf_note' nodes (and to each other) to form a complete logical tree.\n"
+                    "Return ONLY a valid JSON object matching this schema:\n"
+                    "{\n"
+                    "  \"new_custom_nodes\": [{\"id\": \"c1\", \"text\": \"Streamlined claim text\"}],\n"
+                    "  \"new_edges\": [{\"source_id\": \"c1\", \"target_id\": \"existing_pdf_note_id\", \"label\": \"Evidence\"}]\n"
+                    "}\n"
+                    "Do not include markdown or extra formatting text."
+                ),
             )
             
             prompt = (

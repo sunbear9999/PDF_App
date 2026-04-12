@@ -2,13 +2,15 @@
 import os
 import uuid
 import json
-from PyQt6.QtWidgets import (QGraphicsView, QGraphicsScene, QMenu, QMessageBox, 
+from PyQt6.QtWidgets import (QGraphicsView, QGraphicsScene, QMenu, QMessageBox,
                              QInputDialog, QFrame, QLabel, QVBoxLayout,
                              QHBoxLayout, QComboBox, QPushButton, QDialog,
-                             QScrollArea, QWidget, QFormLayout, QDialogButtonBox, 
-                             QColorDialog, QFileDialog, QTextEdit,QCheckBox,QSlider,QLabel)
+                             QScrollArea, QWidget, QFormLayout, QDialogButtonBox,
+                             QColorDialog, QFileDialog, QTextEdit, QCheckBox, QSlider,
+                             QGraphicsLineItem, QGraphicsTextItem, QListWidget,
+                             QListWidgetItem)
 from PyQt6.QtCore import Qt, QRectF
-from PyQt6.QtGui import QColor, QPen, QBrush, QFont, QPainter, QImage, QStandardItemModel, QStandardItem
+from PyQt6.QtGui import QColor, QPen, QBrush, QFont, QPainter, QImage, QStandardItemModel, QStandardItem, QCursor, QPainterPath, QPainterPathStroker, QShortcut, QKeySequence
 from gui.components.workspace_items import Node, Edge
 from core.ai_organize_worker import AIOrganizeWorker
 from core.ai_connections_worker import AIFindConnectionsWorker
@@ -18,6 +20,115 @@ from core.ai_fill_graph_worker import AIFillGraphWorker
 from core.ai_consolidate_worker import AIConsolidateWorker
 from core.layout_engine import calculate_force_directed_layout
 from core.text_utils import get_semantic_similarity_matrix
+from gui.components.dialogs.workspace_dialogs import PDFColorDialog, DeclutterSettingsDialog, OutlineDialog, WeakpointsDialog
+from gui.components.dialogs.tag_manager_dialog import TagAssignmentDialog
+
+
+class GhostLineItem(QGraphicsLineItem):
+    """A dashed similarity line that can be right-clicked to convert into a real Edge."""
+
+    def __init__(self, x1, y1, x2, y2, source_id, target_id, sim_score, workspace_view):
+        super().__init__(x1, y1, x2, y2)
+        self.source_id = source_id
+        self.target_id = target_id
+        self.sim_score = sim_score
+        self.workspace_view = workspace_view
+        self.setAcceptedMouseButtons(Qt.MouseButton.RightButton)
+
+    def shape(self):
+        # Widen hit area to 12px so right-clicks land easily on thin lines
+        p = QPainterPath()
+        p.moveTo(self.line().p1())
+        p.lineTo(self.line().p2())
+        stroker = QPainterPathStroker()
+        stroker.setWidth(12)
+        return stroker.createStroke(p)
+
+    def contextMenuEvent(self, event):
+        menu = QMenu()
+        pct = int(self.sim_score * 100)
+        convert_action = menu.addAction(f"\U0001f517 Convert to Edge  (similarity {pct}%)")
+        action = menu.exec(event.screenPos())
+        if action == convert_action:
+            self.workspace_view._convert_ghost_to_edge(
+                self.source_id, self.target_id, self.sim_score
+            )
+        event.accept()
+
+
+class CollapsingButton(QPushButton):
+    """Icon-only button that expands to its full label while the mouse is over it."""
+    _COLLAPSED_WIDTH = 36
+
+    def __init__(self, icon_text, full_text, parent=None):
+        super().__init__(icon_text, parent)
+        self._icon_text = icon_text
+        self._full_text = full_text
+        self.setFixedWidth(self._COLLAPSED_WIDTH)
+
+    def _sync_toolbar(self):
+        w = self.parentWidget()
+        while w is not None:
+            if isinstance(w, QFrame) and w.objectName() == "WorkspaceToolbar":
+                w.adjustSize()
+                w.move(15, 15)
+                return
+            w = w.parentWidget()
+
+    def enterEvent(self, event):
+        self.setText(self._full_text)
+        # sizeHint reflects new text immediately; add horizontal padding to match style
+        self.setFixedWidth(self.sizeHint().width() + 8)
+        self._sync_toolbar()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.setText(self._icon_text)
+        self.setFixedWidth(self._COLLAPSED_WIDTH)
+        self._sync_toolbar()
+        super().leaveEvent(event)
+
+
+class CollapsingSection(QFrame):
+    """Shows only an icon label; reveals a content widget while the mouse is inside."""
+
+    def __init__(self, icon_text, content_widget, parent=None):
+        super().__init__(parent)
+        self._content = content_widget
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(4, 0, 4, 0)
+        layout.setSpacing(4)
+        self._icon_label = QLabel(icon_text)
+        self._icon_label.setObjectName("CollapsingIcon")
+        layout.addWidget(self._icon_label)
+        layout.addWidget(content_widget)
+        content_widget.hide()
+
+    def _sync_toolbar(self):
+        w = self.parentWidget()
+        while w is not None:
+            if isinstance(w, QFrame) and w.objectName() == "WorkspaceToolbar":
+                w.adjustSize()
+                w.move(15, 15)
+                return
+            w = w.parentWidget()
+
+    def enterEvent(self, event):
+        self._content.show()
+        self.adjustSize()
+        self._sync_toolbar()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        # leaveEvent fires when mouse enters a child widget too; only collapse when
+        # the cursor has genuinely left this section's bounding rect.
+        local_pos = self.mapFromGlobal(QCursor.pos())
+        if not self.rect().contains(local_pos):
+            self._content.hide()
+            self.adjustSize()
+            self._sync_toolbar()
+        super().leaveEvent(event)
+
 
 class CheckableComboBox(QComboBox):
     def __init__(self, parent=None):
@@ -108,263 +219,150 @@ class CheckableComboBox(QComboBox):
             super().clear()
 
 
-class OutlineDialog(QDialog):
-    def __init__(self, outline_text, workspace_view, parent=None):
-        super().__init__(parent or workspace_view)
-        self.workspace_view = workspace_view
-        self.setWindowTitle("AI Generated Outline")
-        self.setMinimumSize(600, 700)
-        
-        layout = QVBoxLayout(self)
-        
-        self.text_edit = QTextEdit()
-        self.text_edit.setPlainText(outline_text)
-        layout.addWidget(self.text_edit)
-        
-        btn_layout = QHBoxLayout()
-        
-        self.btn_save_txt = QPushButton("💾 Save as .txt")
-        self.btn_save_txt.clicked.connect(self.save_as_txt)
-        
-        self.btn_save_node = QPushButton("📌 Save as Workspace Node")
-        self.btn_save_node.clicked.connect(self.save_as_node)
-        
-        self.btn_close = QPushButton("Close")
-        self.btn_close.clicked.connect(self.reject)
-        
-        self.buttons = [self.btn_save_txt, self.btn_save_node, self.btn_close]
-        
-        btn_layout.addWidget(self.btn_save_txt)
-        btn_layout.addWidget(self.btn_save_node)
-        btn_layout.addStretch()
-        btn_layout.addWidget(self.btn_close)
-        
-        layout.addLayout(btn_layout)
-        
-    def save_as_txt(self):
-        file_path, _ = QFileDialog.getSaveFileName(self, "Save Outline", "outline.txt", "Text Files (*.txt)")
-        if file_path:
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(self.text_edit.toPlainText())
-            QMessageBox.information(self, "Success", "Outline saved successfully!")
-            
-    def save_as_node(self):
-        text = self.text_edit.toPlainText().strip()
-        if not text: return
-        
-        self.workspace_view.save_state_for_undo()
-        
-        node_id = f"custom_{uuid.uuid4()}"
-        node = Node(node_id, quote="", note=text, color="#1e4034", is_custom=True, width=350, height=250)
-        
-        view_center = self.workspace_view.mapToScene(self.workspace_view.viewport().rect().center())
-        node.setPos(view_center)
-        
-        self.workspace_view.scene_obj.addItem(node)
-        self.workspace_view.nodes[node_id] = node
-        self.workspace_view.main_window.project_manager.mark_dirty("workspace")
-        
-        QMessageBox.information(self, "Success", "Outline added as a new node to the workspace!")
-        self.accept()
-
-class DeclutterSettingsDialog(QDialog):
-    def __init__(self, parent=None):
+class UnusedHighlightsDialog(QDialog):
+    def __init__(self, highlights, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Declutter Options")
-        self.setMinimumWidth(350)
-        
+        self.setWindowTitle("Unused Highlights")
+        self.resize(520, 380)
+
         layout = QVBoxLayout(self)
-        
-        # Enable AI Checkbox
-        self.cb_enable_ai = QCheckBox("Enable Semantic Clustering")
-        self.cb_enable_ai.setChecked(True)
-        self.cb_enable_ai.toggled.connect(self._toggle_slider)
-        layout.addWidget(self.cb_enable_ai)
-        
-        # Strength Slider
-        self.slider_layout = QVBoxLayout()
-        self.lbl_strength = QLabel("Clustering Strength: Medium")
-        self.slider_layout.addWidget(self.lbl_strength)
-        
-        self.slider = QSlider(Qt.Orientation.Horizontal)
-        self.slider.setRange(0, 100)
-        self.slider.setValue(50) # Default to 50%
-        self.slider.valueChanged.connect(self._update_label)
-        self.slider_layout.addWidget(self.slider)
-        
-        layout.addLayout(self.slider_layout)
-        layout.addSpacing(15)
-        
-        # Buttons
+        layout.addWidget(QLabel("Highlights in the database that are not in this workspace (Ctrl+click or Shift+click to select multiple):"))
+
+        self.list_widget = QListWidget()
+        self.list_widget.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        for highlight in highlights:
+            text_content = (highlight.get("text_content") or "[Empty Highlight]").strip()
+            doc_name = os.path.basename(highlight.get("doc_id") or "Unknown PDF")
+            page_num = highlight.get("page_num")
+            page_label = f"Pg {page_num + 1}" if isinstance(page_num, int) else "Unknown Page"
+            label = f"{doc_name} - {page_label}: {text_content}"
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, highlight.get("id"))
+            item.setToolTip(text_content)
+            self.list_widget.addItem(item)
+
+        layout.addWidget(self.list_widget)
+
         btn_layout = QHBoxLayout()
-        self.btn_run = QPushButton("Run Declutter")
+        btn_layout.addStretch()
+        self.btn_add = QPushButton("Add to Workspace")
         self.btn_cancel = QPushButton("Cancel")
-        self.btn_run.clicked.connect(self.accept)
+        self.btn_add.clicked.connect(self.accept)
         self.btn_cancel.clicked.connect(self.reject)
-        
+        btn_layout.addWidget(self.btn_add)
         btn_layout.addWidget(self.btn_cancel)
-        btn_layout.addWidget(self.btn_run)
         layout.addLayout(btn_layout)
 
-        # Apply theme colors if available from parent
-        try:
-            if hasattr(parent, 'main_window') and hasattr(parent.main_window, 'theme_manager'):
-                theme = parent.main_window.theme_manager.get_theme()
-                self.setStyleSheet(f"background-color: {theme['bg_main']}; color: {theme['text_main']};")
-                self.btn_run.setStyleSheet(f"background-color: {theme['accent']}; color: white; border-radius: 4px; padding: 6px;")
-                self.btn_cancel.setStyleSheet(f"background-color: {theme['bg_panel']}; color: {theme['text_main']}; border: 1px solid {theme['border']}; border-radius: 4px; padding: 6px;")
-        except:
-            pass
+        if self.list_widget.count() > 0:
+            self.list_widget.setCurrentRow(0)
+        self.list_widget.itemDoubleClicked.connect(lambda _: self.accept())
 
-    def _toggle_slider(self, checked):
-        self.slider.setEnabled(checked)
-        self.lbl_strength.setEnabled(checked)
-
-    def _update_label(self, value):
-        if value < 30: text = "Low (Loose groupings)"
-        elif value < 70: text = "Medium (Balanced)"
-        else: text = "High (Tight clusters)"
-        self.lbl_strength.setText(f"Clustering Strength: {text}")
-
-    def get_settings(self):
-        # Returns (use_ai: bool, strength_multiplier: float from 0.0 to 2.0)
-        use_ai = self.cb_enable_ai.isChecked()
-        # Map 0-100 slider to a 0.0 to 2.0 multiplier
-        strength = self.slider.value() / 50.0 
-        return use_ai, strength
-    
-class WeakpointsDialog(QDialog):
-    def __init__(self, weakpoints_text, workspace_view, parent=None):
-        super().__init__(parent or workspace_view)
-        self.workspace_view = workspace_view
-        self.setWindowTitle("AI Weakpoint Analysis")
-        self.setMinimumSize(600, 700)
-        
-        layout = QVBoxLayout(self)
-        
-        self.text_edit = QTextEdit()
-        self.text_edit.setPlainText(weakpoints_text)
-        layout.addWidget(self.text_edit)
-        
-        btn_layout = QHBoxLayout()
-        
-        self.btn_save_txt = QPushButton("💾 Save as .txt")
-        self.btn_save_txt.clicked.connect(self.save_as_txt)
-        
-        self.btn_save_node = QPushButton("📌 Save as Workspace Node")
-        self.btn_save_node.clicked.connect(self.save_as_node)
-        
-        self.btn_close = QPushButton("Close")
-        self.btn_close.clicked.connect(self.reject)
-        
-        self.buttons = [self.btn_save_txt, self.btn_save_node, self.btn_close]
-        
-        btn_layout.addWidget(self.btn_save_txt)
-        btn_layout.addWidget(self.btn_save_node)
-        btn_layout.addStretch()
-        btn_layout.addWidget(self.btn_close)
-        
-        layout.addLayout(btn_layout)
-        
-    def save_as_txt(self):
-        file_path, _ = QFileDialog.getSaveFileName(self, "Save Analysis", "weakpoints.txt", "Text Files (*.txt)")
-        if file_path:
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(self.text_edit.toPlainText())
-            QMessageBox.information(self, "Success", "Analysis saved successfully!")
-            
-    def save_as_node(self):
-        text = self.text_edit.toPlainText().strip()
-        if not text: return
-        
-        self.workspace_view.save_state_for_undo()
-        
-        node_id = f"custom_{uuid.uuid4()}"
-        node = Node(node_id, quote="", note=text, color="#4a0e28", is_custom=True, width=350, height=250)
-        
-        view_center = self.workspace_view.mapToScene(self.workspace_view.viewport().rect().center())
-        node.setPos(view_center)
-        
-        self.workspace_view.scene_obj.addItem(node)
-        self.workspace_view.nodes[node_id] = node
-        self.workspace_view.main_window.project_manager.mark_dirty("workspace")
-        
-        QMessageBox.information(self, "Success", "Analysis added as a new node to the workspace!")
-        self.accept()
+    def get_selected_highlight_ids(self):
+        return [item.data(Qt.ItemDataRole.UserRole) for item in self.list_widget.selectedItems()]
 
 
-class PDFColorDialog(QDialog):
-    def __init__(self, pdfs, current_colors, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Organize by PDF Colors")
-        self.setMinimumSize(350, 400)
-        self.pdf_colors = dict(current_colors)
-        
-        layout = QVBoxLayout(self)
-        
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        self.scroll_widget = QWidget()
-        self.form = QFormLayout(self.scroll_widget)
-        
-        self.buttons = {}
-        for pdf in pdfs:
-            btn = QPushButton()
-            btn.setFixedSize(80, 30)
-            color = self.pdf_colors.get(pdf, "#2b2b2b")
-            btn.setStyleSheet(f"background-color: {color}; border: 1px solid #aaaaaa; border-radius: 4px;")
-            btn.clicked.connect(lambda checked, p=pdf, b=btn: self.pick_color(p, b))
-            self.buttons[pdf] = btn
-            self.form.addRow(os.path.basename(pdf), btn)
-            
-        scroll.setWidget(self.scroll_widget)
-        layout.addWidget(scroll)
-        
-        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        btns.accepted.connect(self.accept)
-        btns.rejected.connect(self.reject)
-        layout.addWidget(btns)
-        
-    def pick_color(self, pdf, btn):
-        initial = QColor(self.pdf_colors.get(pdf, "#2b2b2b"))
-        color = QColorDialog.getColor(initial, self, f"Select Color for {os.path.basename(pdf)}")
-        if color.isValid():
-            self.pdf_colors[pdf] = color.name()
-            btn.setStyleSheet(f"background-color: {color.name()}; border: 1px solid #aaaaaa; border-radius: 4px;")
-            
-    def get_colors(self):
-        return self.pdf_colors
+
 
 
 class WorkspaceView(QGraphicsView):
-    def add_node_from_annotation(self, annot):
+    def add_node_from_annotation(self, annot, persist=False, position=None, target_workspace_id=None):
         n_id = annot["id"]
-        quote = annot["subject"] or ""
-        note = annot["content"] or ""
-        color = "#2d2238" if n_id.startswith("AINote") else "#2b2b2b"
+        effective_ws_id = target_workspace_id if target_workspace_id is not None else self.current_workspace_id
+
+        # If the highlight targets a different workspace, persist directly to DB without touching the canvas
+        if persist and effective_ws_id != self.current_workspace_id:
+            pm = self.main_window.project_manager if self.main_window and hasattr(self.main_window, "project_manager") else None
+            if pm and pm.project_filepath:
+                quote = annot.get("subject") or annot.get("text_content") or ""
+                note = annot.get("content") or annot.get("note_text") or ""
+                color = annot.get("color") or "#2b2b2b"
+                w = 200 if len(note + quote) < 50 else (250 if len(note + quote) < 150 else 300)
+                h = 70 if len(note + quote) < 50 else (110 if len(note + quote) < 150 else 160)
+                pm.upsert_node_record({
+                    "id": n_id, "highlight_id": n_id,
+                    "quote": quote, "note": note, "color": color,
+                    "is_custom": False,
+                    "pdf_path": annot.get("pdf_path") or annot.get("doc_id"),
+                    "page_num": annot.get("page_num"),
+                    "manual_font_size": None,
+                    "x": 0.0, "y": 0.0, "width": w, "height": h,
+                }, effective_ws_id)
+            return None
+
+        if n_id in self.nodes:
+            return self.nodes[n_id]
+
+        quote = annot.get("subject") or annot.get("text_content") or ""
+        note = annot.get("content") or annot.get("note_text") or ""
+        color = annot.get("color") or ("#2d2238" if n_id.startswith("AINote") else "#2b2b2b")
         w = 200 if len(note + quote) < 50 else (250 if len(note + quote) < 150 else 300)
         h = 70 if len(note + quote) < 50 else (110 if len(note + quote) < 150 else 160)
-        node = Node(n_id, quote, note, color=color, is_custom=False, width=w, height=h, pdf_path=annot["pdf_path"], page_num=annot["page_num"])
-        node.setPos(50, 50)
+        node = Node(
+            n_id,
+            quote,
+            note,
+            color=color,
+            is_custom=False,
+            width=w,
+            height=h,
+            pdf_path=annot.get("pdf_path") or annot.get("doc_id"),
+            page_num=annot.get("page_num"),
+            highlight_id=n_id,
+        )
+        if position is None:
+            position = self.mapToScene(self.viewport().rect().center())
+        node.setPos(position)
         self.scene_obj.addItem(node)
         self.nodes[n_id] = node
+        self._similarity_signature = None
+        if persist:
+            self._mark_workspace_dirty(autosave=True)
+            self.update_ghost_connections()
+        return node
     def __init__(self, main_window):
         super().__init__()
         self.main_window = main_window
         self.scene_obj = QGraphicsScene(self)
         self.setScene(self.scene_obj)
-        self.scene_obj.view = self 
+        self.scene_obj.view = self
         self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
-        
+        self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
+
+        self.current_workspace_id = 1
+        self._switching_workspace = False
+
         self.nodes = {}
         self.edges = []
+        self.ghost_lines = []
+        self.similarity_matrix = {}
+        self._similarity_signature = None
+        self._updating_ghost_links = False
         self.connecting_node = None
         self.worker = None
 
         self.undo_stack = []
         self.redo_stack = []
         self.is_restoring = False
+
+        self.clipboard = {'nodes': [], 'edges': []}
+
+        # Keep as instance vars so Qt/Python don't GC them.
+        # Use explicit key sequences (not StandardKey enums) to avoid multi-binding ambiguity.
+        # Connect activatedAmbiguously as well so the slot fires even when another widget
+        # in the same window has a conflicting shortcut registered.
+        self._copy_sc = QShortcut(QKeySequence("Ctrl+C"), self)
+        self._copy_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._copy_sc.activated.connect(self.copy_selection)
+        self._copy_sc.activatedAmbiguously.connect(self.copy_selection)
+        self._cut_sc = QShortcut(QKeySequence("Ctrl+X"), self)
+        self._cut_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._cut_sc.activated.connect(self.cut_selection)
+        self._cut_sc.activatedAmbiguously.connect(self.cut_selection)
+        self._paste_sc = QShortcut(QKeySequence("Ctrl+V"), self)
+        self._paste_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._paste_sc.activated.connect(self.paste_selection)
+        self._paste_sc.activatedAmbiguously.connect(self.paste_selection)
 
         self.loading_overlay = QFrame(self)
         self.loading_overlay.hide()
@@ -377,29 +375,90 @@ class WorkspaceView(QGraphicsView):
         self.toolbar_frame = QFrame(self)
         self.toolbar_frame.setObjectName("WorkspaceToolbar")
         tb_layout = QHBoxLayout(self.toolbar_frame)
-        tb_layout.setContentsMargins(10, 8, 10, 8)
-        
-        tb_layout.addWidget(QLabel("Filter View:"))
+        tb_layout.setContentsMargins(10, 6, 10, 6)
+        tb_layout.setSpacing(4)
+
+        # Filter section — collapses to 🔽, expands to show label + combo on hover
+        filter_content = QWidget()
+        filter_content.setStyleSheet("background: transparent;")
+        filter_inner = QHBoxLayout(filter_content)
+        filter_inner.setContentsMargins(0, 0, 0, 0)
+        filter_inner.setSpacing(4)
+        filter_inner.addWidget(QLabel("Filter:"))
         self.filter_combo = CheckableComboBox()
         self.filter_combo.model().dataChanged.connect(self._apply_filter)
-        tb_layout.addWidget(self.filter_combo)
-        
-        self.btn_color_pdf = QPushButton("🎨 Color by PDF")
+        filter_inner.addWidget(self.filter_combo)
+        tb_layout.addWidget(CollapsingSection("🔽", filter_content))
+        filter_inner.addWidget(QLabel("Tags:"))
+        self.tag_filter_combo = CheckableComboBox()
+        self.tag_filter_combo.model().dataChanged.connect(self._apply_filter)
+        filter_inner.addWidget(self.tag_filter_combo)
+
+        # Standalone action buttons (icon-only, expand text on hover)
+        self.btn_color_pdf = CollapsingButton("🎨", "🎨 Color by PDF")
         self.btn_color_pdf.clicked.connect(self._open_color_by_pdf_dialog)
         tb_layout.addWidget(self.btn_color_pdf)
 
-        self.btn_declutter = QPushButton("🧹 Declutter")
+        self.btn_declutter = CollapsingButton("🧹", "🧹 Declutter")
         self.btn_declutter.clicked.connect(self.trigger_declutter)
         tb_layout.addWidget(self.btn_declutter)
 
-        self.btn_export = QPushButton("📸 Export Image")
+        self.btn_export = CollapsingButton("📸", "📸 Export")
         self.btn_export.clicked.connect(self._export_workspace)
         tb_layout.addWidget(self.btn_export)
 
-        self.btn_ai_tools = QPushButton("🤖 AI Tools")
+        self.btn_unused_highlights = CollapsingButton("🧷", "🧷 Unused Highlights")
+        self.btn_unused_highlights.clicked.connect(self.open_unused_highlights_dialog)
+        tb_layout.addWidget(self.btn_unused_highlights)
+
+        self.btn_clear_filters = CollapsingButton("✖", "✖ Clear Filters")
+        self.btn_clear_filters.clicked.connect(self.reset_filters)
+        tb_layout.addWidget(self.btn_clear_filters)
+
+        # Ghost links section — collapses to 👻, expands to show checkbox + slider on hover
+        ghost_content = QWidget()
+        ghost_content.setStyleSheet("background: transparent;")
+        ghost_inner = QHBoxLayout(ghost_content)
+        ghost_inner.setContentsMargins(0, 0, 0, 0)
+        ghost_inner.setSpacing(4)
+        self.chk_show_ghost_links = QCheckBox("Ghost Links")
+        self.chk_show_ghost_links.setChecked(False)
+        ghost_inner.addWidget(self.chk_show_ghost_links)
+        ghost_inner.addWidget(QLabel("Threshold:"))
+        self.slider_ghost_threshold = QSlider(Qt.Orientation.Horizontal)
+        self.slider_ghost_threshold.setRange(60, 95)
+        self.slider_ghost_threshold.setValue(75)
+        self.slider_ghost_threshold.setFixedWidth(110)
+        ghost_inner.addWidget(self.slider_ghost_threshold)
+        tb_layout.addWidget(CollapsingSection("👻", ghost_content))
+
+        # AI Tools button
+        self.btn_ai_tools = CollapsingButton("🤖", "🤖 AI Tools")
         self.ai_menu = self.create_ai_menu(self.btn_ai_tools)
         self.btn_ai_tools.setMenu(self.ai_menu)
         tb_layout.addWidget(self.btn_ai_tools)
+
+        self.chk_show_ghost_links.toggled.connect(self.update_ghost_connections)
+        self.slider_ghost_threshold.valueChanged.connect(self.update_ghost_connections)
+        self.scene_obj.selectionChanged.connect(self.update_ghost_connections)
+        self.scene_obj.changed.connect(self._on_scene_changed)
+
+        # Workspace selector — inline in the toolbar, right of AI Tools
+        tb_layout.addSpacing(8)
+        ws_label = QLabel("🗂️")
+        tb_layout.addWidget(ws_label)
+        self.workspace_combo = QComboBox()
+        self.workspace_combo.setMinimumWidth(110)
+        self.workspace_combo.setToolTip("Switch workspace")
+        self.workspace_combo.addItem("Main Board", 1)
+        self.workspace_combo.currentIndexChanged.connect(self._on_tab_changed)
+        tb_layout.addWidget(self.workspace_combo)
+
+        self.btn_add_workspace = CollapsingButton("＋", "＋ New Board")
+        self.btn_add_workspace.setToolTip("Add new workspace")
+        self.btn_add_workspace.clicked.connect(self._add_workspace)
+        tb_layout.addWidget(self.btn_add_workspace)
+
         self.update_scene_bounds()
 
     def update_scene_bounds(self):
@@ -413,6 +472,9 @@ class WorkspaceView(QGraphicsView):
         buffer = 1500
         rect.adjust(-buffer, -buffer, buffer, buffer)
         self.scene_obj.setSceneRect(rect)
+
+    def _get_workspace_id(self):
+        return self.current_workspace_id
 
     def create_ai_menu(self, parent_widget):
         menu = QMenu("🤖 AI Tools", parent_widget)
@@ -453,7 +515,7 @@ class WorkspaceView(QGraphicsView):
         self.setBackgroundBrush(QBrush(QColor(theme['canvas'])))
         self.loading_overlay.setStyleSheet("background-color: rgba(0, 0, 0, 180); border-radius: 8px;")
         self.loading_label.setStyleSheet(f"color: {theme['success']}; font-size: 26px; font-weight: bold; background: transparent;")
-        
+
         if hasattr(self, 'toolbar_frame'):
             self.toolbar_frame.setStyleSheet(f"""
                 QFrame#WorkspaceToolbar {{
@@ -467,6 +529,12 @@ class WorkspaceView(QGraphicsView):
                 QPushButton {{ background-color: {theme['accent']}; color: #ffffff; border: none; padding: 6px 12px; border-radius: 4px; font-weight: bold; }}
                 QPushButton:hover {{ background-color: {theme['accent_hover']}; }}
                 QPushButton::menu-indicator {{ image: none; }}
+                QLabel#CollapsingIcon {{ background-color: {theme['accent']}; color: #ffffff; padding: 6px 12px; border-radius: 4px; font-weight: bold; }}
+                QCheckBox {{ color: {theme['text_main']}; font-weight: bold; background: transparent; }}
+                QCheckBox::indicator {{ width: 14px; height: 14px; }}
+                QSlider::groove:horizontal {{ height: 4px; background: {theme['border']}; border-radius: 2px; }}
+                QSlider::handle:horizontal {{ background: {theme['accent']}; width: 12px; height: 12px; margin: -4px 0; border-radius: 6px; }}
+                QFrame {{ background: transparent; border: none; }}
                 QMenu {{ background-color: {theme['bg_panel']}; color: {theme['text_main']}; border: 1px solid {theme['border']}; font-weight: bold; padding: 5px; }}
                 QMenu::item {{ padding: 6px 20px 6px 20px; border-radius: 4px; }}
                 QMenu::item:selected {{ background-color: {theme['accent']}; color: #ffffff; }}
@@ -477,9 +545,11 @@ class WorkspaceView(QGraphicsView):
         super().resizeEvent(event)
         if hasattr(self, 'loading_overlay') and not self.loading_overlay.isHidden():
             self.loading_overlay.resize(self.viewport().size())
-            
+
         if hasattr(self, 'toolbar_frame'):
             self.toolbar_frame.move(15, 15)
+
+
 
     def _refresh_pdf_list(self):
         checked_data = self.filter_combo.get_checked_items()
@@ -495,9 +565,52 @@ class WorkspaceView(QGraphicsView):
         
         if self.main_window and hasattr(self.main_window, 'project_manager') and self.main_window.project_manager:
             for pdf in self.main_window.project_manager.pdfs:
-                self.filter_combo.addItem(os.path.basename(pdf), pdf, checked=(pdf in checked_data))
+                full_name = os.path.basename(pdf)
+                display_name = (full_name[:16] + "\u2026") if len(full_name) > 18 else full_name
+                self.filter_combo.addItem(display_name, pdf, checked=(pdf in checked_data))
                 
         self.filter_combo.blockSignals(False)
+
+    def _refresh_tag_list(self, forced_checked=None):
+        checked_data = list(forced_checked) if forced_checked is not None else self.tag_filter_combo.get_checked_items()
+
+        if not checked_data and self.tag_filter_combo.count() == 0:
+            checked_data = ["ALL_TAGS"]
+
+        self.tag_filter_combo.blockSignals(True)
+        self.tag_filter_combo.clear()
+        self.tag_filter_combo.addItem("All Tags", "ALL_TAGS", checked=("ALL_TAGS" in checked_data))
+
+        pm = self.main_window.project_manager if self.main_window and hasattr(self.main_window, "project_manager") else None
+        all_tags = pm.get_all_tags() if pm else []
+        for tag in all_tags:
+            tag_name = tag.get("name")
+            if tag_name:
+                self.tag_filter_combo.addItem(tag_name, tag_name, checked=(tag_name in checked_data))
+
+        self.tag_filter_combo.blockSignals(False)
+
+    def apply_tag_filter(self, tag_name):
+        if not tag_name:
+            return
+        self._refresh_tag_list(forced_checked=[tag_name])
+        self._apply_filter()
+
+    def reset_filters(self):
+        self._refresh_pdf_list()
+        self._refresh_tag_list(forced_checked=["ALL_TAGS"])
+
+        self.filter_combo.blockSignals(True)
+        self.filter_combo.clear()
+        self.filter_combo.addItem("All PDFs", "ALL", checked=True)
+        if self.main_window and hasattr(self.main_window, 'project_manager') and self.main_window.project_manager:
+            for pdf in self.main_window.project_manager.pdfs:
+                full_name = os.path.basename(pdf)
+                display_name = (full_name[:16] + "\u2026") if len(full_name) > 18 else full_name
+                self.filter_combo.addItem(display_name, pdf, checked=False)
+        self.filter_combo.blockSignals(False)
+
+        self._apply_filter()
 
     def get_allowed_docs(self):
         checked = self.filter_combo.get_checked_items()
@@ -510,18 +623,28 @@ class WorkspaceView(QGraphicsView):
     def _apply_filter(self):
         checked_pdfs = self.filter_combo.get_checked_items()
         show_all = "ALL" in checked_pdfs or not checked_pdfs
+        checked_tags = self.tag_filter_combo.get_checked_items() if hasattr(self, "tag_filter_combo") else ["ALL_TAGS"]
+        show_all_tags = "ALL_TAGS" in checked_tags or not checked_tags
         
         # Filter Nodes
         for node in self.nodes.values():
             if show_all:
-                node.show()
+                pdf_ok = True
             else:
                 if node.pdf_path is None:
-                    node.show() # Always show custom structural nodes
+                    pdf_ok = True # Always show custom structural nodes
                 elif node.pdf_path in checked_pdfs:
-                    node.show()
+                    pdf_ok = True
                 else:
-                    node.hide()
+                    pdf_ok = False
+
+            if show_all_tags:
+                tag_ok = True
+            else:
+                node_tag_names = set(node.get_tag_names()) if hasattr(node, "get_tag_names") else set()
+                tag_ok = any(tag_name in node_tag_names for tag_name in checked_tags)
+
+            node.setVisible(pdf_ok and tag_ok)
                     
         # Filter Edges (hide edge if either connected node is hidden)
         for edge in self.edges:
@@ -529,6 +652,253 @@ class WorkspaceView(QGraphicsView):
                 edge.show()
             else:
                 edge.hide()
+
+        self.update_ghost_connections()
+
+    def _build_similarity_matrix_if_needed(self):
+        node_items = sorted(self.nodes.values(), key=lambda n: n.node_id)
+        signature = tuple((n.node_id, (n.quote or ""), (n.note or "")) for n in node_items)
+        if signature == self._similarity_signature:
+            return
+
+        self._similarity_signature = signature
+        self.similarity_matrix = {}
+
+        if len(node_items) < 2:
+            return
+
+        llm_manager = None
+        try:
+            temp_manager = self.main_window.tabs["LLM Chat"].llm_manager
+            if temp_manager and temp_manager.ai_enabled:
+                llm_manager = temp_manager
+        except Exception:
+            llm_manager = None
+
+        if not llm_manager:
+            return
+
+        node_ids = [n.node_id for n in node_items]
+        texts_to_embed = [f"{n.quote} {n.note}".strip() for n in node_items]
+        self.similarity_matrix = get_semantic_similarity_matrix(node_ids, texts_to_embed, llm_manager)
+
+    def update_ghost_connections(self):
+        if self._updating_ghost_links:
+            return
+
+        self._updating_ghost_links = True
+        try:
+            for line_item in self.ghost_lines:
+                if line_item and line_item.scene() is self.scene_obj:
+                    self.scene_obj.removeItem(line_item)
+            self.ghost_lines.clear()
+
+            if not hasattr(self, "chk_show_ghost_links") or not self.chk_show_ghost_links.isChecked():
+                return
+
+            self._build_similarity_matrix_if_needed()
+
+            threshold = self.slider_ghost_threshold.value() / 100.0
+            selected_ids = {n.node_id for n in self.scene_obj.selectedItems() if isinstance(n, Node)}
+            node_list = [n for n in self.nodes.values() if n.isVisible()]
+
+            seen_pairs = set()
+            for i, node_a in enumerate(node_list):
+                for node_b in node_list[i + 1:]:
+                    pair_key = (min(node_a.node_id, node_b.node_id), max(node_a.node_id, node_b.node_id))
+                    if pair_key in seen_pairs:
+                        continue
+                    seen_pairs.add(pair_key)
+
+                    sim_score = self.similarity_matrix.get(node_a.node_id, {}).get(node_b.node_id)
+                    if sim_score is None:
+                        sim_score = self.similarity_matrix.get(node_b.node_id, {}).get(node_a.node_id)
+                    if sim_score is None or sim_score <= threshold:
+                        continue
+
+                    p1 = node_a.mapToScene(node_a.rect().center())
+                    p2 = node_b.mapToScene(node_b.rect().center())
+
+                    # Highlight lines that touch a currently selected node
+                    if node_a.node_id in selected_ids or node_b.node_id in selected_ids:
+                        pen = QPen(QColor("#e8e8ff"), 3, Qt.PenStyle.DashLine)
+                    else:
+                        pen = QPen(QColor("#9090d0"), 2, Qt.PenStyle.DashLine)
+
+                    line_item = GhostLineItem(
+                        p1.x(), p1.y(), p2.x(), p2.y(),
+                        node_a.node_id, node_b.node_id, sim_score, self
+                    )
+                    line_item.setPen(pen)
+                    line_item.setZValue(-1)
+                    self.scene_obj.addItem(line_item)
+                    self.ghost_lines.append(line_item)
+
+                    # Similarity score label at the midpoint
+                    mid_x = (p1.x() + p2.x()) / 2
+                    mid_y = (p1.y() + p2.y()) / 2
+                    text_item = self.scene_obj.addText(f"{int(sim_score * 100)}%")
+                    lbl_font = QFont()
+                    lbl_font.setPointSize(7)
+                    text_item.setFont(lbl_font)
+                    text_item.setDefaultTextColor(pen.color())
+                    text_item.setPos(
+                        mid_x - text_item.boundingRect().width() / 2,
+                        mid_y - text_item.boundingRect().height() / 2
+                    )
+                    text_item.setZValue(-0.5)
+                    self.ghost_lines.append(text_item)
+        finally:
+            self._updating_ghost_links = False
+
+    def _on_scene_changed(self, *args):
+        if self._updating_ghost_links:
+            return
+        if not hasattr(self, "chk_show_ghost_links") or not self.chk_show_ghost_links.isChecked():
+            return
+        self.update_ghost_connections()
+
+    def _convert_ghost_to_edge(self, source_id, target_id, sim_score):
+        """Convert a ghost similarity line into a persistent Edge."""
+        if source_id not in self.nodes or target_id not in self.nodes:
+            return
+        src_node = self.nodes[source_id]
+        tgt_node = self.nodes[target_id]
+
+        # Skip if an edge already exists between these two nodes
+        for existing in self.edges:
+            if {existing.source_node, existing.dest_node} == {src_node, tgt_node}:
+                return
+
+        self.save_state_for_undo()
+        label = f"~{int(sim_score * 100)}% similar"
+        edge = Edge(src_node, tgt_node, label)
+        self.scene_obj.addItem(edge)
+        self.edges.append(edge)
+        self._mark_workspace_dirty(autosave=True)
+        self.update_ghost_connections()
+
+    def open_unused_highlights_dialog(self):
+        workspace_id = self._get_workspace_id()
+        unused_highlights = self.main_window.project_manager.get_unused_highlights(workspace_id)
+
+        if not unused_highlights:
+            QMessageBox.information(self, "Unused Highlights", "No unused highlights found.")
+            return
+
+        dialog = UnusedHighlightsDialog(unused_highlights, self)
+        if hasattr(self.main_window, 'theme_manager'):
+            theme = self.main_window.theme_manager.get_theme()
+            dialog.setStyleSheet(f"""
+                QDialog {{ background-color: {theme['bg_main']}; color: {theme['text_main']}; }}
+                QLabel {{ color: {theme['text_main']}; font-weight: bold; }}
+                QListWidget {{ background-color: {theme['bg_panel']}; color: {theme['text_main']}; border: 1px solid {theme['border']}; }}
+                QListWidget::item:selected {{ background-color: {theme['accent']}; color: #ffffff; }}
+                QPushButton {{ background-color: {theme['accent']}; color: #ffffff; border: none; padding: 6px 12px; border-radius: 4px; font-weight: bold; }}
+            """)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        highlight_ids = dialog.get_selected_highlight_ids()
+        if not highlight_ids:
+            return
+
+        self.save_state_for_undo()
+        view_center = self.mapToScene(self.viewport().rect().center())
+        last_node = None
+        offset = 0
+        for highlight_id in highlight_ids:
+            highlight = self.main_window.project_manager.get_highlight(highlight_id)
+            if not highlight:
+                continue
+            position = view_center.__class__(view_center.x(), view_center.y() + offset)
+            node = self.add_node_from_annotation(
+                {
+                    "id": highlight["id"],
+                    "subject": highlight.get("text_content", ""),
+                    "content": "",
+                    "pdf_path": highlight.get("doc_id"),
+                    "page_num": highlight.get("page_num"),
+                    "color": highlight.get("color"),
+                },
+                persist=True,
+                position=position,
+            )
+            if node:
+                last_node = node
+                offset += 120
+
+        self.scene_obj.clearSelection()
+        if last_node:
+            last_node.setSelected(True)
+        self.update_scene_bounds()
+
+    # ------------------------------------------------------------------ workspace tabs
+
+    def _populate_workspace_tabs(self):
+        """Reload the workspace combo from the DB. Called when a project is opened."""
+        if not hasattr(self, 'workspace_combo'):
+            return
+        pm = self.main_window.project_manager
+        if not pm or not pm.project_filepath:
+            return
+
+        self.workspace_combo.blockSignals(True)
+        try:
+            self.workspace_combo.clear()
+            workspaces = pm.get_workspaces()
+            current_index = 0
+            for i, ws in enumerate(workspaces):
+                self.workspace_combo.addItem(ws["name"], ws["id"])
+                if ws["id"] == self.current_workspace_id:
+                    current_index = i
+            self.workspace_combo.setCurrentIndex(current_index)
+        finally:
+            self.workspace_combo.blockSignals(False)
+
+    def _on_tab_changed(self, index):
+        """Save current workspace and load the one selected in the combo box."""
+        new_ws_id = self.workspace_combo.itemData(index)
+        if new_ws_id is None or new_ws_id == self.current_workspace_id:
+            return
+
+        # Persist the current workspace before switching
+        self._mark_workspace_dirty(autosave=True)
+
+        self.current_workspace_id = new_ws_id
+        self._similarity_signature = None
+
+        pm = self.main_window.project_manager
+        if not pm or not pm.project_filepath:
+            return
+
+        workspace_data = pm.get_workspace_data(self.current_workspace_id)
+        all_annots = pm.get_highlights()
+        self.sync_with_project(workspace_data, all_annots)
+
+    def _add_workspace(self):
+        """Prompt for a name, create a new workspace in DB, and switch to it."""
+        pm = self.main_window.project_manager
+        if not pm or not pm.project_filepath:
+            QMessageBox.information(self, "No Project", "Please open a project first.")
+            return
+
+        name, ok = QInputDialog.getText(self, "New Workspace", "Enter workspace name:")
+        if not ok or not name.strip():
+            return
+
+        name = name.strip()
+        new_id = pm.create_workspace(name)
+        if new_id is None:
+            QMessageBox.warning(self, "Error", "Could not create workspace.")
+            return
+
+        self.workspace_combo.blockSignals(True)
+        self.workspace_combo.addItem(name, new_id)
+        new_index = self.workspace_combo.count() - 1
+        self.workspace_combo.blockSignals(False)
+        self.workspace_combo.setCurrentIndex(new_index)  # fires _on_tab_changed
 
     def _open_color_by_pdf_dialog(self):
         if not self.main_window.project_manager.pdfs:
@@ -762,7 +1132,7 @@ class WorkspaceView(QGraphicsView):
         
         for n_id, data in state_data.get("nodes", {}).items():
             node = Node(n_id, data["quote"], data["note"], data["color"], data["is_custom"], 
-                        data["width"], data["height"], data.get("pdf_path"), data.get("page_num"), data.get("manual_font_size"))
+                        data["width"], data["height"], data.get("pdf_path"), data.get("page_num"), data.get("manual_font_size"), data.get("highlight_id"))
             node.setPos(data["x"], data["y"])
             self.scene_obj.addItem(node)
             self.nodes[n_id] = node
@@ -777,6 +1147,120 @@ class WorkspaceView(QGraphicsView):
                 
         self._apply_filter()
 
+    # ------------------------------------------------------------------ clipboard
+
+    def copy_selection(self):
+        selected_nodes = [n for n in self.scene_obj.selectedItems() if type(n).__name__ == 'Node']
+        if not selected_nodes:
+            return
+        selected_node_set = set(selected_nodes)
+        self.clipboard['nodes'] = [
+            {
+                'old_id': n.node_id,
+                'highlight_id': n.highlight_id,
+                'quote': n.quote,
+                'note_text': n.note,
+                'color': n.color,
+                'is_custom': n.is_custom,
+                'pdf_path': n.pdf_path,
+                'page_num': n.page_num,
+                'manual_font_size': n.manual_font_size,
+                'width': n.base_width,
+                'height': n.base_height,
+                'x': n.pos().x(),
+                'y': n.pos().y(),
+            }
+            for n in selected_nodes
+        ]
+        self.clipboard['edges'] = [
+            {
+                'source_old_id': e.source_node.node_id,
+                'dest_old_id': e.dest_node.node_id,
+                'label': e.label_text,
+                'color': e.base_color.name(),
+                'weight': e.weight,
+            }
+            for e in self.edges
+            if e.source_node in selected_node_set and e.dest_node in selected_node_set
+        ]
+
+    def cut_selection(self):
+        self.copy_selection()
+        if self.clipboard['nodes']:
+            self.delete_selected_nodes()
+
+    def paste_selection(self):
+        if not self.clipboard['nodes']:
+            return
+
+        self.save_state_for_undo()
+        pm = self.main_window.project_manager
+        ws_id = self.current_workspace_id
+        offset = 20  # shift so pastes don't overlap when re-pasting in the same workspace
+
+        id_mapping = {}
+        new_nodes = []
+        for data in self.clipboard['nodes']:
+            new_id = f"custom_{uuid.uuid4()}"
+            id_mapping[data['old_id']] = new_id
+            node = Node(
+                new_id,
+                data['quote'],
+                data['note_text'],
+                color=data['color'],
+                is_custom=data['is_custom'],
+                width=data['width'],
+                height=data['height'],
+                pdf_path=data['pdf_path'],
+                page_num=data['page_num'],
+                manual_font_size=data['manual_font_size'],
+                highlight_id=data['highlight_id'],
+            )
+            node.setPos(data['x'] + offset, data['y'] + offset)
+            self.scene_obj.addItem(node)
+            self.nodes[new_id] = node
+            new_nodes.append(node)
+            pm.upsert_node_record({
+                'id': new_id,
+                'highlight_id': data['highlight_id'],
+                'quote': data['quote'],
+                'note': data['note_text'],
+                'color': data['color'],
+                'is_custom': data['is_custom'],
+                'pdf_path': data['pdf_path'],
+                'page_num': data['page_num'],
+                'manual_font_size': data['manual_font_size'],
+                'x': data['x'] + offset,
+                'y': data['y'] + offset,
+                'width': data['width'],
+                'height': data['height'],
+            }, ws_id)
+
+        for edata in self.clipboard['edges']:
+            src_id = id_mapping.get(edata['source_old_id'])
+            tgt_id = id_mapping.get(edata['dest_old_id'])
+            if src_id and tgt_id and src_id in self.nodes and tgt_id in self.nodes:
+                edge_id = str(uuid.uuid4())
+                edge = Edge(
+                    self.nodes[src_id],
+                    self.nodes[tgt_id],
+                    edata['label'],
+                    edge_id,
+                    edata['color'],
+                    edata['weight'],
+                )
+                self.scene_obj.addItem(edge)
+                self.edges.append(edge)
+
+        self.scene_obj.clearSelection()
+        for node in new_nodes:
+            node.setSelected(True)
+
+        self._similarity_signature = None
+        self._mark_workspace_dirty(autosave=True)
+        self.update_ghost_connections()
+        self.update_scene_bounds()
+
     def keyPressEvent(self, event):
         if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
             if event.key() == Qt.Key.Key_Z:
@@ -785,6 +1269,22 @@ class WorkspaceView(QGraphicsView):
             elif event.key() == Qt.Key.Key_Y:
                 self.redo()
                 return
+            elif event.key() == Qt.Key.Key_C:
+                self.copy_selection()
+                event.accept()
+                return
+            elif event.key() == Qt.Key.Key_X:
+                self.cut_selection()
+                event.accept()
+                return
+            elif event.key() == Qt.Key.Key_V:
+                self.paste_selection()
+                event.accept()
+                return
+        if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            self.delete_selected_nodes()
+            event.accept()
+            return
         super().keyPressEvent(event)
 
     def wheelEvent(self, event):
@@ -853,7 +1353,7 @@ class WorkspaceView(QGraphicsView):
         pm.mark_dirty("workspace")
         if autosave:
             try:
-                pm.save_workspace_data(self.serialize_workspace())
+                pm.save_workspace_data(self.serialize_workspace(), self.current_workspace_id)
             except Exception as e:
                 print(f"Workspace autosave failed: {e}")
 
@@ -874,6 +1374,7 @@ class WorkspaceView(QGraphicsView):
         # Remove from internal edge list
         if edge in self.edges:
             self.edges.remove(edge)
+        self.main_window.project_manager.delete_edge_record(edge.edge_id)
 
         # Schedule for deletion (deleteLater is available on QGraphicsItem)
         if hasattr(edge, 'deleteLater'):
@@ -885,7 +1386,49 @@ class WorkspaceView(QGraphicsView):
 
         self._mark_workspace_dirty(autosave=True)
 
-    def delete_node(self, node):
+    def delete_selected_nodes(self):
+        nodes_to_delete = [item for item in list(self.scene_obj.selectedItems()) if type(item).__name__ == 'Node']
+        if not nodes_to_delete:
+            return
+
+        self.save_state_for_undo()
+
+        for node in nodes_to_delete:
+            for edge in list(self.edges)[::-1]:
+                if edge.source_node == node or edge.dest_node == node:
+                    if edge.source_node and edge in edge.source_node.edges:
+                        edge.source_node.edges.remove(edge)
+                    if edge.dest_node and edge in edge.dest_node.edges:
+                        edge.dest_node.edges.remove(edge)
+
+                    self.scene_obj.removeItem(edge)
+                    if edge in self.edges:
+                        self.edges.remove(edge)
+                    self.main_window.project_manager.delete_edge_record(edge.edge_id)
+
+                    edge.source_node = None
+                    edge.dest_node = None
+                    if hasattr(edge, 'deleteLater'):
+                        edge.deleteLater()
+
+            self.scene_obj.removeItem(node)
+            node.edges = []
+            if node.node_id in self.nodes:
+                del self.nodes[node.node_id]
+            self.main_window.project_manager.delete_node_record(node.node_id)
+
+            if hasattr(node, 'deleteLater'):
+                node.deleteLater()
+
+        self._similarity_signature = None
+        self.update_ghost_connections()
+        self.main_window.project_manager.mark_dirty("workspace")
+
+    def delete_node(self, node, delete_highlight=False):
+        if delete_highlight and node.highlight_id:
+            self._delete_highlight_permanently(node.highlight_id)
+            return
+
         # Delete all connected edges first (shallow copy)
         for edge in list(node.edges):
             self.delete_edge(edge)
@@ -897,10 +1440,7 @@ class WorkspaceView(QGraphicsView):
         node.edges = []
         if node.node_id in self.nodes:
             del self.nodes[node.node_id]
-
-        if not node.is_custom and node.pdf_path is not None:
-            self.main_window.tabs["Notes"].save_workspace_state()
-            self.main_window.tabs["Notes"].delete_note(node.pdf_path, node.page_num, node.node_id)
+        self.main_window.project_manager.delete_node_record(node.node_id)
 
         # Schedule for deletion
         if hasattr(node, 'deleteLater'):
@@ -909,7 +1449,40 @@ class WorkspaceView(QGraphicsView):
             from PyQt6.QtCore import QTimer
             QTimer.singleShot(0, lambda: node.setParentItem(None))
 
+        self._similarity_signature = None
         self._mark_workspace_dirty(autosave=True)
+        self.update_ghost_connections()
+
+    def _delete_highlight_permanently(self, highlight_id):
+        nodes_to_remove = [node for node in list(self.nodes.values()) if node.highlight_id == highlight_id or node.node_id == highlight_id]
+        highlight_record = self.main_window.project_manager.get_highlight(highlight_id)
+
+        for node in nodes_to_remove:
+            for edge in list(node.edges):
+                self.delete_edge(edge)
+            self.scene_obj.removeItem(node)
+            node.edges = []
+            self.nodes.pop(node.node_id, None)
+            self.main_window.project_manager.delete_node_record(node.node_id)
+            if hasattr(node, 'deleteLater'):
+                node.deleteLater()
+
+        pdf_path = None
+        page_num = None
+        if highlight_record:
+            pdf_path = highlight_record.get("doc_id")
+            page_num = highlight_record.get("page_num")
+        elif nodes_to_remove:
+            pdf_path = nodes_to_remove[0].pdf_path
+            page_num = nodes_to_remove[0].page_num
+
+        if pdf_path is not None and page_num is not None:
+            self.main_window.tabs["Notes"].delete_note(pdf_path, page_num, highlight_id)
+
+        self.main_window.project_manager.delete_highlight_record(highlight_id)
+        self._similarity_signature = None
+        self._mark_workspace_dirty(autosave=True)
+        self.update_ghost_connections()
 
     def contextMenuEvent(self, event):
         item = self.itemAt(event.pos())
@@ -921,33 +1494,52 @@ class WorkspaceView(QGraphicsView):
 
         if len(selected_nodes) > 1 and isinstance(item, Node) and item in selected_nodes:
             menu = QMenu(self)
-            del_action = menu.addAction("🗑️ Delete Selected Nodes")
+            remove_action = menu.addAction("🗑️ Remove Selected from Workspace")
+            delete_action = menu.addAction("🔥 Delete Selected Highlights Permanently")
             declutter_action = menu.addAction("🧹 Declutter Selected Nodes")
+            remove_action.triggered.connect(self.delete_selected_nodes)
             
             menu.addSeparator()
             ai_menu = self.create_ai_menu(menu)
             menu.addMenu(ai_menu)
             
             action = menu.exec(event.globalPos())
-            if action == del_action:
+            if action == delete_action:
                 self.save_state_for_undo()
-                for n in selected_nodes:
-                    self.delete_node(n)
+                for highlight_id in {n.highlight_id for n in selected_nodes if n.highlight_id}:
+                    self._delete_highlight_permanently(highlight_id)
             elif action == declutter_action:
                 self.trigger_declutter()
             return
 
         if isinstance(item, Node):
+            # Snapshot the selection BEFORE we potentially clear it below.
+            # This lets us detect "node A was selected, right-clicked on node B → offer connect".
+            prior_selected = [n for n in selected_nodes]
+
+            if item not in selected_nodes:
+                self.scene_obj.clearSelection()
+                item.setSelected(True)
+                selected_nodes = [item]
+
+            # Connect action: exactly one node was already selected, and it's not the item
+            connect_source = prior_selected[0] if (len(prior_selected) == 1 and prior_selected[0] is not item) else None
+
             menu = QMenu(self)
             edit_action = menu.addAction("✏️ Edit Note Text")
             color_action = menu.addAction("🎨 Change Color")
-            
+            manage_tags_action = menu.addAction("🏷️ Manage Tags")
+
             connect_action = None
-            if len(selected_nodes) == 1 and item != selected_nodes[0]:
-                connect_action = menu.addAction("🔗 Connect Selected Node to This")
+            if connect_source:
+                connect_action = menu.addAction("🔗 Connect to Selected Node")
                 
-            del_action = menu.addAction("🗑️ Delete Note")
+            remove_action = menu.addAction("🗑️ Remove Selected from Workspace")
+            delete_highlight_action = None
+            if item.highlight_id:
+                delete_highlight_action = menu.addAction("🔥 Delete Highlight Permanently")
             declutter_action = menu.addAction("🧹 Declutter Selected Node")
+            remove_action.triggered.connect(self.delete_selected_nodes)
             
             menu.addSeparator()
             ai_menu = self.create_ai_menu(menu)
@@ -958,13 +1550,19 @@ class WorkspaceView(QGraphicsView):
                 item.trigger_edit()
             elif action == color_action:
                 item.trigger_color_change()
+            elif action == manage_tags_action:
+                dlg = TagAssignmentDialog(self.main_window.project_manager, item.node_id, "node", self)
+                if dlg.exec():
+                    item.refresh_tag_badges()
+                    self._refresh_tag_list()
+                    self._apply_filter()
             elif connect_action and action == connect_action:
                 self.save_state_for_undo()
-                self.connecting_node = selected_nodes[0]
+                self.connecting_node = connect_source
                 self.finish_connection(item)
-            elif action == del_action:
+            elif delete_highlight_action and action == delete_highlight_action:
                 self.save_state_for_undo()
-                self.delete_node(item)
+                self.delete_node(item, delete_highlight=True)
             elif action == declutter_action:
                 self.trigger_declutter()
             return
@@ -1341,9 +1939,9 @@ class WorkspaceView(QGraphicsView):
                     "weight": 3
                 })
                 
-            self.main_window.project_manager.save_workspace_data(workspace_data)
+            self.main_window.project_manager.save_workspace_data(workspace_data, self.current_workspace_id)
             self.main_window.project_manager.mark_dirty("workspace")
-            
+
             all_annots = self.main_window.tabs["Notes"]._get_all_project_annotations_for_workspace()
             self.sync_with_project(workspace_data, all_annots)
             
@@ -1481,7 +2079,9 @@ class WorkspaceView(QGraphicsView):
         
         self.scene_obj.addItem(node)
         self.nodes[node_id] = node
+        self._similarity_signature = None
         self._mark_workspace_dirty(autosave=True)
+        self.update_ghost_connections()
         
         # Select the newly created node visually
         self.scene_obj.clearSelection()
@@ -1501,41 +2101,50 @@ class WorkspaceView(QGraphicsView):
         self.nodes.clear()
         self.edges.clear()
 
-        annot_dict = {a["id"]: a for a in pdf_annotations}
+        if isinstance(pdf_annotations, dict):
+            annot_dict = pdf_annotations
+        else:
+            annot_dict = {a["id"]: a for a in pdf_annotations}
 
         saved_nodes = workspace_data.get("nodes", {})
         for n_id, data in saved_nodes.items():
             quote = data.get("quote", "")
             note = data.get("note", "")
+            highlight_id = data.get("highlight_id")
 
-            if n_id in annot_dict:
-                quote = annot_dict[n_id]["subject"] or ""
-                note = annot_dict[n_id]["content"] or ""
+            if highlight_id and highlight_id in annot_dict:
+                quote = annot_dict[highlight_id].get("text_content", quote) or quote
+            elif n_id in annot_dict:
+                quote = annot_dict[n_id].get("text_content", quote) or quote
 
             node = Node(n_id, quote, note, data["color"], data["is_custom"], 
-                        data["width"], data["height"], data.get("pdf_path"), data.get("page_num"), data.get("manual_font_size"))
+                        data["width"], data["height"], data.get("pdf_path") or annot_dict.get(highlight_id or n_id, {}).get("doc_id"), data.get("page_num") if data.get("page_num") is not None else annot_dict.get(highlight_id or n_id, {}).get("page_num"), data.get("manual_font_size"), highlight_id)
             node.setPos(data["x"], data["y"])
             self.scene_obj.addItem(node)
             self.nodes[n_id] = node
 
-        y_offset = 50
-        for annot in pdf_annotations:
-            if annot["id"] not in self.nodes:
-                quote = annot["subject"] or ""
-                note = annot["content"] or ""
-                
-                l = len(note + quote)
-                w = 200 if l < 50 else (250 if l < 150 else 300)
-                h = 70 if l < 50 else (110 if l < 150 else 160)
-                
-                color = "#2d2238" if annot["id"].startswith("AINote") else "#2b2b2b"
-                
-                node = Node(annot["id"], quote, note, color=color, is_custom=False, 
-                            width=w, height=h, pdf_path=annot["pdf_path"], page_num=annot["page_num"])
-                node.setPos(50, y_offset)
-                y_offset += 100
-                self.scene_obj.addItem(node)
-                self.nodes[annot["id"]] = node
+        should_initialize_nodes = (
+            self.current_workspace_id == 1
+            and self.main_window.project_manager.get_metadata("workspace_nodes_initialized", "0") != "1"
+        )
+        if should_initialize_nodes:
+            y_offset = 50
+            for annot in annot_dict.values():
+                if annot["id"] not in self.nodes:
+                    self.add_node_from_annotation(
+                        {
+                            "id": annot["id"],
+                            "subject": annot.get("text_content", ""),
+                            "content": "",
+                            "pdf_path": annot.get("doc_id"),
+                            "page_num": annot.get("page_num"),
+                            "color": annot.get("color"),
+                        },
+                        persist=False,
+                        position=self.mapToScene(50, y_offset),
+                    )
+                    y_offset += 100
+            self.main_window.project_manager.set_metadata("workspace_nodes_initialized", "1")
 
         for edge_data in workspace_data.get("edges", []):
             if edge_data["source"] in self.nodes and edge_data["target"] in self.nodes:
@@ -1550,10 +2159,16 @@ class WorkspaceView(QGraphicsView):
                 self.nodes[n_id].setSelected(True)
                 
         self._refresh_pdf_list()
+        self._refresh_tag_list()
         self._apply_filter()
+        self._similarity_signature = None
+        self.update_ghost_connections()
         self.update_scene_bounds()
         self.horizontalScrollBar().setValue(h_scroll)
         self.verticalScrollBar().setValue(v_scroll)
+
+        if should_initialize_nodes:
+            self._mark_workspace_dirty(autosave=True)
 
         
 
@@ -1561,6 +2176,8 @@ class WorkspaceView(QGraphicsView):
         data = {"nodes": {}, "edges": []}
         for n_id, node in self.nodes.items():
             data["nodes"][n_id] = {
+                "highlight_id": node.highlight_id,
+                "workspace_id": self.current_workspace_id,
                 "quote": node.quote,
                 "note": node.note,
                 "color": node.color,

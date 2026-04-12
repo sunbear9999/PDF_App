@@ -1,9 +1,11 @@
 # gui/tabs/notes_tab.py
+import json
 import os
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                              QPushButton, QScrollArea, QFrame, QComboBox, 
                              QStackedWidget, QColorDialog, QMessageBox)
 from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QColor
 from gui.components.workspace_view import WorkspaceView
 from gui.components.help_dialog import HelpDialog
 
@@ -270,8 +272,29 @@ class NotesTab(QWidget):
     def save_workspace_state(self):
         if hasattr(self, 'workspace_view'):
             data = self.workspace_view.serialize_workspace()
-            self.main_window.project_manager.save_workspace_data(data)
+            ws_id = self.workspace_view.current_workspace_id
+            self.main_window.project_manager.save_workspace_data(data, ws_id)
             self.main_window.project_manager.mark_dirty("workspace")
+
+    def handle_highlight_created(self, highlight_data):
+        pm = self.main_window.project_manager
+        pm.upsert_highlight({
+            "id": highlight_data.get("id"),
+            "doc_id": highlight_data.get("pdf_path"),
+            "page_num": highlight_data.get("page_num"),
+            "rect_coords": highlight_data.get("rect_coords"),
+            "text_content": highlight_data.get("subject", ""),
+            "color": highlight_data.get("color"),
+        })
+
+        if not hasattr(self, "workspace_view"):
+            return
+
+        if highlight_data.get("id") in self.workspace_view.nodes:
+            return
+
+        self.workspace_view.add_node_from_annotation(highlight_data, persist=True, target_workspace_id=1)
+        pm.set_metadata("workspace_nodes_initialized", "1")
 
     def _get_all_project_annotations_for_workspace(self):
         annots = []
@@ -286,13 +309,28 @@ class NotesTab(QWidget):
                         if info:
                             title = info.get("title", "")
                             if title.startswith("UserNote") or title.startswith("AINote"):
-                                annots.append({
+                                stroke = annot.colors.get("stroke")
+                                color_hex = None
+                                if isinstance(stroke, tuple) and len(stroke) >= 3:
+                                    color_hex = QColor(int(stroke[0] * 255), int(stroke[1] * 255), int(stroke[2] * 255)).name()
+                                annot_data = {
                                     "id": title,
                                     "subject": info.get("subject", ""),
                                     "content": info.get("content", ""),
-                                    "pdf_path": path,     
-                                    "page_num": i         
+                                    "pdf_path": path,
+                                    "page_num": i,
+                                    "rect_coords": json.dumps(list(annot.rect)),
+                                    "color": color_hex,
+                                }
+                                self.main_window.project_manager.upsert_highlight({
+                                    "id": annot_data["id"],
+                                    "doc_id": annot_data["pdf_path"],
+                                    "page_num": annot_data["page_num"],
+                                    "rect_coords": annot_data["rect_coords"],
+                                    "text_content": annot_data["subject"],
+                                    "color": annot_data["color"],
                                 })
+                                annots.append(annot_data)
             except Exception as e: 
                 print(f"Error extracting annotations from {path}: {e}")
         return annots
@@ -300,8 +338,11 @@ class NotesTab(QWidget):
     def _sync_workspace(self, force_reload=False):
         try:
             if not self.main_window.project_manager.project_filepath: return
-            workspace_data = self.main_window.project_manager.get_workspace_data()
-            all_annots = self._get_all_project_annotations_for_workspace()
+            self._get_all_project_annotations_for_workspace()
+            ws_id = self.workspace_view.current_workspace_id
+            workspace_data = self.main_window.project_manager.get_workspace_data(ws_id)
+            all_annots = self.main_window.project_manager.get_highlights()
+            self.workspace_view._populate_workspace_tabs()
             self.workspace_view.sync_with_project(workspace_data, all_annots)
         except Exception as e:
             print(f"Error syncing workspace: {e}")

@@ -20,12 +20,15 @@ class AIWeakpointsWorker(QThread):
             # =================================================================
             # AGENT 1: Structural Mapping & Argument Comprehension
             # =================================================================
-            agent1_system = (
-                "You are an expert logical analyst and debate coach. Your task is to review a web of notes and user-created concepts. "
-                "User-created nodes represent claims, arguments, or assertions. PDF note nodes represent concrete evidence, quotes, or citations. "
-                "Review the nodes and their connections to map out the exact argument the user is building. "
-                "Identify the main thesis, the supporting pillars, and map which evidence goes to which claim. "
-                "Do NOT critique the argument yet; simply map it out and explain what the user is attempting to prove and how they are structuring it."
+            agent1_system = self.llm_manager.get_system_prompt(
+                "AI Weakpoints Worker - Mapper",
+                (
+                    "You are an expert logical analyst and debate coach. Your task is to review a web of notes and user-created concepts. "
+                    "User-created nodes represent claims, arguments, or assertions. PDF note nodes represent concrete evidence, quotes, or citations. "
+                    "Review the nodes and their connections to map out the exact argument the user is building. "
+                    "Identify the main thesis, the supporting pillars, and map which evidence goes to which claim. "
+                    "Do NOT critique the argument yet; simply map it out and explain what the user is attempting to prove and how they are structuring it."
+                ),
             )
             
             agent1_prompt = (
@@ -57,12 +60,15 @@ class AIWeakpointsWorker(QThread):
             # =================================================================
             # AGENT 2: Weakpoint Identification & Suggestions
             # =================================================================
-            agent2_system = (
-                "You are an expert academic advisor and critical thinker. Your task is to evaluate an argument's structural map for weaknesses. "
-                "Review the provided argument structure alongside the original nodes. "
-                "Identify specific weak points: Which claims lack sufficient concrete evidence? Where are the logical leaps or assumptions? Are counterarguments missing? "
-                "Provide a constructive, formatted critique. "
-                "Crucially, suggest SPECIFIC new nodes (claims to clarify, or evidence to find) that the user should create in their workspace to strengthen this argument."
+            agent2_system = self.llm_manager.get_system_prompt(
+                "AI Weakpoints Worker - Critic",
+                (
+                    "You are an expert academic advisor and critical thinker. Your task is to evaluate an argument's structural map for weaknesses. "
+                    "Review the provided argument structure alongside the original nodes. "
+                    "Identify specific weak points: Which claims lack sufficient concrete evidence? Where are the logical leaps or assumptions? Are counterarguments missing? "
+                    "Provide a constructive, formatted critique. "
+                    "Crucially, suggest SPECIFIC new nodes (claims to clarify, or evidence to find) that the user should create in their workspace to strengthen this argument."
+                ),
             )
             
             agent2_prompt = (

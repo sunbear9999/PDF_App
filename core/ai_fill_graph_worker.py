@@ -25,12 +25,15 @@ class AIFillGraphWorker(QThread):
             # =================================================================
             # PHASE 1: Logical Analysis & Claim Extraction (Multi-Query)
             # =================================================================
-            agent1_system = (
-                "You are an expert logical analyst. Review the provided graph of notes. "
-                "Identify which user-created nodes represent 'claims' or 'reasons' that could use concrete textual evidence from the documents to support them. "
-                "For each such claim, generate 2 to 3 highly specific search queries (3-8 words each, keywords only) to capture different ways the text might discuss this topic. "
-                "Return ONLY a valid JSON array of objects. "
-                "Format: [{\"node_id\": \"id1\", \"claim\": \"The user's claim\", \"search_queries\": [\"keyword phrase one\", \"keyword phrase two\"]}]"
+            agent1_system = self.llm_manager.get_system_prompt(
+                "AI Fill Graph Worker - Claim Finder",
+                (
+                    "You are an expert logical analyst. Review the provided graph of notes. "
+                    "Identify which user-created nodes represent 'claims' or 'reasons' that could use concrete textual evidence from the documents to support them. "
+                    "For each such claim, generate 2 to 3 highly specific search queries (3-8 words each, keywords only) to capture different ways the text might discuss this topic. "
+                    "Return ONLY a valid JSON array of objects. "
+                    "Format: [{\"node_id\": \"id1\", \"claim\": \"The user's claim\", \"search_queries\": [\"keyword phrase one\", \"keyword phrase two\"]}]"
+                ),
             )
             
             agent1_prompt = (
@@ -133,15 +136,18 @@ class AIFillGraphWorker(QThread):
                     context_str = "\n\n".join(context_pieces)
                     
                     # 2. STRICT QUOTE EXTRACTION (Expanded bounds & multi-document emphasis)
-                    system_prompt = (
-                        "You are an expert AI research assistant. Your task is to find concrete textual evidence to support a specific claim.\n"
-                        "Read the provided CONTEXT documents thoroughly. Extract 2 to 5 highly relevant, VERBATIM quotes that strongly prove the claim.\n"
-                        "CRITICAL RULES:\n"
-                        "1. Quotes MUST be exactly copy-pasted from the text. Do not paraphrase.\n"
-                        "2. Try to find evidence from MULTIPLE different documents if the context supports it.\n"
-                        "3. Output ONLY using the following format on a single line for each quote:\n"
-                        "%%QUOTE | Document_Name.pdf | Exact verbatim quote text here | Brief explanation of how it supports the claim\n"
-                        "4. Do not include introductory text, headers, or a final answer block. Output ONLY the %%QUOTE lines."
+                    system_prompt = self.llm_manager.get_system_prompt(
+                        "AI Fill Graph Worker - Evidence Extractor",
+                        (
+                            "You are an expert AI research assistant. Your task is to find concrete textual evidence to support a specific claim.\n"
+                            "Read the provided CONTEXT documents thoroughly. Extract 2 to 5 highly relevant, VERBATIM quotes that strongly prove the claim.\n"
+                            "CRITICAL RULES:\n"
+                            "1. Quotes MUST be exactly copy-pasted from the text. Do not paraphrase.\n"
+                            "2. Try to find evidence from MULTIPLE different documents if the context supports it.\n"
+                            "3. Output ONLY using the following format on a single line for each quote:\n"
+                            "%%QUOTE | Document_Name.pdf | Exact verbatim quote text here | Brief explanation of how it supports the claim\n"
+                            "4. Do not include introductory text, headers, or a final answer block. Output ONLY the %%QUOTE lines."
+                        ),
                     )
                     
                     prompt = f"TARGET CLAIM TO SUPPORT: '{claim_text}'\n\nCONTEXT:\n{context_str}"

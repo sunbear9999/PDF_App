@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
                              QPushButton, QLabel, QSplitter, QStackedWidget, 
                              QFileDialog, QFrame, QButtonGroup, QMessageBox, QComboBox, QMenu,
                              QApplication)
-from PyQt6.QtGui import QShortcut, QKeySequence
+from PyQt6.QtGui import QColor, QShortcut, QKeySequence
 from PyQt6.QtCore import Qt, QSettings, QTimer, QThread, QEvent
 
 from core.project_manager import ProjectManager
@@ -18,6 +18,9 @@ from gui.tabs.llm_tab import LLMTab
 from gui.tabs.notes_tab import NotesTab
 from gui.theme import ThemeManager
 from gui.components.help_dialog import HelpDialog
+from gui.components.dialogs.prompt_editor_dialog import PromptEditorDialog
+from gui.components.dialogs.tag_manager_dialog import TagManagerDialog, TagAssignmentDialog
+from core.prompt_manager import PromptManager
 
 
 class PreloadWorker(QThread):
@@ -37,6 +40,7 @@ class MainWindow(QMainWindow):
         
         self.theme_manager = ThemeManager()
         self.project_manager = ProjectManager()
+        self.project_manager.main_window = self
         self.current_file_path = None
         self.settings = QSettings("PDFMultitool", "Workspace")
 
@@ -209,6 +213,8 @@ class MainWindow(QMainWindow):
         self.pdf_selector = QComboBox()
         self.pdf_selector.setFixedWidth(250)
         self.pdf_selector.currentIndexChanged.connect(self._on_pdf_dropdown_changed)
+        self.pdf_selector.view().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.pdf_selector.view().customContextMenuRequested.connect(self._on_pdf_selector_context_menu)
         menu_layout.addWidget(self.pdf_selector)
         
         menu_layout.addSpacing(8)
@@ -247,12 +253,23 @@ class MainWindow(QMainWindow):
         self._configure_hover_expand_button(self.btn_edit_theme, "✏️", "Edit Custom Theme", expanded_width=170)
         self.btn_edit_theme.clicked.connect(lambda: self.theme_manager.edit_custom_theme(self))
         menu_layout.addWidget(self.btn_edit_theme)
+
+        self.btn_tag_manager = QPushButton()
+        self._configure_hover_expand_button(self.btn_tag_manager, "🏷️", "Tag Manager", expanded_width=130)
+        self.btn_tag_manager.clicked.connect(self._open_tag_manager)
+        menu_layout.addWidget(self.btn_tag_manager)
         
         menu_layout.addSpacing(8)
         self.btn_help = QPushButton()
         self._configure_hover_expand_button(self.btn_help, "❓", "Help", expanded_width=100)
         self.btn_help.clicked.connect(self.show_help_window)
         menu_layout.addWidget(self.btn_help)
+        menu_layout.addSpacing(8)
+
+        self.btn_prompt_editor = QPushButton()
+        self._configure_hover_expand_button(self.btn_prompt_editor, "🧠", "Prompt Editor", expanded_width=150)
+        self.btn_prompt_editor.clicked.connect(self._open_prompt_editor)
+        menu_layout.addWidget(self.btn_prompt_editor)
         menu_layout.addSpacing(8)
 
         self.tool_group = QButtonGroup(self)
@@ -274,6 +291,42 @@ class MainWindow(QMainWindow):
     def _open_feedback_link(self):
         import webbrowser
         webbrowser.open("https://docs.google.com/forms/d/e/1FAIpQLSfm3W0Z-79jSJ1uuUgiUoi2CXMkyxLM3S3jyEw931aIDNDFag/viewform?usp=publish-editor")
+
+    def _open_prompt_editor(self):
+        prompt_manager = None
+        try:
+            prompt_manager = self.tabs["LLM Chat"].llm_manager.prompt_manager
+        except Exception:
+            prompt_manager = PromptManager()
+
+        dialog = PromptEditorDialog(prompt_manager, self)
+        dialog.exec()
+
+    def _open_tag_manager(self):
+        dialog = TagManagerDialog(self.project_manager, self)
+        dialog.exec()
+        if "LLM Chat" in self.tabs:
+            self.tabs["LLM Chat"].refresh_tag_filters()
+
+    def _on_pdf_selector_context_menu(self, pos):
+        view = self.pdf_selector.view()
+        index = view.indexAt(pos)
+        row = index.row() if index.isValid() else self.pdf_selector.currentIndex()
+        if row < 0:
+            return
+
+        doc_id = self.pdf_selector.itemData(row)
+        if not doc_id:
+            return
+
+        menu = QMenu(self)
+        manage_tags_action = menu.addAction("🏷️ Manage Tags for This Document")
+        chosen = menu.exec(view.mapToGlobal(pos))
+        if chosen == manage_tags_action:
+            dlg = TagAssignmentDialog(self.project_manager, doc_id, "doc", self)
+            dlg.exec()
+            if "LLM Chat" in self.tabs:
+                self.tabs["LLM Chat"].refresh_tag_filters()
 
     def _on_theme_changed(self, theme_name):
         if theme_name == "Custom":
@@ -529,6 +582,15 @@ class MainWindow(QMainWindow):
                         }
                         annot.set_info(info=annot_info)
                         annot.update()
+                        self.viewer.annot_manager.highlight_created.emit({
+                            "id": annot_id_to_use,
+                            "subject": clean_quote,
+                            "content": note,
+                            "pdf_path": path,
+                            "page_num": page_num,
+                            "rect_coords": repr(list(annot.rect)),
+                            "color": QColor(179, 102, 255).name(),
+                        })
                         
                         found_any = True
                         self.project_manager.mark_dirty(path)
@@ -614,6 +676,7 @@ class MainWindow(QMainWindow):
         self.viewer.annot_manager.note_added.connect(self._mark_current_dirty)
         # Save workspace state after new highlight/note is added
         self.viewer.annot_manager.note_added.connect(self.tabs["Notes"].save_workspace_state)
+        self.viewer.annot_manager.highlight_created.connect(self.tabs["Notes"].handle_highlight_created)
         self.viewer.annotation_clicked.connect(self._on_annotation_clicked)
 
     def _on_annotation_clicked(self, annot_id):
