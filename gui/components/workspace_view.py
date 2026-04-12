@@ -133,32 +133,29 @@ class CollapsingSection(QFrame):
 class CheckableComboBox(QComboBox):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.view().pressed.connect(self.handle_item_pressed)
+        self.view().clicked.connect(self.handle_item_clicked)
         self._changed = False
 
-    def handle_item_pressed(self, index):
+    def handle_item_clicked(self, index):
         item = self.model().itemFromIndex(index)
         if not item: return
 
         clicked_data = item.data(Qt.ItemDataRole.UserRole)
         current_state = item.checkState()
-        new_state = Qt.CheckState.Unchecked if current_state == Qt.CheckState.Checked else Qt.CheckState.Checked
 
         all_item = self.model().item(0) # 'All PDFs' is always at index 0
 
-        # Block signals so we can update multiple checkboxes silently without firing the filter 50 times
+        # Block signals so we can update multiple checkboxes silently without firing the filter repeatedly.
         self.model().blockSignals(True)
 
         if clicked_data == "ALL":
-            # If clicking ALL, force it to checked and uncheck everything else
+            # If clicking ALL, force it to checked and uncheck everything else.
             item.setCheckState(Qt.CheckState.Checked)
             for i in range(1, self.model().rowCount()):
                 self.model().item(i).setCheckState(Qt.CheckState.Unchecked)
         else:
-            item.setCheckState(new_state)
-
-            if new_state == Qt.CheckState.Checked:
-                # If transitioning from "ALL" to a specific PDF, clear everything else out for a fresh start
+            if current_state == Qt.CheckState.Checked:
+                # If transitioning from "ALL" to a specific filter, clear everything else for a fresh start.
                 if all_item and all_item.checkState() == Qt.CheckState.Checked:
                     all_item.setCheckState(Qt.CheckState.Unchecked)
                     for i in range(1, self.model().rowCount()):
@@ -166,7 +163,7 @@ class CheckableComboBox(QComboBox):
                         if other_item != item:
                             other_item.setCheckState(Qt.CheckState.Unchecked)
             else:
-                # If we unchecked a specific PDF, verify if we need to auto-fallback to "ALL"
+                # If no specific items are checked, auto-fallback to ALL.
                 any_checked = False
                 for i in range(1, self.model().rowCount()):
                     if self.model().item(i).checkState() == Qt.CheckState.Checked:
@@ -178,7 +175,7 @@ class CheckableComboBox(QComboBox):
         self._changed = True
         self.model().blockSignals(False)
 
-        # Emit dataChanged once for the whole list to trigger the workspace filter and UI update instantly
+        # Emit dataChanged once for the whole list to trigger filter/UI updates.
         top_left = self.model().index(0, 0)
         bottom_right = self.model().index(self.model().rowCount() - 1, 0)
         self.model().dataChanged.emit(top_left, bottom_right)
@@ -526,6 +523,8 @@ class WorkspaceView(QGraphicsView):
                 QLabel {{ color: {theme['text_main']}; font-weight: bold; }}
                 QComboBox {{ background-color: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']}; padding: 4px; border-radius: 4px; font-weight: bold; min-width: 150px; }}
                 QComboBox QAbstractItemView {{ background-color: {theme['bg_panel']}; color: {theme['text_main']}; }}
+                QComboBox QAbstractItemView::item {{ background-color: {theme['bg_panel']}; color: {theme['text_main']}; padding: 4px; }}
+                QComboBox QAbstractItemView::item:selected {{ background-color: {theme['accent']}; color: #ffffff; }}
                 QPushButton {{ background-color: {theme['accent']}; color: #ffffff; border: none; padding: 6px 12px; border-radius: 4px; font-weight: bold; }}
                 QPushButton:hover {{ background-color: {theme['accent_hover']}; }}
                 QPushButton::menu-indicator {{ image: none; }}
@@ -1492,10 +1491,11 @@ class WorkspaceView(QGraphicsView):
 
         selected_nodes = [n for n in self.scene_obj.selectedItems() if isinstance(n, Node)]
 
-        if len(selected_nodes) > 1 and isinstance(item, Node) and item in selected_nodes:
+        if len(selected_nodes) > 1 and (item is None or (isinstance(item, Node) and item in selected_nodes)):
             menu = QMenu(self)
             remove_action = menu.addAction("🗑️ Remove Selected from Workspace")
             delete_action = menu.addAction("🔥 Delete Selected Highlights Permanently")
+            manage_tags_action = menu.addAction("🏷️ Manage Tags for Selected Nodes")
             declutter_action = menu.addAction("🧹 Declutter Selected Nodes")
             remove_action.triggered.connect(self.delete_selected_nodes)
             
@@ -1508,6 +1508,8 @@ class WorkspaceView(QGraphicsView):
                 self.save_state_for_undo()
                 for highlight_id in {n.highlight_id for n in selected_nodes if n.highlight_id}:
                     self._delete_highlight_permanently(highlight_id)
+            elif action == manage_tags_action:
+                self._manage_tags_for_nodes(selected_nodes)
             elif action == declutter_action:
                 self.trigger_declutter()
             return
@@ -1631,6 +1633,33 @@ class WorkspaceView(QGraphicsView):
         self.worker = AIOrganizeWorker(llm_manager, model, nodes_data, custom_instructions=instructions.strip(), parent=self)
         self.worker.finished.connect(self._on_ai_organize_finished)
         self.worker.start()
+
+    def _manage_tags_for_nodes(self, selected_nodes):
+        if not selected_nodes:
+            return
+
+        template_node = selected_nodes[0]
+        pm = self.main_window.project_manager
+        dlg = TagAssignmentDialog(pm, template_node.node_id, "node", self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        template_tag_ids = {t.get("id") for t in pm.get_tags_for_node(template_node.node_id)}
+
+        for node in selected_nodes[1:]:
+            node_tag_ids = {t.get("id") for t in pm.get_tags_for_node(node.node_id)}
+
+            for tag_id in template_tag_ids - node_tag_ids:
+                pm.assign_tag_to_node(node.node_id, tag_id)
+            for tag_id in node_tag_ids - template_tag_ids:
+                pm.remove_tag_from_node(node.node_id, tag_id)
+
+        for node in selected_nodes:
+            node.refresh_tag_badges()
+
+        self._refresh_tag_list()
+        self._apply_filter()
+        pm.mark_dirty("workspace")
 
     def _on_ai_organize_finished(self, clusters, error_msg):
         self.loading_overlay.hide()
