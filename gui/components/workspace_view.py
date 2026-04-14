@@ -395,6 +395,11 @@ class WorkspaceView(QGraphicsView):
         self._new_node_sc.activated.connect(self.add_custom_bubble)
         self._new_node_sc.activatedAmbiguously.connect(self.add_custom_bubble)
 
+        self._clear_filters_sc = QShortcut(QKeySequence("Ctrl+W"), self)
+        self._clear_filters_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._clear_filters_sc.activated.connect(self.reset_filters)
+        self._clear_filters_sc.activatedAmbiguously.connect(self.reset_filters)
+
         self._declutter_sc = QShortcut(QKeySequence("Ctrl+D"), self)
         self._declutter_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self._declutter_sc.activated.connect(self.trigger_declutter)
@@ -417,7 +422,6 @@ class WorkspaceView(QGraphicsView):
     
         # Filter section — collapses to 🔽, expands to show label + combo on hover
         filter_content = QWidget()
-        filter_content.setStyleSheet("background: transparent;")
         filter_inner = QHBoxLayout(filter_content)
         filter_inner.setContentsMargins(0, 0, 0, 0)
         filter_inner.setSpacing(4)
@@ -1027,8 +1031,8 @@ class WorkspaceView(QGraphicsView):
                     node.refresh_layout()
                     
             self.main_window.project_manager.mark_dirty("workspace")
-            if "Notes" in self.main_window.tabs:
-                self.save_workspace_state()
+            
+            self.save_workspace_state()
 
     def trigger_declutter(self):
         selected_nodes = [n for n in self.scene_obj.selectedItems() if isinstance(n, Node)]
@@ -1573,9 +1577,26 @@ class WorkspaceView(QGraphicsView):
             page_num = nodes_to_remove[0].page_num
 
         if pdf_path is not None and page_num is not None:
+            try:
+                doc = self.main_window.project_manager.get_doc(pdf_path)
+                if doc:
+                    page = doc.load_page(page_num)
+                    for annot in page.annots():
+                        if annot.info and annot.info.get("title") == highlight_id:
+                            page.delete_annot(annot)
+                            break
+                    self.main_window.project_manager.mark_dirty(pdf_path)
+                    
+                    # Live update the viewer if they are looking at it right now
+                    if pdf_path == self.main_window.current_file_path and hasattr(self.main_window, 'viewer'):
+                        self.main_window.viewer.reload_page(page_num)
+            except Exception as e:
+                print(f"Error removing physical annotation: {e}")
+
+            # Update the notes sidebars visually if they happen to be open
             if hasattr(self.main_window, 'notes_docks'):
                 for n_dock in self.main_window.notes_docks:
-                    n_dock.delete_note(pdf_path, page_num, highlight_id)
+                    n_dock.refresh_notes()
 
         self.main_window.project_manager.delete_highlight_record(highlight_id)
         self._similarity_signature = None
@@ -2074,18 +2095,39 @@ class WorkspaceView(QGraphicsView):
                 added_count += 1
                 
         if added_count > 0:
+            # --- NEW: Manually spawn the nodes onto the CURRENT canvas first ---
+            for item, (new_annot_id, target_node_id) in zip(evidence_items, new_annot_mappings):
+                hl_record = self.main_window.project_manager.get_highlight(new_annot_id)
+                if hl_record:
+                    node = self.add_node_from_annotation({
+                        "id": hl_record["id"],
+                        "subject": item["quote"],
+                        "content": item["note"],
+                        "pdf_path": hl_record.get("doc_id"),
+                        "page_num": hl_record.get("page_num"),
+                        "color": hl_record.get("color", "#9c27b0")
+                    }, persist=True, target_workspace_id=self.current_workspace_id)
+                    
+                    # Plop it visually to the right of the node it supports
+                    if node and target_node_id in self.nodes:
+                        tgt = self.nodes[target_node_id]
+                        node.setPos(tgt.pos().x() + 320, tgt.pos().y())
+            # -------------------------------------------------------------------
+
             workspace_data = self.serialize_workspace()
             
             for new_annot_id, target_node_id in new_annot_mappings:
-                workspace_data["edges"].append({
-                    "id": str(uuid.uuid4()),
-                    "source": target_node_id,
-                    "target": new_annot_id,
-                    "label": "AI Evidence",
-                    "color": "#9c27b0",
-                    "weight": 3
-                })
-                
+                # Double check the nodes actually exist before wiring the edge!
+                if target_node_id in self.nodes and new_annot_id in self.nodes:
+                    workspace_data["edges"].append({
+                        "id": str(uuid.uuid4()),
+                        "source": target_node_id,
+                        "target": new_annot_id,
+                        "label": "AI Evidence",
+                        "color": "#9c27b0",
+                        "weight": 3
+                    })
+            
             self.main_window.project_manager.save_workspace_data(workspace_data, self.current_workspace_id)
             self.main_window.project_manager.mark_dirty("workspace")
 
@@ -2097,7 +2139,6 @@ class WorkspaceView(QGraphicsView):
             QMessageBox.information(self, "Graph Filled", f"Successfully found and connected {added_count} piece(s) of evidence!")
         else:
             QMessageBox.information(self, "Graph Filled", "Searched for evidence but could not successfully highlight valid quotes in the documents.")
-
     def trigger_consolidate_notes(self):
         if self.is_llm_busy:
             QMessageBox.warning(self, "AI Busy", "The AI is currently processing another request.")

@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (QGraphicsView, QGraphicsScene, QMenu, QMessageBox,
                              QColorDialog, QFileDialog, QTextEdit,QCheckBox,QSlider,QLabel)
 from PyQt6.QtCore import Qt, QRectF
 from PyQt6.QtGui import QColor, QPen, QBrush, QFont, QPainter, QImage, QStandardItemModel, QStandardItem
-
+import os
 class OutlineDialog(QDialog):
     def __init__(self, outline_text, workspace_view, parent=None):
         super().__init__(parent or workspace_view)
@@ -213,7 +213,9 @@ class PDFColorDialog(QDialog):
             btn.setStyleSheet(f"background-color: {color}; border: 1px solid #aaaaaa; border-radius: 4px;")
             btn.clicked.connect(lambda checked, p=pdf, b=btn: self.pick_color(p, b))
             self.buttons[pdf] = btn
-            self.form.addRow(os.path.basename(pdf), btn)
+            full_name = os.path.basename(pdf)
+            display_name = (full_name[:16] + "\u2026") if len(full_name) > 18 else full_name
+            self.form.addRow(display_name, btn)
             
         scroll.setWidget(self.scroll_widget)
         layout.addWidget(scroll)

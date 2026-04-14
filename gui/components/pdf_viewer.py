@@ -68,7 +68,7 @@ class PDFViewer(QGraphicsView):
             if hasattr(self, 'page_hud') and self.page_hud.isVisible():
                 self.page_hud.move(20, self.viewport().height() - self.page_hud.height() - 20)
             return result
-    annotation_clicked = pyqtSignal(str)
+    annotation_clicked = pyqtSignal(str,int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -145,8 +145,18 @@ class PDFViewer(QGraphicsView):
         """)
         self.dark_mode_btn.clicked.connect(self.toggle_dark_mode)
         toolbar_layout.addWidget(self.dark_mode_btn)
+        
+      
         self.viewer_toolbar.setLayout(toolbar_layout)
         self.viewer_toolbar.setVisible(True)
+        self._zoom_in_sc = QShortcut(QKeySequence("Ctrl+="), self)
+        self._zoom_in_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._zoom_in_sc.activated.connect(self.zoom_in)
+        self._zoom_in_sc.activatedAmbiguously.connect(self.zoom_in)
+        self._zoom_out_sc = QShortcut(QKeySequence("Ctrl+-"), self)
+        self._zoom_out_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._zoom_out_sc.activated.connect(self.zoom_out)
+        self._zoom_out_sc.activatedAmbiguously.connect(self.zoom_out)
 
         self.copy_shortcut = QShortcut(QKeySequence("Ctrl+C"), self)
         self.copy_shortcut.activated.connect(self.copy_to_clipboard)
@@ -424,7 +434,8 @@ class PDFViewer(QGraphicsView):
         try:
             from PyQt6.QtGui import QPixmap
             from PyQt6.QtCore import QTimer
-            
+            if getattr(self, 'dark_mode_enabled', False):
+                qimage.invertPixels(QImage.InvertMode.InvertRgb)
             pixmap = QPixmap.fromImage(qimage)
             self.page_pixmaps[page_num].setPixmap(pixmap)
             self.page_pixmaps[page_num].setVisible(True)
@@ -607,11 +618,17 @@ class PDFViewer(QGraphicsView):
                 local_pos = page_item.mapFromScene(scene_pos)
                 pdf_x, pdf_y = local_pos.x() / self.base_zoom, local_pos.y() / self.base_zoom
                 point = fitz.Point(pdf_x, pdf_y)
-                page = self.doc.load_page(page_idx)
-                for annot in page.annots():
-                    if annot.rect.contains(point) and (annot.info.get("title", "").startswith("UserNote") or annot.info.get("title", "").startswith("AINote")):
-                        self.annotation_clicked.emit(annot.info.get("title"))
-                        return 
+                try:
+                    page = self.doc.load_page(page_idx)
+                    for annot in page.annots():
+                        if annot.rect.contains(point) and annot.info:
+                            title = annot.info.get("title", "")
+                            if title.startswith("UserNote") or title.startswith("AINote"):
+                                self.annotation_clicked.emit(title, page_idx)
+                                return 
+                except Exception as e:
+                    print(f"Ignoring PyMuPDF annot error: {e}")
+                    
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -780,8 +797,8 @@ class PDFViewer(QGraphicsView):
         target_value = max(vbar.minimum(), min(target_value, vbar.maximum()))
         vbar.setValue(target_value)
 
-    def zoom_in(self): self.scale(1.2, 1.2)
-    def zoom_out(self): self.scale(1 / 1.2, 1 / 1.2)
+    def zoom_in(self): self.scale(1.1, 1.1)
+    def zoom_out(self): self.scale(1 / 1.1, 1 / 1.1)
     def zoom_reset(self):
         if not self.page_placeholders: return
         self.resetTransform()
@@ -791,7 +808,36 @@ class PDFViewer(QGraphicsView):
         if doc_width > 0:
             target_scale = (view_width - 40) / doc_width
             self.scale(target_scale, target_scale)
-
+    # --- NEW METHOD ---
+    def sharpen_focus(self):
+        """
+        Recalculates the core rendering resolution to match the current visual scale.
+        This completely eliminates blurriness when zoomed very far out or in!
+        """
+        if not self.doc: return
+        
+        # 1. Calculate how much Qt is currently scaling the image visually
+        current_scale = self.transform().m11()
+        
+        # If we are already at 100% native scale, there's no blur to fix
+        if abs(current_scale - 1.0) < 0.01:
+            return
+            
+        # 2. Save current scroll position so we don't lose our place
+        vbar = self.verticalScrollBar()
+        scroll_ratio = vbar.value() / vbar.maximum() if vbar.maximum() > 0 else 0
+        
+        # 3. Permanently bake the visual scale into the PDF engine's rendering resolution
+        self.base_zoom = self.base_zoom * current_scale
+        
+        # 4. Reset Qt's visual scale back to 1.0 (no stretching/squishing)
+        self.resetTransform()
+        
+        # 5. Force the engine to re-render the document natively at the new resolution
+        self.load_document(self.doc)
+        
+        # 6. Restore our scroll position (using a tiny delay to let the UI update first)
+        QTimer.singleShot(50, lambda: vbar.setValue(int(scroll_ratio * vbar.maximum())))
     def _get_dpi_scale(self):
         try:
             w = self.window()
@@ -819,9 +865,15 @@ class PDFViewer(QGraphicsView):
 
         links = self.page_links.get(page_idx)
         if links is None:
-            page = self.doc.load_page(page_idx)
-            links = page.get_links()
+            # --- FIX: Safely wrap link extraction so corrupted PDFs don't crash the click! ---
+            try:
+                page = self.doc.load_page(page_idx)
+                links = page.get_links()
+            except Exception as e:
+                print(f"Ignoring PyMuPDF link error: {e}")
+                links = []
             self.page_links[page_idx] = links
+            
         self.current_links = links
 
         for link in self.current_links:

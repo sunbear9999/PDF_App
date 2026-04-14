@@ -274,20 +274,12 @@ class MainWindow(QMainWindow):
         menu_layout.addWidget(self.btn_save)
         menu_layout.addStretch()
 
-        self.btn_zoom_out = QPushButton("➖")
-        self.btn_zoom_out.clicked.connect(self.viewer.zoom_out)
-        self.btn_zoom_reset = QPushButton("Fit Width")
-        self.btn_zoom_reset.clicked.connect(self.viewer.zoom_reset)
-        self.btn_zoom_in = QPushButton("➕")
-        self.btn_zoom_in.clicked.connect(self.viewer.zoom_in)
-
+        
         self.btn_fullscreen = QPushButton()
         self._configure_hover_expand_button(self.btn_fullscreen, "⛶", "Enter Full Screen", expanded_width=180)
         self.btn_fullscreen.clicked.connect(self.toggle_full_screen)
         
-        menu_layout.addWidget(self.btn_zoom_out)
-        menu_layout.addWidget(self.btn_zoom_reset)
-        menu_layout.addWidget(self.btn_zoom_in)
+        
         menu_layout.addWidget(self.btn_fullscreen)
         menu_layout.addStretch()
 
@@ -300,7 +292,7 @@ class MainWindow(QMainWindow):
         menu_layout.addWidget(self.theme_selector)
         menu_layout.addSpacing(10)
         self.btn_layouts = QPushButton()
-        self._configure_hover_expand_button(self.btn_layouts, "🗔", "Window Layouts", expanded_width=140)
+        self._configure_hover_expand_button(self.btn_layouts, "🗔", "Window Layouts", expanded_width=140,collapsed_width=56)
         
         layout_menu = QMenu(self)
         layout_menu.addAction("⭐ Set Current as Default Layout", self._save_as_default_layout)
@@ -314,10 +306,7 @@ class MainWindow(QMainWindow):
         self.btn_layouts.setMenu(layout_menu)
         menu_layout.addWidget(self.btn_layouts)
         self._refresh_layout_templates_menu()
-        self.btn_edit_theme = QPushButton()
-        self._configure_hover_expand_button(self.btn_edit_theme, "✏️", "Edit Custom Theme", expanded_width=170)
-        self.btn_edit_theme.clicked.connect(lambda: self.theme_manager.edit_custom_theme(self))
-        menu_layout.addWidget(self.btn_edit_theme)
+        
 
         self.btn_tag_manager = QPushButton()
         self._configure_hover_expand_button(self.btn_tag_manager, "🏷️", "Tag Manager", expanded_width=130)
@@ -550,7 +539,7 @@ class MainWindow(QMainWindow):
             dialog = ExtractPagesDialog(doc_path, self.project_manager, self)
             if dialog.exec():
                 # Refresh your document list UI if the user successfully extracted a PDF
-                self.refresh_doc_list()
+                self._refresh_doc_list()
     def _ui_rename_pdf(self, old_path, row):
         # 1. CRITICAL: Force save all current highlights/nodes to disk and DB BEFORE renaming
         # This guarantees physical highlights are baked into the PDF before the OS touches it.
@@ -646,8 +635,9 @@ class MainWindow(QMainWindow):
                     self.viewer.doc = None
                 
                 # Switch to the first available PDF, if any
-                if self.pdf_selector.count() > 0:
-                    self.switch_to_pdf(self.pdf_selector.itemData(0))
+                if self.doc_list.count() > 0:
+                    item = self.doc_list.item(0)
+                    self.switch_to_pdf(item.data(Qt.ItemDataRole.UserRole))
 
     def _on_theme_changed(self, theme_name):
         if theme_name == "Custom":
@@ -1151,16 +1141,60 @@ class MainWindow(QMainWindow):
         self.pdf_dock.setObjectName("PDFViewerDock")
         self.pdf_dock.setWidget(self.viewer)
         self.pdf_dock.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures) 
+        title_bar = QWidget()
+        title_layout = QHBoxLayout(title_bar)
+        title_layout.setContentsMargins(10, 0, 10, 0)
         
-        # We then split the PDF Viewer explicitly to the RIGHT (Horizontal) of the Doc Dock
-        self.splitDockWidget(self.doc_dock, self.pdf_dock, Qt.Orientation.Horizontal)
-        self.resizeDocks([self.doc_dock, self.pdf_dock], [250, 1000], Qt.Orientation.Horizontal)
-        # ----------------------------------
+        lbl_title = QLabel("📄 PDF Viewer")
+        lbl_title.setStyleSheet("font-weight: bold; background: transparent;")
+        title_layout.addWidget(lbl_title)
+        
+        # 1st Stretch: Pushes buttons toward the center from the left
+        title_layout.addStretch()
 
-        # 3. Connect Master PDF Signals to broadcast dynamically
-        self.viewer.annot_manager.note_added.connect(self.broadcast_note_added)
-        self.viewer.annot_manager.highlight_created.connect(self.broadcast_highlight_created)
-        self.viewer.annotation_clicked.connect(self.broadcast_annotation_clicked)
+        # Group the buttons together
+        btn_zoom_out = QPushButton("➖")
+        btn_zoom_reset = QPushButton("Fit Width")
+        btn_zoom_in = QPushButton("➕")
+        btn_focus = QPushButton("🎯 Focus") # <-- NEW BUTTON
+
+        # Connect the signals
+        btn_zoom_out.clicked.connect(self.viewer.zoom_out)
+        btn_zoom_reset.clicked.connect(self.viewer.zoom_reset)
+        btn_zoom_in.clicked.connect(self.viewer.zoom_in)
+        btn_focus.clicked.connect(self.viewer.sharpen_focus) # <-- NEW METHOD
+
+        # Hand cursors
+        btn_zoom_out.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_zoom_reset.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_zoom_in.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_focus.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        header_btn_style = """
+            QPushButton { 
+                background: transparent; 
+                border: none; 
+                padding: 4px 8px; 
+            }
+            QPushButton:hover { 
+                background: rgba(128, 128, 128, 0.3); 
+                border-radius: 4px; 
+            }
+        """
+        btn_zoom_out.setStyleSheet(header_btn_style)
+        btn_zoom_reset.setStyleSheet(header_btn_style)
+        btn_zoom_in.setStyleSheet(header_btn_style)
+        btn_focus.setStyleSheet(header_btn_style)
+
+        title_layout.addWidget(btn_zoom_out)
+        title_layout.addWidget(btn_zoom_reset)
+        title_layout.addWidget(btn_zoom_in)
+        title_layout.addWidget(btn_focus)
+
+        # 2nd Stretch: Pushes buttons toward the center from the right
+        title_layout.addStretch()
+
+        self.pdf_dock.setTitleBarWidget(title_bar)
     
 
     def broadcast_note_added(self):
@@ -1182,25 +1216,133 @@ class MainWindow(QMainWindow):
         for ws_view in self.workspace_docks:
             ws_view.handle_highlight_created(highlight_data)
 
-    def broadcast_annotation_clicked(self, annot_id):
-        # Open a notes dock if none exist
-        if not self.notes_docks: self.spawn_notes_dock()
-        # Make the first available notes dock scroll to the specific note
-        if self.notes_docks:
-            self.notes_docks[0].scroll_to_note(annot_id)
-
-    def _on_annotation_clicked(self, annot_id):
-        # 1. Ensure at least one Notes dock is spawned and visible
-        if not self.notes_docks: 
-            self.spawn_notes_dock()
+    def broadcast_annotation_clicked(self, annot_id, page_num):
+        # 1. We already know the exact page, so bypass the DB and skip the document search!
+        pdf_path = self.current_file_path
+        if not pdf_path or page_num is None or page_num < 0: return
+        
+        doc = self.project_manager.get_doc(pdf_path)
+        if not doc: return
+        
+        # 2. Load ONLY the specific page. This completely circumvents the PyMuPDF crash bug!
+        page = doc.load_page(page_num)
+        target_annot = None
+        for annot in page.annots():
+            if annot.info and annot.info.get("title") == annot_id:
+                target_annot = annot
+                break
+                
+        if not target_annot: return
+        
+        # 3. Clean up the old Quick Note Dock if it exists so we don't clutter the screen
+        if hasattr(self, 'quick_note_dock') and self.quick_note_dock:
+            self.removeDockWidget(self.quick_note_dock)
+            self.quick_note_dock.deleteLater()
             
-        # 2. Scroll the first available Notes dock to the specific note
-        if self.notes_docks:
-            notes_dock = self.notes_docks[0]
-            if notes_dock.parentWidget() and not notes_dock.parentWidget().isVisible():
-                notes_dock.parentWidget().show()
-                notes_dock.parentWidget().raise_()
-            notes_dock.scroll_to_note(annot_id)
+        from PyQt6.QtWidgets import QDockWidget, QVBoxLayout, QWidget, QScrollArea, QFrame
+        from gui.tabs.notes_tab import NoteBubble
+        from PyQt6.QtCore import Qt
+        
+        self.quick_note_dock = QDockWidget("📝 Quick Note", self)
+        self.quick_note_dock.setObjectName("QuickNoteDock")
+        
+        # 4. Create a lightweight manager to handle the Bubble's clicks seamlessly
+        class QuickNoteManager:
+            def __init__(self, mw):
+                self.main_window = mw
+                self.viewer = mw.viewer
+                
+            def change_note_color(self, p_path, p_num, a_id, color):
+                d = self.main_window.project_manager.get_doc(p_path)
+                if not d: return
+                pg = d.load_page(p_num)
+                for a in pg.annots():
+                    if a.info and a.info.get("title") == a_id:
+                        a.set_colors(stroke=color)
+                        a.update()
+                        break
+                self.main_window.project_manager.mark_dirty(p_path)
+                
+                # Force Sync the DB so Workspace nodes instantly update their colors too
+                from PyQt6.QtGui import QColor
+                hex_col = QColor(int(color[0]*255), int(color[1]*255), int(color[2]*255)).name()
+                pm = self.main_window.project_manager
+                if pm._conn:
+                    cursor = pm._conn.cursor()
+                    cursor.execute("UPDATE highlights SET color = ? WHERE id = ?", (hex_col, a_id))
+                    cursor.execute("UPDATE workspace_nodes SET color = ? WHERE highlight_id = ?", (hex_col, a_id))
+                    pm._conn.commit()
+                
+                if p_path == self.main_window.current_file_path:
+                    self.viewer.reload_page(p_num)
+                    
+                for nd in self.main_window.notes_docks: nd.refresh_notes()
+                for ws in self.main_window.workspace_docks: ws._sync_workspace()
+                self.main_window.broadcast_annotation_clicked(a_id, p_num) 
+                
+            def delete_note(self, p_path, p_num, a_id):
+                d = self.main_window.project_manager.get_doc(p_path)
+                if d:
+                    pg = d.load_page(p_num)
+                    for a in pg.annots():
+                        if a.info and a.info.get("title") == a_id:
+                            pg.delete_annot(a)
+                            break
+                    self.main_window.project_manager.mark_dirty(p_path)
+                    if p_path == self.main_window.current_file_path:
+                        self.viewer.reload_page(p_num)
+                        
+                self.main_window.project_manager.delete_highlight_record(a_id)
+                for nd in self.main_window.notes_docks: nd.refresh_notes()
+                for ws in self.main_window.workspace_docks: ws._sync_workspace()
+                
+                if hasattr(self.main_window, 'quick_note_dock') and self.main_window.quick_note_dock:
+                    self.main_window.quick_note_dock.close()
+                
+        # 5. Build the UI
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        
+        manager = QuickNoteManager(self)
+        bubble = NoteBubble(
+            manager, 
+            pdf_path, 
+            page_num, 
+            annot_id, 
+            target_annot.info.get("subject", ""), 
+            target_annot.info.get("content", ""), 
+            target_annot.colors.get("stroke"), 
+            is_ai=annot_id.startswith("AINote")
+        )
+        layout.addWidget(bubble)
+        layout.addStretch()
+        
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(container)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        
+        self.quick_note_dock.setWidget(scroll)
+        
+        # 6. Apply Themes dynamically
+        if hasattr(self, 'theme_manager'):
+            theme = self.theme_manager.get_theme()
+            container.setStyleSheet(f"background-color: {theme['bg_main']};")
+            scroll.setStyleSheet("background: transparent; border: none;")
+            bubble.apply_theme(theme)
+            
+            dock_style = f'''
+                QDockWidget {{ font-weight: bold; color: {theme['text_main']}; }}
+                QDockWidget::title {{ background: {theme['bg_panel']}; padding: 6px; border: 1px solid {theme['border']}; }}
+            '''
+            self.quick_note_dock.setStyleSheet(dock_style)
+        
+        # 7. Spawn explicitly to the right of the PDF Viewer and force to front!
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.quick_note_dock)
+        self.quick_note_dock.show()
+        self.quick_note_dock.raise_()
 
     def _check_needs_ocr(self):
         self.ocr_banner.hide()
