@@ -135,7 +135,7 @@ class AIFillGraphWorker(QThread):
                         "AI Fill Graph Worker - Evidence Extractor",
                         (
                             "You are an expert AI research assistant. Your task is to find concrete textual evidence to support a specific claim.\n"
-                            "Read the provided CONTEXT documents thoroughly. Extract 2 to 5 highly relevant, VERBATIM quotes that strongly prove the claim.\n"
+                            "Read the provided CONTEXT documents thoroughly. Extract 2 to 8 highly relevant, VERBATIM quotes that strongly prove the claim.\n"
                             "CRITICAL RULES:\n"
                             "1. Quotes MUST be exactly copy-pasted from the text. Do not paraphrase.\n"
                             "2. Try to find evidence from MULTIPLE different documents if the context supports it.\n"

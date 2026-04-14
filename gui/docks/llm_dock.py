@@ -1,4 +1,4 @@
-# gui/tabs/llm_tab.py
+# gui/tabs/llm_dock.py
 import re
 import os
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QTextEdit, QPushButton, QLabel, 
@@ -263,6 +263,13 @@ class LLMTab(QWidget):
     def _on_index_complete(self, success, error_msg):
         self.btn_index.setEnabled(True)
         if success:
+            # ---> FIX: Re-sync tags to the newly created index chunks so they are searchable
+            if hasattr(self, 'main_window') and self.main_window:
+                pm = self.main_window.project_manager
+                for pdf_path in pm.pdfs:
+                    pm._sync_doc_tags_for_llm(pdf_path)
+            # <---
+            
             self.status_lbl.setText("🟢 Status: Ready (Indexed to Vector DB)")
             color = self.theme['success'] if self.theme else "#00cc66"
             self.status_lbl.setStyleSheet(f"font-weight: bold; color: {color}; font-size: 14px;")

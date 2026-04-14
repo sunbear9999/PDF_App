@@ -108,25 +108,39 @@ class TTSTab(QWidget):
 
     def update_theme(self, theme):
         self.theme = theme
-        self.setStyleSheet(f"background-color: {theme['bg_main']};")
-        self.tab_scroll_area.setStyleSheet("background: transparent; border: none;")
-        self.tab_scroll_area.viewport().setStyleSheet(f"background-color: {theme['bg_main']};")
-        self.content_widget.setStyleSheet(f"background-color: {theme['bg_main']};")
-        self.instructions.setStyleSheet(f"font-weight: bold; margin-bottom: 5px; color: {theme['text_main']};")
-        self.text_editor.setStyleSheet(
-            f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']};"
-        )
-        self.voice_combo.setStyleSheet(
-            f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']};"
-        )
-        self.speed_combo.setStyleSheet(
-            f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']};"
-        )
-        self.btn_fetch.setStyleSheet(f"background-color: {theme['bg_input']}; padding: 6px; border: 1px solid {theme['border']};")
-        self.btn_generate.setStyleSheet(f"background-color: {theme['accent']}; padding: 12px; font-weight: bold; font-size: 14px; margin-top: 5px; color: #ffffff;")
+        
+        # NUCLEAR FIX for PyQt white background bleed
+        self.setAutoFillBackground(True)
+        p = self.palette()
+        p.setColor(self.backgroundRole(), QColor(theme['bg_main']))
+        self.setPalette(p)
+        
+        self.content_widget.setAutoFillBackground(True)
+        self.content_widget.setPalette(p)
+        
+        # Blanket stylesheet to catch all un-styled elements
+        self.setStyleSheet(f"""
+            QWidget {{ background-color: {theme['bg_main']}; color: {theme['text_main']}; }}
+            QScrollArea {{ background-color: transparent; border: none; }}
+            QTextEdit {{ background-color: {theme['bg_input']}; border: 1px solid {theme['border']}; border-radius: 4px; padding: 4px; }}
+            QComboBox, QSpinBox {{ background-color: {theme['bg_input']}; border: 1px solid {theme['border']}; border-radius: 4px; padding: 4px; }}
+            QLabel {{ background: transparent; font-weight: bold; }}
+            QCheckBox {{ background: transparent; font-weight: bold; }}
+        """)
+        
+        self.btn_fetch.setStyleSheet(f"""
+            QPushButton {{ background-color: {theme['bg_input']}; color: {theme['text_main']}; padding: 6px; border: 1px solid {theme['border']}; border-radius: 4px; font-weight: bold; }}
+            QPushButton:hover {{ background-color: {theme['accent_hover']}; color: white; border: none; }}
+        """)
+        
+        self.btn_generate.setStyleSheet(f"""
+            QPushButton {{ background-color: {theme['accent']}; padding: 10px; font-weight: bold; font-size: 14px; margin-top: 5px; color: #ffffff; border-radius: 4px; border: none; }}
+            QPushButton:hover {{ background-color: {theme['accent_hover']}; }}
+            QPushButton:disabled {{ background-color: {theme['bg_input']}; color: {theme['text_muted']}; }}
+        """)
+        
         if self.status_lbl.text() == "Ready":
-            self.status_lbl.setStyleSheet(f"color: {theme['text_muted']}; margin-top: 5px;")
-
+            self.status_lbl.setStyleSheet(f"color: {theme['text_muted']}; margin-top: 5px; font-weight: bold; background: transparent;")
     def _handle_status_update(self, msg):
         self.status_lbl.setText(msg)
         color = self.theme['warning'] if self.theme else "#ffaa00"

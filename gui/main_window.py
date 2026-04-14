@@ -13,10 +13,10 @@ from PyQt6.QtCore import Qt, QSettings, QTimer, QThread, QEvent
 from core.project_manager import ProjectManager
 from gui.components.dialogs.extract_pages_dialog import ExtractPagesDialog
 from gui.components.pdf_viewer import PDFViewer
-from gui.tabs.ocr_tab import OCRTab
-from gui.tabs.tts_tab import TTSTab
-from gui.tabs.llm_tab import LLMTab
-from gui.tabs.notes_tab import NotesTab
+from gui.docks.ocr_dock import OCRTab
+from gui.docks.tts_dock import TTSTab
+from gui.docks.llm_dock import LLMTab
+from gui.docks.notes_dock import NotesTab
 from gui.theme import ThemeManager
 from gui.components.help_dialog import HelpDialog
 from gui.components.dialogs.prompt_editor_dialog import PromptEditorDialog
@@ -37,87 +37,62 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Papyrus - Ethical, Offline Research Assistant")
-        
-        # 1. Put this back so the app remembers its size on your monitor!
         self._apply_smart_window_size()
-        
-        # 2. You can leave the QSettings clearing lines here if you want, or delete them.
+        self.setMinimumSize(800, 600)
         self.settings = QSettings("PDFMultitool", "Workspace")
-        # self.settings.remove("geometry") 
-        # self.settings.remove("windowState")
-        
-        
-        # 3. Force XFCE to respect the window size
-        self.setMinimumSize(1200, 800)
         
         self.theme_manager = ThemeManager()
         self.project_manager = ProjectManager()
         self.project_manager.main_window = self
         self.current_file_path = None
         
-        # 4. Initialize Viewer BEFORE building the menu
-        self.viewer = PDFViewer()
-
-        # 5. Top Menu
-        self._build_top_menu()
-
-        # 6. Ensure Docks can take up the whole screen cleanly
-        self.setDockOptions(
-            QMainWindow.DockOption.AllowNestedDocks | 
-            QMainWindow.DockOption.AnimatedDocks | 
-            QMainWindow.DockOption.AllowTabbedDocks |
-            QMainWindow.DockOption.GroupedDragging
-        )
-        self.setDockNestingEnabled(True)
-        
-        # 7. Give the central widget a 1x1 minimum size so it NEVER reports 0x0 to XFCE
-        dummy_central = QWidget()
-        dummy_central.setMinimumSize(1, 1)
-        self.setCentralWidget(dummy_central)
-        self.setDockOptions(
-            QMainWindow.DockOption.AllowNestedDocks | 
-            QMainWindow.DockOption.AnimatedDocks | 
-            QMainWindow.DockOption.AllowTabbedDocks |
-            QMainWindow.DockOption.GroupedDragging
-        )
-        self.setDockNestingEnabled(True)
-        dummy_central = QWidget()
-        dummy_central.setFixedSize(0, 0)
-        dummy_central.hide() 
-        self.setCentralWidget(dummy_central)
-        
-        # 4. Strict safety net to prevent the XFCE 0x0 crush bug
-        self.setMinimumSize(800, 600)
-        # Track active tool instances
-        self.workspace_docks = []
-        self.notes_docks = []
-        self.chat_docks = []
-        self.scratchpad_docks = []
-        self.ocr_docks = []      # <-- NEW
-        self.audio_docks = []
-
         from core.llm_manager import LocalLLMManager
         self.shared_llm_manager = LocalLLMManager()
+        
+        # 1. INITIALIZE VIEWER EXPLICITLY ONCE
         self.viewer = PDFViewer()
+        
+        # 2. CONNECT CRITICAL SAVING SIGNALS 
+        # This guarantees the ProjectManager knows to save the file!
+        self.viewer.annotation_clicked.connect(self.broadcast_annotation_clicked)
+        self.viewer.annot_manager.note_added.connect(self.broadcast_note_added)
+        self.viewer.annot_manager.highlight_created.connect(self.broadcast_highlight_created)
 
-        # 2. Top Menu is now set as a standard QMainWindow MenuWidget
-        self._build_top_menu()
+        # 3. CONFIGURE DOCKS
+        self.setDockOptions(
+            QMainWindow.DockOption.AllowNestedDocks | 
+            QMainWindow.DockOption.AnimatedDocks | 
+            QMainWindow.DockOption.AllowTabbedDocks |
+            QMainWindow.DockOption.GroupedDragging
+        )
+        self.setDockNestingEnabled(True)
 
-        # 3. The Central Widget now exclusively holds the Canvas & OCR Banner
+        # 4. SET CENTRAL WIDGET PROPERLY
         self.central_wrapper = QWidget()
         self.central_layout = QVBoxLayout(self.central_wrapper)
         self.central_layout.setContentsMargins(0, 0, 0, 0)
         self.central_layout.setSpacing(0)
         self.setCentralWidget(self.central_wrapper)
 
+        # 5. TRACK DOCKS
+        self.workspace_docks = []
+        self.notes_docks = []
+        self.chat_docks = []
+        self.scratchpad_docks = []
+        self.ocr_docks = []      
+        self.audio_docks = []
+
+        # 6. BUILD UI
+        self._build_top_menu()
         self._build_ocr_banner()
         self._build_workspace()
         self._setup_shortcuts()
         
-        # Connect Theme Manager to trigger visual updates
+        # Connect Theme Manager
         self.theme_manager.theme_changed.connect(self.update_theme)
-        self.update_theme(self.theme_manager.get_theme()) # Initial Apply
+        self.update_theme(self.theme_manager.get_theme()) 
         
+        # Timers
         self.autosave_timer = QTimer(self)
         self.autosave_timer.timeout.connect(self.autosave_project)
         self.autosave_timer.start(5 * 60 * 1000) 
@@ -234,28 +209,24 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("F11"), self).activated.connect(self.toggle_full_screen)
 
     def _build_top_menu(self):
-        from PyQt6.QtWidgets import QScrollArea, QHBoxLayout, QWidget
-        self.top_menu_scroll = QScrollArea()
-        self.top_menu_scroll.setWidgetResizable(True)
-        self.top_menu_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.top_menu_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.top_menu_scroll.setFixedHeight(60)
+        from PyQt6.QtWidgets import QToolBar, QWidget, QHBoxLayout, QSizePolicy
+        from PyQt6.QtCore import Qt
 
-        self.top_menu = QWidget()
-        self.top_menu.setMinimumHeight(55)
-        menu_layout = QHBoxLayout(self.top_menu)
-        menu_layout.setContentsMargins(10, 5, 10, 5)
+        # 🔥 UPGRADE: Native QToolBar handles spacing, heights, and overflow automatically!
+        self.top_toolbar = QToolBar("Main Toolbar", self)
+        self.top_toolbar.setMovable(False)
+        self.top_toolbar.setFloatable(False)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.top_toolbar)
 
-        # Feedback Button (opens a placeholder link)
+        # 1. Feedback
         self.btn_feedback = QPushButton()
-        self._configure_hover_expand_button(self.btn_feedback, "💬", "Feedback", expanded_width=120)
+        self._configure_hover_expand_button(self.btn_feedback, "💬", "Feedback", expanded_width=110,collapsed_width=60)
         self.btn_feedback.clicked.connect(lambda: self._open_feedback_link())
-        menu_layout.addWidget(self.btn_feedback)
-        menu_layout.addSpacing(4)
+        self.top_toolbar.addWidget(self.btn_feedback)
 
+        # 2. Project Menu
         self.btn_project = QPushButton()
-        self._configure_hover_expand_button(self.btn_project, "📁", "Project", expanded_width=120, collapsed_width=56)
-        
+        self._configure_hover_expand_button(self.btn_project, "📁", "Project", expanded_width=100,collapsed_width=60)
         project_menu = QMenu(self)
         project_menu.addAction("New Project...", self._new_project)
         project_menu.addAction("Open Project...", self._open_project)
@@ -263,99 +234,85 @@ class MainWindow(QMainWindow):
         project_menu.addSeparator()
         project_menu.addAction("Add PDF to Project...", self._add_pdf)
         self.btn_project.setMenu(project_menu)
-        menu_layout.addWidget(self.btn_project)
-        menu_layout.addSpacing(8)
+        self.top_toolbar.addWidget(self.btn_project)
 
-       
-        menu_layout.addSpacing(8)
-        self.btn_save = QPushButton()
-        self._configure_hover_expand_button(self.btn_save, "💾", "Save Project", expanded_width=140)
+        # 3. Save Button
+        self.btn_save = QPushButton("💾")
         self.btn_save.clicked.connect(self.save_project)
-        menu_layout.addWidget(self.btn_save)
-        menu_layout.addStretch()
+        self.top_toolbar.addWidget(self.btn_save)
 
+        # Add a flexible spacer to push the next items to the right/center
+        spacer1 = QWidget()
+        spacer1.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.top_toolbar.addWidget(spacer1)
+
+        # 4. Spawners (Workspace, Chat, Notes, etc.)
+        self.btn_spawn_ws = QPushButton("➕ Workspace")
+        self.btn_spawn_ws.clicked.connect(self.spawn_workspace_dock)
+        self.top_toolbar.addWidget(self.btn_spawn_ws)
+
+        self.btn_spawn_chat = QPushButton("➕ AI Chat")
+        self.btn_spawn_chat.clicked.connect(self.spawn_chat_dock)
+        self.top_toolbar.addWidget(self.btn_spawn_chat)
+
+        self.btn_spawn_notes = QPushButton("➕ Notes List")
+        self.btn_spawn_notes.clicked.connect(self.spawn_notes_dock)
+        self.top_toolbar.addWidget(self.btn_spawn_notes)
         
-        self.btn_fullscreen = QPushButton()
-        self._configure_hover_expand_button(self.btn_fullscreen, "⛶", "Enter Full Screen", expanded_width=180)
-        self.btn_fullscreen.clicked.connect(self.toggle_full_screen)
+        self.btn_spawn_scratch = QPushButton("➕ Scratchpad")
+        self.btn_spawn_scratch.clicked.connect(self.spawn_scratchpad_dock)
+        self.top_toolbar.addWidget(self.btn_spawn_scratch)
         
-        
-        menu_layout.addWidget(self.btn_fullscreen)
-        menu_layout.addStretch()
+        self.btn_spawn_ocr = QPushButton("➕ OCR Scanner")
+        self.btn_spawn_ocr.clicked.connect(self.spawn_ocr_dock)
+        self.top_toolbar.addWidget(self.btn_spawn_ocr)
+
+        self.btn_spawn_audio = QPushButton("➕ Audio (TTS)")
+        self.btn_spawn_audio.clicked.connect(self.spawn_audio_dock)
+        self.top_toolbar.addWidget(self.btn_spawn_audio)
+
+        spacer2 = QWidget()
+        spacer2.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.top_toolbar.addWidget(spacer2)
+
+        # 5. Right-side Tools
+        self.btn_tag_manager = QPushButton()
+        self._configure_hover_expand_button(self.btn_tag_manager, "🏷️", "Tag Manager", expanded_width=130,collapsed_width=60)
+        self.btn_tag_manager.clicked.connect(self._open_tag_manager)
+        self.top_toolbar.addWidget(self.btn_tag_manager)
+
+        self.btn_prompt_editor = QPushButton()
+        self._configure_hover_expand_button(self.btn_prompt_editor, "🧠", "Prompt Editor", expanded_width=140)
+        self.btn_prompt_editor.clicked.connect(self._open_prompt_editor)
+        self.top_toolbar.addWidget(self.btn_prompt_editor)
+
+        self.btn_layouts = QPushButton()
+        self._configure_hover_expand_button(self.btn_layouts, "🗔", "Window Layouts", expanded_width=160,collapsed_width=65)
+        layout_menu = QMenu(self)
+        layout_menu.addAction("⭐ Set Current as Default Layout", self._save_as_default_layout)
+        layout_menu.addAction("💾 Save as Custom Template...", self._save_layout_template)
+        self.custom_layouts_menu = layout_menu.addMenu("📁 Load Custom Template")
+        layout_menu.addAction("🔄 Reset to Default Sane Layout", self._reset_default_layout)
+        self.btn_layouts.setMenu(layout_menu)
+        self.top_toolbar.addWidget(self.btn_layouts)
+        self._refresh_layout_templates_menu()
 
         # Theme Selector
-        menu_layout.addWidget(QLabel("Theme:"))
+        theme_widget = QWidget()
+        theme_layout = QHBoxLayout(theme_widget)
+        theme_layout.setContentsMargins(5, 0, 5, 0)
+        theme_layout.addWidget(QLabel("Theme:"))
         self.theme_selector = QComboBox()
         self.theme_selector.addItems(self.theme_manager.themes.keys())
         self.theme_selector.setCurrentText(self.theme_manager.current_theme_name)
         self.theme_selector.currentTextChanged.connect(self._on_theme_changed)
-        menu_layout.addWidget(self.theme_selector)
-        menu_layout.addSpacing(10)
-        self.btn_layouts = QPushButton()
-        self._configure_hover_expand_button(self.btn_layouts, "🗔", "Window Layouts", expanded_width=140,collapsed_width=56)
-        
-        layout_menu = QMenu(self)
-        layout_menu.addAction("⭐ Set Current as Default Layout", self._save_as_default_layout)
-        layout_menu.addSeparator()
-        layout_menu.addAction("💾 Save as Custom Template...", self._save_layout_template)
-        layout_menu.addSeparator()
-        self.custom_layouts_menu = layout_menu.addMenu("📁 Load Custom Template")
-        layout_menu.addSeparator()
-        layout_menu.addAction("🔄 Reset to Default Sane Layout", self._reset_default_layout)
-        
-        self.btn_layouts.setMenu(layout_menu)
-        menu_layout.addWidget(self.btn_layouts)
-        self._refresh_layout_templates_menu()
-        
+        theme_layout.addWidget(self.theme_selector)
+        self.top_toolbar.addWidget(theme_widget)
 
-        self.btn_tag_manager = QPushButton()
-        self._configure_hover_expand_button(self.btn_tag_manager, "🏷️", "Tag Manager", expanded_width=130)
-        self.btn_tag_manager.clicked.connect(self._open_tag_manager)
-        menu_layout.addWidget(self.btn_tag_manager)
-        
-        menu_layout.addSpacing(8)
-        self.btn_help = QPushButton()
-        self._configure_hover_expand_button(self.btn_help, "❓", "Help", expanded_width=100)
-        self.btn_help.clicked.connect(self.show_help_window)
-        menu_layout.addWidget(self.btn_help)
-        menu_layout.addSpacing(8)
-
-        self.btn_prompt_editor = QPushButton()
-        self._configure_hover_expand_button(self.btn_prompt_editor, "🧠", "Prompt Editor", expanded_width=150)
-        self.btn_prompt_editor.clicked.connect(self._open_prompt_editor)
-        menu_layout.addWidget(self.btn_prompt_editor)
-        menu_layout.addSpacing(8)
-
-        self.tool_group = QButtonGroup(self)
-        # Independent Tool Spawners
-        self.btn_spawn_ws = QPushButton("➕ Workspace")
-        self.btn_spawn_ws.clicked.connect(self.spawn_workspace_dock)
-        menu_layout.addWidget(self.btn_spawn_ws)
-
-        self.btn_spawn_chat = QPushButton("➕ AI Chat")
-        self.btn_spawn_chat.clicked.connect(self.spawn_chat_dock)
-        menu_layout.addWidget(self.btn_spawn_chat)
-
-        self.btn_spawn_notes = QPushButton("➕ Notes List")
-        self.btn_spawn_notes.clicked.connect(self.spawn_notes_dock)
-        menu_layout.addWidget(self.btn_spawn_notes)
-        
-        self.btn_spawn_scratch = QPushButton("➕ Scratchpad")
-        self.btn_spawn_scratch.clicked.connect(self.spawn_scratchpad_dock)
-        menu_layout.addWidget(self.btn_spawn_scratch)
-        self.btn_spawn_ocr = QPushButton("➕ OCR Scanner")
-        self.btn_spawn_ocr.clicked.connect(self.spawn_ocr_dock)
-        menu_layout.addWidget(self.btn_spawn_ocr)
-
-        self.btn_spawn_audio = QPushButton("➕ Audio (TTS)")
-        self.btn_spawn_audio.clicked.connect(self.spawn_audio_dock)
-        menu_layout.addWidget(self.btn_spawn_audio)
-
-        self.top_menu_scroll.setWidget(self.top_menu)
-        self.setMenuWidget(self.top_menu_scroll)
-
-        self.top_menu_scroll.setWidget(self.top_menu)
-        self.setMenuWidget(self.top_menu_scroll)
+        self.btn_fullscreen = QPushButton()
+        self._configure_hover_expand_button(self.btn_fullscreen, "⛶", "Full Screen", expanded_width=120)
+        self.btn_fullscreen.clicked.connect(self.toggle_full_screen)
+        self.top_toolbar.addWidget(self.btn_fullscreen)
 
     def spawn_workspace_dock(self):
         # 1. Revive a hidden dock if one exists!
@@ -415,7 +372,7 @@ class MainWindow(QMainWindow):
         dock = QDockWidget(f"📝 Notes List {self.notes_counter}", self)
         dock.setObjectName(f"NotesDock_{self.notes_counter}")
         
-        from gui.tabs.notes_tab import NotesTab
+        from gui.docks.notes_dock import NotesTab
         notes_view = NotesTab(None, self.viewer, self)
         dock.setWidget(notes_view)
         
@@ -437,7 +394,7 @@ class MainWindow(QMainWindow):
         dock = QDockWidget("🤖 AI Chat", self)
         dock.setObjectName("SingleChatDock") # Constant name for layout saving
         
-        from gui.tabs.llm_tab import LLMTab
+        from gui.docks.llm_dock import LLMTab
         chat_view = LLMTab(self.shared_llm_manager, None, self)
         dock.setWidget(chat_view)
         
@@ -456,7 +413,7 @@ class MainWindow(QMainWindow):
 
         dock = QDockWidget("👁️ OCR Scanner", self)
         dock.setObjectName("SingleOCRDock")
-        from gui.tabs.ocr_tab import OCRTab
+        from gui.docks.ocr_dock import OCRTab
         view = OCRTab(None, self)
         dock.setWidget(view)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
@@ -472,7 +429,7 @@ class MainWindow(QMainWindow):
 
         dock = QDockWidget("🔊 Audio (TTS)", self)
         dock.setObjectName("SingleAudioDock")
-        from gui.tabs.tts_tab import TTSTab
+        from gui.docks.tts_dock import TTSTab
         view = TTSTab(None, self)
         dock.setWidget(view)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
@@ -647,7 +604,7 @@ class MainWindow(QMainWindow):
         self.theme_manager.set_theme(theme_name)
 
     def update_theme(self, theme):
-        self.top_menu.setStyleSheet(f"background-color: {theme['bg_panel']}; border-bottom: 1px solid {theme['border']};")
+        self.top_toolbar.setStyleSheet(f"background-color: {theme['bg_panel']}; border-bottom: 1px solid {theme['border']};")
         self.ocr_banner.setStyleSheet(f"background-color: {theme['warning']}; border-bottom: 1px solid {theme['border']};")
         self.lbl_ocr_banner.setStyleSheet(f"font-weight: bold; color: #1e1e1e; border: none;") 
 
@@ -673,11 +630,20 @@ class MainWindow(QMainWindow):
             QDockWidget::close-button, QDockWidget::float-button {{
                 background: transparent;
                 padding: 4px;
-                icon-size: 18px; /* Bigger hit target */
+                icon-size: 18px; 
             }}
             QDockWidget::close-button:hover, QDockWidget::float-button:hover {{
                 background: {theme['accent_hover']};
                 border-radius: 4px;
+            }}
+            /* NEW: Make dock separators fat and grabbable */
+            QMainWindow::separator {{
+                background: {theme['border']};
+                width: 6px; 
+                height: 6px;
+            }}
+            QMainWindow::separator:hover {{
+                background: {theme['accent']};
             }}
         """
         self.setStyleSheet(self.styleSheet() + dock_style)
@@ -1087,24 +1053,45 @@ class MainWindow(QMainWindow):
             self.project_manager.mark_dirty(self.current_file_path)
 
     def _build_ocr_banner(self):
-        self.ocr_banner = QFrame()
+        # 🔥 FIX: Parent it directly to the PDF Viewer so it acts as a floating overlay!
+        self.ocr_banner = QFrame(self.viewer)
         self.ocr_banner.setFixedHeight(45)
+        
+        # Give it a slight drop shadow and rounded edges
+        self.ocr_banner.setObjectName("OCRBanner")
+        
         banner_layout = QHBoxLayout(self.ocr_banner)
-        banner_layout.setContentsMargins(20, 0, 10, 0)
+        banner_layout.setContentsMargins(15, 0, 15, 0)
+        
         self.lbl_ocr_banner = QLabel("⚠️ Scanned document detected. Run OCR?")
         banner_layout.addWidget(self.lbl_ocr_banner)
         banner_layout.addStretch()
+        
         btn_run = QPushButton("Run OCR")
-        btn_run.setStyleSheet("background-color: white; color: black; border: none;")
+        btn_run.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_run.clicked.connect(self._trigger_auto_ocr)
         banner_layout.addWidget(btn_run)
-        btn_dismiss = QPushButton("Dismiss")
-        btn_dismiss.setStyleSheet("background-color: transparent; border: 1px solid #1e1e1e; color: #1e1e1e;")
+        
+        btn_dismiss = QPushButton("✖")
+        btn_dismiss.setFixedSize(24, 24)
+        btn_dismiss.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_dismiss.clicked.connect(self.ocr_banner.hide)
         banner_layout.addWidget(btn_dismiss)
-        self.central_layout.addWidget(self.ocr_banner)
+        
         self.ocr_banner.hide()
-
+        
+        # Create a dynamic hook so it stays centered at the top of the PDF Viewer when resized
+        original_resize = self.viewer.resizeEvent
+        def dynamic_resize(event):
+            original_resize(event)
+            banner_width = min(500, self.viewer.width() - 40)
+            self.ocr_banner.setGeometry(
+                (self.viewer.width() - banner_width) // 2, 
+                15, # 15px from the top of the viewer
+                banner_width, 
+                45
+            )
+        self.viewer.resizeEvent = dynamic_resize
     def _build_workspace(self):
         # 1. Anchor: Document Explorer Dock (Permanently Locked)
         self.doc_dock = QDockWidget("📁 Document Explorer", self)
@@ -1195,7 +1182,10 @@ class MainWindow(QMainWindow):
         title_layout.addStretch()
 
         self.pdf_dock.setTitleBarWidget(title_bar)
-    
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.pdf_dock)
+        
+        # Split the space cleanly between the Doc list and the PDF viewer
+        self.splitDockWidget(self.doc_dock, self.pdf_dock, Qt.Orientation.Horizontal)
 
     def broadcast_note_added(self):
         self._mark_current_dirty()
@@ -1217,14 +1207,12 @@ class MainWindow(QMainWindow):
             ws_view.handle_highlight_created(highlight_data)
 
     def broadcast_annotation_clicked(self, annot_id, page_num):
-        # 1. We already know the exact page, so bypass the DB and skip the document search!
         pdf_path = self.current_file_path
         if not pdf_path or page_num is None or page_num < 0: return
         
         doc = self.project_manager.get_doc(pdf_path)
         if not doc: return
         
-        # 2. Load ONLY the specific page. This completely circumvents the PyMuPDF crash bug!
         page = doc.load_page(page_num)
         target_annot = None
         for annot in page.annots():
@@ -1234,116 +1222,161 @@ class MainWindow(QMainWindow):
                 
         if not target_annot: return
         
-        # 3. Clean up the old Quick Note Dock if it exists so we don't clutter the screen
-        if hasattr(self, 'quick_note_dock') and self.quick_note_dock:
-            self.removeDockWidget(self.quick_note_dock)
-            self.quick_note_dock.deleteLater()
+        if hasattr(self, 'quick_note_popup') and self.quick_note_popup is not None:
+            try:
+                self.quick_note_popup.close()
+                self.quick_note_popup.deleteLater()
+            except RuntimeError:
+                pass
             
-        from PyQt6.QtWidgets import QDockWidget, QVBoxLayout, QWidget, QScrollArea, QFrame
-        from gui.tabs.notes_tab import NoteBubble
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QTextEdit, QPushButton, QLabel
         from PyQt6.QtCore import Qt
+        from PyQt6.QtGui import QCursor
         
-        self.quick_note_dock = QDockWidget("📝 Quick Note", self)
-        self.quick_note_dock.setObjectName("QuickNoteDock")
+        self.quick_note_popup = QDialog(self, Qt.WindowType.Tool)
+        self.quick_note_popup.setWindowTitle("📝 Edit Highlight")
+        # 🔥 FIX: Made the default size much smaller and cleaner
+        self.quick_note_popup.setMinimumSize(280, 200) 
+        self.quick_note_popup.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+
+        layout = QVBoxLayout(self.quick_note_popup)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        # --- 1. Quote Display ---
+        quote_text = target_annot.info.get("subject", "No quote extracted")
+        lbl_quote = QTextEdit()
+        lbl_quote.setPlainText(f'"{quote_text}"')
+        lbl_quote.setReadOnly(True)
+        lbl_quote.setMaximumHeight(45) # 🔥 FIX: Constrain quote height
+        lbl_quote.setStyleSheet("background: transparent; border: none; font-style: italic; color: #888;")
+        layout.addWidget(lbl_quote)
+
+        # --- 2. Note Box ---
+        layout.addWidget(QLabel("<b>Your Note:</b>"))
+        note_editor = QTextEdit()
+        note_editor.setPlainText(target_annot.info.get("content", ""))
+        note_editor.setPlaceholderText("Type your thoughts here...")
+        layout.addWidget(note_editor)
+
+        # --- 3. Toolbar (Colors + Delete) ---
+        toolbar = QHBoxLayout()
+        colors = [
+            ("#ffe16b", (1.0, 0.88, 0.42)), 
+            ("#ff9d9d", (1.0, 0.61, 0.61)), 
+            ("#a8ff9d", (0.66, 1.0, 0.61)), 
+            ("#9de1ff", (0.61, 0.88, 1.0)), 
+            ("#d89dff", (0.84, 0.61, 1.0))  
+        ]
         
-        # 4. Create a lightweight manager to handle the Bubble's clicks seamlessly
-        class QuickNoteManager:
-            def __init__(self, mw):
-                self.main_window = mw
-                self.viewer = mw.viewer
-                
-            def change_note_color(self, p_path, p_num, a_id, color):
-                d = self.main_window.project_manager.get_doc(p_path)
-                if not d: return
-                pg = d.load_page(p_num)
-                for a in pg.annots():
-                    if a.info and a.info.get("title") == a_id:
-                        a.set_colors(stroke=color)
-                        a.update()
-                        break
-                self.main_window.project_manager.mark_dirty(p_path)
-                
-                # Force Sync the DB so Workspace nodes instantly update their colors too
-                from PyQt6.QtGui import QColor
-                hex_col = QColor(int(color[0]*255), int(color[1]*255), int(color[2]*255)).name()
-                pm = self.main_window.project_manager
-                if pm._conn:
-                    cursor = pm._conn.cursor()
-                    cursor.execute("UPDATE highlights SET color = ? WHERE id = ?", (hex_col, a_id))
-                    cursor.execute("UPDATE workspace_nodes SET color = ? WHERE highlight_id = ?", (hex_col, a_id))
-                    pm._conn.commit()
-                
-                if p_path == self.main_window.current_file_path:
-                    self.viewer.reload_page(p_num)
-                    
-                for nd in self.main_window.notes_docks: nd.refresh_notes()
-                for ws in self.main_window.workspace_docks: ws._sync_workspace()
-                self.main_window.broadcast_annotation_clicked(a_id, p_num) 
-                
-            def delete_note(self, p_path, p_num, a_id):
-                d = self.main_window.project_manager.get_doc(p_path)
-                if d:
-                    pg = d.load_page(p_num)
-                    for a in pg.annots():
-                        if a.info and a.info.get("title") == a_id:
-                            pg.delete_annot(a)
-                            break
-                    self.main_window.project_manager.mark_dirty(p_path)
-                    if p_path == self.main_window.current_file_path:
-                        self.viewer.reload_page(p_num)
-                        
-                self.main_window.project_manager.delete_highlight_record(a_id)
-                for nd in self.main_window.notes_docks: nd.refresh_notes()
-                for ws in self.main_window.workspace_docks: ws._sync_workspace()
-                
-                if hasattr(self.main_window, 'quick_note_dock') and self.main_window.quick_note_dock:
-                    self.main_window.quick_note_dock.close()
-                
-        # 5. Build the UI
-        container = QWidget()
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(5, 5, 5, 5)
-        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        color_layout = QHBoxLayout()
+        color_layout.setSpacing(6)
+        for hex_col, rgb_tuple in colors:
+            btn_col = QPushButton()
+            btn_col.setFixedSize(22, 22)
+            btn_col.setStyleSheet(f"background-color: {hex_col}; border-radius: 11px; border: 1px solid #555;")
+            btn_col.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_col.clicked.connect(lambda checked, c=rgb_tuple, h=hex_col: change_highlight_color(c, h))
+            color_layout.addWidget(btn_col)
+            
+        toolbar.addLayout(color_layout)
+        toolbar.addStretch()
         
-        manager = QuickNoteManager(self)
-        bubble = NoteBubble(
-            manager, 
-            pdf_path, 
-            page_num, 
-            annot_id, 
-            target_annot.info.get("subject", ""), 
-            target_annot.info.get("content", ""), 
-            target_annot.colors.get("stroke"), 
-            is_ai=annot_id.startswith("AINote")
-        )
-        layout.addWidget(bubble)
-        layout.addStretch()
-        
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(container)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        
-        self.quick_note_dock.setWidget(scroll)
-        
-        # 6. Apply Themes dynamically
+        btn_delete = QPushButton("🗑️ Delete")
+        btn_delete.setStyleSheet("background-color: transparent; border: none; color: #ff4444; font-weight: bold;")
+        btn_delete.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_delete.clicked.connect(lambda: delete_highlight())
+        toolbar.addWidget(btn_delete)
+        layout.addLayout(toolbar)
+
         if hasattr(self, 'theme_manager'):
             theme = self.theme_manager.get_theme()
-            container.setStyleSheet(f"background-color: {theme['bg_main']};")
-            scroll.setStyleSheet("background: transparent; border: none;")
-            bubble.apply_theme(theme)
-            
-            dock_style = f'''
-                QDockWidget {{ font-weight: bold; color: {theme['text_main']}; }}
-                QDockWidget::title {{ background: {theme['bg_panel']}; padding: 6px; border: 1px solid {theme['border']}; }}
-            '''
-            self.quick_note_dock.setStyleSheet(dock_style)
-        
-        # 7. Spawn explicitly to the right of the PDF Viewer and force to front!
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.quick_note_dock)
-        self.quick_note_dock.show()
-        self.quick_note_dock.raise_()
+            self.quick_note_popup.setStyleSheet(f"""
+                QDialog {{ background-color: {theme['bg_panel']}; color: {theme['text_main']}; }}
+                QTextEdit {{ 
+                    background-color: {theme['bg_panel']}; 
+                    color: {theme['text_main']}; 
+                    border: 1px solid {theme['border']}; 
+                    border-radius: 6px;
+                    padding: 6px;
+                }}
+            """)
 
+        # --- Logic Closures ---
+        state = {"is_deleted": False} # Prevents saving a deleted note
+        
+        def save_note_text():
+            if state["is_deleted"]: return
+            
+            new_text = note_editor.toPlainText()
+            if target_annot.info.get("content") == new_text:
+                return # Skip if nothing changed
+                
+            # 1. Update PyMuPDF
+            info = dict(target_annot.info)
+            info["content"] = new_text
+            target_annot.set_info(info=info)
+            target_annot.update()
+            
+            # 2. Update highlights DB
+            pm = self.project_manager
+            pm.mark_dirty(pdf_path)
+            if pm._conn:
+                cursor = pm._conn.cursor()
+                cursor.execute("UPDATE highlights SET text_content = ? WHERE id = ?", (new_text, annot_id))
+                pm._conn.commit()
+                
+            # 🔥 FIX: Update Workspace nodes in RAM (solves the SQL Schema Crash)
+            for ws in self.workspace_docks:
+                for node in ws.nodes.values():
+                    if getattr(node, 'highlight_id', None) == annot_id:
+                        node.note = new_text
+                        node.update()
+                pm.mark_dirty("workspace")
+                
+            for nd in self.notes_docks: nd.refresh_notes()
+
+        def change_highlight_color(rgb_tuple, hex_col):
+            target_annot.set_colors(stroke=rgb_tuple)
+            target_annot.update()
+            
+            pm = self.project_manager
+            pm.mark_dirty(pdf_path)
+            if pm._conn:
+                cursor = pm._conn.cursor()
+                cursor.execute("UPDATE highlights SET color = ? WHERE id = ?", (hex_col, annot_id))
+                pm._conn.commit()
+
+            # Update RAM nodes
+            for ws in self.workspace_docks:
+                for node in ws.nodes.values():
+                    if getattr(node, 'highlight_id', None) == annot_id:
+                        node.color = hex_col
+                        node.update()
+                pm.mark_dirty("workspace")
+
+            self.viewer.reload_page(page_num)
+            for nd in self.notes_docks: nd.refresh_notes()
+
+        def delete_highlight():
+            state["is_deleted"] = True
+            page.delete_annot(target_annot)
+            pm = self.project_manager
+            pm.mark_dirty(pdf_path)
+            pm.delete_highlight_record(annot_id)
+            
+            self.viewer.reload_page(page_num)
+            for nd in self.notes_docks: nd.refresh_notes()
+            for ws in self.workspace_docks: ws._sync_workspace()
+            self.quick_note_popup.close()
+
+        # 🔥 FIX: Hook saving ONLY to the window closing, not text typing!
+        self.quick_note_popup.finished.connect(save_note_text)
+        self.quick_note_popup.finished.connect(lambda: setattr(self, 'quick_note_popup', None))
+
+        cursor_pos = QCursor.pos()
+        self.quick_note_popup.move(cursor_pos.x() + 15, cursor_pos.y() + 15)
+        self.quick_note_popup.show()
     def _check_needs_ocr(self):
         self.ocr_banner.hide()
         if not self.viewer.doc: return
@@ -1353,7 +1386,54 @@ class MainWindow(QMainWindow):
             if len(total_text.strip()) < 50:
                 self.ocr_banner.show()
         except: pass
+    def closeEvent(self, event):
+        """Intercepts the window closing to check for unsaved changes and clean up threads."""
+        
+        # 1. Check if there is anything actually waiting to be saved
+        has_unsaved_changes = hasattr(self, 'project_manager') and bool(self.project_manager.dirty_docs)
+        
+        if has_unsaved_changes:
+            from PyQt6.QtWidgets import QMessageBox
+            
+            # 2. Pop up the native OS warning dialog
+            reply = QMessageBox.question(
+                self, 
+                "Unsaved Changes",
+                "You have unsaved changes in your project. Do you want to save before exiting?",
+                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Save # Default button
+            )
+            
+            if reply == QMessageBox.StandardButton.Save:
+                # Attempt to save. If you have a method that handles this (like self.save_project), call it.
+                if hasattr(self, 'save_project'):
+                    self.save_project()
+                event.accept()
+                
+            elif reply == QMessageBox.StandardButton.Discard:
+                # User explicitly doesn't care, let the app die
+                event.accept()
+                
+            else:
+                # User hit Cancel, abort the close sequence entirely!
+                event.ignore()
+                return 
 
+        # 3. Clean up background workers so the app doesn't leave ghost processes running in Task Manager
+        if hasattr(self, 'autosave_timer') and self.autosave_timer.isActive():
+            self.autosave_timer.stop()
+            
+        if hasattr(self, 'viewer') and hasattr(self.viewer, 'worker') and self.viewer.worker:
+            self.viewer.worker._is_running = False
+            self.viewer.worker.wait()
+            
+        if hasattr(self, 'quick_note_popup') and self.quick_note_popup:
+            try:
+                self.quick_note_popup.close()
+            except RuntimeError:
+                pass
+                
+        event.accept()
     def _trigger_auto_ocr(self):
         self.ocr_banner.hide()
         self.spawn_ocr_dock()

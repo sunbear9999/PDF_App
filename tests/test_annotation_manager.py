@@ -70,9 +70,9 @@ class TestAnnotationManager(unittest.TestCase):
         
         # Mock window and tabs
         mock_main_window = MagicMock()
-        mock_llm_tab = MagicMock()
-        mock_llm_tab.model_combo.currentText.return_value = "llama3"
-        mock_main_window.tabs = {"LLM Chat": mock_llm_tab}
+        mock_llm_dock = MagicMock()
+        mock_llm_dock.model_combo.currentText.return_value = "llama3"
+        mock_main_window.tabs = {"LLM Chat": mock_llm_dock}
         self.mock_viewer.window.return_value = mock_main_window
 
         self.annot_manager.reword_selection()

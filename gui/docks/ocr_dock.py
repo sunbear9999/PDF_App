@@ -97,47 +97,44 @@ class OCRTab(QWidget):
 
     def update_theme(self, theme):
         self.theme = theme
-        self.setStyleSheet(f"background-color: {theme['bg_main']};")
-        self.tab_scroll_area.setStyleSheet("background: transparent; border: none;")
-        self.tab_scroll_area.viewport().setStyleSheet(f"background-color: {theme['bg_main']};")
-        self.content_widget.setStyleSheet(f"background-color: {theme['bg_main']};")
-        self.header.setStyleSheet(f"font-size: 24px; font-weight: bold; margin-bottom: 10px; color: {theme['text_main']};")
-        self.text_area.setStyleSheet(
-            f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']};"
-        )
+        
+        # NUCLEAR FIX for PyQt white background bleed
+        self.setAutoFillBackground(True)
+        p = self.palette()
+        p.setColor(self.backgroundRole(), QColor(theme['bg_main']))
+        self.setPalette(p)
+        
+        self.content_widget.setAutoFillBackground(True)
+        self.content_widget.setPalette(p)
+        
+        # Blanket stylesheet to catch all un-styled elements
+        self.setStyleSheet(f"""
+            QWidget {{ background-color: {theme['bg_main']}; color: {theme['text_main']}; }}
+            QScrollArea {{ background-color: transparent; border: none; }}
+            QTextEdit {{ background-color: {theme['bg_input']}; border: 1px solid {theme['border']}; border-radius: 4px; padding: 4px; }}
+            QLabel {{ background: transparent; font-weight: bold; }}
+        """)
+        
+        self.header.setStyleSheet(f"font-size: 18px; margin-bottom: 10px;")
+        
         radio_style = f"""
-            QRadioButton {{
-                color: {theme['text_main']};
-                spacing: 8px;
-                padding: 2px 0;
-                background: transparent;
-            }}
-            QRadioButton::indicator {{
-                width: 14px;
-                height: 14px;
-                border-radius: 7px;
-                border: 2px solid {theme['border']};
-                background: {theme['bg_input']};
-            }}
-            QRadioButton::indicator:hover {{
-                border: 2px solid {theme['accent']};
-            }}
-            QRadioButton::indicator:checked {{
-                border: 2px solid {theme['accent']};
-                background: {theme['accent']};
-            }}
-            QRadioButton::indicator:disabled {{
-                border: 2px solid {theme['border']};
-                background: {theme['bg_panel']};
-            }}
+            QRadioButton {{ background: transparent; spacing: 8px; }}
+            QRadioButton::indicator {{ width: 14px; height: 14px; border-radius: 7px; border: 2px solid {theme['border']}; background: {theme['bg_input']}; }}
+            QRadioButton::indicator:hover {{ border: 2px solid {theme['accent']}; }}
+            QRadioButton::indicator:checked {{ border: 2px solid {theme['accent']}; background: {theme['accent']}; }}
         """
         self.rb_text.setStyleSheet(radio_style)
         self.rb_new.setStyleSheet(radio_style)
         self.rb_replace.setStyleSheet(radio_style)
-        self.run_ocr_btn.setStyleSheet(f"background-color: {theme['success']}; color: #ffffff; padding: 10px 20px; font-weight: bold; border-radius: 4px; border: none;")
-        if self.status_label.text() == "Ready" or self.status_label.text().startswith("Target:"):
-            self.status_label.setStyleSheet(f"color: {theme['text_muted']}; font-size: 14px; margin-left: 10px;")
-
+        
+        self.run_ocr_btn.setStyleSheet(f"""
+            QPushButton {{ background-color: {theme['success']}; color: #ffffff; padding: 8px 16px; font-weight: bold; border-radius: 4px; border: none; }}
+            QPushButton:hover {{ background-color: {theme['accent_hover']}; }}
+            QPushButton:disabled {{ background-color: {theme['bg_input']}; color: {theme['text_muted']}; }}
+        """)
+        
+        if self.status_label.text() in ["Ready", ""] or self.status_label.text().startswith("Target:"):
+            self.status_label.setStyleSheet(f"color: {theme['text_muted']}; font-size: 13px; font-weight: bold; margin-left: 10px; background: transparent;")
     def get_output_mode(self):
         if self.rb_text.isChecked(): return "text"
         if self.rb_new.isChecked(): return "save_new"

@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (QGraphicsView, QGraphicsScene, QMenu, QMessageBox,
                              QScrollArea, QWidget, QFormLayout, QDialogButtonBox,
                              QColorDialog, QFileDialog, QTextEdit, QCheckBox, QSlider,
                              QGraphicsLineItem, QGraphicsTextItem, QListWidget,
-                             QListWidgetItem)
+                             QListWidgetItem,QSizePolicy)
 from PyQt6.QtCore import Qt, QRectF, QRunnable, QThreadPool, pyqtSlot
 from PyQt6.QtGui import QColor, QPen, QBrush, QFont, QPainter, QImage, QStandardItemModel, QStandardItem, QCursor, QPainterPath, QPainterPathStroker, QShortcut, QKeySequence
 from gui.components.workspace_items import Node, Edge
@@ -20,7 +20,7 @@ from core.ai_fill_graph_worker import AIFillGraphWorker
 from core.ai_consolidate_worker import AIConsolidateWorker
 from core.layout_engine import calculate_force_directed_layout
 from core.text_utils import get_semantic_similarity_matrix
-from gui.components.dialogs.workspace_dialogs import PDFColorDialog, DeclutterSettingsDialog, OutlineDialog, WeakpointsDialog
+from gui.components.dialogs.workspace_dialogs import ColorOrganizerDialog, DeclutterSettingsDialog, OutlineDialog, WeakpointsDialog
 from gui.components.dialogs.tag_manager_dialog import TagAssignmentDialog
 
 
@@ -414,99 +414,201 @@ class WorkspaceView(QGraphicsView):
 
         self.toolbar_frame = QFrame(self)
         self.toolbar_frame.setObjectName("WorkspaceToolbar")
-        tb_layout = QHBoxLayout(self.toolbar_frame)
-        tb_layout.setContentsMargins(10, 6, 10, 6)
-        tb_layout.setSpacing(4)
+        # 🔥 FIX 1: Strict Vertical Policy prevents the horizontal stretching glitch!
+        self.toolbar_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        main_tb_layout = QVBoxLayout(self.toolbar_frame)
+        main_tb_layout.setContentsMargins(4, 4, 4, 4)
+        main_tb_layout.setSpacing(2) # Ultra-tight vertical spacing
+
+        # 🔥 FIX 2: CSS to force emojis to the direct center and compress padding
+        compact_btn_style = """
+            QPushButton {
+                padding: 4px 6px;
+                border-radius: 4px;
+                font-weight: bold;
+                text-align: center;
+            }
+        """
+
+        # ==========================================
+        # ROW 1: Primary Tools & Navigation
+        # ==========================================
+        self.row1_widget = QWidget()
+        row1_layout = QHBoxLayout(self.row1_widget)
+        row1_layout.setContentsMargins(0, 0, 0, 0)
+        row1_layout.setSpacing(4) # Ultra-tight horizontal spacing
+
+        ws_label = QLabel("🗂️")
+        row1_layout.addWidget(ws_label)
         
+        self.workspace_combo = QComboBox()
+        self.workspace_combo.setFixedWidth(110)
+        self.workspace_combo.addItem("Main Board", 1)
+        self.workspace_combo.currentIndexChanged.connect(self._on_tab_changed)
+        row1_layout.addWidget(self.workspace_combo)
 
-    
-        # Filter section — collapses to 🔽, expands to show label + combo on hover
-        filter_content = QWidget()
-        filter_inner = QHBoxLayout(filter_content)
-        filter_inner.setContentsMargins(0, 0, 0, 0)
-        filter_inner.setSpacing(4)
-        filter_inner.addWidget(QLabel("Filter:"))
-        self.filter_combo = CheckableComboBox()
-        self.filter_combo.model().dataChanged.connect(self._apply_filter)
-        filter_inner.addWidget(self.filter_combo)
-        tb_layout.addWidget(CollapsingSection("🔽", filter_content))
-        filter_inner.addWidget(QLabel("Tags:"))
-        self.tag_filter_combo = CheckableComboBox()
-        self.tag_filter_combo.model().dataChanged.connect(self._apply_filter)
-        filter_inner.addWidget(self.tag_filter_combo)
-        self.btn_add_main_idea = CollapsingButton("💡", "💡 New Main Idea")
+        self.btn_add_workspace = QPushButton("➕ Board")
+        self.btn_add_workspace.setStyleSheet(compact_btn_style)
+        self.btn_add_workspace.clicked.connect(self._add_workspace)
+        row1_layout.addWidget(self.btn_add_workspace)
+
+        # Visual Divider
+        line1 = QFrame()
+        line1.setFrameShape(QFrame.Shape.VLine)
+        row1_layout.addWidget(line1)
+
+        self.btn_ai_tools = QPushButton("🤖 AI")
+        self.btn_ai_tools.setStyleSheet(compact_btn_style)
+        self.ai_menu = self.create_ai_menu(self.btn_ai_tools) if hasattr(self, 'create_ai_menu') else QMenu()
+        self.btn_ai_tools.setMenu(self.ai_menu)
+        row1_layout.addWidget(self.btn_ai_tools)
+
+        self.btn_add_main_idea = QPushButton("💡 Idea")
+        self.btn_add_main_idea.setStyleSheet(compact_btn_style)
         self.btn_add_main_idea.clicked.connect(self.add_custom_bubble)
-        tb_layout.addWidget(self.btn_add_main_idea)
-        # Standalone action buttons (icon-only, expand text on hover)
-        self.btn_color_pdf = CollapsingButton("🎨", "🎨 Color by PDF")
-        self.btn_color_pdf.clicked.connect(self._open_color_by_pdf_dialog)
-        tb_layout.addWidget(self.btn_color_pdf)
+        row1_layout.addWidget(self.btn_add_main_idea)
 
-        self.btn_declutter = CollapsingButton("🧹", "🧹 Declutter")
-        self.btn_declutter.clicked.connect(self.trigger_declutter)
-        tb_layout.addWidget(self.btn_declutter)
-
-        self.btn_export = CollapsingButton("📸", "📸 Export")
-        self.btn_export.clicked.connect(self._export_workspace)
-        tb_layout.addWidget(self.btn_export)
-
-        self.btn_unused_highlights = CollapsingButton("🧷", "🧷 Unused Highlights")
-        self.btn_unused_highlights.clicked.connect(self.open_unused_highlights_dialog)
-        tb_layout.addWidget(self.btn_unused_highlights)
-
-        self.btn_clear_filters = CollapsingButton("✖", "✖ Clear Filters")
-        self.btn_clear_filters.clicked.connect(self.reset_filters)
-        tb_layout.addWidget(self.btn_clear_filters)
-        self.btn_undo = CollapsingButton("↩️", "↩️ Undo")
+        # Shrink Undo/Redo to pure square icons
+        self.btn_undo = QPushButton("↩️")
+        self.btn_undo.setFixedWidth(28)
+        self.btn_undo.setStyleSheet("padding: 2px; text-align: center;")
         self.btn_undo.clicked.connect(self.undo)
-        tb_layout.addWidget(self.btn_undo)
+        row1_layout.addWidget(self.btn_undo)
 
-        self.btn_redo = CollapsingButton("↪️", "↪️ Redo")
+        self.btn_redo = QPushButton("↪️")
+        self.btn_redo.setFixedWidth(28)
+        self.btn_redo.setStyleSheet("padding: 2px; text-align: center;")
         self.btn_redo.clicked.connect(self.redo)
-        tb_layout.addWidget(self.btn_redo)
-        # Ghost links section — collapses to 👻, expands to show checkbox + slider on hover
-        ghost_content = QWidget()
-        ghost_content.setStyleSheet("background: transparent;")
-        ghost_inner = QHBoxLayout(ghost_content)
-        ghost_inner.setContentsMargins(0, 0, 0, 0)
+        row1_layout.addWidget(self.btn_redo)
+
+        line2 = QFrame()
+        line2.setFrameShape(QFrame.Shape.VLine)
+        row1_layout.addWidget(line2)
+
+        self.btn_recenter = QPushButton("🎯 Center")
+        self.btn_recenter.setStyleSheet(compact_btn_style)
+        self.btn_recenter.clicked.connect(self.recenter_view)
+        row1_layout.addWidget(self.btn_recenter)
+
+        self.btn_clear_filter = QPushButton("⚠️ Clear")
+        self.btn_clear_filter.setStyleSheet("background-color: #aa3333; color: white; font-weight: bold; padding: 4px; border-radius: 4px;")
+        self.btn_clear_filter.clicked.connect(self.reset_filters)
+        self.btn_clear_filter.hide()
+        row1_layout.addWidget(self.btn_clear_filter)
+
+        # This pushes everything cleanly to the left, preventing the weird spacing
+        row1_layout.addStretch()
+
+        self.btn_toggle_row2 = QPushButton("🔽")
+        self.btn_toggle_row2.setFixedWidth(28)
+        self.btn_toggle_row2.setStyleSheet("padding: 2px; font-weight: bold;")
+        self.btn_toggle_row2.setCursor(Qt.CursorShape.PointingHandCursor)
+        row1_layout.addWidget(self.btn_toggle_row2)
+
+        main_tb_layout.addWidget(self.row1_widget)
+
+        # ==========================================
+        # ROW 2: Filters & Secondary Tools
+        # ==========================================
+        self.row2_widget = QWidget()
+        row2_layout = QHBoxLayout(self.row2_widget)
+        row2_layout.setContentsMargins(0, 4, 0, 0)
+        row2_layout.setSpacing(6)
+
+        # 🔥 FIX: Removed text labels, widened the boxes slightly, and added hover Tooltips!
+        self.filter_combo = CheckableComboBox()
+        self.filter_combo.setFixedWidth(105)
+        self.filter_combo.setToolTip("Filter the workspace to only show nodes from specific PDFs.")
+        self.filter_combo.model().dataChanged.connect(self._apply_filter)
+        row2_layout.addWidget(self.filter_combo)
+        
+        self.tag_filter_combo = CheckableComboBox()
+        self.tag_filter_combo.setFixedWidth(105)
+        self.tag_filter_combo.setToolTip("Filter the workspace to only show nodes with specific Tags.")
+        self.tag_filter_combo.model().dataChanged.connect(self._apply_filter)
+        row2_layout.addWidget(self.tag_filter_combo)
+
+        line3 = QFrame()
+        line3.setFrameShape(QFrame.Shape.VLine)
+        row2_layout.addWidget(line3)
+
+        self.btn_color_pdf = QPushButton("🎨 Colors")
+        self.btn_color_pdf.setStyleSheet(compact_btn_style)
+        self.btn_color_pdf.setToolTip("Automatically color-code all nodes based on which PDF they came from.")
+        self.btn_color_pdf.clicked.connect(self._open_color_by_pdf_dialog)
+        row2_layout.addWidget(self.btn_color_pdf)
+
+        self.btn_declutter = QPushButton("🧹 Clean")
+        self.btn_declutter.setStyleSheet(compact_btn_style)
+        self.btn_declutter.setToolTip("Auto-arrange overlapping nodes to tidy up the board.")
+        self.btn_declutter.clicked.connect(self.trigger_declutter)
+        row2_layout.addWidget(self.btn_declutter)
+
+        self.btn_export = QPushButton("📸 Export")
+        self.btn_export.setStyleSheet(compact_btn_style)
+        self.btn_export.setToolTip("Save an image copy of your current workspace.")
+        self.btn_export.clicked.connect(self._export_workspace)
+        row2_layout.addWidget(self.btn_export)
+
+        # 🔥 FIX: Renamed to "Inbox" so it doesn't cut off, and explicitly explained it in the hover box.
+        self.btn_unused_highlights = QPushButton("📥 Inbox")
+        self.btn_unused_highlights.setStyleSheet(compact_btn_style)
+        self.btn_unused_highlights.setToolTip("View all highlights you've made in your PDFs that haven't been added to this board yet.")
+        self.btn_unused_highlights.clicked.connect(self.open_unused_highlights_dialog)
+        row2_layout.addWidget(self.btn_unused_highlights)
+
+        row2_layout.addStretch()
+
+        ghost_inner = QHBoxLayout()
         ghost_inner.setSpacing(4)
-        self.chk_show_ghost_links = QCheckBox("Ghost Links")
+        
+        # 🔥 FIX: Renamed "Ghosts" to "AI Links" for clarity, and added clear tooltips
+        self.chk_show_ghost_links = QCheckBox("👻")
         self.chk_show_ghost_links.setChecked(False)
+        self.chk_show_ghost_links.setToolTip("Show semantic connections between notes with similar meanings.")
         ghost_inner.addWidget(self.chk_show_ghost_links)
-        ghost_inner.addWidget(QLabel("Threshold:"))
+        
         self.slider_ghost_threshold = QSlider(Qt.Orientation.Horizontal)
         self.slider_ghost_threshold.setRange(60, 95)
         self.slider_ghost_threshold.setValue(75)
-        self.slider_ghost_threshold.setFixedWidth(110)
+        self.slider_ghost_threshold.setFixedWidth(60)
+        self.slider_ghost_threshold.setToolTip("Adjust how strict the AI is when suggesting links (Higher = Stricter matching).")
         ghost_inner.addWidget(self.slider_ghost_threshold)
-        tb_layout.addWidget(CollapsingSection("👻", ghost_content))
+        
+        row2_layout.addLayout(ghost_inner)
 
-        # AI Tools button
-        self.btn_ai_tools = CollapsingButton("🤖", "🤖 AI Tools")
-        self.ai_menu = self.create_ai_menu(self.btn_ai_tools)
-        self.btn_ai_tools.setMenu(self.ai_menu)
-        tb_layout.addWidget(self.btn_ai_tools)
+        main_tb_layout.addWidget(self.row2_widget)
+        self.row2_widget.hide()
 
+        # 🔥 FIX 3: Removed adjustSize() so the Dock stays perfectly locked in place
+        def toggle_secondary_tools():
+            if self.row2_widget.isVisible():
+                self.row2_widget.hide()
+                self.btn_toggle_row2.setText("🔽")
+            else:
+                self.row2_widget.show()
+                self.btn_toggle_row2.setText("🔼")
+                
+            # 1. Force the layout to instantly register the hidden/shown widgets
+            main_tb_layout.invalidate()
+            main_tb_layout.activate()
+            
+            # 2. Extract exactly how tall it *needs* to be, and lock the QFrame to that height
+            target_height = main_tb_layout.sizeHint().height()
+            self.toolbar_frame.setFixedHeight(target_height)
+
+        self.btn_toggle_row2.clicked.connect(toggle_secondary_tools)
+
+        # 3. Trigger this exact logic once on startup so it perfectly wraps Row 1
+        main_tb_layout.activate()
+        self.toolbar_frame.setFixedHeight(main_tb_layout.sizeHint().height())
+
+        # Connect Signals
         self.chk_show_ghost_links.toggled.connect(self.update_ghost_connections)
         self.slider_ghost_threshold.valueChanged.connect(self.update_ghost_connections)
         self.scene_obj.selectionChanged.connect(self.update_ghost_connections)
         self.scene_obj.changed.connect(self._on_scene_changed)
-
-        # Workspace selector — inline in the toolbar, right of AI Tools
-        tb_layout.addSpacing(8)
-        ws_label = QLabel("🗂️")
-        tb_layout.addWidget(ws_label)
-        self.workspace_combo = QComboBox()
-        self.workspace_combo.setMinimumWidth(110)
-        self.workspace_combo.setToolTip("Switch workspace")
-        self.workspace_combo.addItem("Main Board", 1)
-        self.workspace_combo.currentIndexChanged.connect(self._on_tab_changed)
-        tb_layout.addWidget(self.workspace_combo)
-
-        self.btn_add_workspace = CollapsingButton("＋", "＋ New Board")
-        self.btn_add_workspace.setToolTip("Add new workspace")
-        self.btn_add_workspace.clicked.connect(self._add_workspace)
-        tb_layout.addWidget(self.btn_add_workspace)
 
         self.update_scene_bounds()
     def get_active_ai_model(self):
@@ -525,6 +627,13 @@ class WorkspaceView(QGraphicsView):
                 
         # 🔥 The new global default fallback!
         return "gemma4:e2b"
+    def recenter_view(self):
+        """Finds the bounding box of all nodes and smoothly centers the camera on them."""
+        rect = self.scene().itemsBoundingRect()
+        if not rect.isEmpty():
+            # Add 50px of padding around the edges so nodes don't touch the screen borders
+            rect.adjust(-50, -50, 50, 50)
+            self.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
     def _queue_background_embedding(self, node):
         """Dispatches node text to the global thread pool for embedding."""
         try:
@@ -700,13 +809,19 @@ class WorkspaceView(QGraphicsView):
 
     def _apply_filter(self):
         checked_pdfs = self.filter_combo.get_checked_items()
-        show_all = "ALL" in checked_pdfs or not checked_pdfs
+        show_all_pdfs = "ALL" in checked_pdfs or not checked_pdfs
+        
         checked_tags = self.tag_filter_combo.get_checked_items() if hasattr(self, "tag_filter_combo") else ["ALL_TAGS"]
         show_all_tags = "ALL_TAGS" in checked_tags or not checked_tags
         
+        # 🔥 FIX: Safely check if any specific filters are applied
+        is_filtered = not show_all_pdfs or not show_all_tags
+        if hasattr(self, 'btn_clear_filter'):
+            self.btn_clear_filter.setVisible(is_filtered)
+        
         # Filter Nodes
         for node in self.nodes.values():
-            if show_all:
+            if show_all_pdfs:
                 pdf_ok = True
             else:
                 if node.pdf_path is None:
@@ -1000,38 +1115,67 @@ class WorkspaceView(QGraphicsView):
         self.workspace_combo.setCurrentIndex(new_index)  # fires _on_tab_changed
 
     def _open_color_by_pdf_dialog(self):
-        if not self.main_window.project_manager.pdfs:
-            QMessageBox.information(self, "No PDFs", "There are no PDFs in this project.")
+        pm = self.main_window.project_manager
+        if not pm: return
+        
+        pdfs = pm.pdfs
+        tags = pm.get_all_tags()
+        
+        if not pdfs and not tags:
+            QMessageBox.information(self, "Nothing to Color", "There are no PDFs or Tags in this project.")
             return
             
-        current_colors = {}
+        # 1. Collect current PDF colors
+        current_pdf_colors = {}
         for node in self.nodes.values():
-            if node.pdf_path and node.pdf_path not in current_colors:
-                current_colors[node.pdf_path] = node.color
+            if node.pdf_path and node.pdf_path not in current_pdf_colors:
+                current_pdf_colors[node.pdf_path] = node.color
                 
-        for pdf in self.main_window.project_manager.pdfs:
-            if pdf not in current_colors:
-                current_colors[pdf] = "#2b2b2b"
+        for pdf in pdfs:
+            if pdf not in current_pdf_colors:
+                current_pdf_colors[pdf] = "#2b2b2b"
                 
-        dialog = PDFColorDialog(self.main_window.project_manager.pdfs, current_colors, self)
+        # 2. Collect current Tag colors from the DB
+        current_tag_colors = {t.get("name"): t.get("color", "#808080") for t in tags if t.get("name")}
+                
+        dialog = ColorOrganizerDialog(pdfs, tags, current_pdf_colors, current_tag_colors, self)
         
+        # 3. Apply themes
         if hasattr(self.main_window, 'theme_manager'):
             theme = self.main_window.theme_manager.get_theme()
             dialog.setStyleSheet(f"background-color: {theme['bg_main']}; color: {theme['text_main']};")
-            dialog.scroll_widget.setStyleSheet(f"background-color: {theme['bg_panel']};")
             
+            # Style the tabs to match the rest of your app natively
+            tab_style = f"""
+                QTabWidget::pane {{ border: 1px solid {theme['border']}; border-radius: 4px; }}
+                QTabBar::tab {{ background: {theme['bg_panel']}; color: {theme['text_main']}; padding: 8px 16px; margin-right: 2px; border-top-left-radius: 4px; border-top-right-radius: 4px; }}
+                QTabBar::tab:selected {{ background: {theme['accent']}; color: #ffffff; font-weight: bold; }}
+            """
+            dialog.tab_widget.setStyleSheet(tab_style)
+            
+        # 4. Handle Execution
         if dialog.exec():
-            new_colors = dialog.get_colors()
+            mode, new_colors = dialog.get_result()
             self.save_state_for_undo()
             
-            for node in self.nodes.values():
-                if node.pdf_path and node.pdf_path in new_colors:
-                    node.color = new_colors[node.pdf_path]
-                    node.setBrush(QBrush(QColor(node.color)))
-                    node.refresh_layout()
-                    
+            if mode == "pdf":
+                for node in self.nodes.values():
+                    if node.pdf_path and node.pdf_path in new_colors:
+                        node.color = new_colors[node.pdf_path]
+                        node.setBrush(QBrush(QColor(node.color)))
+                        node.refresh_layout()
+            elif mode == "tag":
+                for node in self.nodes.values():
+                    # Apply color of the first matching tag found on the node
+                    node_tags = node.get_tag_names()
+                    for tag_name in node_tags:
+                        if tag_name in new_colors:
+                            node.color = new_colors[tag_name]
+                            node.setBrush(QBrush(QColor(node.color)))
+                            node.refresh_layout()
+                            break 
+                            
             self.main_window.project_manager.mark_dirty("workspace")
-            
             self.save_workspace_state()
 
     def trigger_declutter(self):
@@ -1271,6 +1415,7 @@ class WorkspaceView(QGraphicsView):
                 'height': n.base_height,
                 'x': n.pos().x(),
                 'y': n.pos().y(),
+                "tags": n.get_tag_names() if hasattr(n, "get_tag_names") else [],
             }
             for n in selected_nodes
         ]
@@ -1318,6 +1463,7 @@ class WorkspaceView(QGraphicsView):
                 manual_font_size=data['manual_font_size'],
                 highlight_id=data['highlight_id'],
             )
+            
             node.setPos(data['x'] + offset, data['y'] + offset)
             self.scene_obj.addItem(node)
             self.nodes[new_id] = node
@@ -1615,6 +1761,7 @@ class WorkspaceView(QGraphicsView):
             menu = QMenu(self)
             remove_action = menu.addAction("🗑️ Remove Selected from Workspace")
             delete_action = menu.addAction("🔥 Delete Selected Highlights Permanently")
+            color_action = menu.addAction("🎨 Change Color for Selected Nodes") # <-- ADDED
             manage_tags_action = menu.addAction("🏷️ Manage Tags for Selected Nodes")
             declutter_action = menu.addAction("🧹 Declutter Selected Nodes")
             remove_action.triggered.connect(self.delete_selected_nodes)
@@ -1628,12 +1775,16 @@ class WorkspaceView(QGraphicsView):
                 self.save_state_for_undo()
                 for highlight_id in {n.highlight_id for n in selected_nodes if n.highlight_id}:
                     self._delete_highlight_permanently(highlight_id)
+            elif action == color_action:                        # <-- ADDED
+                self._change_color_for_nodes(selected_nodes)    # <-- ADDED
             elif action == manage_tags_action:
                 self._manage_tags_for_nodes(selected_nodes)
             elif action == declutter_action:
                 self.trigger_declutter()
             return
-
+        
+                
+           
         if isinstance(item, Node):
             # Snapshot the selection BEFORE we potentially clear it below.
             # This lets us detect "node A was selected, right-clicked on node B → offer connect".
@@ -1727,7 +1878,37 @@ class WorkspaceView(QGraphicsView):
             return
 
         super().contextMenuEvent(event)
-
+    def _change_color_for_nodes(self, nodes):
+        if not nodes: return
+        
+        # Use the first node's color as the initial dialog color
+        initial_color = QColor(nodes[0].color)
+        color = QColorDialog.getColor(initial_color, self, "Select Color for Selected Nodes")
+        
+        if color.isValid():
+            self.save_state_for_undo()
+            color_name = color.name()
+            
+            for node in nodes:
+                node.color = color_name
+                node.setBrush(QBrush(QColor(color_name)))
+                node.refresh_layout()
+                
+                # Sync the UI if it's a PDF note and the notes dock is open
+                if not getattr(node, 'is_custom', False) and getattr(node, 'pdf_path', None) is not None:
+                    annot_id = getattr(node, 'highlight_id', None) or getattr(node, 'node_id', None)
+                    if hasattr(self.main_window, 'notes_docks'):
+                        for notes_dock in self.main_window.notes_docks:
+                            notes_dock._modify_note(
+                                node.pdf_path, 
+                                node.page_num, 
+                                annot_id, 
+                                action="edit_content", 
+                                content=getattr(node, 'note', ''), 
+                                refresh=False
+                            )
+                            
+            self._mark_workspace_dirty(autosave=True)
     def trigger_ai_organize(self, selected_nodes):
         if self.is_llm_busy:
             QMessageBox.warning(self, "AI Busy", "The AI is currently processing another request.")

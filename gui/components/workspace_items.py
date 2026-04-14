@@ -95,6 +95,7 @@ class Edge(QGraphicsLineItem):
                 view.save_state_for_undo()
                 view._mark_workspace_dirty(autosave=True)
             self.base_color = color
+           
             self.setPen(QPen(self.base_color, self.weight + 2 if self.isSelected() else self.weight, Qt.PenStyle.SolidLine))
             if view:
                 view.main_window.project_manager.mark_dirty("workspace")
@@ -448,21 +449,21 @@ class Node(QGraphicsRectItem):
         spacing = 4
         shown = self.tag_badges[:max_dots]
         
-        # Calculate text widths to ensure hitboxes perfectly match the new pills
-        from PyQt6.QtGui import QFontMetrics, QFont
-        fm = QFontMetrics(QFont("Arial", 8, QFont.Weight.Bold))
-        pill_widths = [fm.horizontalAdvance(b.get("name", "")) + 12 for b in shown]
-        total_w = sum(pill_widths) + max(0, len(shown) - 1) * spacing
+        # 🔥 FIX: Define simple 10x10px circles
+        dot_radius = 5
+        dot_diam = dot_radius * 2
         
-        x = self.rect().right() - 6 - total_w
-        y = self.rect().top() + 6
-        pill_h = 16
+        # Start from top-right corner
+        x = self.rect().right() - 8 - dot_diam
+        y = self.rect().top() + 8
 
         regions = []
-        for badge, p_width in zip(shown, pill_widths):
-            regions.append((QRectF(x, y, p_width, pill_h), badge.get("name") or ""))
-            x += p_width + spacing
+        for badge in shown:
+            regions.append((QRectF(x, y, dot_diam, dot_diam), badge.get("name") or ""))
+            x -= (dot_diam + spacing) # Move left for the next dot
         return regions
+
+    
 
    
 
@@ -513,7 +514,7 @@ class Node(QGraphicsRectItem):
     def paint(self, painter, option, widget=None):
         super().paint(painter, option, widget)
 
-        # 🔥 FIX 6: Draw ghost placeholder text directly on the canvas if empty
+        # Draw ghost placeholder text directly on the canvas if empty
         if not self.quote and not self.note and not self.text_item.hasFocus():
             painter.save()
             painter.setPen(QPen(QColor(150, 150, 150, 150)))
@@ -529,40 +530,15 @@ class Node(QGraphicsRectItem):
         if not self.tag_badges:
             return
 
-        # 🔥 FIX 8: Render full pills with dynamic text contrast
+        # 🔥 FIX: Draw clean, borderless colored dots
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen) # No borders for a minimalist look
 
-        max_dots = 5
-        spacing = 4
-        shown = self.tag_badges[:max_dots]
-        
-        font = QFont("Arial", 8, QFont.Weight.Bold)
-        painter.setFont(font)
-        fm = painter.fontMetrics()
-        
-        pill_widths = [fm.horizontalAdvance(b.get("name", "")) + 12 for b in shown]
-        total_w = sum(pill_widths) + max(0, len(shown) - 1) * spacing
-        
-        x = self.rect().right() - 6 - total_w
-        y = self.rect().top() + 6
-        pill_h = 16
-
-        for badge, p_width in zip(shown, pill_widths):
-            color_hex = badge.get("color") or "#808080"
-            bg_color = QColor(color_hex)
-            # Reusing your existing luminance formula for the tag text!
-            text_color = QColor(get_text_color_for_bg(color_hex)) 
-            
-            painter.setBrush(QBrush(bg_color))
-            painter.setPen(QPen(QColor("#ffffff"), 1))
-            pill_rect = QRectF(x, y, p_width, pill_h)
-            painter.drawRoundedRect(pill_rect, pill_h/2, pill_h/2)
-            
-            painter.setPen(QPen(text_color))
-            painter.drawText(pill_rect, Qt.AlignmentFlag.AlignCenter, badge.get("name", ""))
-            
-            x += p_width + spacing
+        for rect, tag_name in self._get_tag_dot_regions():
+            color_hex = next((b.get("color") for b in self.tag_badges if b.get("name") == tag_name), "#808080")
+            painter.setBrush(QBrush(QColor(color_hex)))
+            painter.drawEllipse(rect)
 
         painter.restore()
 

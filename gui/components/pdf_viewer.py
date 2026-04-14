@@ -181,7 +181,7 @@ class PDFViewer(QGraphicsView):
         # Position HUD in bottom left
         if hasattr(self, 'page_hud') and self.page_hud.isVisible():
             self.page_hud.move(20, self.viewport().height() - self.page_hud.height() - 20)
-
+    
     def toggle_search_bar(self):
         if self.search_bar.isVisible():
             self.search_bar.hide()
@@ -621,7 +621,10 @@ class PDFViewer(QGraphicsView):
                 try:
                     page = self.doc.load_page(page_idx)
                     for annot in page.annots():
-                        if annot.rect.contains(point) and annot.info:
+                        # 🔥 Expand the hitbox slightly to make thin lines easier to click
+                        hitbox = annot.rect + (-2, -2, 2, 2)
+                        
+                        if hitbox.contains(point) and annot.info:
                             title = annot.info.get("title", "")
                             if title.startswith("UserNote") or title.startswith("AINote"):
                                 self.annotation_clicked.emit(title, page_idx)

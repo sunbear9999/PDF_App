@@ -3,11 +3,12 @@ import json
 import os
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                              QPushButton, QScrollArea, QFrame, QComboBox, 
-                             QStackedWidget, QColorDialog, QMessageBox)
+                             QStackedWidget, QColorDialog, QMessageBox, QMenu)
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QColor
 from gui.components.workspace_view import WorkspaceView
 from gui.components.help_dialog import HelpDialog
+from gui.components.dialogs.tag_manager_dialog import TagAssignmentDialog
 
 class NoteBubble(QFrame):
     def __init__(self, tab, pdf_path, page_num, annot_id, subject, content, color, is_ai=False):
@@ -25,6 +26,22 @@ class NoteBubble(QFrame):
         doc_name = os.path.basename(pdf_path)
         self.lbl_page = QLabel(f"📄 {doc_name} - Pg {page_num + 1}")
         header_layout.addWidget(self.lbl_page)
+        
+        # --- NEW: Fetch and render Tag Dots ---
+        pm = self.tab.main_window.project_manager if self.tab.main_window else None
+        tags = pm.get_tags_for_node(annot_id) if pm else []
+        for t in tags:
+            tag_name = t.get("name", "")
+            tag_color = t.get("color", "#808080")
+            btn_tag = QPushButton()
+            btn_tag.setFixedSize(12, 12)
+            btn_tag.setStyleSheet(f"background-color: {tag_color}; border-radius: 6px; border: none;")
+            btn_tag.setToolTip(f"Filter by tag: {tag_name}")
+            btn_tag.setCursor(Qt.CursorShape.PointingHandCursor)
+            # Route clicks to the filter combo box
+            btn_tag.clicked.connect(lambda checked, name=tag_name: self.tab.apply_tag_filter(name))
+            header_layout.addWidget(btn_tag)
+        # --------------------------------------
         
         if is_ai:
             self.lbl_ai = QLabel("🤖 AI Note")
@@ -65,10 +82,8 @@ class NoteBubble(QFrame):
             self.lbl_content.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
             layout.addWidget(self.lbl_content)
 
-        # Apply theme dynamically based on main window's theme manager
         if hasattr(self.tab, 'main_window') and hasattr(self.tab.main_window, 'theme_manager'):
             self.apply_theme(self.tab.main_window.theme_manager.get_theme())
-
     def apply_theme(self, theme):
         if self.is_ai:
             self.setStyleSheet(f"""
@@ -84,14 +99,10 @@ class NoteBubble(QFrame):
             """)
         
         self.lbl_page.setStyleSheet(f"font-weight: bold; color: {theme['text_muted']}; border: none;")
-        self.lbl_subj.setStyleSheet(
-            f"font-style: italic; color: {theme['text_muted']}; border: none; background: transparent; padding: 0px;"
-        )
+        self.lbl_subj.setStyleSheet(f"font-style: italic; color: {theme['text_muted']}; border: none; background: transparent; padding: 0px;")
         
         if hasattr(self, 'lbl_content'):
-            self.lbl_content.setStyleSheet(
-                f"font-weight: bold; color: {theme['text_main']}; margin-top: 5px; border: none; background: transparent; padding: 0px;"
-            )
+            self.lbl_content.setStyleSheet(f"font-weight: bold; color: {theme['text_main']}; margin-top: 5px; border: none; background: transparent; padding: 0px;")
             
         self.btn_del.setStyleSheet(f"""
             QPushButton {{ background-color: transparent; color: {theme['error']}; border: 1px solid {theme['error']}; border-radius: 4px; font-weight: bold; }}
@@ -105,8 +116,61 @@ class NoteBubble(QFrame):
             self.tab.viewer.jump_to_page(self.page_num)
         super().mousePressEvent(event)
 
+    def contextMenuEvent(self, event):
+        menu = QMenu(self)
+        
+        if hasattr(self.tab, 'main_window') and hasattr(self.tab.main_window, 'theme_manager'):
+            theme = self.tab.main_window.theme_manager.get_theme()
+            menu.setStyleSheet(f"""
+                QMenu {{ background-color: {theme['bg_panel']}; color: {theme['text_main']}; border: 1px solid {theme['border']}; padding: 5px; font-weight: bold; }}
+                QMenu::item {{ padding: 6px 20px 6px 20px; border-radius: 4px; }}
+                QMenu::item:selected {{ background-color: {theme['accent']}; color: #ffffff; }}
+            """)
+            
+        tag_action = menu.addAction("🏷️ Manage Tags")
+        action = menu.exec(event.globalPos())
+        
+        if action == tag_action:
+            self.manage_tags()
+
+    def manage_tags(self):
+        pm = self.tab.main_window.project_manager
+        if not pm: return
+        
+        dlg = TagAssignmentDialog(pm, self.annot_id, "node", self)
+        if dlg.exec():
+            # 1. Fetch tags that were just assigned to this physical PDF annotation
+            assigned_tags = pm.get_tags_for_node(self.annot_id)
+            tag_ids = {t["id"] for t in assigned_tags}
+            
+            # 2. Mirror these tags to ALL nodes in the workspace that originated from this annotation
+            ws_view = getattr(self.tab.main_window, 'workspace_view', None)
+            if ws_view:
+                for node in ws_view.nodes.values():
+                    # Check if the workspace node is tied to this PDF annotation
+                    if node.highlight_id == self.annot_id or node.node_id == self.annot_id:
+                        current_tags = {t["id"] for t in pm.get_tags_for_node(node.node_id)}
+                        
+                        # Apply missing tags to the specific workspace node
+                        for tid in tag_ids - current_tags:
+                            pm.assign_tag_to_node(node.node_id, tid)
+                        # Remove unchecked tags
+                        for tid in current_tags - tag_ids:
+                            pm.remove_tag_from_node(node.node_id, tid)
+                            
+                        # Force the node to immediately redraw its colored dots
+                        node.refresh_tag_badges()
+                        
+                # Refresh the workspace dropdowns and filters
+                ws_view._refresh_tag_list()
+                ws_view._apply_filter()
+                
+            # 3. Refresh the dock UI and flag the project as dirty so it saves
+            self.tab.refresh_tag_list()
+            pm.mark_dirty("workspace")
     def delete_note(self):
         self.tab.delete_note(self.pdf_path, self.page_num, self.annot_id)
+
 
 class NotesTab(QWidget):
     def __init__(self, parent=None, viewer=None, main_window=None):
@@ -132,6 +196,12 @@ class NotesTab(QWidget):
         self.scope_combo.addItems(["Current PDF", "Entire Project"])
         self.scope_combo.currentIndexChanged.connect(self.refresh_notes)
         top_layout.addWidget(self.scope_combo)
+        
+        self.tag_combo = QComboBox()
+        self.tag_combo.addItem("All Tags", None)
+        self.tag_combo.currentIndexChanged.connect(self.refresh_notes)
+        top_layout.addWidget(self.tag_combo)
+        
         top_layout.addStretch()
         layout.addLayout(top_layout)
         
@@ -157,14 +227,41 @@ class NotesTab(QWidget):
         self.scroll_content.setStyleSheet(f"background-color: {theme['bg_main']};")
         self.lbl.setStyleSheet(f"font-size: 16px; font-weight: bold; padding-left: 5px; color: {theme['text_main']};")
         self.scope_combo.setStyleSheet(f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']};")
+        self.tag_combo.setStyleSheet(f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']};")
         
         for i in range(self.scroll_layout.count()):
             widget = self.scroll_layout.itemAt(i).widget()
             if isinstance(widget, NoteBubble):
                 widget.apply_theme(theme)
 
+    def apply_tag_filter(self, tag_name):
+        """Automatically updates the dropdown to filter notes when a tag bubble is clicked."""
+        index = self.tag_combo.findData(tag_name)
+        if index >= 0:
+            self.tag_combo.setCurrentIndex(index)
+
+    def refresh_tag_list(self):
+        current_tag = self.tag_combo.currentData()
+        
+        self.tag_combo.blockSignals(True)
+        self.tag_combo.clear()
+        self.tag_combo.addItem("All Tags", None)
+        
+        if self.main_window and hasattr(self.main_window, 'project_manager'):
+            pm = self.main_window.project_manager
+            tags = pm.get_all_tags()
+            for t in tags:
+                self.tag_combo.addItem(t["name"], t["name"])
+                
+        index = self.tag_combo.findData(current_tag)
+        if index >= 0:
+            self.tag_combo.setCurrentIndex(index)
+            
+        self.tag_combo.blockSignals(False)
+
     def refresh_notes(self):
         try:
+            self.refresh_tag_list()
             for i in reversed(range(self.scroll_layout.count())): 
                 widget = self.scroll_layout.itemAt(i).widget()
                 if widget: widget.deleteLater()
@@ -175,20 +272,31 @@ class NotesTab(QWidget):
             for path in paths_to_check:
                 self._load_notes_from_pdf(path)
         except Exception as e:
-            print(f"Error refreshing notes: {e}")
+            pass
 
     def _load_notes_from_pdf(self, path):
         try:
             doc = self.main_window.project_manager.get_doc(path)
             if not doc: return
+            
+            pm = self.main_window.project_manager if self.main_window else None
+            selected_tag_name = self.tag_combo.currentData()
+            doc_tag_names = [t["name"] for t in pm.get_tags_for_doc(path)] if pm else []
+            
             for i in range(len(doc)):
                 page = doc.load_page(i)
                 for annot in page.annots():
                     if annot.info and (annot.info.get("title", "").startswith("UserNote") or annot.info.get("title", "").startswith("AINote")):
+                        if selected_tag_name is not None and pm:
+                            annot_id = annot.info.get("title")
+                            node_tag_names = [t["name"] for t in pm.get_tags_for_node(annot_id)]
+                            if selected_tag_name not in doc_tag_names and selected_tag_name not in node_tag_names:
+                                continue
+                                
                         bubble = NoteBubble(self, path, i, annot.info.get("title"), annot.info.get("subject", ""), annot.info.get("content", ""), annot.colors.get("stroke"), is_ai=annot.info.get("title").startswith("AINote"))
                         self.scroll_layout.addWidget(bubble)
         except Exception as e:
-            print(f"Error loading notes from {path}: {e}")
+            pass
 
     def scroll_to_note(self, annot_id):
         for i in range(self.scroll_layout.count()):
@@ -226,4 +334,4 @@ class NotesTab(QWidget):
                 self.viewer.reload_page(page_num)
             self.main_window.project_manager.mark_dirty(pdf_path)
             if refresh: self.refresh_notes()
-        except Exception as e: print(f"Error applying annotation modification: {e}")
+        except Exception as e: pass

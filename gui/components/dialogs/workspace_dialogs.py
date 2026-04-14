@@ -2,7 +2,7 @@ from PyQt6.QtWidgets import (QGraphicsView, QGraphicsScene, QMenu, QMessageBox,
                              QInputDialog, QFrame, QLabel, QVBoxLayout,
                              QHBoxLayout, QComboBox, QPushButton, QDialog,
                              QScrollArea, QWidget, QFormLayout, QDialogButtonBox, 
-                             QColorDialog, QFileDialog, QTextEdit,QCheckBox,QSlider,QLabel)
+                             QColorDialog, QFileDialog, QTextEdit,QCheckBox,QSlider,QLabel,QTabWidget)
 from PyQt6.QtCore import Qt, QRectF
 from PyQt6.QtGui import QColor, QPen, QBrush, QFont, QPainter, QImage, QStandardItemModel, QStandardItem
 import os
@@ -191,46 +191,91 @@ class WeakpointsDialog(QDialog):
         self.accept()
 
 
-class PDFColorDialog(QDialog):
-    def __init__(self, pdfs, current_colors, parent=None):
+
+
+class ColorOrganizerDialog(QDialog):
+    def __init__(self, pdfs, tags, current_pdf_colors, current_tag_colors, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Organize by PDF Colors")
-        self.setMinimumSize(350, 400)
-        self.pdf_colors = dict(current_colors)
+        self.setWindowTitle("Organize by Color")
+        self.setMinimumSize(400, 450)
+        
+        self.pdf_colors = dict(current_pdf_colors)
+        self.tag_colors = dict(current_tag_colors)
         
         layout = QVBoxLayout(self)
         
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        self.scroll_widget = QWidget()
-        self.form = QFormLayout(self.scroll_widget)
+        self.tab_widget = QTabWidget()
+        layout.addWidget(self.tab_widget)
         
-        self.buttons = {}
+        # --- PDF Tab ---
+        self.pdf_tab = QWidget()
+        pdf_layout = QVBoxLayout(self.pdf_tab)
+        pdf_scroll = QScrollArea()
+        pdf_scroll.setWidgetResizable(True)
+        pdf_scroll_widget = QWidget()
+        pdf_form = QFormLayout(pdf_scroll_widget)
+        
         for pdf in pdfs:
             btn = QPushButton()
             btn.setFixedSize(80, 30)
             color = self.pdf_colors.get(pdf, "#2b2b2b")
             btn.setStyleSheet(f"background-color: {color}; border: 1px solid #aaaaaa; border-radius: 4px;")
-            btn.clicked.connect(lambda checked, p=pdf, b=btn: self.pick_color(p, b))
-            self.buttons[pdf] = btn
+            btn.clicked.connect(lambda checked, p=pdf, b=btn: self.pick_pdf_color(p, b))
+            
             full_name = os.path.basename(pdf)
             display_name = (full_name[:16] + "\u2026") if len(full_name) > 18 else full_name
-            self.form.addRow(display_name, btn)
+            pdf_form.addRow(display_name, btn)
             
-        scroll.setWidget(self.scroll_widget)
-        layout.addWidget(scroll)
+        pdf_scroll.setWidget(pdf_scroll_widget)
+        pdf_layout.addWidget(pdf_scroll)
+        self.tab_widget.addTab(self.pdf_tab, "By PDF")
+        
+        # --- Tag Tab ---
+        self.tag_tab = QWidget()
+        tag_layout = QVBoxLayout(self.tag_tab)
+        tag_scroll = QScrollArea()
+        tag_scroll.setWidgetResizable(True)
+        tag_scroll_widget = QWidget()
+        tag_form = QFormLayout(tag_scroll_widget)
+        
+        for tag in tags:
+            tag_name = tag.get("name")
+            if not tag_name: continue
+            
+            btn = QPushButton()
+            btn.setFixedSize(80, 30)
+            color = self.tag_colors.get(tag_name, "#808080")
+            btn.setStyleSheet(f"background-color: {color}; border: 1px solid #aaaaaa; border-radius: 4px;")
+            btn.clicked.connect(lambda checked, t=tag_name, b=btn: self.pick_tag_color(t, b))
+            
+            tag_form.addRow(tag_name, btn)
+            
+        tag_scroll.setWidget(tag_scroll_widget)
+        tag_layout.addWidget(tag_scroll)
+        self.tab_widget.addTab(self.tag_tab, "By Tag")
         
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
         
-    def pick_color(self, pdf, btn):
+    def pick_pdf_color(self, pdf, btn):
         initial = QColor(self.pdf_colors.get(pdf, "#2b2b2b"))
         color = QColorDialog.getColor(initial, self, f"Select Color for {os.path.basename(pdf)}")
         if color.isValid():
             self.pdf_colors[pdf] = color.name()
             btn.setStyleSheet(f"background-color: {color.name()}; border: 1px solid #aaaaaa; border-radius: 4px;")
             
-    def get_colors(self):
-        return self.pdf_colors
+    def pick_tag_color(self, tag_name, btn):
+        initial = QColor(self.tag_colors.get(tag_name, "#808080"))
+        color = QColorDialog.getColor(initial, self, f"Select Color for {tag_name}")
+        if color.isValid():
+            self.tag_colors[tag_name] = color.name()
+            btn.setStyleSheet(f"background-color: {color.name()}; border: 1px solid #aaaaaa; border-radius: 4px;")
+            
+    def get_result(self):
+        """Returns a tuple of (mode, colors_dict) based on which tab was active when saved."""
+        if self.tab_widget.currentIndex() == 0:
+            return "pdf", self.pdf_colors
+        else:
+            return "tag", self.tag_colors

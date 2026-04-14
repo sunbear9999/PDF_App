@@ -248,15 +248,9 @@ class ProjectManager:
             self._conn.commit()
         except Exception as e:
             print(f"Error creating project: {e}")
-    def _halt_viewer_if_active(self, path):
-        """Safely stops the background render thread if the file is currently open in the UI."""
-        if hasattr(self, 'main_window') and self.main_window and self.main_window.current_file_path == path:
-            viewer = getattr(self.main_window, 'viewer', None)
-            if viewer and viewer.worker and viewer.worker.isRunning():
-                viewer.worker.stop()
-                viewer.worker.wait()
-                return viewer
-        return None
+    
+
+    
     def load_project(self, filepath):
         try:
             filepath = filepath.strip()
@@ -973,43 +967,58 @@ class ProjectManager:
         except Exception as e:
             print(f"Error evicting docs: {e}")
 
+    def _halt_viewer_if_active(self, path):
+        """Safely stops the background render thread if the file is currently open."""
+        if hasattr(self, 'main_window') and self.main_window and self.main_window.current_file_path == path:
+            viewer = getattr(self.main_window, 'viewer', None)
+            if viewer:
+                if viewer.worker and viewer.worker.isRunning():
+                    viewer.worker.stop()
+                    viewer.worker.wait()
+                return viewer  # <-- CRITICAL FIX: Always return the viewer!
+        return None
+
     def _save_single_doc(self, doc, path):
         if not doc or doc.is_closed:
             return
             
-        # 1. HALT background thread before touching file locks
+        # 1. Safely halt the background thread
         viewer = self._halt_viewer_if_active(path)
 
         temp_path = None
         try:
+            # 2. Get a safe temporary file path
             temp_path = self._create_closed_temp_path(path, suffix=".tmp_save")
-            doc.save(temp_path, garbage=3, deflate=True)
-            doc.close() # Now totally safe, no background thread is reading it
+          
+            # 3. Save WITHOUT garbage collection. 
+            # This bypasses the C-level abort and safely appends your highlights!
+            doc.save(temp_path)
+            
+            # 4. Completely close the PyMuPDF document to drop all OS file locks
+            
+            if viewer and viewer.doc:
+                viewer.doc = None
+
+            # 5. Safely swap the temp file with the real file
             self._safe_swap_file(temp_path, path)
+            
             temp_path = None
+            
+            # 6. Mark as successfully saved
             self.dirty_docs.discard(path)
+            doc.close() 
         except Exception as e:
             print(f"Primary save failed for {path}: {e}")
-            if not doc.is_closed:
-                try:
-                    pdf_bytes = doc.write()
-                    doc.close()
-                    temp_path = self._create_closed_temp_path(path, suffix=".tmp_write")
-                    with open(temp_path, "wb") as f:
-                        f.write(pdf_bytes)
-                        f.flush()
-                        os.fsync(f.fileno())
-                    self._safe_swap_file(temp_path, path)
-                    temp_path = None
-                    self.dirty_docs.discard(path)
-                except Exception as fallback_e:
-                    print(f"Full save fallback failed for {path}: {fallback_e}")
             if temp_path and os.path.exists(temp_path):
-                os.remove(temp_path)
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
         finally:
-            # 2. Reopen and RESUME the background thread with the fresh handle
+            # 7. Reopen from the fresh file on disk and restart the UI
             if path in self.open_docs or viewer: 
                 try:
+                    import fitz
                     new_doc = fitz.open(path)
                     self.open_docs[path] = new_doc
                     if viewer:
@@ -1017,6 +1026,7 @@ class ProjectManager:
                 except Exception as reopen_e:
                     print(f"Failed to reopen {path} after save: {reopen_e}")
                     self.open_docs.pop(path, None)
+   
 
     def save_all_docs(self):
         try:

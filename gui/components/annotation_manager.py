@@ -221,7 +221,9 @@ class AnnotationManager(QObject):
                 }
                 annot.set_info(info=annot_info)
                 annot.update()
-
+                main_window = self.viewer.window()
+                if hasattr(main_window, 'project_manager'):
+                    main_window.project_manager.mark_dirty(main_window.current_file_path)
                 self.highlight_created.emit({
                     "id": annot_info["title"],
                     "subject": annot_info["subject"],
@@ -251,9 +253,9 @@ class AnnotationManager(QObject):
         
         # 2. Push the extracted text into the input field
         if hasattr(main_window, 'chat_docks') and main_window.chat_docks:
-            llm_tab = main_window.chat_docks[0]
-            llm_tab.chat_input.setText(f"Explain this text: \"{extracted_text}\"")
-            llm_tab.chat_input.setFocus()
+            llm_dock = main_window.chat_docks[0]
+            llm_dock.chat_input.setText(f"Explain this text: \"{extracted_text}\"")
+            llm_dock.chat_input.setFocus()
         
         self.clear_selection()
 
@@ -262,15 +264,22 @@ class AnnotationManager(QObject):
         extracted_text = " ".join(w[4] for w in self.selected_words)
         
         main_window = self.viewer.window()
-        llm_tab = main_window.tabs.get("LLM Chat")
         
-        if llm_tab:
-            llm_manager = llm_tab.llm_manager
-            model = llm_tab.model_combo.currentText()
+        # NEW: Access the Chat Dock instead of the old Tabs dictionary
+        if hasattr(main_window, 'chat_docks') and main_window.chat_docks:
+            llm_dock = main_window.chat_docks[0]
+            llm_manager = llm_dock.llm_manager
+            model = llm_dock.model_combo.currentText()
             
             # Keep a reference to the dialog so it isn't garbage collected
             self.reword_dialog = RewordDialog(extracted_text, llm_manager, model, self.viewer)
             self.reword_dialog.show()
+        else:
+            # Failsafe: Ensure the dock is open first
+            if hasattr(main_window, 'spawn_chat_dock'):
+                main_window.spawn_chat_dock()
+                self.reword_selection() # Try again once spawned
+                return
         
         self.clear_selection()
 
