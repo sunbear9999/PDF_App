@@ -1,0 +1,165 @@
+# gui/docks/research_assistant/view.py
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, 
+                             QPushButton, QLabel, QCheckBox, QScrollArea, QFrame, QInputDialog, QComboBox)
+from PyQt6.QtCore import pyqtSignal, Qt
+from PyQt6.QtGui import QCursor
+
+class TermWidget(QFrame):
+    """A visually pleasing card for a single search term."""
+    open_jstor = pyqtSignal(str)
+    open_scholar = pyqtSignal(str)
+    open_custom = pyqtSignal(str)
+
+    def __init__(self, term, reason, theme, parent=None):
+        super().__init__(parent)
+        self.term = term
+        
+        bg_color = theme.get('bg_input', '#2b2b2b')
+        border_color = theme.get('border', '#444')
+        self.setStyleSheet(f"""
+            TermWidget {{
+                background-color: {bg_color};
+                border: 1px solid {border_color};
+                border-radius: 6px;
+                margin-bottom: 8px;
+            }}
+        """)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+
+        lbl_term = QLabel(f"<b>{term}</b>")
+        lbl_term.setStyleSheet("font-size: 14px;")
+        lbl_term.setWordWrap(True)
+        layout.addWidget(lbl_term)
+
+        lbl_reason = QLabel(f"<i>{reason}</i>")
+        lbl_reason.setStyleSheet(f"color: {theme.get('text_muted', '#aaa')};")
+        lbl_reason.setWordWrap(True)
+        layout.addWidget(lbl_reason)
+
+        btn_layout = QHBoxLayout()
+        
+        self.btn_jstor = QPushButton("🏛️ JSTOR")
+        self.btn_scholar = QPushButton("🎓 Scholar")
+        self.btn_custom = QPushButton("🔗 Custom")
+        
+        for btn in [self.btn_jstor, self.btn_scholar, self.btn_custom]:
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn.setStyleSheet(f"background-color: {theme.get('bg_panel', '#333')}; border: 1px solid {border_color}; padding: 4px; border-radius: 4px;")
+            btn_layout.addWidget(btn)
+
+        layout.addLayout(btn_layout)
+
+        self.btn_jstor.clicked.connect(lambda: self.open_jstor.emit(self.term))
+        self.btn_scholar.clicked.connect(lambda: self.open_scholar.emit(self.term))
+        self.btn_custom.clicked.connect(lambda: self.open_custom.emit(self.term))
+
+
+class ResearchView(QWidget):
+    generate_requested = pyqtSignal(str, str, bool) # goal, model, is_advanced
+    change_custom_url_requested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.theme = {}
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+
+        # Top Control Area
+        header_layout = QHBoxLayout()
+        self.lbl_title = QLabel("🎯 Research Goal:")
+        self.lbl_title.setStyleSheet("font-weight: bold;")
+        header_layout.addWidget(self.lbl_title)
+        header_layout.addStretch()
+        
+        self.btn_settings = QPushButton("⚙️ Custom Link")
+        self.btn_settings.clicked.connect(self.change_custom_url_requested.emit)
+        header_layout.addWidget(self.btn_settings)
+        layout.addLayout(header_layout)
+
+        self.input_goal = QTextEdit()
+        self.input_goal.setPlaceholderText("Explain what you want to research or argue here. Be as specific as possible...")
+        self.input_goal.setMaximumHeight(80)
+        layout.addWidget(self.input_goal)
+
+        # Options Area (Added Model Selector)
+        options_layout = QHBoxLayout()
+        
+        options_layout.addWidget(QLabel("Model:"))
+        self.model_combo = QComboBox()
+        options_layout.addWidget(self.model_combo, 1)
+
+        self.chk_advanced = QCheckBox("Advanced (Scan Citations)")
+        options_layout.addWidget(self.chk_advanced)
+        options_layout.addStretch()
+        
+        self.btn_generate = QPushButton("Generate Search Terms")
+        self.btn_generate.clicked.connect(self._on_generate_clicked)
+        options_layout.addWidget(self.btn_generate)
+        layout.addLayout(options_layout)
+
+        # Output Area
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        
+        self.results_container = QWidget()
+        self.results_layout = QVBoxLayout(self.results_container)
+        self.results_layout.setContentsMargins(0, 0, 0, 0)
+        self.results_layout.addStretch() 
+        self.scroll_area.setWidget(self.results_container)
+        
+        layout.addWidget(self.scroll_area)
+        
+        self.status_lbl = QLabel("")
+        layout.addWidget(self.status_lbl)
+
+    def _on_generate_clicked(self):
+        goal = self.input_goal.toPlainText().strip()
+        model = self.model_combo.currentText()
+        if goal and model:
+            self.generate_requested.emit(goal, model, self.chk_advanced.isChecked())
+
+    def set_loading_state(self, is_loading):
+        self.btn_generate.setEnabled(not is_loading)
+        self.input_goal.setEnabled(not is_loading)
+        if is_loading:
+            self.clear_results()
+            self.set_status("⏳ Analyzing research goal...", is_error=False)
+
+    def set_status(self, message, is_error=False):
+        color = self.theme.get('error', '#ff4444') if is_error else self.theme.get('text_main', '#fff')
+        self.status_lbl.setStyleSheet(f"color: {color};")
+        self.status_lbl.setText(message)
+
+    def clear_results(self):
+        while self.results_layout.count() > 1:
+            item = self.results_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+    def add_term_card(self, term, reason):
+        card = TermWidget(term, reason, self.theme)
+        self.results_layout.insertWidget(self.results_layout.count() - 1, card)
+        return card
+
+    def prompt_for_custom_url(self, current_url):
+        text, ok = QInputDialog.getText(
+            self, 
+            "Custom Search URL", 
+            "Enter search URL template (use '{term}' where the search query should go):",
+            text=current_url
+        )
+        return text if ok else None
+
+    def update_theme(self, theme):
+        self.theme = theme
+        self.setStyleSheet(f"background-color: {theme['bg_main']}; color: {theme['text_main']};")
+        self.input_goal.setStyleSheet(f"background-color: {theme['bg_input']}; border: 1px solid {theme['border']};")
+        self.model_combo.setStyleSheet(f"background-color: {theme['bg_input']}; border: 1px solid {theme['border']}; padding: 4px;")
+        self.btn_generate.setStyleSheet(f"background-color: {theme['accent']}; font-weight: bold; color: white; padding: 6px;")
+        self.btn_settings.setStyleSheet(f"background-color: transparent; color: {theme['text_muted']}; border: none;")

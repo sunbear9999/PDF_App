@@ -2,7 +2,7 @@ from PyQt6.QtWidgets import (QGraphicsView, QGraphicsScene, QMenu, QMessageBox,
                              QInputDialog, QFrame, QLabel, QVBoxLayout,
                              QHBoxLayout, QComboBox, QPushButton, QDialog,
                              QScrollArea, QWidget, QFormLayout, QDialogButtonBox, 
-                             QColorDialog, QFileDialog, QTextEdit,QCheckBox,QSlider,QLabel,QTabWidget)
+                             QColorDialog, QFileDialog, QTextEdit,QCheckBox,QSlider,QLabel,QTabWidget,QListWidget,QListWidgetItem)
 from PyQt6.QtCore import Qt, QRectF
 from PyQt6.QtGui import QColor, QPen, QBrush, QFont, QPainter, QImage, QStandardItemModel, QStandardItem
 import os
@@ -279,3 +279,120 @@ class ColorOrganizerDialog(QDialog):
             return "pdf", self.pdf_colors
         else:
             return "tag", self.tag_colors
+class ContextFilterDialog(QDialog):
+    def __init__(self, project_manager, target_nodes, parent=None):
+        super().__init__(parent)
+        self.project_manager = project_manager
+        self.target_nodes = target_nodes
+        self.setWindowTitle("Context Optimization Required")
+        self.setMinimumSize(650, 450)
+        
+        layout = QVBoxLayout(self)
+        
+        warning_lbl = QLabel(
+            "<b>⚠️ Project Size Threshold Reached</b><br>"
+            "To prevent AI context bloat and hallucinations across many documents, you must link your nodes to specific tags. "
+            "The AI will only search documents that share the same tags as the node it is analyzing."
+        )
+        warning_lbl.setWordWrap(True)
+        warning_lbl.setStyleSheet("color: #e67e22; font-size: 13px; margin-bottom: 10px;")
+        layout.addWidget(warning_lbl)
+        
+        h_layout = QHBoxLayout()
+        
+        # Left Panel: Selected Nodes List
+        left_layout = QVBoxLayout()
+        left_layout.addWidget(QLabel("<b>Target Nodes:</b>"))
+        self.node_list = QListWidget()
+        for n in target_nodes:
+            # Display a snippet of the node text
+            display_text = n.quote[:50] + "..." if n.quote else n.note[:50] + "..."
+            item = QListWidgetItem(display_text)
+            item.setData(Qt.ItemDataRole.UserRole, n.node_id)
+            self.node_list.addItem(item)
+            
+        self.node_list.currentItemChanged.connect(self._on_node_selected)
+        left_layout.addWidget(self.node_list)
+        h_layout.addLayout(left_layout, 2)
+        
+        # Right Panel: Tag Assignment & Document Manager
+        right_layout = QVBoxLayout()
+        
+        self.btn_manage_tags = QPushButton("🏷️ Open Global Tag Manager")
+        self.btn_manage_tags.setToolTip("Create tags and assign them to your PDFs here.")
+        self.btn_manage_tags.clicked.connect(self._open_tag_manager)
+        self.btn_manage_tags.setStyleSheet("padding: 8px; font-weight: bold;")
+        right_layout.addWidget(self.btn_manage_tags)
+        
+        right_layout.addWidget(QLabel("<b>Assign Tags to Selected Node:</b>"))
+        
+        self.tag_scroll = QScrollArea()
+        self.tag_scroll.setWidgetResizable(True)
+        self.tag_widget = QWidget()
+        self.tag_layout = QVBoxLayout(self.tag_widget)
+        self.tag_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.tag_scroll.setWidget(self.tag_widget)
+        right_layout.addWidget(self.tag_scroll, 1)
+        
+        h_layout.addLayout(right_layout, 1)
+        layout.addLayout(h_layout)
+        
+        btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btn_box.accepted.connect(self.accept)
+        btn_box.rejected.connect(self.reject)
+        btn_box.button(QDialogButtonBox.StandardButton.Ok).setText("Proceed with Tags")
+        layout.addWidget(btn_box)
+        
+        self.checkboxes = {}
+        self._load_tags()
+        
+        if self.node_list.count() > 0:
+            self.node_list.setCurrentRow(0)
+
+    def _open_tag_manager(self):
+        from gui.components.dialogs.tag_manager_dialog import TagManagerDialog
+        dlg = TagManagerDialog(self.project_manager, self)
+        dlg.exec()
+        self._load_tags() # Refresh available tags in case the user created new ones
+
+    def _load_tags(self):
+        # Clear existing checkboxes
+        while self.tag_layout.count():
+            item = self.tag_layout.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+        self.checkboxes.clear()
+        
+        tags = self.project_manager.get_all_tags()
+        for tag in tags:
+            cb = QCheckBox(tag.get("name", ""))
+            cb.setStyleSheet(f"color: {tag.get('color', '#ffffff')}; font-weight: bold;")
+            cb.clicked.connect(self._on_tag_toggled)
+            self.tag_layout.addWidget(cb)
+            self.checkboxes[tag.get("id")] = cb
+            
+        self._on_node_selected(self.node_list.currentItem())
+
+    def _on_node_selected(self, item):
+        if not item: return
+        node_id = item.data(Qt.ItemDataRole.UserRole)
+        
+        # Fetch current tags for this specific node
+        assigned = self.project_manager.get_tags_for_node(node_id)
+        assigned_ids = [t.get("id") for t in assigned]
+        
+        for tag_id, cb in self.checkboxes.items():
+            cb.blockSignals(True) # Prevent triggering the toggle event while updating UI
+            cb.setChecked(tag_id in assigned_ids)
+            cb.blockSignals(False)
+
+    def _on_tag_toggled(self):
+        item = self.node_list.currentItem()
+        if not item: return
+        node_id = item.data(Qt.ItemDataRole.UserRole)
+        
+        # Save state to the database live as they click
+        for tag_id, cb in self.checkboxes.items():
+            if cb.isChecked():
+                self.project_manager.assign_tag_to_node(node_id, tag_id)
+            else:
+                self.project_manager.remove_tag_from_node(node_id, tag_id)

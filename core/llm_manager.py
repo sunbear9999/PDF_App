@@ -34,7 +34,8 @@ class LocalLLMManager:
             return fallback_template.format(**kwargs)
 
     def get_system_prompt(self, tool_name, fallback_template, **kwargs):
-        return self._format_prompt_template(tool_name, fallback_template, **kwargs)
+        prompt = self._format_prompt_template(tool_name, fallback_template, **kwargs)
+        return prompt
 
     def ensure_server_running(self):
         # 1. Safely check if Ollama is actually installed on the system
@@ -350,11 +351,12 @@ class LocalLLMManager:
                 # 🔥 FIX: Build the global where_clause safely without empty or single-item $and operators
                 global_conditions = []
                 if allowed_docs:
-                    if len(allowed_docs) == 1:
-                        global_conditions.append({"doc_name": allowed_docs[0]})
+                    base_names = [os.path.basename(d) for d in allowed_docs]
+                    if len(base_names) == 1:
+                        global_conditions.append({"doc_name": base_names[0]})
                     else:
-                        global_conditions.append({"doc_name": {"$in": allowed_docs}})
-                        
+                        global_conditions.append({"doc_name": {"$in": base_names}})
+                                        
                 for t in tag_filters:
                     global_conditions.append({f"tag_{t}": True})
                     
@@ -423,13 +425,9 @@ class LocalLLMManager:
                     try:
                         sq_emb = self.get_embedding(sq)
                         for doc in docs_to_search:
-                            
-                            # 🔥 FIX: Build the specific where clause for this exact document iteration safely
                             local_conditions = []
                             if doc:
-                                local_conditions.append({"doc_name": doc})
-                            for t in tag_filters:
-                                local_conditions.append({f"tag_{t}": True})
+                                local_conditions.append({"doc_name": os.path.basename(doc)})
                                 
                             final_doc_where = None
                             if len(local_conditions) == 1:

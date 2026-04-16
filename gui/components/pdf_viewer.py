@@ -426,6 +426,9 @@ class PDFViewer(QGraphicsView):
         # 4. Force re-render of currently visible pages (so the deleted highlight disappears)
         self.rendered_pages.clear() 
         self._on_scroll()
+    def rotate_view(self):
+        """Rotates the native view by 90 degrees cleanly."""
+        self.rotate(90)
     def _on_page_ready(self, page_num, qimage):
         """Callback for when the background RenderWorker finishes a page."""
         if not self._doc_valid() or not (0 <= page_num < len(self.page_pixmaps)):

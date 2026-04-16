@@ -1,6 +1,6 @@
 import json
 import os
-
+import sys
 
 class PromptManager:
     DEFAULT_PROMPTS = {
@@ -92,24 +92,37 @@ class PromptManager:
         ),
         "AI Fill Graph Worker - Evidence Extractor": (
             "You are an expert AI research assistant. Your task is to find concrete textual evidence to support a specific claim.\n"
-            "Read the provided CONTEXT documents thoroughly. Extract 2 to 5 highly relevant, VERBATIM quotes that strongly prove the claim.\n"
-            "CRITICAL RULES:\n"
-            "1. Quotes MUST be exactly copy-pasted from the text. Do not paraphrase.\n"
-            "2. Try to find evidence from MULTIPLE different documents if the context supports it.\n"
-            "3. Output ONLY using the following format on a single line for each quote:\n"
-            "%%QUOTE | Document_Name.pdf | Exact verbatim quote text here | Brief explanation of how it supports the claim\n"
-            "4. Do not include introductory text, headers, or a final answer block. Output ONLY the %%QUOTE lines."
+                            "Read the provided CONTEXT documents thoroughly. Extract 2 to 4 highly relevant, VERBATIM quotes that strongly prove the claim.\n"
+                            "CRITICAL RULES:\n"
+                            "1. Quotes MUST be EXACTLY copy-pasted from the text. Do not paraphrase, fix typos, change punctuation, or use ellipses (...).\n"
+                            "2. Keep quotes short (10 to 30 words maximum) to ensure they can be located in the UI.\n"
+                            "3. The ONLY valid document names you can use are: {valid_docs_str}\n"
+                            "4. You MUST structure your response in two parts. First, write a brief '--- REASONING ---' section where you think about the claim and identify relevant parts of the text. Second, write a '--- QUOTES ---' section.\n"
+                            "5. In the Quotes section, you MUST format each quote on its own line EXACTLY like this:\n"
+                            "%%QUOTE | DocumentName.pdf | The exact verbatim text goes here | A brief explanation\n"
         ),
     }
 
     def __init__(self):
-        local_app_data = os.getenv("LOCALAPPDATA")
-        if local_app_data:
-            prompts_dir = os.path.join(local_app_data, "PDF_App_Argument_Map")
-            os.makedirs(prompts_dir, exist_ok=True)
-            self.prompts_path = os.path.join(prompts_dir, "prompts.json")
+        app_name = "Papyrus Research"
+        
+        # Determine the correct hidden app data directory based on the OS
+        if sys.platform == "win32":
+            # Windows: C:\Users\<User>\AppData\Local\Papyrus Research
+            base_dir = os.getenv("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local"))
+            prompts_dir = os.path.join(base_dir, app_name)
+            
+        elif sys.platform == "darwin":
+            # macOS: ~/Library/Application Support/Papyrus Research
+            prompts_dir = os.path.join(os.path.expanduser("~"), "Library", "Application Support", app_name)
+            
         else:
-            self.prompts_path = os.path.join(os.getcwd(), "prompts.json")
+            # Linux (Mint/Ubuntu/etc): ~/.local/share/Papyrus Research
+            base_dir = os.getenv("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
+            prompts_dir = os.path.join(base_dir, app_name)
+
+        os.makedirs(prompts_dir, exist_ok=True)
+        self.prompts_path = os.path.join(prompts_dir, "prompts.json")
 
         self.custom_prompts = {}
         self._load_prompts()

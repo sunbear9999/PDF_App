@@ -81,7 +81,7 @@ class MainWindow(QMainWindow):
         self.scratchpad_docks = []
         self.ocr_docks = []      
         self.audio_docks = []
-
+        self.research_docks = [] 
         # 6. BUILD UI
         self._build_top_menu()
         self._build_ocr_banner()
@@ -105,9 +105,9 @@ class MainWindow(QMainWindow):
         if self.settings.value("show_help_on_startup", True, type=bool):
             QTimer.singleShot(500, self.show_help_window)
             
-    def show_help_window(self):
+    def show_help_window(self,initial_tab_index=0):
         # We keep a reference to it so it doesn't get garbage collected
-        self.help_dialog = HelpDialog(self)
+        self.help_dialog = HelpDialog(self,initial_tab_index=initial_tab_index)
         self.help_dialog.show()
 
     def _apply_smart_window_size(self):
@@ -258,6 +258,10 @@ class MainWindow(QMainWindow):
         self.btn_spawn_notes = QPushButton("➕ Notes List")
         self.btn_spawn_notes.clicked.connect(self.spawn_notes_dock)
         self.top_toolbar.addWidget(self.btn_spawn_notes)
+
+        self.btn_spawn_research = QPushButton("➕ Research Assistant")
+        self.btn_spawn_research.clicked.connect(self.spawn_research_dock)
+        self.top_toolbar.addWidget(self.btn_spawn_research)
         
         self.btn_spawn_scratch = QPushButton("➕ Scratchpad")
         self.btn_spawn_scratch.clicked.connect(self.spawn_scratchpad_dock)
@@ -335,6 +339,31 @@ class MainWindow(QMainWindow):
         self.workspace_docks.append(ws_view)
         if hasattr(self, 'theme_manager'): ws_view.update_theme(self.theme_manager.get_theme())
         ws_view._sync_workspace()
+        dock.show()
+    def spawn_research_dock(self):
+        # STRICT SINGLETON: Like AI Chat, we only need one of these
+        if self.research_docks:
+            view = self.research_docks[0]
+            if view.parentWidget():
+                view.parentWidget().show()
+                view.parentWidget().raise_()
+            return
+                
+        dock = QDockWidget("🔬 Research Assistant", self)
+        dock.setObjectName("ResearchAssistantDock") 
+        
+        # Import our new controller
+        from gui.docks.research_assistant.controller import ResearchDockWidget
+        
+        research_view = ResearchDockWidget(self)
+        dock.setWidget(research_view)
+        
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        self.research_docks.append(research_view)
+        
+        if hasattr(self, 'theme_manager'): 
+            research_view.update_theme(self.theme_manager.get_theme())
+            
         dock.show()
 
     def _save_as_default_layout(self):
@@ -469,6 +498,7 @@ class MainWindow(QMainWindow):
         dialog = TagManagerDialog(self.project_manager, self)
         dialog.exec()
         for c in self.chat_docks: c.refresh_tag_filters()
+        self._refresh_doc_tag_filter()
 
     def _on_doc_list_context_menu(self, pos):
         item = self.doc_list.itemAt(pos)
@@ -691,6 +721,8 @@ class MainWindow(QMainWindow):
             
 
     def _load_project(self, path):
+        if hasattr(self, 'shared_llm_manager'):
+            self.shared_llm_manager.set_project_database(self.project_manager.project_filepath)
         if self.project_manager.project_filepath:
             self.save_project()
             
@@ -741,6 +773,7 @@ class MainWindow(QMainWindow):
                 self.switch_to_pdf(self.project_manager.pdfs[0])
         else:
             QMessageBox.warning(self, "Error", "Failed to load project file.")
+        self._refresh_doc_tag_filter()
     def _save_layout_template(self):
         # The WindowStaysOnTopHint prevents XFCE from hiding the popup
         name, ok = QInputDialog.getText(
@@ -878,10 +911,44 @@ class MainWindow(QMainWindow):
     def _refresh_doc_list(self):
         self.doc_list.blockSignals(True)
         self.doc_list.clear()
+        
+        selected_tag = self.doc_tag_filter.currentData() if hasattr(self, 'doc_tag_filter') else "ALL_TAGS"
+        
         for path in self.project_manager.pdfs:
-            item = QListWidgetItem(os.path.basename(path))
-            item.setData(Qt.ItemDataRole.UserRole, path)
+            doc_tags = self.project_manager.get_tags_for_doc(path)
+            
+            # Filter Logic
+            if selected_tag and selected_tag != "ALL_TAGS":
+                if selected_tag not in [t.get("name") for t in doc_tags]:
+                    continue 
+
+            item = QListWidgetItem(self.doc_list)
             self.doc_list.addItem(item)
+            
+            # Custom Widget for the List Item
+            widget = QWidget()
+            widget.setStyleSheet("background: transparent;") # Crucial so selection styling works
+            layout = QHBoxLayout(widget)
+            layout.setContentsMargins(5, 2, 5, 2)
+            
+            lbl = QLabel(os.path.basename(path))
+            lbl.setStyleSheet("background: transparent;")
+            layout.addWidget(lbl)
+            
+            layout.addStretch()
+            
+            # Add up to 4 colored tag dots to the row
+            for t in doc_tags[:4]:
+                dot = QLabel("●")
+                color = t.get('color', '#888')
+                dot.setStyleSheet(f"color: {color}; font-size: 12px; background: transparent;")
+                dot.setToolTip(t.get("name", ""))
+                layout.addWidget(dot)
+            
+            item.setSizeHint(widget.sizeHint())
+            self.doc_list.setItemWidget(item, widget)
+            item.setData(Qt.ItemDataRole.UserRole, path)
+            
         self.doc_list.blockSignals(False)
 
     def _on_doc_list_clicked(self, item):
@@ -1093,16 +1160,24 @@ class MainWindow(QMainWindow):
             )
         self.viewer.resizeEvent = dynamic_resize
     def _build_workspace(self):
-        # 1. Anchor: Document Explorer Dock (Permanently Locked)
+        # 1. Anchor: Document Explorer Dock
         self.doc_dock = QDockWidget("📁 Document Explorer", self)
         self.doc_dock.setObjectName("DocExplorerDock")
         self.doc_dock.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
         
-        from PyQt6.QtWidgets import QWidget, QVBoxLayout, QListWidget
+        from PyQt6.QtWidgets import QWidget, QVBoxLayout, QListWidget, QComboBox
         doc_container = QWidget()
         doc_layout = QVBoxLayout(doc_container)
         doc_layout.setContentsMargins(0, 0, 0, 0)
         doc_layout.setSpacing(0)
+        
+        # --- NEW: Tag Filter for Document List ---
+        self.doc_tag_filter = QComboBox()
+        self.doc_tag_filter.setStyleSheet("padding: 4px; margin: 4px; font-weight: bold;")
+        self.doc_tag_filter.addItem("All Tags", "ALL_TAGS")
+        self.doc_tag_filter.currentIndexChanged.connect(self._refresh_doc_list)
+        doc_layout.addWidget(self.doc_tag_filter)
+        # -----------------------------------------
         
         self.doc_list = QListWidget()
         self.doc_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -1118,12 +1193,9 @@ class MainWindow(QMainWindow):
         doc_layout.addWidget(self.btn_add_pdf_dock)
             
         self.doc_dock.setWidget(doc_container)
-        
-        # --- FIX: OS-AGNOSTIC PLACEMENT ---
-        # We explicitly add the Doc Dock FIRST to anchor the far left edge.
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.doc_dock)
 
-        # 2. Anchor: PDF Viewer Dock (Permanently Locked)
+        # 2. Anchor: PDF Viewer Dock
         self.pdf_dock = QDockWidget("📄 PDF Viewer", self)
         self.pdf_dock.setObjectName("PDFViewerDock")
         self.pdf_dock.setWidget(self.viewer)
@@ -1136,56 +1208,59 @@ class MainWindow(QMainWindow):
         lbl_title.setStyleSheet("font-weight: bold; background: transparent;")
         title_layout.addWidget(lbl_title)
         
-        # 1st Stretch: Pushes buttons toward the center from the left
         title_layout.addStretch()
 
-        # Group the buttons together
         btn_zoom_out = QPushButton("➖")
         btn_zoom_reset = QPushButton("Fit Width")
         btn_zoom_in = QPushButton("➕")
-        btn_focus = QPushButton("🎯 Focus") # <-- NEW BUTTON
+        btn_focus = QPushButton("🎯 Focus") 
+        btn_rotate = QPushButton("🔃 Rotate") # <-- NEW BUTTON
 
-        # Connect the signals
         btn_zoom_out.clicked.connect(self.viewer.zoom_out)
         btn_zoom_reset.clicked.connect(self.viewer.zoom_reset)
         btn_zoom_in.clicked.connect(self.viewer.zoom_in)
-        btn_focus.clicked.connect(self.viewer.sharpen_focus) # <-- NEW METHOD
+        btn_focus.clicked.connect(self.viewer.sharpen_focus)
+        btn_rotate.clicked.connect(self.viewer.rotate_view) # <-- CONNECT NEW BUTTON
 
-        # Hand cursors
         btn_zoom_out.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_zoom_reset.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_zoom_in.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_focus.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_rotate.setCursor(Qt.CursorShape.PointingHandCursor)
 
         header_btn_style = """
-            QPushButton { 
-                background: transparent; 
-                border: none; 
-                padding: 4px 8px; 
-            }
-            QPushButton:hover { 
-                background: rgba(128, 128, 128, 0.3); 
-                border-radius: 4px; 
-            }
+            QPushButton { background: transparent; border: none; padding: 4px 8px; }
+            QPushButton:hover { background: rgba(128, 128, 128, 0.3); border-radius: 4px; }
         """
-        btn_zoom_out.setStyleSheet(header_btn_style)
-        btn_zoom_reset.setStyleSheet(header_btn_style)
-        btn_zoom_in.setStyleSheet(header_btn_style)
-        btn_focus.setStyleSheet(header_btn_style)
+        for btn in [btn_zoom_out, btn_zoom_reset, btn_zoom_in, btn_focus, btn_rotate]:
+            btn.setStyleSheet(header_btn_style)
+            title_layout.addWidget(btn)
 
-        title_layout.addWidget(btn_zoom_out)
-        title_layout.addWidget(btn_zoom_reset)
-        title_layout.addWidget(btn_zoom_in)
-        title_layout.addWidget(btn_focus)
-
-        # 2nd Stretch: Pushes buttons toward the center from the right
         title_layout.addStretch()
-
         self.pdf_dock.setTitleBarWidget(title_bar)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.pdf_dock)
         
-        # Split the space cleanly between the Doc list and the PDF viewer
         self.splitDockWidget(self.doc_dock, self.pdf_dock, Qt.Orientation.Horizontal)
+
+    def _refresh_doc_tag_filter(self):
+        """Refreshes the available tags in the Document Explorer combo box."""
+        if not hasattr(self, 'doc_tag_filter'): return
+        
+        current = self.doc_tag_filter.currentData()
+        self.doc_tag_filter.blockSignals(True)
+        self.doc_tag_filter.clear()
+        self.doc_tag_filter.addItem("All Tags", "ALL_TAGS")
+        
+        tags = self.project_manager.get_all_tags()
+        for t in tags:
+            if t.get("name"):
+                self.doc_tag_filter.addItem(t.get("name"), t.get("name"))
+                
+        index = self.doc_tag_filter.findData(current)
+        if index >= 0:
+            self.doc_tag_filter.setCurrentIndex(index)
+            
+        self.doc_tag_filter.blockSignals(False)
 
     def broadcast_note_added(self):
         self._mark_current_dirty()

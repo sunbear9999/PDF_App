@@ -91,11 +91,12 @@ class ChatWorker(QThread):
             
         self.chat_completed.emit(full_response)
 
+
 class LLMTab(QWidget):
-    def __init__(self, shared_llm_manager, parent=None, main_window=None): # <-- Added parameter
+    def __init__(self, shared_llm_manager, parent=None, main_window=None): 
         super().__init__(parent)
         self.main_window = main_window
-        self.llm_manager = shared_llm_manager # <-- Use the shared instance
+        self.llm_manager = shared_llm_manager 
         self.current_existing_quotes = []
         self.theme = None
         
@@ -118,6 +119,15 @@ class LLMTab(QWidget):
         self.agent_checkbox.setChecked(True)
         status_layout.addWidget(self.agent_checkbox)
         layout.addLayout(status_layout)
+        
+        # --- NEW WARNING LABEL ---
+        self.doc_warning_lbl = QLabel()
+        self.doc_warning_lbl.setWordWrap(True)
+        self.doc_warning_lbl.setTextFormat(Qt.TextFormat.RichText)
+        self.doc_warning_lbl.linkActivated.connect(self._on_warning_link_clicked)
+        self.doc_warning_lbl.hide()
+        layout.addWidget(self.doc_warning_lbl)
+        # -------------------------
 
         model_layout = QHBoxLayout()
         model_layout.addWidget(QLabel("Model:"))
@@ -170,6 +180,12 @@ class LLMTab(QWidget):
         self.tab_scroll_area.setWidget(self.content_widget)
         outer_layout.addWidget(self.tab_scroll_area)
 
+    def _on_warning_link_clicked(self, url):
+        """Handle clicks on the dynamic warning label link."""
+        if url == "help_tagging" and self.main_window:
+            self.main_window.show_help_window(initial_tab_index=3)
+            
+
     def update_theme(self, theme):
         self.theme = theme
         self.setStyleSheet(f"background-color: {theme['bg_main']};")
@@ -206,17 +222,43 @@ class LLMTab(QWidget):
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 item.setCheckState(Qt.CheckState.Checked) 
                 self.pdf_list.addItem(item)
+                
+        # --- NEW WARNING LOGIC ---
+        num_pdfs = len(self.main_window.project_manager.pdfs) if self.main_window.project_manager.pdfs else 0
+        if num_pdfs > 3:
+            warn_color = self.theme['warning'] if self.theme else "#ffaa00"
+            self.doc_warning_lbl.setText(
+                f"<div style='border: 1px solid {warn_color}; padding: 8px; border-radius: 4px; margin-bottom: 8px;'>"
+                f"<span style='color: {warn_color};'>⚠️ <b>Context Optimization Recommended:</b><br>"
+                f"You have {num_pdfs} documents loaded. To prevent AI hallucinations and memory limits, it is highly recommended to "
+                f"<a href='help_tagging' style='color: #55aaff; text-decoration: underline;'>start tagging documents</a> "
+                f"and filter your search context below.</span></div>"
+            )
+            self.doc_warning_lbl.show()
+        else:
+            self.doc_warning_lbl.hide()
+        # -------------------------
 
         self.refresh_tag_filters()
                 
         proj_path = self.main_window.project_manager.project_filepath
         if proj_path and hasattr(self, 'llm_manager'):
-            self.llm_manager.set_project_database(proj_path)
-            if self.llm_manager.collection and self.llm_manager.collection.count() > 0:
-                self.status_lbl.setText("🟢 Status: Ready (Vector DB Loaded)")
-                color = self.theme['success'] if self.theme else "#00cc66"
-                self.status_lbl.setStyleSheet(f"font-weight: bold; color: {color}; font-size: 14px;")
-            else:
+            
+            # 🔥 CRITICAL FIX: Only set the database if it hasn't been initialized yet.
+            # This prevents wiping the ChromaDB client if it was already loaded in the background!
+            if self.llm_manager.collection is None:
+                self.llm_manager.set_project_database(proj_path)
+                
+            try:
+                if self.llm_manager.collection and self.llm_manager.collection.count() > 0:
+                    self.status_lbl.setText("🟢 Status: Ready (Vector DB Loaded)")
+                    color = self.theme['success'] if self.theme else "#00cc66"
+                    self.status_lbl.setStyleSheet(f"font-weight: bold; color: {color}; font-size: 14px;")
+                else:
+                    self.status_lbl.setText("🔴 Status: Needs Indexing")
+                    color = self.theme['warning'] if self.theme else "#ffaa00"
+                    self.status_lbl.setStyleSheet(f"font-weight: bold; color: {color}; font-size: 14px;")
+            except Exception:
                 self.status_lbl.setText("🔴 Status: Needs Indexing")
                 color = self.theme['warning'] if self.theme else "#ffaa00"
                 self.status_lbl.setStyleSheet(f"font-weight: bold; color: {color}; font-size: 14px;")
@@ -263,12 +305,10 @@ class LLMTab(QWidget):
     def _on_index_complete(self, success, error_msg):
         self.btn_index.setEnabled(True)
         if success:
-            # ---> FIX: Re-sync tags to the newly created index chunks so they are searchable
             if hasattr(self, 'main_window') and self.main_window:
                 pm = self.main_window.project_manager
                 for pdf_path in pm.pdfs:
                     pm._sync_doc_tags_for_llm(pdf_path)
-            # <---
             
             self.status_lbl.setText("🟢 Status: Ready (Indexed to Vector DB)")
             color = self.theme['success'] if self.theme else "#00cc66"

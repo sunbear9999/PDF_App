@@ -20,8 +20,8 @@ a = Analysis(
 
 def apply_pyarmor_patch():
 
-    srcpath = ['/home/sunbe/papyrus/PDF_App']
-    obfpath = '/home/sunbe/papyrus/PDF_App/.pyarmor/pack/dist'
+    srcpath = ['/home/sunbear/Desktop/PDF Multitool']
+    obfpath = '/home/sunbear/Desktop/PDF Multitool/.pyarmor/pack/dist'
     pkgname = 'pyarmor_runtime_000000'
     pkgpath = os.path.join(obfpath, pkgname)
     extpath = os.path.join(pkgname, 'pyarmor_runtime.so')

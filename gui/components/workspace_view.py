@@ -20,7 +20,7 @@ from core.ai_fill_graph_worker import AIFillGraphWorker
 from core.ai_consolidate_worker import AIConsolidateWorker
 from core.layout_engine import calculate_force_directed_layout
 from core.text_utils import get_semantic_similarity_matrix
-from gui.components.dialogs.workspace_dialogs import ColorOrganizerDialog, DeclutterSettingsDialog, OutlineDialog, WeakpointsDialog
+from gui.components.dialogs.workspace_dialogs import ColorOrganizerDialog, DeclutterSettingsDialog, OutlineDialog, WeakpointsDialog, ContextFilterDialog
 from gui.components.dialogs.tag_manager_dialog import TagAssignmentDialog
 
 
@@ -1929,7 +1929,8 @@ class WorkspaceView(QGraphicsView):
 
         nodes_data = [{"id": n.node_id, "text": n.note or n.quote} for n in selected_nodes]
         llm_manager = self.main_window.shared_llm_manager
-
+        if llm_manager.collection is None:
+            self._start_llm_manager()
         self.loading_label.setText("✨ AI is analyzing and organizing your notes...\nThis may take a moment.")
         self.loading_overlay.resize(self.viewport().size())
         self.loading_overlay.show()
@@ -1964,7 +1965,24 @@ class WorkspaceView(QGraphicsView):
         self._refresh_tag_list()
         self._apply_filter()
         pm.mark_dirty("workspace")
-
+    def _start_llm_manager(self):
+        try:
+                # Attempt to get the project path. Adjust the property name if your 
+                # project manager uses something other than 'project_filepath'.
+                proj_path = getattr(self.main_window.project_manager, 'project_filepath', None)
+                if not proj_path:
+                    # Fallback in case the variable is named differently
+                    proj_path = getattr(self.main_window.project_manager, 'current_project_path', None) 
+                
+                if proj_path:
+                    self.main_window.shared_llm_manager.set_project_database(proj_path)
+                else:
+                    QMessageBox.warning(self, "Database Error", "Could not locate the project database path.")
+                    return
+        except Exception as e:
+                QMessageBox.warning(self, "Database Error", f"Failed to mount search database: {e}")
+                return
+        
     def _on_ai_organize_finished(self, clusters, error_msg):
         self.loading_overlay.hide()
 
@@ -2042,7 +2060,8 @@ class WorkspaceView(QGraphicsView):
                       for e in self.edges if e.source_node in target_nodes and e.dest_node in target_nodes]
 
         llm_manager = self.main_window.shared_llm_manager
-
+        if llm_manager.collection is None:
+            self._start_llm_manager()
         self.loading_label.setText("✨ AI is analyzing relationships and finding new connections...\nThis may take a moment.")
         self.loading_overlay.resize(self.viewport().size())
         self.loading_overlay.show()
@@ -2119,7 +2138,8 @@ class WorkspaceView(QGraphicsView):
                       for e in self.edges if e.source_node in target_nodes and e.dest_node in target_nodes]
 
         llm_manager = self.main_window.shared_llm_manager
-
+        if llm_manager.collection is None:
+            self._start_llm_manager()
         self.loading_label.setText("✨ AI is analyzing argument structure and drafting outline...\nThis may take a moment.")
         self.loading_overlay.resize(self.viewport().size())
         self.loading_overlay.show()
@@ -2173,7 +2193,8 @@ class WorkspaceView(QGraphicsView):
                       for e in self.edges if e.source_node in target_nodes and e.dest_node in target_nodes]
 
         llm_manager = self.main_window.shared_llm_manager
-
+        if llm_manager.collection is None:
+            self._start_llm_manager()
         self.loading_label.setText("✨ AI is evaluating argument strength and identifying weak points...\nThis may take a moment.")
         self.loading_overlay.resize(self.viewport().size())
         self.loading_overlay.show()
@@ -2215,6 +2236,16 @@ class WorkspaceView(QGraphicsView):
         if not model or "Error" in model or "running" in model:
             QMessageBox.warning(self, "No Model Selected", "Please select a valid AI model in the LLM Chat tab first.")
             return
+        pm = self.main_window.project_manager
+        llm_manager = self.main_window.shared_llm_manager
+        if llm_manager.collection is None and pm.project_filepath:
+            llm_manager.set_project_database(pm.project_filepath)
+        
+        
+        # 1. ERROR HANDLING FIX: Explicitly check for an empty or missing index
+        if llm_manager.collection is None or llm_manager.collection.count() == 0:
+            QMessageBox.critical(self, "Search Index Missing", "The search index is empty. Please add PDFs and build the project index in the LLM Chat tab before using AI tools.")
+            return
 
         selected_nodes = [n for n in self.scene_obj.selectedItems() if isinstance(n, Node)]
         target_nodes = selected_nodes if selected_nodes else [n for n in self.nodes.values() if n.isVisible()]
@@ -2223,23 +2254,63 @@ class WorkspaceView(QGraphicsView):
             QMessageBox.warning(self, "No Nodes", "Please add or select some nodes in the workspace first.")
             return
 
-        nodes_data = [{"id": n.node_id, "type": "user_created" if n.is_custom else "pdf_note", "text": f"{n.quote} \n {n.note}".strip()} for n in target_nodes]
+       
+        enforce_tags = False
+        node_tags_map = {}
+
+        # 2. THRESHOLD INTERCEPTION: Force tagging on large projects
+        if len(pm.pdfs) > 3:
+            dialog = ContextFilterDialog(pm, target_nodes, self)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return # User cancelled the operation
+            
+            enforce_tags = True
+            
+            # Pre-fetch node tag mappings to safely pass to the background thread
+            for n in target_nodes:
+                tags = pm.get_tags_for_node(n.node_id)
+                if tags:
+                    # We extract the tag names since that's how ChromaDB metadata is keyed
+                    node_tags_map[n.node_id] = [t.get("name") for t in tags if t.get("name")]
+
+            if not node_tags_map:
+                QMessageBox.warning(self, "No Tags Assigned", "You must tag at least one node to proceed. The AI needs this to filter context.")
+                return
+
+        nodes_data = []
+        for n in target_nodes:
+            # RULE ENFORCEMENT: Completely skip untagged nodes if threshold was met
+            if enforce_tags and n.node_id not in node_tags_map:
+                continue
+                
+            nodes_data.append({
+                "id": n.node_id, 
+                "type": "user_created" if n.is_custom else "pdf_note", 
+                "text": f"{n.quote} \n {n.note}".strip()
+            })
+
+        if not nodes_data:
+            QMessageBox.warning(self, "No Valid Nodes", "No tagged nodes were found. Please tag your nodes to proceed.")
+            return
+
         edges_data = [{"source_id": e.source_node.node_id, "target_id": e.dest_node.node_id, "label": e.label_text} 
-                      for e in self.edges if e.source_node in target_nodes and e.dest_node in target_nodes]
+                    for e in self.edges if e.source_node in target_nodes and e.dest_node in target_nodes]
 
         allowed_docs = self.get_allowed_docs()
-
-        llm_manager = self.main_window.shared_llm_manager
 
         self.loading_label.setText("✨ AI is analyzing graph to find missing evidence...\nThis may take a moment.")
         self.loading_overlay.resize(self.viewport().size())
         self.loading_overlay.show()
         self.is_llm_busy = True
-        self.fill_worker = AIFillGraphWorker(llm_manager, model, nodes_data, edges_data, allowed_docs, parent=self)
+        
+        # 3. Pass the new tagging parameters to the worker
+        self.fill_worker = AIFillGraphWorker(
+            llm_manager, model, nodes_data, edges_data, allowed_docs, 
+            enforce_tags=enforce_tags, node_tags_map=node_tags_map, parent=self
+        )
         self.fill_worker.progress.connect(self._update_loading_label)
         self.fill_worker.finished.connect(self._on_fill_graph_finished)
         self.fill_worker.start()
-
     def _update_loading_label(self, text):
         self.loading_label.setText(text + "\nThis may take a moment.")
 
@@ -2343,7 +2414,8 @@ class WorkspaceView(QGraphicsView):
                       for e in self.edges if e.source_node in target_nodes and e.dest_node in target_nodes]
 
         llm_manager = self.main_window.shared_llm_manager
-
+        if llm_manager.collection is None:
+            self._start_llm_manager()
         self.loading_label.setText("✨ AI is restructuring and streamlining your argument...\nThis may take a moment.")
         self.loading_overlay.resize(self.viewport().size())
         self.loading_overlay.show()
