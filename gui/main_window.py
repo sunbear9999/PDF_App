@@ -3,12 +3,12 @@ import os
 import uuid
 import fitz
 import shutil
-from PyQt6.QtWidgets import (QMainWindow, QSizePolicy, QWidget, QHBoxLayout, QVBoxLayout, 
+from PySide6.QtWidgets import (QMainWindow, QSizePolicy, QWidget, QHBoxLayout, QVBoxLayout, 
                              QPushButton, QLabel, QStackedWidget, 
                              QFileDialog, QFrame, QButtonGroup, QMessageBox, QComboBox, QMenu,
                              QApplication, QDockWidget, QListWidget, QListWidgetItem, QTextEdit,QInputDialog) # <-- Added Dock, List, and TextEdit
-from PyQt6.QtGui import QColor, QShortcut, QKeySequence
-from PyQt6.QtCore import Qt, QSettings, QTimer, QThread, QEvent
+from PySide6.QtGui import QColor, QShortcut, QKeySequence
+from PySide6.QtCore import Qt, QSettings, QTimer, QThread, QEvent
 
 from core.project_manager import ProjectManager
 from gui.components.dialogs.extract_pages_dialog import ExtractPagesDialog
@@ -209,8 +209,8 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("F11"), self).activated.connect(self.toggle_full_screen)
 
     def _build_top_menu(self):
-        from PyQt6.QtWidgets import QToolBar, QWidget, QHBoxLayout, QSizePolicy
-        from PyQt6.QtCore import Qt
+        from PySide6.QtWidgets import QToolBar, QWidget, QHBoxLayout, QSizePolicy
+        from PySide6.QtCore import Qt
 
         # 🔥 UPGRADE: Native QToolBar handles spacing, heights, and overflow automatically!
         self.top_toolbar = QToolBar("Main Toolbar", self)
@@ -382,8 +382,8 @@ class MainWindow(QMainWindow):
         }
         self.settings.setValue("default_startup_counts", json.dumps(counts))
         
-        from PyQt6.QtWidgets import QMessageBox
-        from PyQt6.QtCore import Qt
+        from PySide6.QtWidgets import QMessageBox
+        from PySide6.QtCore import Qt
         msg = QMessageBox(self)
         msg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowStaysOnTopHint)
         msg.setIcon(QMessageBox.Icon.Information)
@@ -474,7 +474,7 @@ class MainWindow(QMainWindow):
         dock = QDockWidget(f"✍️ Scratchpad {self.scratch_counter}", self)
         dock.setObjectName(f"ScratchDock_{self.scratch_counter}")
         
-        from PyQt6.QtWidgets import QTextEdit
+        from PySide6.QtWidgets import QTextEdit
         editor = QTextEdit()
         editor.setPlaceholderText("Jot down quick thoughts here...\n\n(Stays perfectly saved in memory until you load a new project)")
         dock.setWidget(editor)
@@ -758,11 +758,11 @@ class MainWindow(QMainWindow):
                         print(f"Error loading scratchpad text: {e}")
             state_str = self.project_manager.get_metadata("window_layout_state")
             if state_str:
-                from PyQt6.QtCore import QByteArray
+                from PySide6.QtCore import QByteArray
                 self.restoreState(QByteArray.fromBase64(state_str.encode('utf-8')))
 
             # --- BULLETPROOF FIX: Query the C++ object tree directly ---
-            from PyQt6.QtWidgets import QDockWidget
+            from PySide6.QtWidgets import QDockWidget
             for dock in self.findChildren(QDockWidget):
                 dock.show()
             # ----------------------------------------------------------
@@ -808,7 +808,7 @@ class MainWindow(QMainWindow):
     def _apply_layout_template(self, name):
         state_str = self.settings.value(f"layouts/{name}")
         if state_str:
-            from PyQt6.QtCore import QByteArray
+            from PySide6.QtCore import QByteArray
             self.restoreState(QByteArray.fromBase64(state_str.encode('utf-8')))
 
     def _reset_default_layout(self):
@@ -830,15 +830,15 @@ class MainWindow(QMainWindow):
         
         # 2. Restore the positions
         if default_state:
-            from PyQt6.QtCore import QByteArray
+            from PySide6.QtCore import QByteArray
             self.restoreState(QByteArray.fromBase64(default_state.encode('utf-8')))
         else:
             HARDCODED_DEFAULT = "YOUR_MASTER_STRING_HERE"
-            from PyQt6.QtCore import QByteArray
+            from PySide6.QtCore import QByteArray
             self.restoreState(QByteArray.fromBase64(HARDCODED_DEFAULT.encode('utf-8')))
 
         # 3. Force visibility
-        from PyQt6.QtWidgets import QDockWidget
+        from PySide6.QtWidgets import QDockWidget
         for dock in self.findChildren(QDockWidget): dock.show()
 
     def _save_project_as(self):
@@ -1165,7 +1165,7 @@ class MainWindow(QMainWindow):
         self.doc_dock.setObjectName("DocExplorerDock")
         self.doc_dock.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
         
-        from PyQt6.QtWidgets import QWidget, QVBoxLayout, QListWidget, QComboBox
+        from PySide6.QtWidgets import QWidget, QVBoxLayout, QListWidget, QComboBox
         doc_container = QWidget()
         doc_layout = QVBoxLayout(doc_container)
         doc_layout.setContentsMargins(0, 0, 0, 0)
@@ -1268,7 +1268,7 @@ class MainWindow(QMainWindow):
         for ws_view in self.workspace_docks: ws_view.save_workspace_state()
 
     def broadcast_highlight_created(self, highlight_data):
-        from PyQt6.QtGui import QColor
+        from PySide6.QtGui import QColor
         pm = self.project_manager
         pm.upsert_highlight({
             "id": highlight_data.get("id"),
@@ -1304,9 +1304,9 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 pass
             
-        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QTextEdit, QPushButton, QLabel
-        from PyQt6.QtCore import Qt
-        from PyQt6.QtGui import QCursor
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QTextEdit, QPushButton, QLabel
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QCursor
         
         self.quick_note_popup = QDialog(self, Qt.WindowType.Tool)
         self.quick_note_popup.setWindowTitle("📝 Edit Highlight")
@@ -1468,7 +1468,7 @@ class MainWindow(QMainWindow):
         has_unsaved_changes = hasattr(self, 'project_manager') and bool(self.project_manager.dirty_docs)
         
         if has_unsaved_changes:
-            from PyQt6.QtWidgets import QMessageBox
+            from PySide6.QtWidgets import QMessageBox
             
             # 2. Pop up the native OS warning dialog
             reply = QMessageBox.question(

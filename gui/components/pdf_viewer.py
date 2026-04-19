@@ -1,12 +1,12 @@
 # gui/components/pdf_viewer.py
 import fitz
 import webbrowser
-from PyQt6.QtWidgets import (QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsRectItem,
+from PySide6.QtWidgets import (QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsRectItem,
                              QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox, QApplication)
-from PyQt6.QtGui import QImage, QPixmap, QPainter, QColor, QBrush, QPen, QShortcut, QKeySequence
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QRectF, QTimer
-from PyQt6.QtCore import QPointF, QPoint
-from PyQt6.QtCore import QEvent
+from PySide6.QtGui import QImage, QPixmap, QPainter, QColor, QBrush, QPen, QShortcut, QKeySequence
+from PySide6.QtCore import Qt, QThread, Signal, QRectF, QTimer
+from PySide6.QtCore import QPointF, QPoint
+from PySide6.QtCore import QEvent
 
 from gui.components.annotation_manager import AnnotationManager
 from gui.components.search_bar_widget import SearchBarWidget
@@ -68,7 +68,7 @@ class PDFViewer(QGraphicsView):
             if hasattr(self, 'page_hud') and self.page_hud.isVisible():
                 self.page_hud.move(20, self.viewport().height() - self.page_hud.height() - 20)
             return result
-    annotation_clicked = pyqtSignal(str,int)
+    annotation_clicked = Signal(str,int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -435,8 +435,8 @@ class PDFViewer(QGraphicsView):
             return
             
         try:
-            from PyQt6.QtGui import QPixmap
-            from PyQt6.QtCore import QTimer
+            from PySide6.QtGui import QPixmap
+            from PySide6.QtCore import QTimer
             if getattr(self, 'dark_mode_enabled', False):
                 qimage.invertPixels(QImage.InvertMode.InvertRgb)
             pixmap = QPixmap.fromImage(qimage)
@@ -678,7 +678,7 @@ class PDFViewer(QGraphicsView):
             
         try:
             import fitz
-            from PyQt6.QtGui import QImage, QPixmap
+            from PySide6.QtGui import QImage, QPixmap
             
             page = self.doc.load_page(page_num)
             dpi_scale = getattr(self, '_get_dpi_scale', lambda: 1.0)()
@@ -753,7 +753,7 @@ class PDFViewer(QGraphicsView):
             if page_num not in getattr(self, 'rendered_pages', set()):
                 self._render_page_sync(page_num)
                 
-            from PyQt6.QtWidgets import QApplication
+            from PySide6.QtWidgets import QApplication
             QApplication.processEvents()
 
             target_item = self.page_pixmaps[page_num] if self.page_pixmaps[page_num] is not None else self.page_placeholders[page_num]
@@ -779,7 +779,7 @@ class PDFViewer(QGraphicsView):
             if page_num not in getattr(self, 'rendered_pages', set()):
                 self._render_page_sync(page_num)
                 
-            from PyQt6.QtWidgets import QApplication
+            from PySide6.QtWidgets import QApplication
             QApplication.processEvents()
             
             page_item = self.page_pixmaps[page_num]

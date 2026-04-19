@@ -1,9 +1,9 @@
 import json
 import re
-from PyQt6.QtCore import QThread, pyqtSignal
+from PySide6.QtCore import QThread, Signal
 
 class AIFindConnectionsWorker(QThread):
-    finished = pyqtSignal(list, str)
+    finished = Signal(list, str)
 
     def __init__(self, llm_manager, model, nodes_data, edges_data, parent=None):
         super().__init__(parent)

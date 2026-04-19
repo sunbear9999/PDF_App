@@ -2,15 +2,15 @@
 import os
 import uuid
 import json
-from PyQt6.QtWidgets import (QGraphicsView, QGraphicsScene, QMenu, QMessageBox,
+from PySide6.QtWidgets import (QGraphicsView, QGraphicsScene, QMenu, QMessageBox,
                              QInputDialog, QFrame, QLabel, QVBoxLayout,
                              QHBoxLayout, QComboBox, QPushButton, QDialog,
                              QScrollArea, QWidget, QFormLayout, QDialogButtonBox,
                              QColorDialog, QFileDialog, QTextEdit, QCheckBox, QSlider,
                              QGraphicsLineItem, QGraphicsTextItem, QListWidget,
                              QListWidgetItem,QSizePolicy)
-from PyQt6.QtCore import Qt, QRectF, QRunnable, QThreadPool, pyqtSlot
-from PyQt6.QtGui import QColor, QPen, QBrush, QFont, QPainter, QImage, QStandardItemModel, QStandardItem, QCursor, QPainterPath, QPainterPathStroker, QShortcut, QKeySequence
+from PySide6.QtCore import Qt, QRectF, QRunnable, QThreadPool, Slot
+from PySide6.QtGui import QColor, QPen, QBrush, QFont, QPainter, QImage, QStandardItemModel, QStandardItem, QCursor, QPainterPath, QPainterPathStroker, QShortcut, QKeySequence
 from gui.components.workspace_items import Node, Edge
 from core.ai_organize_worker import AIOrganizeWorker
 from core.ai_connections_worker import AIFindConnectionsWorker
@@ -268,7 +268,7 @@ class NodeEmbeddingTask(QRunnable):
         self.llm_manager = llm_manager
         self.project_manager = project_manager
 
-    @pyqtSlot()
+    @Slot()
     def run(self):
         if not self.text.strip() or not self.llm_manager or not self.llm_manager.ai_enabled:
             return
@@ -1627,7 +1627,7 @@ class WorkspaceView(QGraphicsView):
             edge.deleteLater()
         else:
             # Fallback: schedule deletion via QTimer if needed
-            from PyQt6.QtCore import QTimer
+            from PySide6.QtCore import QTimer
             QTimer.singleShot(0, lambda: edge.setParentItem(None))
 
         self._mark_workspace_dirty(autosave=True)
@@ -1692,7 +1692,7 @@ class WorkspaceView(QGraphicsView):
         if hasattr(node, 'deleteLater'):
             node.deleteLater()
         else:
-            from PyQt6.QtCore import QTimer
+            from PySide6.QtCore import QTimer
             QTimer.singleShot(0, lambda: node.setParentItem(None))
 
         self._similarity_signature = None

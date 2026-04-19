@@ -1,8 +1,8 @@
 # gui/components/help_dialog.py
-from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QTabWidget, 
+from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QTabWidget, 
                              QWidget, QLabel, QPushButton, QCheckBox, QScrollArea, QFrame)
-from PyQt6.QtCore import Qt, QSettings
-from PyQt6.QtGui import QPixmap, QFont, QMovie
+from PySide6.QtCore import Qt, QSettings
+from PySide6.QtGui import QPixmap, QFont, QMovie
 from gui.theme import ThemeManager
 import sys
 import os

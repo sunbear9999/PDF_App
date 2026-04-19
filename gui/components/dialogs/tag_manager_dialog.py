@@ -1,6 +1,6 @@
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QBrush
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QBrush
+from PySide6.QtWidgets import (
     QCheckBox,
     QColorDialog,
     QDialog,
@@ -19,9 +19,9 @@ from PyQt6.QtWidgets import (
 
 
 # gui/components/dialogs/tag_manager_dialog.py
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QBrush
-from PyQt6.QtWidgets import (
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QBrush
+from PySide6.QtWidgets import (
     QCheckBox, QColorDialog, QDialog, QDialogButtonBox,
     QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMessageBox, QPushButton, QScrollArea,

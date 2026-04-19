@@ -1,5 +1,5 @@
 # gui/components/search_bar_widget.py
-from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox
 
 class SearchBarWidget(QFrame):
     def __init__(self, parent=None):

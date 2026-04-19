@@ -1,11 +1,11 @@
 import json
 import re
-from PyQt6.QtCore import QThread, pyqtSignal
+from PySide6.QtCore import QThread, Signal
 import os
 
 class AIFillGraphWorker(QThread):
-    finished = pyqtSignal(list, str) 
-    progress = pyqtSignal(str) 
+    finished = Signal(list, str) 
+    progress = Signal(str) 
 
     def __init__(self, llm_manager, model, nodes_data, edges_data, allowed_docs, enforce_tags=False, node_tags_map=None, parent=None):
         super().__init__(parent)

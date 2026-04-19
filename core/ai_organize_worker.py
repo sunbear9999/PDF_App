@@ -1,9 +1,9 @@
 import json
 import re
-from PyQt6.QtCore import QThread, pyqtSignal
+from PySide6.QtCore import QThread, Signal
 
 class AIOrganizeWorker(QThread):
-    finished = pyqtSignal(list, str)
+    finished = Signal(list, str)
 
     def __init__(self, llm_manager, model, nodes_data, custom_instructions="", parent=None):
         super().__init__(parent)

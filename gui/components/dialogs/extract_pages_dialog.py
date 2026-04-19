@@ -1,9 +1,9 @@
 # gui/components/dialogs/extract_pages_dialog.py
 import os
 import fitz
-from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
+from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
                              QLineEdit, QPushButton, QMessageBox, QFileDialog)
-from PyQt6.QtCore import Qt
+from PySide6.QtCore import Qt
 
 class ExtractPagesDialog(QDialog):
     def __init__(self, source_pdf_path, project_manager, parent=None):

@@ -1,19 +1,19 @@
 # gui/docks/research_assistant/controller.py
 import re
 import os
-from PyQt6.QtWidgets import QWidget, QVBoxLayout
-from PyQt6.QtCore import QThread, pyqtSignal
-from PyQt6.QtGui import QDesktopServices
-from PyQt6.QtCore import QUrl
+from PySide6.QtWidgets import QWidget, QVBoxLayout
+from PySide6.QtCore import QThread, Signal
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QUrl
 
 from .model import ResearchModel
 from .view import ResearchView
 
 class ResearchWorker(QThread):
-    term_received = pyqtSignal(str, str) 
-    quote_received = pyqtSignal(str, str, str) 
-    finished_generation = pyqtSignal()
-    status_update = pyqtSignal(str)
+    term_received = Signal(str, str) 
+    quote_received = Signal(str, str, str) 
+    finished_generation = Signal()
+    status_update = Signal(str)
 
     def __init__(self, llm_manager, goal, model, is_advanced, allowed_docs, parent=None):
         super().__init__(parent)

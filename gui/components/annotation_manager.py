@@ -1,15 +1,15 @@
 # gui/components/annotation_manager.py
 import fitz
 import uuid
-from PyQt6.QtWidgets import QGraphicsRectItem, QInputDialog, QWidget, QMenu, QDialog, QVBoxLayout, QTextEdit, QPushButton
-from PyQt6.QtGui import QColor, QBrush, QPen, QAction, QTextCursor, QDesktopServices
-from PyQt6.QtCore import Qt, QRectF, QObject, pyqtSignal, QThread, QUrl
+from PySide6.QtWidgets import QGraphicsRectItem, QInputDialog, QWidget, QMenu, QDialog, QVBoxLayout, QTextEdit, QPushButton
+from PySide6.QtGui import QColor, QBrush, QPen, QAction, QTextCursor, QDesktopServices
+from PySide6.QtCore import Qt, QRectF, QObject, Signal, QThread, QUrl
 import re 
 
 
 class AnnotationManager(QObject):
-    note_added = pyqtSignal()
-    highlight_created = pyqtSignal(dict)
+    note_added = Signal()
+    highlight_created = Signal(dict)
 
     def __init__(self, viewer):
         super().__init__()
@@ -284,8 +284,8 @@ class AnnotationManager(QObject):
         self.clear_selection()
 
 class RewordWorker(QThread):
-    token_received = pyqtSignal(str)
-    finished = pyqtSignal()
+    token_received = Signal(str)
+    finished = Signal()
 
     def __init__(self, llm_manager, model, text, parent=None):
         super().__init__(parent)

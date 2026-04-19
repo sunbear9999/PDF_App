@@ -2,18 +2,18 @@ import os
 import re
 import time
 import threading
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QTextEdit, QPushButton, QLabel, 
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QTextEdit, QPushButton, QLabel, 
                              QComboBox, QHBoxLayout, QCheckBox, QSpinBox, QMessageBox,
                              QScrollArea, QFrame)
-from PyQt6.QtCore import pyqtSignal
+from PySide6.QtCore import Signal
 
 from core.pdf_utils import extract_filtered_blocks
 from core.text_utils import sanitize_extracted_text
 from core.tts_engine import generate_audio
 
 class TTSTab(QWidget):
-    status_updated = pyqtSignal(str)
-    generation_complete = pyqtSignal(bool, str)
+    status_updated = Signal(str)
+    generation_complete = Signal(bool, str)
 
     def __init__(self, parent=None, main_window=None):
         super().__init__(parent)

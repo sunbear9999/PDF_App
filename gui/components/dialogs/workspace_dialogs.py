@@ -1,10 +1,10 @@
-from PyQt6.QtWidgets import (QGraphicsView, QGraphicsScene, QMenu, QMessageBox, 
+from PySide6.QtWidgets import (QGraphicsView, QGraphicsScene, QMenu, QMessageBox, 
                              QInputDialog, QFrame, QLabel, QVBoxLayout,
                              QHBoxLayout, QComboBox, QPushButton, QDialog,
                              QScrollArea, QWidget, QFormLayout, QDialogButtonBox, 
                              QColorDialog, QFileDialog, QTextEdit,QCheckBox,QSlider,QLabel,QTabWidget,QListWidget,QListWidgetItem)
-from PyQt6.QtCore import Qt, QRectF
-from PyQt6.QtGui import QColor, QPen, QBrush, QFont, QPainter, QImage, QStandardItemModel, QStandardItem
+from PySide6.QtCore import Qt, QRectF
+from PySide6.QtGui import QColor, QPen, QBrush, QFont, QPainter, QImage, QStandardItemModel, QStandardItem
 import os
 class OutlineDialog(QDialog):
     def __init__(self, outline_text, workspace_view, parent=None):

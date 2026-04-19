@@ -1,9 +1,9 @@
 # main.py
 import sys
 import traceback
-from PyQt6.QtWidgets import QApplication, QMessageBox
-from PyQt6.QtGui import QIcon
-from PyQt6.QtCore import QSettings, QTimer
+from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtGui import QIcon
+from PySide6.QtCore import QSettings, QTimer
 
 from gui.main_window import MainWindow
 from gui.theme import ThemeManager

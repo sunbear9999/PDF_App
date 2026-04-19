@@ -1,11 +1,11 @@
 # gui/tabs/notes_tab.py
 import json
 import os
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                              QPushButton, QScrollArea, QFrame, QComboBox, 
                              QStackedWidget, QColorDialog, QMessageBox, QMenu)
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QColor
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QColor
 from gui.components.workspace_view import WorkspaceView
 from gui.components.help_dialog import HelpDialog
 from gui.components.dialogs.tag_manager_dialog import TagAssignmentDialog

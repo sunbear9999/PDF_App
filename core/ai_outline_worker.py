@@ -1,8 +1,8 @@
 import json
-from PyQt6.QtCore import QThread, pyqtSignal
+from PySide6.QtCore import QThread, Signal
 
 class AIOutlineWorker(QThread):
-    finished = pyqtSignal(str, str) # Emits (outline_text, error_msg)
+    finished = Signal(str, str) # Emits (outline_text, error_msg)
 
     def __init__(self, llm_manager, model, nodes_data, edges_data, parent=None):
         super().__init__(parent)

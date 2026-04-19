@@ -1,12 +1,12 @@
 # core/render_worker.py
 import fitz
-from PyQt6.QtCore import QThread, pyqtSignal
-from PyQt6.QtGui import QImage
+from PySide6.QtCore import QThread, Signal
+from PySide6.QtGui import QImage
 from queue import Queue
 
 class RenderWorker(QThread):
-    page_ready = pyqtSignal(int, QImage)
-    finished_rendering = pyqtSignal()
+    page_ready = Signal(int, QImage)
+    finished_rendering = Signal()
 
     def __init__(self, pdf_path, zoom, page_queue_or_list, pixel_ratio=1.0):
         super().__init__()

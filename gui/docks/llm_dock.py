@@ -1,16 +1,16 @@
 # gui/tabs/llm_dock.py
 import re
 import os
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QTextEdit, QPushButton, QLabel, 
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QTextEdit, QPushButton, QLabel, 
                              QComboBox, QHBoxLayout, QLineEdit, QMessageBox, QListWidget, QListWidgetItem, QCheckBox,
                              QScrollArea, QFrame, QSizePolicy)
-from PyQt6.QtCore import pyqtSignal, QThread, Qt
-from PyQt6.QtGui import QTextCursor, QColor
+from PySide6.QtCore import Signal, QThread, Qt
+from PySide6.QtGui import QTextCursor, QColor
 from core.llm_manager import LocalLLMManager
 
 class IndexWorker(QThread):
-    progress = pyqtSignal(str)
-    finished_indexing = pyqtSignal(bool, str)
+    progress = Signal(str)
+    finished_indexing = Signal(bool, str)
     
     def __init__(self, llm, filepaths, parent=None):
         super().__init__(parent)
@@ -25,9 +25,9 @@ class IndexWorker(QThread):
             self.finished_indexing.emit(False, str(e))
 
 class ChatWorker(QThread):
-    token_received = pyqtSignal(str)
-    chat_completed = pyqtSignal(str)
-    agent_update = pyqtSignal(str)
+    token_received = Signal(str)
+    chat_completed = Signal(str)
+    agent_update = Signal(str)
     
     def __init__(self, llm, question, model, allowed_docs, tag_filters, use_agents, rag_enabled=True, custom_system_prompt=None, existing_highlights=None, parent=None):
         super().__init__(parent)

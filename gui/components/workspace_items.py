@@ -1,10 +1,10 @@
 # gui/components/workspace_items.py
 import uuid
-from PyQt6.QtWidgets import (QGraphicsRectItem, QGraphicsTextItem, QGraphicsLineItem, QGraphicsItem, 
+from PySide6.QtWidgets import (QGraphicsRectItem, QGraphicsTextItem, QGraphicsLineItem, QGraphicsItem, 
                              QInputDialog, QColorDialog, QGraphicsProxyWidget,
                              QPushButton, QHBoxLayout, QWidget)
-from PyQt6.QtCore import Qt, QLineF, QPointF, QTimer, QRectF
-from PyQt6.QtGui import QColor, QPen, QBrush, QFont, QTextDocument, QPainter
+from PySide6.QtCore import Qt, QLineF, QPointF, QTimer, QRectF
+from PySide6.QtGui import QColor, QPen, QBrush, QFont, QTextDocument, QPainter
 
 from gui.theme import ThemeManager
 
@@ -43,7 +43,7 @@ class Edge(QGraphicsLineItem):
         self.update_position()
 
     def shape(self):
-        from PyQt6.QtGui import QPainterPath, QPainterPathStroker
+        from PySide6.QtGui import QPainterPath, QPainterPathStroker
         path = QPainterPath()
         path.moveTo(self.line().p1())
         path.lineTo(self.line().p2())
@@ -280,7 +280,7 @@ class Node(QGraphicsRectItem):
     def trigger_jump(self):
         if self.pdf_path and self.page_num is not None:
             if self.scene() and hasattr(self.scene(), 'view'):
-                from PyQt6.QtCore import QTimer
+                from PySide6.QtCore import QTimer
                 view = self.scene().view
                 main_win = view.main_window
                 

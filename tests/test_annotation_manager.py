@@ -1,12 +1,12 @@
 import unittest
 from unittest.mock import MagicMock, patch
-from PyQt6.QtCore import QPointF, QRectF
+from PySide6.QtCore import QPointF, QRectF
 import fitz
 
 # Note: In a headless environment, PyQt widget creation can fail. 
-# We mock PyQt6 components heavily here to test pure logic.
+# We mock PySide6 components heavily here to test pure logic.
 import sys
-from PyQt6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication
 app = QApplication(sys.argv) if not QApplication.instance() else QApplication.instance()
 
 from gui.components.annotation_manager import AnnotationManager

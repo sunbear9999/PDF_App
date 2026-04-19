@@ -1,14 +1,14 @@
 # gui/docks/research_assistant/view.py
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, 
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, 
                              QPushButton, QLabel, QCheckBox, QScrollArea, QFrame, QInputDialog, QComboBox)
-from PyQt6.QtCore import pyqtSignal, Qt
-from PyQt6.QtGui import QCursor
+from PySide6.QtCore import Signal, Qt
+from PySide6.QtGui import QCursor
 
 class TermWidget(QFrame):
     """A visually pleasing card for a single search term."""
-    open_jstor = pyqtSignal(str)
-    open_scholar = pyqtSignal(str)
-    open_custom = pyqtSignal(str)
+    open_jstor = Signal(str)
+    open_scholar = Signal(str)
+    open_custom = Signal(str)
 
     def __init__(self, term, reason, theme, parent=None):
         super().__init__(parent)
@@ -57,8 +57,8 @@ class TermWidget(QFrame):
 
 
 class ResearchView(QWidget):
-    generate_requested = pyqtSignal(str, str, bool) # goal, model, is_advanced
-    change_custom_url_requested = pyqtSignal()
+    generate_requested = Signal(str, str, bool) # goal, model, is_advanced
+    change_custom_url_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)

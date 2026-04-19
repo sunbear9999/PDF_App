@@ -1,10 +1,10 @@
 import json
 import re
-from PyQt6.QtCore import QThread, pyqtSignal
+from PySide6.QtCore import QThread, Signal
 
 class AIConsolidateWorker(QThread):
-    finished = pyqtSignal(dict, str) # Emits (result_dict, error_msg)
-    progress = pyqtSignal(str)
+    finished = Signal(dict, str) # Emits (result_dict, error_msg)
+    progress = Signal(str)
 
     def __init__(self, llm_manager, model, nodes_data, edges_data, parent=None):
         super().__init__(parent)

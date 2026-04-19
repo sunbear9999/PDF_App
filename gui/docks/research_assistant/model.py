@@ -1,7 +1,7 @@
 # gui/docks/research_assistant/model.py
 import urllib.parse
 import re
-from PyQt6.QtCore import QSettings
+from PySide6.QtCore import QSettings
 
 class ResearchModel:
     def __init__(self):

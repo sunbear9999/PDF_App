@@ -1,6 +1,6 @@
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QTabWidget, QTextEdit, 
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QTabWidget, QTextEdit, 
                              QPushButton, QLabel, QHBoxLayout, QLineEdit)
-from PyQt6.QtCore import Qt
+from PySide6.QtCore import Qt
 
 class ToolsPanel(QWidget):
     def __init__(self, pdf_viewer, parent=None):

@@ -1,9 +1,9 @@
 import json
-from PyQt6.QtCore import QObject, pyqtSignal, QSettings, Qt
-from PyQt6.QtWidgets import (QApplication, QDialog, QVBoxLayout, QHBoxLayout, 
+from PySide6.QtCore import QObject, Signal, QSettings, Qt
+from PySide6.QtWidgets import (QApplication, QDialog, QVBoxLayout, QHBoxLayout, 
                              QLabel, QPushButton, QColorDialog, QScrollArea, 
                              QWidget, QFormLayout)
-from PyQt6.QtGui import QColor
+from PySide6.QtGui import QColor
 
 class CustomThemeDialog(QDialog):
     def __init__(self, current_custom_theme, parent=None):
@@ -119,9 +119,9 @@ class CustomThemeDialog(QDialog):
 class _ThemeManager(QObject):
     """
     Internal ThemeManager class. 
-    Inherits from QObject to allow pyqtSignals.
+    Inherits from QObject to allow Signals.
     """
-    theme_changed = pyqtSignal(dict)
+    theme_changed = Signal(dict)
 
     def __init__(self):
         super().__init__()
@@ -241,7 +241,7 @@ class _ThemeManager(QObject):
 
 
 # -------------------------------------------------------------
-# STRICT SINGLETON PATTERN - SAFE FOR PYQT6
+# STRICT SINGLETON PATTERN - SAFE FOR PySide6
 # -------------------------------------------------------------
 # Instead of overriding __new__, which breaks C++ object pointers 
 # in PyQt, we use a module-level global and a factory function.

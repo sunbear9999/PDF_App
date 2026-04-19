@@ -1,14 +1,14 @@
 # gui/tabs/ocr_tab.py
 import os
 import shutil
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                              QRadioButton, QButtonGroup, QTextEdit, QPushButton,
                              QScrollArea, QFrame)
-from PyQt6.QtCore import Qt, pyqtSignal, QThread
+from PySide6.QtCore import Qt, Signal, QThread
 
 class OCRWorker(QThread):
-    progress_updated = pyqtSignal(int, int)
-    ocr_completed = pyqtSignal(str, str, str)
+    progress_updated = Signal(int, int)
+    ocr_completed = Signal(str, str, str)
 
     def __init__(self, file_path, ui_mode, parent=None):
         super().__init__(parent)
