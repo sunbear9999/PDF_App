@@ -22,6 +22,7 @@ from gui.components.help_dialog import HelpDialog
 from gui.components.dialogs.prompt_editor_dialog import PromptEditorDialog
 from gui.components.dialogs.tag_manager_dialog import TagManagerDialog, TagAssignmentDialog
 from core.prompt_manager import PromptManager
+from core.dictionary_manager import DictionaryManager
 
 
 class PreloadWorker(QThread):
@@ -51,7 +52,16 @@ class MainWindow(QMainWindow):
         self.shared_llm_manager.set_audit_logger(self.project_manager.log_ai_interaction_threadsafe)
         # 1. INITIALIZE VIEWER EXPLICITLY ONCE
         self.viewer = PDFViewer()
-        
+        root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        dict_data_dir = os.path.join(root_dir, "data")
+        self.dictionary_manager = DictionaryManager(dict_data_dir)
+        if not self.dictionary_manager.get_available_dictionaries():
+            # Assume you placed a file named 'default_english.json' in an 'assets' folder
+            default_dict_path = os.path.join(root_dir, "assets", "default_english.json")
+            
+            if os.path.exists(default_dict_path):
+                print("[System] First launch detected. Building default dictionary...")
+                self.dictionary_manager.import_json(default_dict_path, "Default English")
         # 2. CONNECT CRITICAL SAVING SIGNALS 
         # This guarantees the ProjectManager knows to save the file!
         self.viewer.annotation_clicked.connect(self.broadcast_annotation_clicked)
@@ -82,6 +92,7 @@ class MainWindow(QMainWindow):
         self.ocr_docks = []      
         self.audio_docks = []
         self.research_docks = [] 
+        self.dict_docks = []
         # 6. BUILD UI
         self._build_top_menu()
         self._build_ocr_banner()
@@ -278,6 +289,10 @@ class MainWindow(QMainWindow):
         self.btn_spawn_audio.clicked.connect(self.spawn_audio_dock)
         self.top_toolbar.addWidget(self.btn_spawn_audio)
 
+        self.btn_spawn_dict = QPushButton("📖 Dictionary")
+        self.btn_spawn_dict.clicked.connect(self.spawn_dictionary_dock)
+        self.top_toolbar.addWidget(self.btn_spawn_dict)
+
         spacer2 = QWidget()
         spacer2.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.top_toolbar.addWidget(spacer2)
@@ -320,6 +335,30 @@ class MainWindow(QMainWindow):
         self._configure_hover_expand_button(self.btn_fullscreen, "⛶", "Full Screen", expanded_width=120)
         self.btn_fullscreen.clicked.connect(self.toggle_full_screen)
         self.top_toolbar.addWidget(self.btn_fullscreen)
+
+    def spawn_dictionary_dock(self):
+        # STRICT SINGLETON: Only one dictionary dock needed
+        if self.dict_docks:
+            view = self.dict_docks[0]
+            if view.parentWidget():
+                view.parentWidget().show()
+                view.parentWidget().raise_()
+            return
+
+        dock = QDockWidget("📖 Dictionary", self)
+        dock.setObjectName("SingleDictionaryDock")
+        
+        from gui.docks.dictionary_dock import DictionaryTab
+        dict_view = DictionaryTab(self.dictionary_manager,self)
+        dock.setWidget(dict_view)
+        
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        self.dict_docks.append(dict_view)
+        
+        if hasattr(self, 'theme_manager'):
+            dict_view.update_theme(self.theme_manager.get_theme())
+            
+        dock.show()
 
     def spawn_workspace_dock(self):
         # 1. Revive a hidden dock if one exists!

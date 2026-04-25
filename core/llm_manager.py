@@ -19,7 +19,7 @@ except ImportError:
 class LocalLLMManager:
     def __init__(self):
         self.api_base = "http://localhost:11434/api"
-        self.embedding_model = "nomic-embed-text"
+        self.embedding_model = "bge-m3"
         self.chroma_client = None
         self.collection = None
         self.ai_enabled = False  # Track if AI is available

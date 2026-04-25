@@ -197,8 +197,38 @@ class AnnotationManager(QObject):
         
         reword_action = menu.addAction("✍️ Reword this")
         reword_action.triggered.connect(self.reword_selection)
+
+        define_action = menu.addAction("📖 Define")
+        define_action.triggered.connect(self.define_selection)
         
         menu.exec(global_pos)
+
+    def define_selection(self):
+        if not self.selected_words: return
+        extracted_text = " ".join(w[4] for w in self.selected_words).strip()
+        
+        # Clean up punctuation attached to the highlighted word
+        import string
+        extracted_text = extracted_text.strip(string.punctuation)
+        
+        # Optional: Limit the dictionary lookup to a maximum of 3-4 words 
+        # so users don't accidentally try to "define" a whole paragraph
+        words = extracted_text.split()
+        if len(words) > 4:
+            extracted_text = " ".join(words[:4])
+
+        main_window = self.viewer.window()
+        
+        # 1. Force the Dictionary Dock to spawn or revive
+        if hasattr(main_window, 'spawn_dictionary_dock'):
+            main_window.spawn_dictionary_dock()
+            
+        # 2. Push the text into the dictionary's public search method
+        if hasattr(main_window, 'dict_docks') and main_window.dict_docks:
+            dict_dock = main_window.dict_docks[0]
+            dict_dock.public_search(extracted_text)
+            
+        self.clear_selection()
 
     def apply_highlight(self, color_tuple):
         if not self.selected_words: return
