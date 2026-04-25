@@ -85,6 +85,52 @@ class ProjectManager:
             self._conn.commit()
         except sqlite3.Error as e:
             print(f"Database initialization error: {e}")
+        try:
+            # 1. Safely add Tracking columns to existing nodes
+            cursor.execute("PRAGMA table_info(nodes)")
+            node_columns = [col[1] for col in cursor.fetchall()]
+            
+            if "node_origin" not in node_columns:
+                try:
+                    cursor.execute("ALTER TABLE nodes ADD COLUMN node_origin TEXT DEFAULT 'human'")
+                except sqlite3.OperationalError:
+                    pass
+                    
+            if "is_verified" not in node_columns:
+                try:
+                    cursor.execute("ALTER TABLE nodes ADD COLUMN is_verified INTEGER DEFAULT 0")
+                except sqlite3.OperationalError:
+                    pass
+
+            # 2. Create the AI Audit Log Table
+            cursor.execute('''CREATE TABLE IF NOT EXISTS ai_audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                prompt TEXT,
+                response TEXT,
+                model_used TEXT
+            )''')
+            
+            self._conn.commit()
+        except sqlite3.Error as e:
+            print(f"Database initialization error (Tracking Features): {e}")
+        if "node_origin" not in node_columns:
+                try: cursor.execute("ALTER TABLE nodes ADD COLUMN node_origin TEXT DEFAULT 'human'")
+                except: pass
+        if "is_verified" not in node_columns:
+                try: cursor.execute("ALTER TABLE nodes ADD COLUMN is_verified INTEGER DEFAULT 0")
+                except: pass
+        if "original_text" not in node_columns:
+                try: cursor.execute("ALTER TABLE nodes ADD COLUMN original_text TEXT")
+                except: pass
+                
+        cursor.execute('''CREATE TABLE IF NOT EXISTS ai_audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                prompt TEXT,
+                response TEXT,
+                model_used TEXT
+            )''')
 
     def _ensure_nodes_table(self, cursor):
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='nodes'")
@@ -98,6 +144,30 @@ class ProjectManager:
                 x REAL, y REAL, width REAL, height REAL
             )''')
             return
+    def log_ai_interaction(self, prompt, response, model):
+        """Silently logs AI interactions for the LLM Log."""
+        if not self._conn: return
+        try:
+            self._conn.execute(
+                "INSERT INTO ai_audit_log (prompt, response, model_used) VALUES (?, ?, ?)",
+                (prompt, response, model)
+            )
+            self._conn.commit()
+        except sqlite3.Error as e:
+            print(f"Failed to log AI interaction: {e}")
+
+    def set_node_verification(self, node_id, is_verified):
+        """Toggles the human-verified status of an AI-generated note."""
+        if not self._conn: return
+        try:
+            status_int = 1 if is_verified else 0
+            self._conn.execute(
+                "UPDATE nodes SET is_verified = ? WHERE id = ?",
+                (status_int, node_id)
+            )
+            self._conn.commit()
+        except sqlite3.Error as e:
+            print(f"Failed to update verification status: {e}")
     def save_node_embedding_threadsafe(self, node_id, vector):
         """Opens a short-lived, localized connection to bypass SQLite thread restrictions."""
         if not self.project_filepath: return
@@ -439,33 +509,41 @@ class ProjectManager:
         if not self._conn: return {"nodes": {}, "edges": []}
         try:
             cursor = self._conn.cursor()
-
             nodes = {}
-            cursor.execute(
-                "SELECT id, highlight_id, workspace_id, quote, note_text, color, is_custom, "
-                "pdf_path, page_num, manual_font_size, x, y, width, height "
-                "FROM nodes WHERE workspace_id = ?",
-                (workspace_id,),
-            )
-            for row in cursor.fetchall():
-                node_id, highlight_id, ws_id, quote, note, color, is_custom, pdf_path, page_num, font_size, x, y, w, h = row
-                nodes[node_id] = {
-                    "highlight_id": highlight_id, "workspace_id": ws_id or 1,
-                    "quote": quote, "note": note, "color": color, "is_custom": bool(is_custom),
-                    "pdf_path": pdf_path, "page_num": page_num, "manual_font_size": font_size,
-                    "x": x, "y": y, "width": w, "height": h
-                }
-
-            edges = []
             try:
                 cursor.execute(
-                    "SELECT edge_id, source_id, target_id, label, color, weight "
-                    "FROM edges WHERE workspace_id = ?",
-                    (workspace_id,),
+                    "SELECT id, highlight_id, workspace_id, quote, note_text, color, is_custom, "
+                    "pdf_path, page_num, manual_font_size, x, y, width, height, node_origin, is_verified, original_text "
+                    "FROM nodes WHERE workspace_id = ?", (workspace_id,)
                 )
+                for row in cursor.fetchall():
+                    node_id, highlight_id, ws_id, quote, note, color, is_custom, pdf_path, page_num, font_size, x, y, w, h, origin, verified, orig_text = row
+                    nodes[node_id] = {
+                        "highlight_id": highlight_id, "workspace_id": ws_id or 1,
+                        "quote": quote, "note": note, "color": color, "is_custom": bool(is_custom),
+                        "pdf_path": pdf_path, "page_num": page_num, "manual_font_size": font_size,
+                        "x": x, "y": y, "width": w, "height": h,
+                        "node_origin": origin or "human", "is_verified": int(verified or 0),
+                        "original_text": orig_text if orig_text is not None else note
+                    }
             except sqlite3.OperationalError:
-                # workspace_id column not yet added (first run before migration commits)
-                cursor.execute("SELECT edge_id, source_id, target_id, label, color, weight FROM edges")
+                cursor.execute(
+                    "SELECT id, highlight_id, workspace_id, quote, note_text, color, is_custom, "
+                    "pdf_path, page_num, manual_font_size, x, y, width, height "
+                    "FROM nodes WHERE workspace_id = ?", (workspace_id,)
+                )
+                for row in cursor.fetchall():
+                    node_id, highlight_id, ws_id, quote, note, color, is_custom, pdf_path, page_num, font_size, x, y, w, h = row
+                    nodes[node_id] = {
+                        "highlight_id": highlight_id, "workspace_id": ws_id or 1,
+                        "quote": quote, "note": note, "color": color, "is_custom": bool(is_custom),
+                        "pdf_path": pdf_path, "page_num": page_num, "manual_font_size": font_size,
+                        "x": x, "y": y, "width": w, "height": h,
+                        "node_origin": "human", "is_verified": 0, "original_text": note
+                    }
+
+            edges = []
+            cursor.execute("SELECT edge_id, source_id, target_id, label, color, weight FROM edges WHERE workspace_id = ?", (workspace_id,))
             for row in cursor.fetchall():
                 edge_id, source_id, target_id, label, color, weight = row
                 edges.append({
@@ -474,16 +552,12 @@ class ProjectManager:
                 })
             return {"nodes": nodes, "edges": edges}
         except sqlite3.Error as e:
-            print(f"Error reading workspace data: {e}")
             return {"nodes": {}, "edges": []}
 
     def save_workspace_data(self, workspace_data, workspace_id=1):
-        """OPTIMIZED: Uses bulk transactions for massive speedup when saving large workspaces.
-        Only touches nodes/edges belonging to the given workspace_id."""
         if not self._conn: return
         try:
             cursor = self._conn.cursor()
-
             cursor.execute("BEGIN TRANSACTION")
             cursor.execute("DELETE FROM nodes WHERE workspace_id = ?", (workspace_id,))
             cursor.execute("DELETE FROM edges WHERE workspace_id = ?", (workspace_id,))
@@ -491,20 +565,11 @@ class ProjectManager:
             nodes = workspace_data.get("nodes", {})
             node_insert_data = [
                 (
-                    n_id,
-                    d.get("highlight_id"),
-                    workspace_id,
-                    d.get("quote"),
-                    d.get("note"),
-                    d.get("color"),
-                    int(d.get("is_custom", 0)),
-                    d.get("pdf_path"),
-                    d.get("page_num"),
-                    d.get("manual_font_size"),
-                    d.get("x"),
-                    d.get("y"),
-                    d.get("width"),
-                    d.get("height"),
+                    n_id, d.get("highlight_id"), workspace_id, d.get("quote"), d.get("note"),
+                    d.get("color"), int(d.get("is_custom", 0)), d.get("pdf_path"),
+                    d.get("page_num"), d.get("manual_font_size"), d.get("x"), d.get("y"),
+                    d.get("width"), d.get("height"), d.get("node_origin", "human"), 
+                    int(d.get("is_verified", 0)), d.get("original_text", d.get("note", "")) # <--- 17th ITEM
                 )
                 for n_id, d in nodes.items()
             ]
@@ -512,9 +577,9 @@ class ProjectManager:
             cursor.executemany("""
                 INSERT INTO nodes (
                     id, highlight_id, workspace_id, quote, note_text, color,
-                    is_custom, pdf_path, page_num, manual_font_size, x, y, width, height
+                    is_custom, pdf_path, page_num, manual_font_size, x, y, width, height, node_origin, is_verified, original_text
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, node_insert_data)
 
             edges = workspace_data.get("edges", [])
@@ -531,7 +596,6 @@ class ProjectManager:
         except sqlite3.Error as e:
             self._conn.rollback()
             print(f"Error saving workspace data: {e}")
-
     def get_metadata(self, key, default=None):
         if not self._conn:
             return default
@@ -720,32 +784,40 @@ class ProjectManager:
             print(f"Error deleting workspace {workspace_id}: {e}")
 
     def upsert_node_record(self, node_data, workspace_id):
-        """Insert or replace a single node record into the given workspace."""
-        if not self._conn:
-            return
+        if not self._conn: return
         try:
-            self._conn.execute(
+            cursor = self._conn.cursor()
+            
+            # --- CRITICAL FIX: Check if an original backup already exists in the DB ---
+            cursor.execute("SELECT original_text FROM nodes WHERE id = ?", (node_data.get("id"),))
+            row = cursor.fetchone()
+            
+            # 1. If passed explicitly from the UI, use it.
+            # 2. If it's already safely in the DB, KEEP IT (don't overwrite it).
+            # 3. Otherwise, it's a brand new note, so back up the current text.
+            if "original_text" in node_data:
+                orig_text = node_data["original_text"]
+            elif row and row[0] is not None:
+                orig_text = row[0] 
+            else:
+                orig_text = node_data.get("note", "")
+                
+            cursor.execute(
                 """
                 INSERT OR REPLACE INTO nodes (
                     id, highlight_id, workspace_id, quote, note_text, color,
-                    is_custom, pdf_path, page_num, manual_font_size, x, y, width, height
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    is_custom, pdf_path, page_num, manual_font_size, x, y, width, height, node_origin, is_verified, original_text
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    node_data.get("id"),
-                    node_data.get("highlight_id"),
-                    workspace_id,
-                    node_data.get("quote"),
-                    node_data.get("note"),
-                    node_data.get("color"),
-                    int(node_data.get("is_custom", 0)),
-                    node_data.get("pdf_path"),
-                    node_data.get("page_num"),
-                    node_data.get("manual_font_size"),
-                    node_data.get("x", 0.0),
-                    node_data.get("y", 0.0),
-                    node_data.get("width", 150.0),
-                    node_data.get("height", 80.0),
+                    node_data.get("id"), node_data.get("highlight_id"), workspace_id,
+                    node_data.get("quote"), node_data.get("note"), node_data.get("color"),
+                    int(node_data.get("is_custom", 0)), node_data.get("pdf_path"),
+                    node_data.get("page_num"), node_data.get("manual_font_size"),
+                    node_data.get("x", 0.0), node_data.get("y", 0.0),
+                    node_data.get("width", 150.0), node_data.get("height", 80.0),
+                    node_data.get("node_origin", "human"), int(node_data.get("is_verified", 0)),
+                    orig_text # <--- Safely injected here
                 ),
             )
             self._conn.commit()
@@ -771,7 +843,77 @@ class ProjectManager:
         except sqlite3.Error as e:
             print(f"Error creating tag '{name}': {e}")
             return None
-
+    def generate_llm_log(self, export_path):
+        """Generates a Markdown audit trail of all AI interactions and calculates the Human-to-AI ratio."""
+        if not self._conn: return False
+        
+        try:
+            cursor = self._conn.cursor()
+            
+            # 1. Tally the Evidence Pedigree
+            cursor.execute("SELECT COUNT(*) FROM nodes WHERE node_origin = 'human'")
+            n_h = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM nodes WHERE node_origin = 'ai' AND is_verified = 1")
+            n_v = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM nodes WHERE node_origin = 'ai' AND is_verified = 0")
+            n_ai_unverified = cursor.fetchone()[0]
+            
+            # 2. Calculate the Metrics
+            total_ai_notes = n_v + n_ai_unverified
+            verification_score = (n_v / total_ai_notes * 100) if total_ai_notes > 0 else 100.0
+            
+            # Ratio calculation (prevent division by zero)
+            denominator = max(1, n_ai_unverified) 
+            integrity_ratio = (n_h + n_v) / denominator
+            
+            # 3. Fetch the Audit Log
+            cursor.execute("SELECT timestamp, prompt, response, model_used FROM ai_audit_log ORDER BY timestamp ASC")
+            logs = cursor.fetchall()
+            
+            # 4. Generate the Markdown Report
+            with open(export_path, 'w', encoding='utf-8') as f:
+                f.write(f"# 🛡️ LLM Usage Log\n")
+                f.write(f"**Project:** {self.project_name}\n\n")
+                
+                f.write(f"## 📊 Cognitive Agency Dashboard\n")
+                f.write(f"* **Independent Human Notes ($N_h$):** {n_h}\n")
+                f.write(f"* **Human-Verified AI Notes ($N_v$):** {n_v}\n")
+                f.write(f"* **Unverified AI Notes ($N_{{ai\\_unverified}}$):** {n_ai_unverified}\n")
+                f.write(f"---\n")
+                f.write(f"### **Human-to-AI Ratio:** `{integrity_ratio:.2f}`\n")
+                f.write(f"### **Verification Score:** `{verification_score:.1f}%`\n")
+                f.write(f"---\n\n")
+                
+                f.write(f"## 📜 Verified Interaction Log\n")
+                f.write(f"*This section contains the immutable, raw prompt-response pairs processed by local hardware.*\n\n")
+                
+                for idx, (timestamp, prompt, response, model) in enumerate(logs, 1):
+                    f.write(f"### Interaction #{idx} ({timestamp})\n")
+                    f.write(f"**Model:** `{model}` (Local Inference)\n\n")
+                    f.write(f"**Prompt:**\n> {prompt.replace(chr(10), chr(10) + '> ')}\n\n")
+                    f.write(f"**Raw AI Response:**\n```text\n{response}\n```\n")
+                    f.write(f"---\n\n")
+                    
+            return True
+        except Exception as e:
+            print(f"Error generating llm log: {e}")
+            return False
+    def log_ai_interaction_threadsafe(self, prompt, response, model):
+        """Opens a short-lived connection to safely log AI interactions from background QThreads."""
+        if not self.project_filepath: return
+        try:
+            # Localized connection specifically for this thread
+            conn = sqlite3.connect(self.project_filepath, timeout=10.0)
+            conn.execute(
+                "INSERT INTO ai_audit_log (prompt, response, model_used) VALUES (?, ?, ?)",
+                (prompt, response, model)
+            )
+            conn.commit()
+            conn.close()
+        except sqlite3.Error as e:
+            print(f"Failed to log AI interaction in background: {e}")
     def delete_tag(self, tag_id):
         if not self._conn:
             return

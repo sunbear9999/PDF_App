@@ -48,7 +48,7 @@ class MainWindow(QMainWindow):
         
         from core.llm_manager import LocalLLMManager
         self.shared_llm_manager = LocalLLMManager()
-        
+        self.shared_llm_manager.set_audit_logger(self.project_manager.log_ai_interaction_threadsafe)
         # 1. INITIALIZE VIEWER EXPLICITLY ONCE
         self.viewer = PDFViewer()
         
@@ -214,6 +214,7 @@ class MainWindow(QMainWindow):
 
         # 🔥 UPGRADE: Native QToolBar handles spacing, heights, and overflow automatically!
         self.top_toolbar = QToolBar("Main Toolbar", self)
+        self.top_toolbar.setObjectName("MainToolbar")
         self.top_toolbar.setMovable(False)
         self.top_toolbar.setFloatable(False)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.top_toolbar)
@@ -233,9 +234,11 @@ class MainWindow(QMainWindow):
         project_menu.addAction("Save Project As...", self._save_project_as)
         project_menu.addSeparator()
         project_menu.addAction("Add PDF to Project...", self._add_pdf)
-        self.btn_project.setMenu(project_menu)
         self.top_toolbar.addWidget(self.btn_project)
-
+        export_action = project_menu.addAction("🛡️ Export LLM Log...")
+        export_action.triggered.connect(self._export_llm_log)
+        
+        self.btn_project.setMenu(project_menu)
         # 3. Save Button
         self.btn_save = QPushButton("💾")
         self.btn_save.clicked.connect(self.save_project)
@@ -410,7 +413,37 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'theme_manager'): notes_view.update_theme(self.theme_manager.get_theme())
         notes_view.refresh_notes()
         dock.show()
-
+    def _export_llm_log(self):
+        if not self.project_manager.project_filepath:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "No Project", "Please open or create a project first.")
+            return
+            
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        
+        # Change dialog to look for .pdf files
+        path, _ = QFileDialog.getSaveFileName(
+            self, 
+            "Export LLM Log", 
+            f"{self.project_manager.project_name}_LLM_Log.pdf", 
+            "PDF Documents (*.pdf)"
+        )
+        
+        if path:
+            # Import and trigger the new PDF generator
+            from core.llm_log import LlmLogGenerator
+            
+            generator = LlmLogGenerator(
+                self.project_manager.project_filepath, 
+                self.project_manager.project_name
+            )
+            
+            success = generator.generate_pdf(path)
+            
+            if success:
+                QMessageBox.information(self, "Success", f"LLM Log successfully exported to:\n{path}")
+            else:
+                QMessageBox.warning(self, "Error", "Failed to generate the report. Check the console for details.")
     def spawn_chat_dock(self):
         # STRICT SINGLETON: AI doesn't run well concurrently
         if self.chat_docks:

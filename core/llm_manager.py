@@ -24,6 +24,7 @@ class LocalLLMManager:
         self.collection = None
         self.ai_enabled = False  # Track if AI is available
         self.prompt_manager = PromptManager()
+        self.audit_logger = None
         self.ensure_server_running()
 
     def _format_prompt_template(self, tool_name, fallback_template, **kwargs):
@@ -36,6 +37,9 @@ class LocalLLMManager:
     def get_system_prompt(self, tool_name, fallback_template, **kwargs):
         prompt = self._format_prompt_template(tool_name, fallback_template, **kwargs)
         return prompt
+    def set_audit_logger(self, logger_func):
+        """Injects the database logging function once at startup."""
+        self.audit_logger = logger_func
 
     def ensure_server_running(self):
         # 1. Safely check if Ollama is actually installed on the system
@@ -542,5 +546,7 @@ class LocalLLMManager:
             err = f"\n[Generation Error: {str(e)}]"
             if callback: callback(err)
             full_response += err
-        
+        if self.audit_logger and full_response and "[System Error" not in full_response:
+            # Fire and forget; the thread-safe DB method handles the rest
+            self.audit_logger(question, full_response, selected_model)
         return full_response

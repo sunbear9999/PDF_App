@@ -50,7 +50,7 @@ class AIFindConnectionsWorker(QThread):
                 callback=handle_chunk,
                 rag_enabled=False,
                 use_agents=False,
-                custom_system_prompt=system_prompt
+                custom_system_prompt=system_prompt,
             )
 
             if "[Generation Error" in response or "[System Error" in response:

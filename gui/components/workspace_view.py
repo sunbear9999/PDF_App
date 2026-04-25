@@ -288,7 +288,7 @@ class WorkspaceView(QGraphicsView):
     def add_node_from_annotation(self, annot, persist=False, position=None, target_workspace_id=None):
         n_id = annot["id"]
         effective_ws_id = target_workspace_id if target_workspace_id is not None else self.current_workspace_id
-
+        origin = "ai" if n_id.startswith("AINote") else "human"
         # If the highlight targets a different workspace, persist directly to DB without touching the canvas
         if persist and effective_ws_id != self.current_workspace_id:
             pm = self.main_window.project_manager if self.main_window and hasattr(self.main_window, "project_manager") else None
@@ -306,6 +306,7 @@ class WorkspaceView(QGraphicsView):
                     "page_num": annot.get("page_num"),
                     "manual_font_size": None,
                     "x": 0.0, "y": 0.0, "width": w, "height": h,
+                    "origin": origin,
                 }, effective_ws_id)
             return None
 
@@ -328,6 +329,9 @@ class WorkspaceView(QGraphicsView):
             pdf_path=annot.get("pdf_path") or annot.get("doc_id"),
             page_num=annot.get("page_num"),
             highlight_id=n_id,
+            node_origin=origin,
+            is_verified=0,
+            original_text=note
         )
         if position is None:
             position = self.mapToScene(self.viewport().rect().center())
@@ -1026,14 +1030,28 @@ class WorkspaceView(QGraphicsView):
             highlight = self.main_window.project_manager.get_highlight(highlight_id)
             if not highlight:
                 continue
+                
+            # 🔥 NEW: Extract the actual note directly from the PDF since the DB doesn't store it!
+            actual_note = ""
+            pdf_path = highlight.get("doc_id")
+            page_num = highlight.get("page_num")
+            if pdf_path and page_num is not None:
+                doc = self.main_window.project_manager.get_doc(pdf_path)
+                if doc:
+                    page = doc.load_page(page_num)
+                    for annot in page.annots():
+                        if annot.info and annot.info.get("title") == highlight["id"]:
+                            actual_note = annot.info.get("content", "")
+                            break
+                            
             position = view_center.__class__(view_center.x(), view_center.y() + offset)
             node = self.add_node_from_annotation(
                 {
                     "id": highlight["id"],
                     "subject": highlight.get("text_content", ""),
-                    "content": "",
-                    "pdf_path": highlight.get("doc_id"),
-                    "page_num": highlight.get("page_num"),
+                    "content": actual_note, # <==== USE THE ACTUAL NOTE!
+                    "pdf_path": pdf_path,
+                    "page_num": page_num,
                     "color": highlight.get("color"),
                 },
                 persist=True,
@@ -2013,7 +2031,7 @@ class WorkspaceView(QGraphicsView):
                 if not n_ids: continue
 
                 cluster_node_id = f"custom_{uuid.uuid4()}"
-                cluster_node = Node(cluster_node_id, quote="", note=c_name, color="#0078D7", is_custom=True, width=180, height=60)
+                cluster_node = Node(cluster_node_id, quote="", note=c_name, color="#0078D7", is_custom=True, width=180, height=60, node_origin="ai")
                 cluster_node.setPos(current_x, start_y)
                 self.scene_obj.addItem(cluster_node)
                 self.nodes[cluster_node_id] = cluster_node
@@ -2596,7 +2614,13 @@ class WorkspaceView(QGraphicsView):
                 quote = annot_dict[n_id].get("text_content", quote) or quote
 
             node = Node(n_id, quote, note, data["color"], data["is_custom"], 
-                        data["width"], data["height"], data.get("pdf_path") or annot_dict.get(highlight_id or n_id, {}).get("doc_id"), data.get("page_num") if data.get("page_num") is not None else annot_dict.get(highlight_id or n_id, {}).get("page_num"), data.get("manual_font_size"), highlight_id)
+                        data["width"], data["height"], 
+                        data.get("pdf_path") or annot_dict.get(highlight_id or n_id, {}).get("doc_id"), 
+                        data.get("page_num") if data.get("page_num") is not None else annot_dict.get(highlight_id or n_id, {}).get("page_num"), 
+                        data.get("manual_font_size"), highlight_id,
+                        data.get("node_origin", "human"),    # <--- LOAD SAVED STATE
+                        data.get("is_verified", 0),
+                        data.get("original_text", note))
             node.setPos(data["x"], data["y"])
             self.scene_obj.addItem(node)
             self.nodes[n_id] = node
@@ -2609,13 +2633,26 @@ class WorkspaceView(QGraphicsView):
             y_offset = 50
             for annot in annot_dict.values():
                 if annot["id"] not in self.nodes:
+                    # 🔥 NEW: Fetch note from PDF for first-time node initialization
+                    actual_note = ""
+                    pdf_path = annot.get("doc_id")
+                    page_num = annot.get("page_num")
+                    if pdf_path and page_num is not None:
+                        doc = self.main_window.project_manager.get_doc(pdf_path)
+                        if doc:
+                            page = doc.load_page(page_num)
+                            for pdf_annot in page.annots():
+                                if pdf_annot.info and pdf_annot.info.get("title") == annot["id"]:
+                                    actual_note = pdf_annot.info.get("content", "")
+                                    break
+                                    
                     self.add_node_from_annotation(
                         {
                             "id": annot["id"],
                             "subject": annot.get("text_content", ""),
-                            "content": "",
-                            "pdf_path": annot.get("doc_id"),
-                            "page_num": annot.get("page_num"),
+                            "content": actual_note, # <==== USE THE ACTUAL NOTE!
+                            "pdf_path": pdf_path,
+                            "page_num": page_num,
                             "color": annot.get("color"),
                         },
                         persist=False,
@@ -2666,7 +2703,10 @@ class WorkspaceView(QGraphicsView):
                 "x": node.pos().x(),
                 "y": node.pos().y(),
                 "width": node.base_width,
-                "height": node.base_height
+                "height": node.base_height,
+                "node_origin": getattr(node, "node_origin", "human"), # <--- ADD THIS
+                "is_verified": int(getattr(node, "is_verified", 0)),
+                "original_text": getattr(node, "original_text", getattr(node, "note", ""))
             }
         for edge in self.edges:
             data["edges"].append({

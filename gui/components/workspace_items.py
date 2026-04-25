@@ -2,9 +2,9 @@
 import uuid
 from PySide6.QtWidgets import (QGraphicsRectItem, QGraphicsTextItem, QGraphicsLineItem, QGraphicsItem, 
                              QInputDialog, QColorDialog, QGraphicsProxyWidget,
-                             QPushButton, QHBoxLayout, QWidget)
+                             QPushButton, QHBoxLayout, QVBoxLayout, QWidget)
 from PySide6.QtCore import Qt, QLineF, QPointF, QTimer, QRectF
-from PySide6.QtGui import QColor, QPen, QBrush, QFont, QTextDocument, QPainter
+from PySide6.QtGui import QColor, QPen, QBrush, QFont, QTextDocument, QPainter, QTextCursor
 
 from gui.theme import ThemeManager
 
@@ -18,6 +18,54 @@ def get_text_color_for_bg(bg_color):
         return "#000000" if brightness > 140 else "#ffffff"
     except:
         return "#ffffff"
+class EditableTextItem(QGraphicsTextItem):
+    """Custom inline editor that tracks the exact moment a human modifies AI text."""
+    def __init__(self, parent_node):
+        super().__init__(parent_node)
+        self.parent_node = parent_node
+
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
+        # Disable editing when clicking away
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+        
+        new_text = self.toPlainText()
+        if new_text != self.parent_node.note:
+            # 1. Capture state for undo
+            view = self.scene().view if self.scene() and hasattr(self.scene(), "view") else None
+            if view: view.save_state_for_undo()
+                
+            # 2. Freeze the AI's original text on the VERY FIRST manual edit
+            current_orig = getattr(self.parent_node, "original_text", self.parent_node.note)
+            if current_orig == self.parent_node.note:
+                self.parent_node.original_text = self.parent_node.note
+                
+            # 3. Apply the human's edit
+            self.parent_node.note = new_text
+            self.parent_node.refresh_layout()
+            
+            # 4. Save safely to DB
+            if view:
+                view._mark_workspace_dirty(autosave=True)
+                if hasattr(view.main_window, 'project_manager'):
+                    view.main_window.project_manager.upsert_node_record({
+                        "id": self.parent_node.node_id,
+                        "highlight_id": getattr(self.parent_node, "highlight_id", None),
+                        "quote": getattr(self.parent_node, "quote", ""),
+                        "note": self.parent_node.note,
+                        "color": getattr(self.parent_node, "color", "#ffff99"),
+                        "is_custom": getattr(self.parent_node, "is_custom", False),
+                        "pdf_path": getattr(self.parent_node, "pdf_path", None),
+                        "page_num": getattr(self.parent_node, "page_num", None),
+                        "manual_font_size": getattr(self.parent_node, "manual_font_size", None),
+                        "x": self.parent_node.pos().x(),
+                        "y": self.parent_node.pos().y(),
+                        "width": self.parent_node.base_width,
+                        "height": self.parent_node.base_height,
+                        "node_origin": getattr(self.parent_node, "node_origin", "human"),
+                        "is_verified": getattr(self.parent_node, "is_verified", 0),
+                        "original_text": self.parent_node.original_text # Protects the backup!
+                    }, view.current_workspace_id)
 
 class Edge(QGraphicsLineItem):
     def __init__(self, source_node, dest_node, label_text="", edge_id=None, color="#888888", weight=2):
@@ -33,7 +81,7 @@ class Edge(QGraphicsLineItem):
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
         self.setPen(QPen(self.base_color, self.weight, Qt.PenStyle.SolidLine))
         
-        self.text_item = QGraphicsTextItem(label_text, self)
+        self.text_item = EditableTextItem(self)
         self.text_item.setDefaultTextColor(QColor("#ffffff"))
         self.text_item.setFont(QFont("Arial", 10, QFont.Weight.Bold))
         self.text_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
@@ -71,18 +119,15 @@ class Edge(QGraphicsLineItem):
         self.text_item.setPos(center_x - text_rect.width() / 2, center_y - text_rect.height() / 2 - 10)
 
     def trigger_edit(self):
-        view = self.scene().view if self.scene() and hasattr(self.scene(), 'view') else None
-        if view:
-            view.save_state_for_undo()
-            view._mark_workspace_dirty(autosave=True)
-            
-        text, ok = QInputDialog.getText(view, "Edit Label", "Enter new text:", text=self.label_text)
-        if ok:
-            self.label_text = text
-            self.text_item.setPlainText(text)
-            self.update_position()
-            if view:
-                view.main_window.project_manager.mark_dirty("workspace")
+        """Activates true native inline editing directly on the canvas."""
+        # Enable inline editing
+        self.text_item.setTextInteractionFlags(Qt.TextInteractionFlag.TextEditorInteraction)
+        self.text_item.setFocus()
+        
+        # Automatically move the typing cursor to the end of the text
+        cursor = self.text_item.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self.text_item.setTextCursor(cursor)
 
     def trigger_color_change(self):
         view = self.scene().view if self.scene() and hasattr(self.scene(), 'view') else None
@@ -184,14 +229,16 @@ class ResizeHandle(QGraphicsRectItem):
 
 
 class Node(QGraphicsRectItem):
-    def __init__(self, node_id, quote, note, color=None, is_custom=False, width=150, height=80, pdf_path=None, page_num=None, manual_font_size=None, highlight_id=None):
+    def __init__(self, node_id, quote, note, color=None, is_custom=False, width=150, height=80, pdf_path=None, page_num=None, manual_font_size=None, highlight_id=None,node_origin="human", is_verified=0, original_text=None):
         super().__init__(0, 0, width, height)
         self.node_id = node_id
         self.highlight_id = highlight_id
         self.is_custom = is_custom
         self.quote = quote if quote else ""
         self.note = note if note else ""
-        
+        self.node_origin = node_origin
+        self.is_verified = bool(is_verified)
+        self.original_text = original_text if original_text is not None else note # <--- ADD THIS
         # If no color is provided, default to theme's panel color
         theme = ThemeManager().get_theme()
         if not color or color == "#333333":
@@ -225,24 +272,48 @@ class Node(QGraphicsRectItem):
         
         self.toolbar_widget = QWidget()
         self.toolbar_widget.setStyleSheet("background: transparent;")
-        t_layout = QHBoxLayout(self.toolbar_widget)
+        
+        # Stack the buttons in two rows so they fit inside the node
+        t_layout = QVBoxLayout(self.toolbar_widget)
         t_layout.setContentsMargins(0,0,0,0)
-        t_layout.setSpacing(5)
+        t_layout.setSpacing(2)
+        
+        row1 = QHBoxLayout()
+        row2 = QHBoxLayout()
+        row1.setContentsMargins(0,0,0,0)
+        row2.setContentsMargins(0,0,0,0)
         
         btn_edit = QPushButton("✏️ Edit")
         btn_color = QPushButton("🎨 Color")
         btn_font = QPushButton("📏 Size")
         btn_connect = QPushButton("🔗 Connect")
         
+        row1.addWidget(btn_edit)
+        row1.addWidget(btn_color)
+        row1.addWidget(btn_font)
+        row2.addWidget(btn_connect)
+        
         buttons = [btn_edit, btn_color, btn_font, btn_connect]
         
         if self.pdf_path is not None:
             self.btn_jump = QPushButton("📄 Jump to PDF")
+            row2.addWidget(self.btn_jump)
             buttons.append(self.btn_jump)
-        
+
+        if self.node_origin == "ai":
+            self.btn_verify = QPushButton("🛡️ Verified" if self.is_verified else "⚠️ Verify AI")
+            row2.addWidget(self.btn_verify)
+            buttons.append(self.btn_verify)
+            
+        t_layout.addLayout(row1)
+        t_layout.addLayout(row2)
+            
         for btn in buttons:
-            btn.setStyleSheet(f"background-color: {theme['bg_panel']}; color: {theme['text_main']}; border-radius: 4px; padding: 2px 6px; font-size: 10px; font-weight: bold; border: 1px solid {theme['border']};")
-            t_layout.addWidget(btn)
+            if self.node_origin == "ai" and btn == getattr(self, "btn_verify", None) and not self.is_verified:
+                # Explicit Red Styling for unverified AI notes
+                btn.setStyleSheet(f"background-color: #aa0000; color: white; border-radius: 4px; padding: 2px 6px; font-size: 10px; font-weight: bold; border: 1px solid #ff4444;")
+            else:
+                btn.setStyleSheet(f"background-color: {theme['bg_panel']}; color: {theme['text_main']}; border-radius: 4px; padding: 2px 6px; font-size: 10px; font-weight: bold; border: 1px solid {theme['border']};")
             
         btn_edit.clicked.connect(self.trigger_edit)
         btn_color.clicked.connect(self.trigger_color_change)
@@ -251,12 +322,37 @@ class Node(QGraphicsRectItem):
         
         if self.pdf_path is not None:
             self.btn_jump.clicked.connect(self.trigger_jump)
-        
+            
         self.proxy_toolbar = QGraphicsProxyWidget(self)
         self.proxy_toolbar.setWidget(self.toolbar_widget)
         self.proxy_toolbar.hide()
         
+        if self.node_origin == "ai":
+            self.btn_verify.clicked.connect(self.trigger_verify)
+        
         self.refresh_layout()
+
+    def trigger_verify(self):
+        """Toggles the verification status of an AI note."""
+        self.is_verified = not self.is_verified
+        
+        # Update UI Button
+        theme = ThemeManager().get_theme()
+        if self.is_verified:
+            self.btn_verify.setText("🛡️ Verified")
+            self.btn_verify.setStyleSheet(f"background-color: {theme['bg_panel']}; color: {theme['text_main']}; border-radius: 4px; padding: 2px 6px; font-size: 10px; font-weight: bold; border: 1px solid {theme['border']};")
+        else:
+            self.btn_verify.setText("⚠️ Verify AI")
+            self.btn_verify.setStyleSheet(f"background-color: #aa0000; color: white; border-radius: 4px; padding: 2px 6px; font-size: 10px; font-weight: bold; border: 1px solid #ff4444;")
+        
+        # Update the database
+        view = self.scene().view if self.scene() and hasattr(self.scene(), "view") else None
+        if view and hasattr(view.main_window, 'project_manager'):
+            view.save_state_for_undo()
+            view.main_window.project_manager.set_node_verification(self.node_id, self.is_verified)
+            view._mark_workspace_dirty(autosave=True)
+            
+        self.update()
 
     def mousePressEvent(self, event):
         view = self.scene().view if self.scene() and hasattr(self.scene(), 'view') else None
@@ -366,8 +462,15 @@ class Node(QGraphicsRectItem):
                 expanded_text += "\n\n"
             expanded_text += f'"{self.quote}"'
             
-        # 🔥 FIX 6: Leave the string genuinely empty if there is no text
-        collapsed_text = self.note if self.note else (f'"{self.quote}"' if self.quote else "")
+        # 🔥 FIX: Show BOTH the note and the quote in the collapsed view so the AI's context is never hidden!
+        if self.note and self.quote and self.quote != self.note and not self.is_custom:
+            collapsed_text = f'{self.note}\n\n"{self.quote}"'
+        elif self.note:
+            collapsed_text = self.note
+        elif self.quote:
+            collapsed_text = f'"{self.quote}"'
+        else:
+            collapsed_text = ""
             
         if self.is_hovered:
             needed_width = max(self.base_width, 320) 
@@ -380,10 +483,10 @@ class Node(QGraphicsRectItem):
             self.text_item.setPlainText(expanded_text)
             
             doc_height = self.text_item.document().size().height()
-            needed_height = max(self.base_height, doc_height + (margin * 2) + 35)
+            needed_height = max(self.base_height, doc_height + (margin * 2) + 60) # Extra room for buttons
             
             self.setRect(0, 0, needed_width, needed_height)
-            self.proxy_toolbar.setPos(margin, needed_height - 30)
+            self.proxy_toolbar.setPos(margin, needed_height - 55) # Adjust toolbar position
             self.proxy_toolbar.show()
             
         else:
@@ -529,7 +632,24 @@ class Node(QGraphicsRectItem):
 
         if not self.tag_badges:
             return
-
+        if self.node_origin == "ai":
+            painter.save()
+            shield_icon = "🛡️" if self.is_verified else "⚠️"
+            
+            # Draw it in the top left corner
+            rect = QRectF(4, 4, 20, 20)
+            
+            # If unverified, draw a subtle red glow warning
+            if not self.is_verified:
+                painter.setBrush(QBrush(QColor(255, 0, 0, 40)))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawEllipse(rect.center(), 12, 12)
+                
+            painter.setPen(QPen(QColor(255, 255, 255)))
+            font = QFont("Arial", 10)
+            painter.setFont(font)
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, shield_icon)
+            painter.restore()
         # 🔥 FIX: Draw clean, borderless colored dots
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -550,25 +670,61 @@ class Node(QGraphicsRectItem):
         if self.scene() and hasattr(self.scene(), 'view'):
             self.scene().view.save_state_for_undo()
             self.scene().view._mark_workspace_dirty(autosave=True)
+            
+        # Switch to plain text editing mode natively on the canvas
         self.text_item.setPlainText(self.note)
         self.text_item.setDefaultTextColor(QColor(get_text_color_for_bg(self.color)))
         self.text_item.setTextInteractionFlags(Qt.TextInteractionFlag.TextEditorInteraction)
         self.text_item.setFocus()
         
-        # FIX: Also set focus to the view so Qt knows where to send keyboard inputs!
+        # Automatically move the typing cursor to the end of the text
+        cursor = self.text_item.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self.text_item.setTextCursor(cursor)
+        
         if self.scene() and hasattr(self.scene(), 'view'):
             self.scene().view.setFocus()
 
     def finish_in_place_edit(self):
-        # Guard clause: Prevents saving logic from firing twice if multiple events close the editor
+        # Guard clause: Prevents saving logic from firing twice
         if not (self.text_item.textInteractionFlags() & Qt.TextInteractionFlag.TextEditorInteraction):
             return
             
         self.text_item.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
         new_text = self.text_item.toPlainText().strip()
-        self.note = new_text
-        self.refresh_layout()
         
+        if new_text != self.note:
+            # 1. Freeze the AI's original text on the VERY FIRST manual edit
+            current_orig = getattr(self, "original_text", self.note)
+            if current_orig == self.note:
+                self.original_text = self.note
+                
+            # 2. Apply the human's edit
+            self.note = new_text
+            
+            # 3. Save safely to DB with tracking fields intact
+            view = self.scene().view if self.scene() and hasattr(self.scene(), "view") else None
+            if view and hasattr(view.main_window, 'project_manager'):
+                view.main_window.project_manager.upsert_node_record({
+                    "id": self.node_id,
+                    "highlight_id": getattr(self, "highlight_id", None),
+                    "quote": getattr(self, "quote", ""),
+                    "note": self.note,
+                    "color": getattr(self, "color", "#ffff99"),
+                    "is_custom": getattr(self, "is_custom", False),
+                    "pdf_path": getattr(self, "pdf_path", None),
+                    "page_num": getattr(self, "page_num", None),
+                    "manual_font_size": getattr(self, "manual_font_size", None),
+                    "x": self.pos().x(),
+                    "y": self.pos().y(),
+                    "width": self.base_width,
+                    "height": self.base_height,
+                    "node_origin": getattr(self, "node_origin", "human"),
+                    "is_verified": getattr(self, "is_verified", 0),
+                    "original_text": getattr(self, "original_text", self.note) # Protects the backup!
+                }, view.current_workspace_id)
+
+        self.refresh_layout()
         self._mark_workspace_dirty(autosave=True)
         self.hoverLeaveEvent(None)
 
