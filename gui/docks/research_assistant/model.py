@@ -82,3 +82,7 @@ class ResearchModel:
         if "{term}" in self._custom_url_template:
             return self._custom_url_template.replace("{term}", encoded_term)
         return f"{self._custom_url_template}{encoded_term}"
+    def get_google_url(self, term):
+        """Generates a standard Google search URL for manual queries."""
+        encoded_term = self._format_boolean_query(term)
+        return f"https://www.google.com/search?q={encoded_term}"

@@ -22,6 +22,7 @@ from core.layout_engine import calculate_force_directed_layout
 from core.text_utils import get_semantic_similarity_matrix
 from gui.components.dialogs.workspace_dialogs import ColorOrganizerDialog, DeclutterSettingsDialog, OutlineDialog, WeakpointsDialog, ContextFilterDialog
 from gui.components.dialogs.tag_manager_dialog import TagAssignmentDialog
+from gui.components.dialogs.tag_relatives_dialog import AIResultsDialog
 
 
 class GhostLineItem(QGraphicsLineItem):
@@ -1832,6 +1833,9 @@ class WorkspaceView(QGraphicsView):
             declutter_action = menu.addAction("🧹 Declutter Selected Node")
             remove_action.triggered.connect(self.delete_selected_nodes)
             
+    
+            
+            
             menu.addSeparator()
             ai_menu = self.create_ai_menu(menu)
             menu.addMenu(ai_menu)
@@ -1885,6 +1889,29 @@ class WorkspaceView(QGraphicsView):
         if item is None:
             menu = QMenu(self)
             declutter_action = menu.addAction("🧹 Declutter All Notes")
+
+           
+            analysis_menu = menu.addMenu("Related to Tag")  # <--- New Submenu
+            pm = self.main_window.project_manager
+            current_tags = pm.get_all_tags() if pm else []
+            
+            if current_tags:
+                for tag in current_tags:
+                    tag_name = tag.get("name")
+                    if tag_name:
+                        # Create a sub-menu for each individual tag
+                        tag_sub = analysis_menu.addMenu(f"'{tag_name}'")
+                        
+                        # Add Relatives Action
+                        rel_action = tag_sub.addAction("🔍 Find Relatives")
+                        rel_action.triggered.connect(lambda checked, t=tag_name: self.trigger_find_tag_relatives(t))
+                        
+                        # Add Opposing Views Action
+                        opp_action = tag_sub.addAction("⚖️ Find Opposing Views")
+                        opp_action.triggered.connect(lambda checked, t=tag_name: self.trigger_tag_opposing_views(t))
+            else:
+                analysis_menu.addAction("No tags created yet").setEnabled(False)
+            # ---------------------------
             
             menu.addSeparator()
             ai_menu = self.create_ai_menu(menu)
@@ -1927,6 +1954,181 @@ class WorkspaceView(QGraphicsView):
                             )
                             
             self._mark_workspace_dirty(autosave=True)
+
+    def trigger_find_tag_relatives(self, tag_name):
+        pm = self.main_window.project_manager
+        llm = self.main_window.shared_llm_manager
+        
+        # We don't need the dock open, but we DO need to ensure the database is mounted
+        if not llm.collection and pm.project_filepath:
+            llm.set_project_database(pm.project_filepath)
+            
+        if not llm.collection or llm.collection.count() == 0:
+            QMessageBox.warning(self, "No Database", "Search index is empty. Please build it first.")
+            return
+
+        # 1. Gather all nodes on the board that have this tag
+        target_nodes = [n for n in self.nodes.values() if tag_name in (n.get_tag_names() if hasattr(n, "get_tag_names") else [])]
+        if not target_nodes:
+            QMessageBox.warning(self, "No Nodes", f"No nodes found with the tag '{tag_name}'.")
+            return
+
+        # 2. Fetch their pre-calculated embeddings from SQLite
+        node_ids = [n.node_id for n in target_nodes]
+        embeddings_dict = pm.get_node_embeddings_batch(node_ids)
+        vectors = list(embeddings_dict.values())
+        
+        # CRITICAL FIX: If vectors didn't save properly, generate them right now!
+        if len(vectors) < len(target_nodes):
+            texts_to_embed = [f"{n.quote} {n.note}".strip() for n in target_nodes]
+            try:
+                vectors = llm.get_batch_embeddings(texts_to_embed)
+            except Exception as e:
+                pass
+                
+        if not vectors:
+            QMessageBox.warning(self, "Error", "Could not generate embeddings. Ensure AI is running.")
+            return
+
+        # 3. Calculate the Centroid (Average Embedding)
+        centroid_vector = [sum(col) / len(vectors) for col in zip(*vectors)]
+
+        # 4. Query ChromaDB with the average vector
+        allowed_docs = self.get_allowed_docs()
+        results = llm.query_by_raw_embedding(centroid_vector, n_results=5, allowed_docs=allowed_docs)
+
+        if not results or not results.get('documents') or not results['documents'][0]:
+            QMessageBox.information(self, "No Results", "Could not find related chunks.")
+            return
+            
+        # 5. Format and present the results in the new UI
+        documents = results['documents'][0]
+        metadatas = results['metadatas'][0]
+        
+        matches = []
+        for doc_text, meta in zip(documents, metadatas):
+            matches.append({
+                "text": doc_text.strip(),
+                "doc_name": meta.get('doc_name', 'Unknown Document'),
+                "page": meta.get('page', 0)
+            })
+            
+        
+        dialog = AIResultsDialog(f"Related to '{tag_name}'", matches, self.main_window, self)
+        dialog.exec()
+    def trigger_tag_opposing_views(self, tag_name):
+        pm = self.main_window.project_manager
+        llm = self.main_window.shared_llm_manager
+
+        if not llm.collection and pm.project_filepath:
+            llm.set_project_database(pm.project_filepath)
+
+        if not llm.collection or llm.collection.count() == 0:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "No Database", "Search index is empty. Please build it first.")
+            return
+
+        target_nodes = [n for n in self.nodes.values() if tag_name in (n.get_tag_names() if hasattr(n, "get_tag_names") else [])]
+        if not target_nodes:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "No Nodes", f"No nodes found with the tag '{tag_name}'.")
+            return
+
+        # --- PHASE 1: DATABASE SEARCH (Main Thread) ---
+        import os
+        from PySide6.QtWidgets import QApplication
+
+        # 1. Synthesize the tag's arguments to use as the target statement for the LLM
+        combined_text = " ".join([f"{n.quote} {getattr(n, 'note', '')}".strip() for n in target_nodes])
+        target_statement = f"The core arguments of the tag '{tag_name}': {combined_text[:1000]}" # Cap at 1000 chars for speed
+
+        # 2. Get embeddings and calculate centroid
+        node_ids = [n.node_id for n in target_nodes]
+        embeddings_dict = pm.get_node_embeddings_batch(node_ids)
+        vectors = list(embeddings_dict.values())
+
+        if len(vectors) < len(target_nodes):
+            texts_to_embed = [f"{n.quote} {getattr(n, 'note', '')}".strip() for n in target_nodes]
+            try:
+                vectors = llm.get_batch_embeddings(texts_to_embed)
+            except Exception:
+                pass
+
+        if not vectors:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Error", "Could not generate embeddings. Ensure AI is running.")
+            return
+
+        centroid_vector = [sum(col) / len(vectors) for col in zip(*vectors)]
+        allowed_docs = self.get_allowed_docs()
+
+        # 3. Pull 30 topically relevant chunks
+        try:
+            results = llm.query_by_raw_embedding(centroid_vector, n_results=30, allowed_docs=allowed_docs)
+
+            if not results or not results.get('documents') or not results['documents'][0]:
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.information(self, "No Results", "Could not find related chunks to analyze.")
+                return
+
+            documents = results['documents'][0]
+            metadatas = results['metadatas'][0]
+        except Exception as e:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "Database Error", str(e))
+            return
+
+        # --- PHASE 2: LLM SCORING (Background Thread) ---
+        active_model = None
+        if hasattr(self.main_window, 'chat_docks') and self.main_window.chat_docks:
+            active_model = self.main_window.chat_docks[0].model_combo.currentText()
+
+        from PySide6.QtWidgets import QProgressDialog, QMessageBox
+        from PySide6.QtCore import Qt
+        
+        self.loading_dialog = QProgressDialog("Initializing AI...", "Cancel", 0, 0, self.main_window)
+        self.loading_dialog.setWindowTitle(f"Finding Opposing Views for '{tag_name}'")
+        self.loading_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        self.loading_dialog.setStyleSheet("QProgressDialog { background-color: #2b2b2b; color: white; }")
+        self.loading_dialog.show()
+
+        from core.ai_opposing_views_worker import AIOpposingViewsWorker
+        self.opposing_worker = AIOpposingViewsWorker(
+            llm.api_base,
+            llm.embedding_model,
+            active_model,
+            target_statement,
+            documents,
+            metadatas,
+            search_mode="opposing",
+            audit_logger=llm.audit_logger,
+            parent=self.main_window
+        )
+
+        self.opposing_worker.progress.connect(self.loading_dialog.setLabelText)
+
+        def on_finished(matches, error):
+            self.loading_dialog.close()
+            self.loading_dialog.deleteLater()
+
+            try:
+                if error:
+                    QMessageBox.warning(self.main_window, "Error", error)
+                    return
+                if not matches:
+                    QMessageBox.information(self.main_window, "No Opposing Views", f"The AI could not find any strongly opposing arguments to the tag '{tag_name}'.")
+                    return
+
+                from gui.components.dialogs.tag_relatives_dialog import AIResultsDialog
+                dlg = AIResultsDialog(f"⚖️ Opposing Views for '{tag_name}'", matches, self.main_window, self.main_window)
+                dlg.exec()
+            except Exception as e:
+                print(f"[UI Error] Failed to load results dialog: {e}")
+                QMessageBox.critical(self.main_window, "UI Error", f"Failed to open results: {str(e)}")
+
+        self.opposing_worker.finished.connect(on_finished)
+        self.loading_dialog.canceled.connect(self.opposing_worker.terminate)
+        self.opposing_worker.start()
     def trigger_ai_organize(self, selected_nodes):
         if self.is_llm_busy:
             QMessageBox.warning(self, "AI Busy", "The AI is currently processing another request.")

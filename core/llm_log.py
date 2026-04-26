@@ -214,13 +214,18 @@ class LlmLogGenerator:
                 temp_html_path = f.name
                 
             try:
-                # 2. Locate our isolated worker script
-                worker_script = os.path.join(os.path.dirname(__file__), "pdf_worker.py")
+                # Check if we are running as a compiled PyInstaller/PyArmor bundle
+                if getattr(sys, 'frozen', False):
+                    # Call the compiled executable itself, but pass a specific flag
+                    cmd = [sys.executable, "--run-pdf-worker", temp_html_path, export_path]
+                else:
+                    # Normal development mode
+                    worker_script = os.path.join(os.path.dirname(__file__), "pdf_worker.py")
+                    cmd = [sys.executable, worker_script, temp_html_path, export_path]
                 
-                # 3. Execute the worker in the background using the same Python environment
-                # sys.executable ensures it uses your (venv)
+                # Execute the worker
                 result = subprocess.run(
-                    [sys.executable, worker_script, temp_html_path, export_path], 
+                    cmd, 
                     capture_output=True, 
                     text=True
                 )

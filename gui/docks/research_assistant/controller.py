@@ -5,13 +5,14 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
-
+import fitz
+import math
 from .model import ResearchModel
 from .view import ResearchView
 
 class ResearchWorker(QThread):
     term_received = Signal(str, str) 
-    quote_received = Signal(str, str, str) 
+    citation_received = Signal(str, str, float) # <--- NEW SIGNAL
     finished_generation = Signal()
     status_update = Signal(str)
 
@@ -23,7 +24,102 @@ class ResearchWorker(QThread):
         self.is_advanced = is_advanced
         self.allowed_docs = allowed_docs
 
+    def _extract_and_rank_citations(self):
+        """Pure math extraction. No LLM hallucination possible."""
+        import fitz
+        import re
+        import math
+        import os
+        
+        citation_pattern = re.compile(r'(\([A-Za-z][^\)]+?,\s*\d{4}[a-z]?\)|\[\d+(?:,\s*\d+)*\])')
+        pm = self.parent().main_window.project_manager
+        all_citations = []
+
+        for doc_name in self.allowed_docs:
+            doc_path = next((p for p in pm.pdfs if doc_name in os.path.basename(p)), None)
+            if not doc_path: continue
+
+            try:
+                doc = fitz.open(doc_path)
+                for page_num in range(len(doc)):
+                    text = doc.load_page(page_num).get_text("text").replace('\n', ' ')
+                    sentences = re.split(r'(?<=[.!?]) +', text)
+
+                    for i, sentence in enumerate(sentences):
+                        if citation_pattern.search(sentence) and len(sentence) > 20:
+                            # 🔥 FIX 1: Context Starvation.
+                            # Grab the sentence BEFORE the citation as well so the vector 
+                            # engine actually knows what claim the citation is proving.
+                            context_text = ""
+                            if i > 0:
+                                context_text += sentences[i-1].strip() + " "
+                            context_text += sentence.strip()
+                            
+                            all_citations.append({
+                                "doc": doc_name,
+                                "text": context_text
+                            })
+                doc.close()
+            except Exception as e:
+                print(f"Error extracting citations from {doc_name}: {e}")
+
+        if not all_citations:
+            return []
+
+        self.status_update.emit("🧮 Ranking citations by relevance to your goal...")
+        
+        try:
+            # 🔥 FIX 2: Nomic-embed-text requires task prefixes for accurate RAG.
+            goal_query = f"search_query: {self.goal}"
+            goal_emb = self.llm.get_embedding(goal_query)
+            
+            texts_to_embed = [f"search_document: {c['text']}" for c in all_citations]
+            cit_embs = self.llm.get_batch_embeddings(texts_to_embed)
+
+            def cosine_sim(v1, v2):
+                dot = sum(a*b for a, b in zip(v1, v2))
+                norm1 = math.sqrt(sum(a*a for a in v1))
+                norm2 = math.sqrt(sum(b*b for b in v2))
+                return dot / (norm1 * norm2) if norm1 and norm2 else 0
+
+            valid_citations = []
+            for i, c in enumerate(all_citations):
+                score = cosine_sim(goal_emb, cit_embs[i])
+                c["score"] = score
+                
+                # 🔥 FIX 3: The Garbage Threshold. 
+                # A score below 0.50 means the AI is just guessing. Skip it.
+                if score > 0.50: 
+                    valid_citations.append(c)
+
+            # Sort by highest score first
+            valid_citations.sort(key=lambda x: x["score"], reverse=True)
+            
+            # 🔥 Bonus Fix: Deduplicate overlapping citations
+            seen_texts = set()
+            unique_citations = []
+            for c in valid_citations:
+                if c["text"] not in seen_texts:
+                    seen_texts.add(c["text"])
+                    unique_citations.append(c)
+                    if len(unique_citations) == 5: # Only keep the Top 5 best unique matches
+                        break
+
+            return unique_citations
+
+        except Exception as e:
+            print(f"Embedding error during citation rank: {e}")
+            return []
+
     def run(self):
+        # 1. Execute purely mathematical citation extraction FIRST
+        if self.is_advanced:
+            self.status_update.emit("🔍 Sweeping documents for academic citations...")
+            top_citations = self._extract_and_rank_citations()
+            for c in top_citations:
+                self.citation_received.emit(c['doc'], c['text'], c['score'])
+
+        # 2. Standard AI Keyword Generation (stripped of citation instructions)
         prompt = (
             f"You are an expert academic research assistant. The user's research goal is: '{self.goal}'\n\n"
             "INSTRUCTIONS:\n"
@@ -32,13 +128,6 @@ class ResearchWorker(QThread):
             "%%TERM | exact boolean search phrase | A brief sentence explaining why this specific query is effective.\n\n"
         )
         
-        if self.is_advanced:
-            prompt += (
-                "3. Scan the provided document context specifically for existing citations, footnotes, or references to other authors/works that relate to the user's goal.\n"
-                "4. If you find relevant citations, you MUST output them at the very end under a '--- HIGHLIGHTS ---' section using this exact format:\n"
-                "%%QUOTE | Document_Name.pdf | The exact citation text | Why this is a good source to track down.\n"
-            )
-
         buffer = ""
         found_any = False
         
@@ -46,21 +135,9 @@ class ResearchWorker(QThread):
             nonlocal found_any
             line = line.strip()
             
-            # 1. Handle Quotes first since they have a strict 4-part format
-            if "%%QUOTE" in line:
-                parts = line.split('|')
-                if len(parts) >= 4:
-                    doc = parts[1].strip()
-                    quote = parts[2].strip()
-                    note = '|'.join(parts[3:]).strip()
-                    self.quote_received.emit(doc, quote, note)
-                    
-            # 2. Handle Terms, being very forgiving if the AI drops the word "TERM"
-            elif line.startswith("%%") or "%%TERM" in line:
-                # Use regex to strip "%%", "%%TERM", and any rogue pipes/spaces at the start
+            if line.startswith("%%") or "%%TERM" in line:
                 import re
                 clean_line = re.sub(r'^%%(TERM)?\s*\|?\s*', '', line).strip()
-                
                 parts = clean_line.split('|')
                 if len(parts) >= 2:
                     term = parts[0].strip()
@@ -70,15 +147,9 @@ class ResearchWorker(QThread):
 
         def handle_chunk(chunk):
             nonlocal buffer
-            
-            # Print to console so we don't have silent failures anymore
-            print(chunk, end="", flush=True) 
-
             if chunk.startswith("@@AGENT@@"):
                 self.status_update.emit(chunk.replace("@@AGENT@@", "").strip())
                 return
-            
-            # Catch LLM Manager Error Messages directly
             if "[Generation Error:" in chunk:
                 self.status_update.emit(chunk.strip())
                 return
@@ -89,21 +160,17 @@ class ResearchWorker(QThread):
                 process_line(line)
 
         try:
-            self.status_update.emit(f"⚙️ Querying {self.model}...")
-            print("\n--- RESEARCH ASSISTANT RAW OUTPUT ---")
-            
+            self.status_update.emit(f"⚙️ Querying {self.model} for search terms...")
             self.llm.query(
                 question=prompt,
                 selected_model=self.model,
-                allowed_docs=self.allowed_docs if self.is_advanced else [],
+                allowed_docs=[], # No context needed for term generation
                 callback=handle_chunk,
-                rag_enabled=self.is_advanced, 
+                rag_enabled=False, 
                 use_agents=False, 
                 custom_system_prompt="You are a strict output generator. Follow format rules exactly. Do not include conversational filler."
             )
-            print("\n--- END RESEARCH OUTPUT ---")
             
-            # Flush the remaining buffer if the LLM didn't end on a newline
             if buffer.strip():
                 process_line(buffer)
                 
@@ -111,7 +178,7 @@ class ResearchWorker(QThread):
             self.status_update.emit(f"Error: {str(e)}")
             
         if not found_any:
-            self.status_update.emit("⚠️ Warning: AI responded, but didn't format any terms correctly. Check terminal.")
+            self.status_update.emit("⚠️ Generation Complete. (AI provided no external search terms)")
         else:
             self.status_update.emit("✅ Generation Complete")
             
@@ -130,13 +197,19 @@ class ResearchDockWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.view)
 
-        # Populate available models
         models = self.llm_manager.get_available_models()
         if models:
             self.view.model_combo.addItems(models)
 
         self.view.generate_requested.connect(self._handle_generate)
         self.view.change_custom_url_requested.connect(self._handle_custom_url_change)
+        
+        # Connect manual searches (if you added those in the prior prompt)
+        if hasattr(self.view, 'manual_search_jstor'):
+            self.view.manual_search_jstor.connect(lambda t: QDesktopServices.openUrl(QUrl(self.model.get_jstor_url(t))))
+            self.view.manual_search_scholar.connect(lambda t: QDesktopServices.openUrl(QUrl(self.model.get_scholar_url(t))))
+            self.view.manual_search_custom.connect(lambda t: QDesktopServices.openUrl(QUrl(self.model.get_custom_url(t))))
+            self.view.manual_search_google.connect(lambda t: QDesktopServices.openUrl(QUrl(self.model.get_google_url(t))))
 
     def update_theme(self, theme):
         self.view.update_theme(theme)
@@ -149,29 +222,42 @@ class ResearchDockWidget(QWidget):
 
     def _handle_generate(self, goal, model, is_advanced):
         self.view.set_loading_state(True)
-        
         allowed_docs = [os.path.basename(p) for p in self.main_window.project_manager.pdfs] if is_advanced else []
 
         self.worker = ResearchWorker(self.llm_manager, goal, model, is_advanced, allowed_docs, parent=self)
         self.worker.term_received.connect(self._on_term_received)
-        self.worker.quote_received.connect(self._on_quote_received)
+        self.worker.citation_received.connect(self._on_citation_received) # <--- Connect New Signal
         self.worker.status_update.connect(lambda msg: self.view.set_status(msg))
         self.worker.finished_generation.connect(self._on_generation_finished)
         self.worker.start()
 
     def _on_term_received(self, term, reason):
-        # Removed the .strip('"\'') so we don't break boolean quotes!
         clean_term = term.strip() 
         card = self.view.add_term_card(clean_term, reason)
         card.open_jstor.connect(lambda t: QDesktopServices.openUrl(QUrl(self.model.get_jstor_url(t))))
         card.open_scholar.connect(lambda t: QDesktopServices.openUrl(QUrl(self.model.get_scholar_url(t))))
         card.open_custom.connect(lambda t: QDesktopServices.openUrl(QUrl(self.model.get_custom_url(t))))
 
-    def _on_quote_received(self, doc_name, quote, note):
-        if hasattr(self.main_window, 'add_ai_annotation'):
-            success = self.main_window.add_ai_annotation(quote, f"[AI Citation Scanner] {note}", target_doc_name=doc_name)
-            if success:
-                self.view.set_status(f"🖍️ Found and highlighted citation in {doc_name}")
+    def _on_citation_received(self, doc_name, text, score):
+        """Creates the UI card and hooks up the jump logic."""
+        card = self.view.add_citation_card(doc_name, text, score)
+        card.jump_requested.connect(self._jump_to_pdf_citation)
+
+    def _jump_to_pdf_citation(self, doc_name, text):
+        """Silently searches the PDF for the exact citation text and pans the camera to it."""
+        pm = self.main_window.project_manager
+        target_path = next((p for p in pm.pdfs if doc_name in os.path.basename(p)), None)
+        if target_path:
+            self.main_window.switch_to_pdf(target_path)
+            
+            viewer = self.main_window.viewer
+            if not viewer.search_bar.isVisible():
+                viewer.toggle_search_bar()
+                
+            viewer.search_bar.search_input.setText(text)
+            
+            # Execute the search natively in the PDF Viewer to highlight and pan to the sentence
+            viewer.execute_search(text, "Current Document", False)
 
     def _on_generation_finished(self):
         self.view.set_loading_state(False)

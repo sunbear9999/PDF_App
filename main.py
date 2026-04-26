@@ -8,6 +8,29 @@ from PySide6.QtCore import QSettings, QTimer
 from gui.main_window import MainWindow
 from gui.theme import ThemeManager
 
+if getattr(sys, 'frozen', False) and len(sys.argv) > 1 and sys.argv[1] == "--run-pdf-worker":
+    # 1. Modify sys.argv so pdf_worker parses the right arguments
+    sys.argv = [sys.argv[0]] + sys.argv[2:] 
+    
+    # 2. Find the raw script inside the PyInstaller temporary bundle
+    base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    worker_path = os.path.join(base_path, 'core', 'pdf_worker.py')
+    
+    # 3. Read the text and execute it directly in memory, bypassing PyArmor completely
+    try:
+        with open(worker_path, 'r', encoding='utf-8') as f:
+            worker_code = f.read()
+            
+        # Passing __name__: __main__ tricks the script into running its main() function
+        exec(worker_code, {'__name__': '__main__'})
+        
+    except Exception as e:
+        print(f"Failed to run pdf_worker: {e}")
+        sys.exit(1)
+        
+    # Exit immediately
+    sys.exit(0)
+
 def global_exception_handler(exc_type, exc_value, exc_traceback):
     """
     A universal safety net for the application. 

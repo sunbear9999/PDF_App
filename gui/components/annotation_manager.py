@@ -178,16 +178,36 @@ class AnnotationManager(QObject):
             
         # 🔥 PHASE 2: Regex URL Extractor
         if extracted_text:
-            urls = re.findall(r'(https?://[^\s]+)', extracted_text)
+            urls = []
+            
+            # Method 1: Standard extraction (works for intact URLs inside larger paragraphs)
+            standard_urls = re.findall(r'(https?://[^\s]+)', extracted_text)
+            urls.extend(standard_urls)
+            
+            # Method 2: Aggressive compression for broken links
+            # If the user highlighted a link split across lines, it will have spaces inside it.
+            # Stripping all whitespace reconstructs the broken URL.
+            compressed_text = re.sub(r'\s+', '', extracted_text)
+            
+            if compressed_text.startswith(('http://', 'https://', 'www.')):
+                formatted_url = 'https://' + compressed_text if compressed_text.startswith('www.') else compressed_text
+                if formatted_url not in urls:
+                    urls.append(formatted_url)
+
+            # Deduplicate just in case
+            urls = list(set(urls))
+
             if urls:
                 menu.addSeparator()
                 for url in urls:
-                    # Strip trailing punctuation that might get caught in the regex block
+                    # Strip trailing punctuation
                     clean_url = url.rstrip('.,;:"\'()')
+                    
                     # Shorten visually so it doesn't stretch the menu across the screen
                     display_url = clean_url[:40] + "..." if len(clean_url) > 40 else clean_url
                     url_action = menu.addAction(f"🌐 Open: {display_url}")
-                    # Use a default argument in the lambda (u=clean_url) to bind the loop variable safely
+                    
+                    # Use a default argument in the lambda to bind the loop variable safely
                     url_action.triggered.connect(lambda checked, u=clean_url: QDesktopServices.openUrl(QUrl(u)))
             
         menu.addSeparator()
@@ -200,8 +220,179 @@ class AnnotationManager(QObject):
 
         define_action = menu.addAction("📖 Define")
         define_action.triggered.connect(self.define_selection)
+        similar_action = menu.addAction("🔗 Find Similar Context")
+        similar_action.triggered.connect(lambda: self.trigger_similar_context(extracted_text))
+        opposing_action = menu.addAction("⚖️ Find Opposing Views")
+        opposing_action.triggered.connect(lambda: self.trigger_opposing_views(extracted_text))
         
         menu.exec(global_pos)
+    def trigger_similar_context(self, selected_text):
+        if not selected_text.strip(): return
+        
+        main_window = self.viewer.window() 
+        llm_manager = main_window.shared_llm_manager
+        
+        if not llm_manager.collection:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self.viewer, "Error", "Search index not loaded.")
+            return
+
+        import os
+        from PySide6.QtWidgets import QApplication, QMessageBox
+        try:
+            self.viewer.page_hud.setVisible(True)
+            self.viewer.page_hud.label_page.setText("Finding Similar Context...")
+            QApplication.processEvents() 
+            
+            emb = llm_manager.get_embedding(selected_text)
+            
+            allowed_docs = main_window.project_manager.pdfs
+            where_clause = None
+            if allowed_docs:
+                base_names = [os.path.basename(d) for d in allowed_docs]
+                if len(base_names) == 1:
+                    where_clause = {"doc_name": base_names[0]}
+                else:
+                    where_clause = {"doc_name": {"$in": base_names}}
+                    
+            results = llm_manager.collection.query(
+                query_embeddings=[emb],
+                n_results=10, # Pull top 10 closest matches
+                where=where_clause
+            )
+            
+            self.viewer.page_hud.label_page.setText("Page:") # Reset HUD
+            
+            if not results or not results.get('documents') or not results['documents'][0]:
+                QMessageBox.information(main_window, "No Results", "No related context found in the database.")
+                return
+                
+            documents = results['documents'][0]
+            metadatas = results['metadatas'][0]
+            
+            matches = []
+            for doc_text, meta in zip(documents, metadatas):
+                matches.append({
+                    "text": doc_text.strip(),
+                    "doc_name": meta.get('doc_name', 'Unknown Document'),
+                    "page": meta.get('page', 0)
+                })
+                
+            # Reuse the AI Results Dialog to cleanly present the findings
+            from gui.components.dialogs.tag_relatives_dialog import AIResultsDialog
+            dlg = AIResultsDialog("🔗 Similar Context Found", matches, main_window, main_window)
+            dlg.exec()
+            
+        except Exception as e:
+            self.viewer.page_hud.label_page.setText("Page:")
+            QMessageBox.critical(main_window, "Database Error", str(e))
+        
+
+    def trigger_opposing_views(self, selected_text):
+        if not selected_text.strip(): return
+        
+        main_window = self.viewer.window() 
+        llm_manager = main_window.shared_llm_manager
+        
+        # --- PHASE 1: DATABASE SEARCH (MAIN THREAD) ---
+        # Do this BEFORE spawning the thread to prevent SQLite crashes!
+        if not llm_manager.collection:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self.viewer, "Error", "Search index not loaded.")
+            return
+
+        import os
+        from PySide6.QtWidgets import QApplication
+        try:
+            # Show a brief HUD update
+            self.viewer.page_hud.setVisible(True)
+            self.viewer.page_hud.label_page.setText("Querying Database...")
+            QApplication.processEvents() # Force UI to paint the text
+            
+            emb = llm_manager.get_embedding(selected_text)
+            
+            allowed_docs = main_window.project_manager.pdfs
+            where_clause = None
+            if allowed_docs:
+                base_names = [os.path.basename(d) for d in allowed_docs]
+                if len(base_names) == 1:
+                    where_clause = {"doc_name": base_names[0]}
+                else:
+                    where_clause = {"doc_name": {"$in": base_names}}
+                    
+            results = llm_manager.collection.query(
+                query_embeddings=[emb],
+                n_results=30,
+                where=where_clause
+            )
+            
+            self.viewer.page_hud.label_page.setText("Page:") # Reset HUD
+            
+            if not results or not results.get('documents') or not results['documents'][0]:
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.information(main_window, "No Opposing Views", "No relevant documents found in the database.")
+                return
+                
+            documents = results['documents'][0]
+            metadatas = results['metadatas'][0]
+            
+        except Exception as db_e:
+            self.viewer.page_hud.label_page.setText("Page:")
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(main_window, "Database Error", str(db_e))
+            return
+
+        # --- PHASE 2: LLM SCORING (BACKGROUND THREAD) ---
+        active_model = None
+        if hasattr(main_window, 'chat_docks') and main_window.chat_docks:
+            active_model = main_window.chat_docks[0].model_combo.currentText()
+            
+        from PySide6.QtWidgets import QProgressDialog, QMessageBox
+        self.loading_dialog = QProgressDialog("Initializing AI...", "Cancel", 0, 0, main_window)
+        self.loading_dialog.setWindowTitle("Finding Opposing Views")
+        self.loading_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        self.loading_dialog.setStyleSheet("QProgressDialog { background-color: #2b2b2b; color: white; }")
+        self.loading_dialog.show()
+        
+        from core.ai_opposing_views_worker import AIOpposingViewsWorker
+        # Pass the PRE-FETCHED arrays (documents and metadatas) to the worker
+        self.opposing_worker = AIOpposingViewsWorker(
+            llm_manager.api_base, 
+            llm_manager.embedding_model,
+            active_model, 
+            selected_text, 
+            documents,  
+            metadatas,  
+            search_mode="opposing",
+            audit_logger=llm_manager.audit_logger, # <-- Added
+            parent=main_window
+        )
+        
+        self.opposing_worker.progress.connect(self.loading_dialog.setLabelText)
+        
+        def on_finished(matches, error):
+            self.loading_dialog.close() 
+            self.loading_dialog.deleteLater() 
+            
+            try:
+                if error:
+                    QMessageBox.warning(main_window, "Error", error)
+                    return
+                if not matches:
+                    QMessageBox.information(main_window, "No Opposing Views", "The AI could not find any strongly opposing arguments.")
+                    return
+                    
+                from gui.components.dialogs.tag_relatives_dialog import AIResultsDialog
+                dlg = AIResultsDialog("⚖️ Opposing Views Found", matches, main_window, main_window)
+                dlg.exec()
+            except Exception as e:
+                print(f"[UI Error] Failed to load results dialog: {e}")
+                QMessageBox.critical(main_window, "UI Error", f"Failed to open results: {str(e)}")
+
+        self.opposing_worker.finished.connect(on_finished)
+        self.loading_dialog.canceled.connect(self.opposing_worker.terminate)
+        self.opposing_worker.start()
+        
 
     def define_selection(self):
         if not self.selected_words: return

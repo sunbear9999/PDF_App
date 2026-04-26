@@ -6,7 +6,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[('gui/components/examples/*.gif', 'gui/components/examples'),
-        ('icon.png', '.')],
+        ('icon.png', '.'),('core/pdf_worker.py', 'core')],
     hiddenimports=['chromadb.telemetry.product.posthog','chromadb.api.rust','piper-tts'],
     hookspath=[],
     hooksconfig={},

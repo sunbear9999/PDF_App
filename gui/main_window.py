@@ -24,6 +24,24 @@ from gui.components.dialogs.tag_manager_dialog import TagManagerDialog, TagAssig
 from core.prompt_manager import PromptManager
 from core.dictionary_manager import DictionaryManager
 
+class ElidedLabel(QLabel):
+    def minimumSizeHint(self):
+        from PySide6.QtCore import QSize
+        # ---> CRITICAL FIX: Drop this to 1 so it yields 100% of its space to the tag dots
+        return QSize(1, super().minimumSizeHint().height())
+
+    def sizeHint(self):
+        from PySide6.QtCore import QSize
+        metrics = self.fontMetrics()
+        return QSize(metrics.horizontalAdvance(self.text()) + 10, super().sizeHint().height())
+
+    def paintEvent(self, event):
+        from PySide6.QtGui import QPainter
+        from PySide6.QtCore import Qt
+        painter = QPainter(self)
+        metrics = self.fontMetrics()
+        elided = metrics.elidedText(self.text(), Qt.TextElideMode.ElideMiddle, self.width())
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, elided)
 
 class PreloadWorker(QThread):
     def __init__(self, llm_manager, model, parent=None):
@@ -573,32 +591,81 @@ class MainWindow(QMainWindow):
         self._refresh_doc_tag_filter()
 
     def _on_doc_list_context_menu(self, pos):
-        item = self.doc_list.itemAt(pos)
-        if not item: return
-        doc_path = item.data(Qt.ItemDataRole.UserRole)
-        row = self.doc_list.row(item)
+        item_at_pos = self.doc_list.itemAt(pos)
+        if not item_at_pos: return
         
+        selected_items = self.doc_list.selectedItems()
+        
+        # Standard OS behavior: if you right-click an item that ISN'T in your current selection,
+        # it clears the selection and selects only the item you right-clicked.
+        if item_at_pos not in selected_items:
+            self.doc_list.clearSelection()
+            item_at_pos.setSelected(True)
+            selected_items = [item_at_pos]
+
         menu = QMenu(self)
-        manage_tags_action = menu.addAction("🏷️ Manage Tags for This Document")
-        menu.addSeparator()
-        rename_action = menu.addAction("✏️ Rename PDF")
-        remove_action = menu.addAction("🗑️ Remove PDF from Project")
-        extract_action = menu.addAction("✂️ Extract Pages to New PDF")
-        chosen = menu.exec(self.doc_list.viewport().mapToGlobal(pos))
-        if chosen == manage_tags_action:
-            from gui.components.dialogs.tag_manager_dialog import TagAssignmentDialog
-            dlg = TagAssignmentDialog(self.project_manager, doc_path, "doc", self)
-            dlg.exec()
-            for c in self.chat_docks: c.refresh_tag_filters()
-        elif chosen == rename_action:
-            self._ui_rename_pdf(doc_path, row)
-        elif chosen == remove_action:
-            self._ui_remove_pdf(doc_path, row)
-        elif chosen == extract_action:
-            dialog = ExtractPagesDialog(doc_path, self.project_manager, self)
-            if dialog.exec():
-                # Refresh your document list UI if the user successfully extracted a PDF
+        
+        # ==========================================
+        # BATCH MODE (Multiple Documents Selected)
+        # ==========================================
+        if len(selected_items) > 1:
+            mass_tag_menu = menu.addMenu(f"🏷️ Mass Assign Tag to {len(selected_items)} Docs")
+            tags = self.project_manager.get_all_tags()
+            
+            if not tags:
+                mass_tag_menu.addAction("No tags created yet").setEnabled(False)
+            else:
+                for t in tags:
+                    action = mass_tag_menu.addAction(t.get("name"))
+                    # Use a lambda with a default arg to lock in the tag ID for this loop iteration
+                    action.triggered.connect(lambda checked=False, t_id=t.get("id"): self._mass_assign_tag(selected_items, t_id))
+            
+            # (Optional) You could add a mass-remove action here later if you want
+            menu.exec(self.doc_list.viewport().mapToGlobal(pos))
+            
+        # ==========================================
+        # SINGLE MODE (One Document Selected)
+        # ==========================================
+        else:
+            doc_path = item_at_pos.data(Qt.ItemDataRole.UserRole)
+            row = self.doc_list.row(item_at_pos)
+            
+            manage_tags_action = menu.addAction("🏷️ Manage Tags for This Document")
+            menu.addSeparator()
+            rename_action = menu.addAction("✏️ Rename PDF")
+            remove_action = menu.addAction("🗑️ Remove PDF from Project")
+            extract_action = menu.addAction("✂️ Extract Pages to New PDF")
+            
+            chosen = menu.exec(self.doc_list.viewport().mapToGlobal(pos))
+            
+            if chosen == manage_tags_action:
+                from gui.components.dialogs.tag_manager_dialog import TagAssignmentDialog
+                dlg = TagAssignmentDialog(self.project_manager, doc_path, "doc", self)
+                dlg.exec()
+                for c in getattr(self, 'chat_docks', []): c.refresh_tag_filters()
                 self._refresh_doc_list()
+                self._refresh_doc_tag_filter()
+                
+            elif chosen == rename_action:
+                self._ui_rename_pdf(doc_path, row)
+            elif chosen == remove_action:
+                self._ui_remove_pdf(doc_path, row)
+            elif chosen == extract_action:
+                dialog = ExtractPagesDialog(doc_path, self.project_manager, self)
+                if dialog.exec():
+                    self._refresh_doc_list()
+    def _mass_assign_tag(self, selected_items, tag_id):
+        """Loops through selected documents and applies the given tag ID to all of them."""
+        for item in selected_items:
+            doc_path = item.data(Qt.ItemDataRole.UserRole)
+            self.project_manager.assign_tag_to_doc(doc_path, tag_id)
+        
+        # Refresh the LLM chat filters if they are open
+        for c in getattr(self, 'chat_docks', []): 
+            c.refresh_tag_filters()
+            
+        # Refresh the document list to show the new colored dots
+        self._refresh_doc_list()
     def _ui_rename_pdf(self, old_path, row):
         # 1. CRITICAL: Force save all current highlights/nodes to disk and DB BEFORE renaming
         # This guarantees physical highlights are baked into the PDF before the OS touches it.
@@ -623,10 +690,8 @@ class MainWindow(QMainWindow):
         success = self.project_manager.rename_pdf(old_path, new_path)
         
         if success:
-            # 3. Update the Document Explorer Dock
-            item = self.doc_list.item(row)
-            item.setText(new_name)
-            item.setData(Qt.ItemDataRole.UserRole, new_path)
+            # 3. Update the Document Explorer Dock cleanly
+            self._refresh_doc_list()
             
             # 4. Update the LLM Chat Docks & ChromaDB
             for c_dock in getattr(self, 'chat_docks', []):
@@ -684,7 +749,7 @@ class MainWindow(QMainWindow):
                     ws_view.delete_node(node)
                 if hasattr(ws_view, '_refresh_pdf_list'):
                     ws_view._refresh_pdf_list()
-                    s
+                    
             # 5. Handle viewer state
             if self.current_file_path == doc_path:
                 self.current_file_path = None
@@ -786,25 +851,32 @@ class MainWindow(QMainWindow):
             self._clear_ui_for_new_project()
             self.project_manager.create_project(path)
             self.settings.setValue("last_project", self.project_manager.project_filepath)
-            self._refresh_doc_list()
-            self.setWindowTitle(f"Papyrus - {self.project_manager.project_name}")
             
-            # Spawn default docks for the new project
+            # Purge the old tag drop downs and redraw the document list!
+            self._refresh_doc_tag_filter()
+            self._refresh_doc_list()
+            
+            self.setWindowTitle(f"Papyrus - {self.project_manager.project_name}")
             
 
     def _load_project(self, path):
-        if hasattr(self, 'shared_llm_manager'):
-            self.shared_llm_manager.set_project_database(self.project_manager.project_filepath)
+        # 1. Save old project before switching
         if self.project_manager.project_filepath:
             self.save_project()
             
+        # 2. Load the new project
         if self.project_manager.load_project(path):
+            
+            # 3. CRITICAL FIX: Link the ChromaDB index AFTER the new path is loaded!
+            if hasattr(self, 'shared_llm_manager'):
+                self.shared_llm_manager.set_project_database(self.project_manager.project_filepath)
+                
             self._clear_ui_for_new_project()
             self.settings.setValue("last_project", self.project_manager.project_filepath)
             self.setWindowTitle(f"Papyrus - {self.project_manager.project_name}")
             self._refresh_doc_list()
             
-            # --- NEW: Restore Saved Layouts ---
+            # --- Restore Saved Layouts ---
             import json
             dock_info = self.project_manager.get_metadata("open_docks_count")
             if dock_info:
@@ -814,30 +886,28 @@ class MainWindow(QMainWindow):
                 for _ in range(counts.get("chats", 0)): self.spawn_chat_dock()
                 for _ in range(counts.get("scratchpads", 0)): self.spawn_scratchpad_dock()
             else:
-                # Fallback for old projects: spawn one of each AND apply your default layout
                 self.spawn_workspace_dock()
                 self.spawn_notes_dock()
-                self._reset_default_layout() # <-- ADD THIS LINE
+                self._reset_default_layout() 
+                
             text_data = self.project_manager.get_metadata("scratchpad_texts")
             if text_data:
                     try:
                         saved_texts = json.loads(text_data)
-                        # Pair each saved text with its corresponding scratchpad dock
                         for i, editor in enumerate(self.scratchpad_docks):
                             if i < len(saved_texts):
                                 editor.setPlainText(saved_texts[i])
                     except Exception as e:
                         print(f"Error loading scratchpad text: {e}")
+                        
             state_str = self.project_manager.get_metadata("window_layout_state")
             if state_str:
                 from PySide6.QtCore import QByteArray
                 self.restoreState(QByteArray.fromBase64(state_str.encode('utf-8')))
 
-            # --- BULLETPROOF FIX: Query the C++ object tree directly ---
             from PySide6.QtWidgets import QDockWidget
             for dock in self.findChildren(QDockWidget):
                 dock.show()
-            # ----------------------------------------------------------
             
             for c in self.chat_docks: c.refresh_project_ui()
             
@@ -1002,20 +1072,34 @@ class MainWindow(QMainWindow):
             widget.setStyleSheet("background: transparent;") # Crucial so selection styling works
             layout = QHBoxLayout(widget)
             layout.setContentsMargins(5, 2, 5, 2)
+            layout.setSpacing(4)
             
-            lbl = QLabel(os.path.basename(path))
+            # Use the ElidedLabel, and set its policy to Expanding!
+            lbl = ElidedLabel(os.path.basename(path))
             lbl.setStyleSheet("background: transparent;")
-            layout.addWidget(lbl)
+            from PySide6.QtWidgets import QSizePolicy
+            lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             
-            layout.addStretch()
+            # ---> CRITICAL FIX: The '1' gives the label a stretch factor, 
+            # effectively turning it into the "spring" that fills the remaining space.
+            layout.addWidget(lbl, 1) 
             
+            # Group the dots into a fixed-size container so they ALWAYS show on the right edge
+            tag_container = QWidget()
+            tag_layout = QHBoxLayout(tag_container)
+            tag_layout.setContentsMargins(0, 0, 0, 0)
+            tag_layout.setSpacing(2)
+            tag_container.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
             # Add up to 4 colored tag dots to the row
             for t in doc_tags[:4]:
                 dot = QLabel("●")
                 color = t.get('color', '#888')
                 dot.setStyleSheet(f"color: {color}; font-size: 12px; background: transparent;")
                 dot.setToolTip(t.get("name", ""))
-                layout.addWidget(dot)
+                tag_layout.addWidget(dot)
+            
+            layout.addWidget(tag_container, 0) # '0' means this container will not stretch
             
             item.setSizeHint(widget.sizeHint())
             self.doc_list.setItemWidget(item, widget)
@@ -1103,17 +1187,7 @@ class MainWindow(QMainWindow):
     def add_ai_annotation(self, quote, note, target_doc_name=None, allowed_paths=None, forced_annot_id=None, emit_signal=True):
         if not quote: return False
         clean_quote = quote.strip()
-        words = clean_quote.split()
-        if not words: return False
         
-        chunks = []
-        if len(words) <= 6:
-            chunks = [" ".join(words)]
-        else:
-            for i in range(0, len(words), 4):
-                chunk = " ".join(words[i:i+6])
-                if chunk.strip(): chunks.append(chunk)
-
         search_paths = allowed_paths if allowed_paths else self.project_manager.pdfs
         
         if target_doc_name:
@@ -1134,20 +1208,15 @@ class MainWindow(QMainWindow):
                 for page_num in range(len(doc)):
                     page = doc.load_page(page_num)
                     
+                    # Strictly search for the exact quote. Removed the chunking fallback 
+                    # that caused single-word partial highlights in the wrong documents.
                     rects = page.search_for(clean_quote)
-                    
-                    if not rects and len(chunks) > 1:
-                        rects = []
-                        for chunk in chunks:
-                            res = page.search_for(chunk)
-                            if res: rects.extend(res)
                     
                     if rects:
                         quads = [r.quad for r in rects]
                         annot = page.add_highlight_annot(quads)
                         annot.set_colors(stroke=(0.7, 0.4, 1.0))
                         
-                        # Apply forced ID if provided for workspace linking
                         annot_id_to_use = forced_annot_id if forced_annot_id else f"AINote|{uuid.uuid4()}"
                         annot_info = {
                             "title": annot_id_to_use,
@@ -1156,6 +1225,7 @@ class MainWindow(QMainWindow):
                         }
                         annot.set_info(info=annot_info)
                         annot.update()
+                        
                         self.viewer.annot_manager.highlight_created.emit({
                             "id": annot_id_to_use,
                             "subject": clean_quote,
@@ -1172,16 +1242,14 @@ class MainWindow(QMainWindow):
                         if path == self.current_file_path:
                             self.viewer.reload_page(page_num)
                             
-                        # Break out of page loop to avoid duplicates for the same quote
-                        break
+                        break # Break page loop
                 
                 if found_any and forced_annot_id:
-                    break
+                    break # Break document loop
 
             except Exception as e:
                 print(f"Error adding AI annotation to {path}: {e}")
 
-        # Suspend UI triggers for batched workspace graph building
         if found_any and emit_signal:
             self.viewer.annot_manager.note_added.emit()
             
@@ -1252,6 +1320,9 @@ class MainWindow(QMainWindow):
         # -----------------------------------------
         
         self.doc_list = QListWidget()
+        self.doc_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        from PySide6.QtWidgets import QAbstractItemView
+        self.doc_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.doc_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         if hasattr(self, '_on_doc_list_context_menu'):
             self.doc_list.customContextMenuRequested.connect(self._on_doc_list_context_menu)
@@ -1369,12 +1440,13 @@ class MainWindow(QMainWindow):
                 
         if not target_annot: return
         
+        # Safely check if it exists AND is not None before deleting
         if hasattr(self, 'quick_note_popup') and self.quick_note_popup is not None:
             try:
-                self.quick_note_popup.close()
                 self.quick_note_popup.deleteLater()
             except RuntimeError:
-                pass
+                pass # Catches cases where C++ already deleted the underlying object
+        self.quick_note_popup = None
             
         from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QTextEdit, QPushButton, QLabel
         from PySide6.QtCore import Qt
@@ -1588,6 +1660,11 @@ class MainWindow(QMainWindow):
     def _sync_tools_with_file(self, file_path):
         for n in self.notes_docks: n.refresh_notes()
         for c in self.chat_docks: c.refresh_project_ui()
+        if hasattr(self, 'workspace_view'):
+            if hasattr(self.workspace_view, 'refresh_unused_highlights'):
+                self.workspace_view.refresh_unused_highlights()
+            elif hasattr(self.workspace_view, 'load_unused_highlights'):
+                self.workspace_view.load_unused_highlights()
     def toggle_tool_panel(self, tool_name, checked):
         dock_map = {
             "Documents": self.doc_dock,

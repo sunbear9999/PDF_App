@@ -1,32 +1,63 @@
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QBrush
-from PySide6.QtWidgets import (
-    QCheckBox,
-    QColorDialog,
-    QDialog,
-    QDialogButtonBox,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QListWidget,
-    QListWidgetItem,
-    QMessageBox,
-    QPushButton,
-    QScrollArea,
-    QVBoxLayout,
-    QWidget,
-)
-
-
-# gui/components/dialogs/tag_manager_dialog.py
+import os
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QBrush
 from PySide6.QtWidgets import (
     QCheckBox, QColorDialog, QDialog, QDialogButtonBox,
     QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMessageBox, QPushButton, QScrollArea,
-    QVBoxLayout, QWidget, QComboBox # <-- Added QComboBox
+    QVBoxLayout, QWidget
 )
+
+# --- NEW: Dialog for Mass Assigning Tags ---
+class MassAssignDialog(QDialog):
+    def __init__(self, project_manager, tag_id, tag_name, parent=None):
+        super().__init__(parent)
+        self.project_manager = project_manager
+        self.tag_id = tag_id
+        
+        self.setWindowTitle(f"Mass Assign Tag: {tag_name}")
+        self.setMinimumSize(400, 350)
+        
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(f"Select documents to tag with <b>{tag_name}</b>:"))
+        
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll_widget = QWidget()
+        self.scroll_layout = QVBoxLayout(self.scroll_widget)
+        self.scroll.setWidget(self.scroll_widget)
+        layout.addWidget(self.scroll)
+        
+        self.checkboxes = []
+        
+        # Get currently assigned docs so we can pre-check them
+        assigned_docs = {d.get("doc_id") for d in project_manager.get_docs_for_tag(tag_id)}
+        
+        for doc_path in project_manager.pdfs:
+            doc_name = os.path.basename(doc_path)
+            cb = QCheckBox(doc_name)
+            cb.setProperty("doc_path", doc_path) # Store the full path safely
+            if doc_path in assigned_docs:
+                cb.setChecked(True)
+            self.scroll_layout.addWidget(cb)
+            self.checkboxes.append(cb)
+            
+        self.scroll_layout.addStretch()
+        
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.save_mass_assign)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        
+    def save_mass_assign(self):
+        for cb in self.checkboxes:
+            doc_path = cb.property("doc_path")
+            if cb.isChecked():
+                self.project_manager.assign_tag_to_doc(doc_path, self.tag_id)
+            else:
+                self.project_manager.remove_tag_from_doc(doc_path, self.tag_id)
+        self.accept()
+# -------------------------------------------
 
 class TagManagerDialog(QDialog):
     def __init__(self, project_manager, parent=None):
@@ -67,21 +98,15 @@ class TagManagerDialog(QDialog):
         self.docs_label.setWordWrap(True)
         self.doc_list = QListWidget()
         
-        # 🔥 NEW: Manual Document Assignment UI
+        # 🔥 UPDATED: Mass Tag UI replaces the Combo Box
         assign_layout = QHBoxLayout()
-        self.assign_doc_combo = QComboBox()
-        self.btn_assign_doc = QPushButton("➕ Assign Doc")
-        self.btn_assign_doc.clicked.connect(self.assign_doc_to_current_tag)
-        
-        self.btn_remove_doc = QPushButton("➖ Remove Selected Doc")
-        self.btn_remove_doc.clicked.connect(self.remove_doc_from_current_tag)
-        
-        assign_layout.addWidget(self.assign_doc_combo, 1)
-        assign_layout.addWidget(self.btn_assign_doc)
+        self.btn_mass_assign = QPushButton("🏷️ Mass Assign / Remove Docs...")
+        self.btn_mass_assign.clicked.connect(self.open_mass_assign_dialog)
+        self.btn_mass_assign.setEnabled(False) # Disabled until a tag is selected
+        assign_layout.addWidget(self.btn_mass_assign)
 
         details_layout.addWidget(self.docs_label)
         details_layout.addWidget(self.doc_list, 1)
-        details_layout.addWidget(self.btn_remove_doc)
         details_layout.addLayout(assign_layout)
 
         middle_row.addLayout(details_layout, 1)
@@ -120,6 +145,7 @@ class TagManagerDialog(QDialog):
     def load_tags(self):
         self.tag_list.clear()
         self.doc_list.clear()
+        self.btn_mass_assign.setEnabled(False)
 
         tags = self.project_manager.get_all_tags() if self.project_manager else []
         for tag in tags:
@@ -145,21 +171,17 @@ class TagManagerDialog(QDialog):
 
     def update_tag_details(self):
         self.doc_list.clear()
-        self.assign_doc_combo.clear() # Clear the combo box on tag switch
         
         item = self.tag_list.currentItem()
         if not item or not self.project_manager:
             self.docs_label.setText("Documents with selected tag")
+            self.btn_mass_assign.setEnabled(False)
             return
 
         tag_name = item.text().strip() or "Selected Tag"
         tag_id = item.data(Qt.ItemDataRole.UserRole)
         self.docs_label.setText(f"Documents with '{tag_name}'")
-
-        # Populate the assignment combobox with all PDFs in the project
-        import os
-        for pdf_path in self.project_manager.pdfs:
-            self.assign_doc_combo.addItem(os.path.basename(pdf_path), pdf_path)
+        self.btn_mass_assign.setEnabled(True)
 
         docs = self.project_manager.get_docs_for_tag(tag_id)
         if not docs:
@@ -172,30 +194,19 @@ class TagManagerDialog(QDialog):
             entry = QListWidgetItem(doc_name)
             if doc_id:
                 entry.setToolTip(doc_id)
-                entry.setData(Qt.ItemDataRole.UserRole, doc_id) # Store doc path for removal
+                entry.setData(Qt.ItemDataRole.UserRole, doc_id)
             self.doc_list.addItem(entry)
 
-    def assign_doc_to_current_tag(self):
+    def open_mass_assign_dialog(self):
         item = self.tag_list.currentItem()
-        if not item: return
-        tag_id = item.data(Qt.ItemDataRole.UserRole)
-        doc_path = self.assign_doc_combo.currentData()
-        
-        if doc_path and self.project_manager:
-            self.project_manager.assign_tag_to_doc(doc_path, tag_id)
-            self.update_tag_details() # Instantly refresh the UI
-
-    def remove_doc_from_current_tag(self):
-        item = self.tag_list.currentItem()
-        doc_item = self.doc_list.currentItem()
-        if not item or not doc_item: return
+        if not item or not self.project_manager: return
         
         tag_id = item.data(Qt.ItemDataRole.UserRole)
-        doc_path = doc_item.data(Qt.ItemDataRole.UserRole)
+        tag_name = item.text().strip()
         
-        if doc_path and self.project_manager:
-            self.project_manager.remove_tag_from_doc(doc_path, tag_id)
-            self.update_tag_details() # Instantly refresh the UI
+        dialog = MassAssignDialog(self.project_manager, tag_id, tag_name, self)
+        if dialog.exec():
+            self.update_tag_details() # Refresh the list immediately after mass assigning!
 
     def add_tag(self):
         name = self.tag_name_input.text().strip()
@@ -225,6 +236,7 @@ class TagManagerDialog(QDialog):
         self.load_tags()
 
 class TagAssignmentDialog(QDialog):
+    # ... (Keep the rest of TagAssignmentDialog exactly as you had it, no changes needed) ...
     def __init__(self, project_manager, target_id, target_type, parent=None):
         super().__init__(parent)
         self.project_manager = project_manager

@@ -494,6 +494,10 @@ class ProjectManager:
                 cursor.execute("UPDATE pdfs SET path = ? WHERE path = ?", (new_path, old_path))
                 cursor.execute("UPDATE highlights SET doc_id = ? WHERE doc_id = ?", (new_path, old_path))
                 cursor.execute("UPDATE nodes SET pdf_path = ? WHERE pdf_path = ?", (new_path, old_path))
+                
+                # ---> ADD THIS LINE TO SAVE THE TAGS <---
+                cursor.execute("UPDATE doc_tags SET doc_id = ? WHERE doc_id = ?", (new_path, old_path))
+                
                 self._conn.commit()
             except sqlite3.Error as e:
                 self._conn.rollback()
@@ -677,19 +681,25 @@ class ProjectManager:
             return []
         try:
             cursor = self._conn.cursor()
+            
+            # 🔥 FIX: Replaced NOT IN with NOT EXISTS.
+            # This safely processes highlights that were imported with NULL or missing IDs
+            # without SQLite silently dropping them from the results.
             cursor.execute(
                 """
                 SELECT h.id, h.doc_id, h.page_num, h.rect_coords, h.text_content, h.color
                 FROM highlights h
-                WHERE h.id NOT IN (
-                    SELECT COALESCE(n.highlight_id, n.id)
+                WHERE NOT EXISTS (
+                    SELECT 1
                     FROM nodes n
                     WHERE n.workspace_id = ?
+                    AND (n.highlight_id = h.id OR n.id = h.id)
                 )
                 ORDER BY h.doc_id, h.page_num, h.id
                 """,
                 (workspace_id,),
             )
+            
             return [
                 {
                     "id": row[0],

@@ -40,6 +40,38 @@ class LocalLLMManager:
     def set_audit_logger(self, logger_func):
         """Injects the database logging function once at startup."""
         self.audit_logger = logger_func
+    def query_by_raw_embedding(self, embedding_vector, n_results=5, allowed_docs=None,tag_filters=None):
+        """Directly queries ChromaDB using a pre-calculated mathematical vector."""
+        if not self.collection or self.collection.count() == 0:
+            return None
+
+       
+        where_clause = {}
+        tag_filters = [str(t).strip() for t in (tag_filters or []) if str(t).strip()]
+        
+        if allowed_docs:
+            base_names = [os.path.basename(d) for d in allowed_docs]
+            if len(base_names) == 1:
+                where_clause["doc_name"] = base_names[0]
+            else:
+                where_clause["doc_name"] = {"$in": base_names}
+                                
+        for t in tag_filters:
+            where_clause[f"tag_{t}"] = True
+            
+        if not where_clause:
+            where_clause = None
+
+        try:
+            results = self.collection.query(
+                query_embeddings=[embedding_vector],
+                n_results=n_results,
+                where=where_clause
+            )
+            return results
+        except Exception as e:
+            print(f"[System] Centroid query failed: {e}")
+            return None
 
     def ensure_server_running(self):
         # 1. Safely check if Ollama is actually installed on the system
@@ -277,7 +309,7 @@ class LocalLLMManager:
         self.unload_all_models()
 
     def sync_doc_tags(self, doc_id, current_tags):
-        """Sync SQLite document tags into flat Chroma metadata keys (tag_<name>: True)."""
+        """Sync SQLite document tags into flat Chroma metadata keys. Explicitly overwrites removed tags."""
         if not self.collection or not doc_id:
             return
 
@@ -305,7 +337,17 @@ class LocalLLMManager:
             updated_metadatas = []
             for meta in metadatas:
                 base_meta = dict(meta or {})
-                cleaned = {k: v for k, v in base_meta.items() if not str(k).startswith("tag_")}
+                cleaned = {}
+                
+                # 🔥 FIX 2: Explicitly set all old tags to False. 
+                # Because ChromaDB merges metadata, omitting a key doesn't delete it.
+                # Setting it to False ensures it is completely overwritten and won't trigger false positives.
+                for k, v in base_meta.items():
+                    if str(k).startswith("tag_"):
+                        cleaned[k] = False 
+                    else:
+                        cleaned[k] = v
+                        
                 cleaned.update(new_tag_keys)
                 updated_metadatas.append(cleaned)
 
@@ -422,40 +464,29 @@ class LocalLLMManager:
 
                 aggregated_docs = {}
                 
-                # Iterate through EACH allowed document individually to guarantee balanced context retrieval.
-                docs_to_search = allowed_docs if allowed_docs else [None]
-                
+                # 🔥 FIX: Rip out the per-document loop. 
+                # Use the global where_clause so ChromaDB natively enforces the tags AND the PDF checks simultaneously.
                 for sq in search_queries:
                     try:
                         sq_emb = self.get_embedding(sq)
-                        for doc in docs_to_search:
-                            local_conditions = []
-                            if doc:
-                                local_conditions.append({"doc_name": os.path.basename(doc)})
-                                
-                            final_doc_where = None
-                            if len(local_conditions) == 1:
-                                final_doc_where = local_conditions[0]
-                            elif len(local_conditions) > 1:
-                                final_doc_where = {"$and": local_conditions}
-
-                            results = self.collection.query(
-                                query_embeddings=[sq_emb],
-                                n_results=3 if use_agents else 6,
-                                where=final_doc_where
-                            )
-                            if results.get('documents') and results['documents'][0]:
-                                for idx, doc_text in enumerate(results['documents'][0]):
-                                    doc_id = results['ids'][0][idx]
-                                    meta = results['metadatas'][0][idx]
-                                    if doc_id not in aggregated_docs:
-                                        aggregated_docs[doc_id] = {
-                                            "text": doc_text,
-                                            "doc_name": meta['doc_name'],
-                                            "page": meta['page']
-                                        }
+                        results = self.collection.query(
+                            query_embeddings=[sq_emb],
+                            n_results=10 if use_agents else 15, # Pull top results globally across allowed context
+                            where=where_clause
+                        )
+                        
+                        if results.get('documents') and results['documents'][0]:
+                            for idx, doc_text in enumerate(results['documents'][0]):
+                                doc_id = results['ids'][0][idx]
+                                meta = results['metadatas'][0][idx]
+                                if doc_id not in aggregated_docs:
+                                    aggregated_docs[doc_id] = {
+                                        "text": doc_text,
+                                        "doc_name": meta['doc_name'],
+                                        "page": meta['page']
+                                    }
                     except Exception as e:
-                        print(f"[System] Search error for query '{sq}': {e}") # Prints to console so it no longer fails silently!
+                        print(f"[System] Search error for query '{sq}': {e}")
                         continue
 
                 if not aggregated_docs:
