@@ -9,6 +9,7 @@ import fitz
 import math
 from .model import ResearchModel
 from .view import ResearchView
+from gui.components.dialogs.tag_relatives_dialog import AIResultsDialog
 
 class ResearchWorker(QThread):
     term_received = Signal(str, str) 
@@ -189,7 +190,7 @@ class ResearchDockWidget(QWidget):
         super().__init__(parent)
         self.main_window = main_window
         self.llm_manager = main_window.shared_llm_manager
-        
+        self.annotation_manager = main_window.viewer.annot_manager
         self.model = ResearchModel()
         self.view = ResearchView(self)
         
@@ -210,6 +211,7 @@ class ResearchDockWidget(QWidget):
             self.view.manual_search_scholar.connect(lambda t: QDesktopServices.openUrl(QUrl(self.model.get_scholar_url(t))))
             self.view.manual_search_custom.connect(lambda t: QDesktopServices.openUrl(QUrl(self.model.get_custom_url(t))))
             self.view.manual_search_google.connect(lambda t: QDesktopServices.openUrl(QUrl(self.model.get_google_url(t))))
+            self.view.manual_search_rag.connect(lambda t: self.annotation_manager.trigger_similar_context(t))
 
     def update_theme(self, theme):
         self.view.update_theme(theme)

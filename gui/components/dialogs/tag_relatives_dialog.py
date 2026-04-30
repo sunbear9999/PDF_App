@@ -4,6 +4,7 @@ import fitz
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                              QPushButton, QScrollArea, QWidget, QFrame, QInputDialog, QMessageBox, QSizePolicy) 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 
 class AIResultsDialog(QDialog):
     # Added 'window_title' to handle both Tags and Opposing Views dynamically

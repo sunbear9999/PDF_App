@@ -101,6 +101,7 @@ class ResearchView(QWidget):
     manual_search_scholar = Signal(str)
     manual_search_custom = Signal(str)
     manual_search_google = Signal(str)
+    manual_search_rag = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -128,8 +129,9 @@ class ResearchView(QWidget):
         self.btn_man_scholar = QPushButton("🎓 Scholar")
         self.btn_man_custom = QPushButton("🔗 Custom")
         self.btn_man_google = QPushButton("🌐 Google")
+        self.btn_man_rag = QPushButton("📄 RAG Search")
         
-        for btn in [self.btn_man_jstor, self.btn_man_scholar, self.btn_man_custom, self.btn_man_google]:
+        for btn in [self.btn_man_jstor, self.btn_man_scholar, self.btn_man_custom, self.btn_man_google, self.btn_man_rag]:
             btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             manual_btn_layout.addWidget(btn)
 
@@ -141,6 +143,7 @@ class ResearchView(QWidget):
         self.btn_man_scholar.clicked.connect(lambda: self._on_manual_search("scholar"))
         self.btn_man_custom.clicked.connect(lambda: self._on_manual_search("custom"))
         self.btn_man_google.clicked.connect(lambda: self._on_manual_search("google"))
+        self.btn_man_rag.clicked.connect(lambda: self._on_manual_search("rag"))
 
         self.sep = QFrame()
         self.sep.setFrameShape(QFrame.Shape.HLine)
@@ -204,6 +207,7 @@ class ResearchView(QWidget):
         elif target == "scholar": self.manual_search_scholar.emit(term)
         elif target == "custom": self.manual_search_custom.emit(term)
         elif target == "google": self.manual_search_google.emit(term)
+        elif target == "rag": self.manual_search_rag.emit(term)
 
     def _on_generate_clicked(self):
         goal = self.input_goal.toPlainText().strip()
