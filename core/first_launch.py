@@ -4,7 +4,7 @@ import subprocess
 import urllib.request
 import webbrowser
 
-from PySide6.QtCore import QProcess, QTimer, Qt
+from PySide6.QtCore import QProcess, QTimer
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QPlainTextEdit
 )
@@ -142,6 +142,15 @@ class OllamaSetupDialog(QDialog):
 
         self._output.appendPlainText(f"Waiting for Ollama daemon... ({self._poll_count}/15)")
         QTimer.singleShot(1000, self._poll_daemon)
+
+    def closeEvent(self, event):
+        """Kill the running brew subprocess if the user closes the dialog mid-install."""
+        if hasattr(self, "_proc") and self._proc is not None:
+            if self._proc.state() != self._proc.ProcessState.NotRunning:
+                self._proc.kill()
+                # Wait briefly for clean exit so we don't leak a zombie
+                self._proc.waitForFinished(2000)
+        super().closeEvent(event)
 
 
 def run_first_launch_check(parent=None):
