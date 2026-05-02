@@ -261,12 +261,53 @@ class InstallerGUI(tk.Tk):
                 except Exception as e:
                     self.log(f"❌ Failed to trigger Linux installer: {e}")
             elif system == "Darwin":
-                self.log("⚠️ Auto-install for Mac is limited. Opening browser to download Ollama...")
-                import webbrowser
-                webbrowser.open("https://ollama.com/download/mac")
-                self.log("👉 Please install Ollama from the downloaded zip file, run it, and then restart this installer.")
-                self.after(0, self._finish_ui_update)
-                return
+                brew = self._brew_path()
+                installed = False
+                if brew:
+                    self.log("📥 Installing Ollama via Homebrew...")
+                    if self.run_hidden_command([brew, "install", "ollama"]):
+                        self.log("✅ Ollama installed via Homebrew.")
+                        installed = True
+                    else:
+                        self.log("⚠️ `brew install ollama` failed; falling back to direct download.")
+
+                if not installed:
+                    self.log("📥 Downloading Ollama-darwin.zip...")
+                    zip_path = os.path.join(tempfile.gettempdir(), "Ollama-darwin.zip")
+                    try:
+                        urllib.request.urlretrieve(
+                            "https://ollama.com/download/Ollama-darwin.zip", zip_path
+                        )
+                        # Unzip into /Applications using the macOS `unzip` tool to preserve bundle metadata
+                        self.log("📦 Unpacking into /Applications...")
+                        unpack_result = subprocess.run(
+                            ["/usr/bin/unzip", "-oq", zip_path, "-d", "/Applications"],
+                            capture_output=True, text=True
+                        )
+                        if unpack_result.returncode != 0:
+                            self.log(f"❌ Unzip failed: {unpack_result.stderr.strip()}")
+                        else:
+                            os.remove(zip_path)
+                            self.log("✅ Ollama.app installed to /Applications.")
+                            installed = True
+                    except Exception as e:
+                        self.log(f"❌ Ollama download/install failed: {e}")
+                        self.log("👉 Install Ollama manually from https://ollama.com/download/mac then re-run.")
+
+                if installed:
+                    self.log("🚀 Launching Ollama (this starts the background daemon)...")
+                    subprocess.Popen(["open", "-a", "Ollama"])
+                    # Poll the daemon for up to 15 seconds
+                    self.log("⏳ Waiting for Ollama daemon to become ready...")
+                    ready = False
+                    for _ in range(15):
+                        try:
+                            urllib.request.urlopen("http://127.0.0.1:11434/", timeout=1)
+                            ready = True
+                            break
+                        except Exception:
+                            time.sleep(1)
+                    self.log("✅ Ollama daemon is responding." if ready else "⚠️ Ollama daemon didn't respond within 15s; you may need to launch Ollama.app manually.")
             else:
                 self.log(f"⚠️ Auto-install not supported on {system}. Install manually from ollama.com.")
 
