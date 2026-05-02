@@ -13,9 +13,16 @@ if getattr(sys, 'frozen', False):
 else:
     root_dir = os.path.abspath(os.path.dirname(__file__))
 
-# Point Qt to your custom dictionaries folder
-dict_path = os.path.join(root_dir, "qtwebengine_dictionaries")
-os.environ["QTWEBENGINE_DICTIONARIES_PATH"] = dict_path
+
+def _configure_qtwebengine_dictionaries(base_dir):
+    """Point Qt to bundled dictionaries if present; otherwise leave unset
+    so Qt's WebEngine spellcheck quietly disables itself."""
+    dict_path = os.path.join(base_dir, "qtwebengine_dictionaries")
+    if os.path.isdir(dict_path):
+        os.environ["QTWEBENGINE_DICTIONARIES_PATH"] = dict_path
+
+
+_configure_qtwebengine_dictionaries(root_dir)
 
 if getattr(sys, 'frozen', False) and len(sys.argv) > 1 and sys.argv[1] == "--run-pdf-worker":
     # 1. Modify sys.argv so pdf_worker parses the right arguments
