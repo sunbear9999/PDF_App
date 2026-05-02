@@ -12,8 +12,10 @@ Make `python main.py` runnable on an Apple Silicon (ARM) Mac after a single `pyt
 **In scope:**
 - New `requirements.txt`
 - Mac (`Darwin`) branches in `installer.py` rewritten to actually install dependencies (currently they're stubs that mostly open a browser)
-- Two small fixes in app code (`main.py`, `core/llm_manager.py`)
+- One small fix in app code (`main.py` — guard the dictionaries env var)
 - Mac spellcheck dictionary download
+
+**Note:** The original spec called for a second app-code edit in `core/llm_manager.py` to guard `subprocess.CREATE_NO_WINDOW`. Verified during planning: the existing code at `llm_manager.py:94-106` already splits Windows / non-Windows into two `subprocess.Popen` calls, and `CREATE_NO_WINDOW` is only referenced inside the Windows branch. Confirmed by grep — no unguarded Windows constants exist in the app code. That edit is removed from scope.
 
 **Out of scope (do not touch):**
 - `installer_win.py`, `installer_win.spec` — Windows-only build artifacts
@@ -118,19 +120,15 @@ if os.path.isdir(dict_path):
 
 When the folder is absent, Qt's WebEngine spellcheck silently disables itself. App runs fine.
 
-### `core/llm_manager.py:99` — guard `subprocess.CREATE_NO_WINDOW`
+### Windows-constant audit
 
-`subprocess.CREATE_NO_WINDOW` is a Windows-only constant. On Mac it raises `AttributeError`. Refactor the `Popen` call to only pass `creationflags` when `sys.platform == "win32"`.
+A grep pass during planning (`CREATE_NO_WINDOW`, `STARTUPINFO`, `STARTF_USESHOWWINDOW`, `SW_HIDE`, `windll`) found four references in app/installer code, all already inside `if platform.system() == "Windows":` branches:
 
-Pattern:
-```python
-popen_kwargs = {}
-if sys.platform == "win32":
-    popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-subprocess.Popen([...], **popen_kwargs)
-```
+- `installer.py:308` (Windows shortcut creation)
+- `installer.py:376` and `:382` (Windows admin elevation)
+- `core/llm_manager.py:99` (Windows-only `Popen` for `ollama serve`)
 
-Verify during implementation that no other unguarded Windows-only constants exist (one full grep pass for `CREATE_NO_WINDOW`, `STARTUPINFO`, `STARTF_USESHOWWINDOW`, `SW_HIDE`, `windll`).
+No code changes required for platform-constant safety.
 
 ## Verification
 
