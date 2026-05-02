@@ -204,25 +204,24 @@ class MainWindow(QMainWindow):
         button.setProperty("collapsed_width", collapsed_width)
         button.setProperty("expanded_width", expanded_width)
         button.setProperty("hover_expanded", False)
-        button.setMinimumWidth(collapsed_width)
-        button.setMaximumWidth(collapsed_width)
+        # Width is locked to expanded_width permanently. The previous
+        # hover-driven width toggle caused QToolBar relayout on every
+        # Enter/Leave; on macOS the resulting cursor-vs-button race
+        # produced a hover/un-hover oscillation ("spazz"). Geometry
+        # never changes now — only the label text toggles on hover.
+        button.setMinimumWidth(expanded_width)
+        button.setMaximumWidth(expanded_width)
         button.installEventFilter(self)
 
     def _set_button_hover_state(self, button, expanded):
         icon = button.property("compact_icon")
         expanded_text = button.property("expanded_text")
-        collapsed_width = int(button.property("collapsed_width") or 44)
-        expanded_width = int(button.property("expanded_width") or 170)
 
         if expanded:
             button.setText(expanded_text or icon)
-            button.setMinimumWidth(expanded_width)
-            button.setMaximumWidth(expanded_width)
             button.setProperty("hover_expanded", True)
         else:
             button.setText(icon)
-            button.setMinimumWidth(collapsed_width)
-            button.setMaximumWidth(collapsed_width)
             button.setProperty("hover_expanded", False)
 
     def eventFilter(self, watched, event):
