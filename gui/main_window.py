@@ -23,6 +23,7 @@ from gui.components.dialogs.prompt_editor_dialog import PromptEditorDialog
 from gui.components.dialogs.tag_manager_dialog import TagManagerDialog, TagAssignmentDialog
 from core.prompt_manager import PromptManager
 from core.dictionary_manager import DictionaryManager
+from core.citation_manager import CitationManager
 
 class ElidedLabel(QLabel):
     def minimumSizeHint(self):
@@ -82,6 +83,8 @@ class MainWindow(QMainWindow):
                 self.dictionary_manager.import_json(default_dict_path, "Default English")
         # 2. CONNECT CRITICAL SAVING SIGNALS 
         # This guarantees the ProjectManager knows to save the file!
+        self.citation_manager = CitationManager(self.project_manager)
+
         self.viewer.annotation_clicked.connect(self.broadcast_annotation_clicked)
         self.viewer.annot_manager.note_added.connect(self.broadcast_note_added)
         self.viewer.annot_manager.highlight_created.connect(self.broadcast_highlight_created)
@@ -111,6 +114,9 @@ class MainWindow(QMainWindow):
         self.audio_docks = []
         self.research_docks = [] 
         self.dict_docks = []
+        self.essay_docks = []
+        self.citation_docks = [] 
+        self.brainstorm_docks = []
         # 6. BUILD UI
         self._build_top_menu()
         self._build_ocr_banner()
@@ -160,12 +166,7 @@ class MainWindow(QMainWindow):
         y = available.y() + (available.height() - height) // 2
         self.setGeometry(x, y, width, height)
 
-    def toggle_full_screen(self):
-        if self.isFullScreen():
-            self.showNormal()
-        else:
-            self.showFullScreen()
-        self._sync_full_screen_button()
+    
 
     def _sync_full_screen_button(self):
         if hasattr(self, "btn_fullscreen"):
@@ -217,6 +218,15 @@ class MainWindow(QMainWindow):
 
     def _trigger_background_preload(self):
         try:
+            # --- THE PRE-WARM FIX ---
+            # Boot the heavy graphics engine invisibly in the background. 
+            # This completely prevents the GUI flash when you open the Essay dock later!
+            from PySide6.QtWebEngineWidgets import QWebEngineView
+            self._dummy_browser = QWebEngineView(self)
+            self._dummy_browser.setFixedSize(1, 1)
+            self._dummy_browser.hide()
+            # ------------------------
+
             if not hasattr(self, 'shared_llm_manager') or not self.shared_llm_manager.ai_enabled: 
                 return
             
@@ -238,10 +248,9 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("F11"), self).activated.connect(self.toggle_full_screen)
 
     def _build_top_menu(self):
-        from PySide6.QtWidgets import QToolBar, QWidget, QHBoxLayout, QSizePolicy
+        from PySide6.QtWidgets import QToolBar, QWidget, QHBoxLayout, QSizePolicy, QMenu
         from PySide6.QtCore import Qt
 
-        # 🔥 UPGRADE: Native QToolBar handles spacing, heights, and overflow automatically!
         self.top_toolbar = QToolBar("Main Toolbar", self)
         self.top_toolbar.setObjectName("MainToolbar")
         self.top_toolbar.setMovable(False)
@@ -250,74 +259,89 @@ class MainWindow(QMainWindow):
 
         # 1. Feedback
         self.btn_feedback = QPushButton()
-        self._configure_hover_expand_button(self.btn_feedback, "💬", "Feedback", expanded_width=110,collapsed_width=60)
+        self._configure_hover_expand_button(self.btn_feedback, "💬", "Feedback", expanded_width=110, collapsed_width=60)
         self.btn_feedback.clicked.connect(lambda: self._open_feedback_link())
         self.top_toolbar.addWidget(self.btn_feedback)
 
         # 2. Project Menu
         self.btn_project = QPushButton()
-        self._configure_hover_expand_button(self.btn_project, "📁", "Project", expanded_width=100,collapsed_width=60)
+        self._configure_hover_expand_button(self.btn_project, "📁", "Project", expanded_width=100, collapsed_width=60)
         project_menu = QMenu(self)
         project_menu.addAction("New Project...", self._new_project)
         project_menu.addAction("Open Project...", self._open_project)
         project_menu.addAction("Save Project As...", self._save_project_as)
         project_menu.addSeparator()
         project_menu.addAction("Add PDF to Project...", self._add_pdf)
-        self.top_toolbar.addWidget(self.btn_project)
         export_action = project_menu.addAction("🛡️ Export LLM Log...")
         export_action.triggered.connect(self._export_llm_log)
-        
         self.btn_project.setMenu(project_menu)
+        self.top_toolbar.addWidget(self.btn_project)
+
         # 3. Save Button
         self.btn_save = QPushButton("💾")
         self.btn_save.clicked.connect(self.save_project)
         self.top_toolbar.addWidget(self.btn_save)
 
-        # Add a flexible spacer to push the next items to the right/center
+        # Spacer to push core tools to the center
         spacer1 = QWidget()
         spacer1.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.top_toolbar.addWidget(spacer1)
 
-        # 4. Spawners (Workspace, Chat, Notes, etc.)
+        # 4. Core Spawners (Always visible)
         self.btn_spawn_ws = QPushButton("➕ Workspace")
         self.btn_spawn_ws.clicked.connect(self.spawn_workspace_dock)
         self.top_toolbar.addWidget(self.btn_spawn_ws)
 
-        self.btn_spawn_chat = QPushButton("➕ AI Chat")
+        self.btn_spawn_chat = QPushButton("🤖 AI Chat")
         self.btn_spawn_chat.clicked.connect(self.spawn_chat_dock)
         self.top_toolbar.addWidget(self.btn_spawn_chat)
 
-        self.btn_spawn_notes = QPushButton("➕ Notes List")
-        self.btn_spawn_notes.clicked.connect(self.spawn_notes_dock)
-        self.top_toolbar.addWidget(self.btn_spawn_notes)
-
-        self.btn_spawn_research = QPushButton("➕ Research Assistant")
+        self.btn_spawn_research = QPushButton("🔬 Research Assistant")
         self.btn_spawn_research.clicked.connect(self.spawn_research_dock)
         self.top_toolbar.addWidget(self.btn_spawn_research)
+
+        self.btn_spawn_brainstorm = QPushButton("💡 Brainstorm")
+        self.btn_spawn_brainstorm.clicked.connect(self.spawn_brainstorm_dock)
+        self.top_toolbar.addWidget(self.btn_spawn_brainstorm)
+
+        self.btn_spawn_essay = QPushButton("📝 Writing")
+        self.btn_spawn_essay.clicked.connect(self.spawn_essay_dock)
+        self.top_toolbar.addWidget(self.btn_spawn_essay)
+
+        # 5. Dropdown Spawner (Other Tools)
+        self.btn_other_tools = QPushButton("➕ Other Tools")
+        other_tools_menu = QMenu(self)
         
-        self.btn_spawn_scratch = QPushButton("➕ Scratchpad")
-        self.btn_spawn_scratch.clicked.connect(self.spawn_scratchpad_dock)
-        self.top_toolbar.addWidget(self.btn_spawn_scratch)
+        action_notes = other_tools_menu.addAction("📝 Notes List")
+        action_notes.triggered.connect(self.spawn_notes_dock)
+
+        action_scratch = other_tools_menu.addAction("✍️ Scratchpad")
+        action_scratch.triggered.connect(self.spawn_scratchpad_dock)
         
-        self.btn_spawn_ocr = QPushButton("➕ OCR Scanner")
-        self.btn_spawn_ocr.clicked.connect(self.spawn_ocr_dock)
-        self.top_toolbar.addWidget(self.btn_spawn_ocr)
+        action_dict = other_tools_menu.addAction("📖 Dictionary")
+        action_dict.triggered.connect(self.spawn_dictionary_dock)
+        
+        action_cite = other_tools_menu.addAction("📚 Citations")
+        # Note: Make sure self.spawn_citation_dock is still defined in main_window.py!
+        action_cite.triggered.connect(self.spawn_citation_dock) 
+        
+        action_ocr = other_tools_menu.addAction("👁️ OCR Scanner")
+        action_ocr.triggered.connect(self.spawn_ocr_dock)
+        
+        action_audio = other_tools_menu.addAction("🔊 Audio (TTS)")
+        action_audio.triggered.connect(self.spawn_audio_dock)
+        
+        self.btn_other_tools.setMenu(other_tools_menu)
+        self.top_toolbar.addWidget(self.btn_other_tools)
 
-        self.btn_spawn_audio = QPushButton("➕ Audio (TTS)")
-        self.btn_spawn_audio.clicked.connect(self.spawn_audio_dock)
-        self.top_toolbar.addWidget(self.btn_spawn_audio)
-
-        self.btn_spawn_dict = QPushButton("📖 Dictionary")
-        self.btn_spawn_dict.clicked.connect(self.spawn_dictionary_dock)
-        self.top_toolbar.addWidget(self.btn_spawn_dict)
-
+        # Spacer to push settings to the right
         spacer2 = QWidget()
         spacer2.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.top_toolbar.addWidget(spacer2)
 
-        # 5. Right-side Tools
+        # 6. Right-side Tools
         self.btn_tag_manager = QPushButton()
-        self._configure_hover_expand_button(self.btn_tag_manager, "🏷️", "Tag Manager", expanded_width=130,collapsed_width=60)
+        self._configure_hover_expand_button(self.btn_tag_manager, "🏷️", "Tag Manager", expanded_width=130, collapsed_width=60)
         self.btn_tag_manager.clicked.connect(self._open_tag_manager)
         self.top_toolbar.addWidget(self.btn_tag_manager)
 
@@ -327,7 +351,7 @@ class MainWindow(QMainWindow):
         self.top_toolbar.addWidget(self.btn_prompt_editor)
 
         self.btn_layouts = QPushButton()
-        self._configure_hover_expand_button(self.btn_layouts, "🗔", "Window Layouts", expanded_width=160,collapsed_width=65)
+        self._configure_hover_expand_button(self.btn_layouts, "🗔", "Window Layouts", expanded_width=160, collapsed_width=65)
         layout_menu = QMenu(self)
         layout_menu.addAction("⭐ Set Current as Default Layout", self._save_as_default_layout)
         layout_menu.addAction("💾 Save as Custom Template...", self._save_layout_template)
@@ -353,6 +377,103 @@ class MainWindow(QMainWindow):
         self._configure_hover_expand_button(self.btn_fullscreen, "⛶", "Full Screen", expanded_width=120)
         self.btn_fullscreen.clicked.connect(self.toggle_full_screen)
         self.top_toolbar.addWidget(self.btn_fullscreen)
+
+    def spawn_brainstorm_dock(self):
+        # STRICT SINGLETON: Like AI Chat, we only need one of these to manage context
+        if self.brainstorm_docks:
+            view = self.brainstorm_docks[0]
+            if view.parentWidget():
+                view.parentWidget().show()
+                view.parentWidget().raise_()
+            return
+                
+        from PySide6.QtWidgets import QDockWidget
+        from PySide6.QtCore import Qt
+        
+        dock = QDockWidget("💡 Brainstorm Assistant", self)
+        dock.setObjectName("SingleBrainstormDock") 
+        
+        from gui.docks.brainstorm_dock import BrainstormDock
+        bs_view = BrainstormDock(self.shared_llm_manager, self.project_manager, self)
+        dock.setWidget(bs_view)
+        
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        self.brainstorm_docks.append(bs_view)
+        
+        if hasattr(self, 'theme_manager'): 
+            bs_view.update_theme(self.theme_manager.get_theme())
+            
+        dock.show()
+
+    
+
+    # REPLACE IN: gui/main_window.py
+    def spawn_citation_dock(self):
+        if self.citation_docks:
+            view = self.citation_docks[0]
+            if view.parentWidget():
+                view.parentWidget().show()
+                view.parentWidget().raise_()
+            return
+
+        dock = QDockWidget("📚 Citation Manager", self)
+        dock.setObjectName("SingleCitationDock")
+
+        from gui.docks.citation_dock import CitationDock
+        cite_view = CitationDock(self.citation_manager, self.project_manager, self)
+        dock.setWidget(cite_view)
+
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        self.citation_docks.append(cite_view)
+        dock.show()
+
+    def toggle_full_screen(self):
+        from PySide6.QtCore import Qt
+        
+        if self.isFullScreen():
+            # 1. Forcefully strip ALL window states (including maximized and fullscreen)
+            self.setWindowState(Qt.WindowState.WindowNoState)
+            
+            # 2. Tell the OS to restore the window
+            self.showNormal()
+            
+            # 3. THE X11 WAKEUP HACK:
+            # Because the Chromium OpenGL context makes XFCE stubborn, we force a 
+            # microscopic resize. This forces the OS window manager to redraw the borders.
+            self.resize(self.width() - 1, self.height())
+            self.resize(self.width() + 1, self.height())
+        else:
+            self.setWindowState(Qt.WindowState.WindowFullScreen)
+            self.showFullScreen()
+            
+        # 4. Safely update the UI Button
+        if hasattr(self, 'btn_fullscreen'):
+            now_full = self.isFullScreen()
+            icon = "🗗" if now_full else "⛶"
+            label = "Exit Full Screen" if now_full else "Full Screen"
+            self.btn_fullscreen.setProperty("compact_icon", icon)
+            self.btn_fullscreen.setProperty("expanded_text", f"{icon} {label}")
+            self._set_button_hover_state(self.btn_fullscreen, self.btn_fullscreen.property("hover_expanded"))
+
+    def spawn_essay_dock(self):
+        self.essay_counter = getattr(self, 'essay_counter', 0) + 1
+        dock = QDockWidget(f"📝 Essay Writer {self.essay_counter}", self)
+        dock.setObjectName(f"EssayDock_{self.essay_counter}")
+        
+        from gui.docks.essay_dock import EssayTab
+        essay_view = EssayTab(self.project_manager, self)
+        dock.setWidget(essay_view)
+        
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        
+        if not hasattr(self, 'essay_docks'):
+            self.essay_docks = []
+        self.essay_docks.append(essay_view)
+        
+        if hasattr(self, 'theme_manager'): 
+            essay_view.update_theme(self.theme_manager.get_theme())
+            
+        dock.show()
 
     def spawn_dictionary_dock(self):
         # STRICT SINGLETON: Only one dictionary dock needed
@@ -830,7 +951,7 @@ class MainWindow(QMainWindow):
             
         # Clean up all dynamic docks cleanly
         for lst in [self.workspace_docks, self.notes_docks, self.chat_docks, 
-                    self.scratchpad_docks, self.ocr_docks, self.audio_docks]:
+                    self.scratchpad_docks, self.ocr_docks, self.audio_docks,self.brainstorm_docks]:
             for item in list(lst):
                 if item.parentWidget(): 
                     item.parentWidget().deleteLater()
@@ -1139,50 +1260,98 @@ class MainWindow(QMainWindow):
         else:
             QMessageBox.warning(self, "Error", "Failed to access the file from the filesystem.")
 
-    def autosave_project(self):
-        if self.project_manager.project_filepath:
-            try:
-                for ws in self.workspace_docks: ws.save_workspace_state()
-                self.project_manager.save_all_docs()
-            except Exception as e:
-                print(f"Background autosave failed: {e}")
+    # REPLACE THESE METHODS IN: gui/main_window.py
 
+    # REPLACE THESE METHODS IN: gui/main_window.py
+
+    
     def save_project(self):
-        if not self.project_manager.project_filepath: return
-        try:
-            for ws in self.workspace_docks: ws.save_workspace_state()
-            self.project_manager.save_all_docs()
-            
-            # --- NEW: Save Dock Layout State ---
-            state_bytes = self.saveState().toBase64().data().decode('utf-8')
-            self.project_manager.set_metadata("window_layout_state", state_bytes)
-            
-            active_docks = {
-                "workspaces": self.ws_counter if hasattr(self, 'ws_counter') else 0,
-                "notes": self.notes_counter if hasattr(self, 'notes_counter') else 0,
-                "chats": self.chat_counter if hasattr(self, 'chat_counter') else 0,
-                "scratchpads": self.scratch_counter if hasattr(self, 'scratch_counter') else 0
-            }
-            import json
-            self.project_manager.set_metadata("open_docks_count", json.dumps(active_docks))
-            scratch_texts = [editor.toPlainText() for editor in self.scratchpad_docks]
-            self.project_manager.set_metadata("scratchpad_texts", json.dumps(scratch_texts))
-            # -----------------------------------
+        if not getattr(self.project_manager, 'project_filepath', None): 
+            return
 
-            # Replace the old success/error boxes with these forced-on-top versions:
-            msg = QMessageBox(self)
-            msg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowStaysOnTopHint)
-            msg.setIcon(QMessageBox.Icon.Information)
-            msg.setWindowTitle("Success")
-            msg.setText("Project, layouts, and highlights saved successfully!")
-            msg.exec()
-        except Exception as e:
-            err = QMessageBox(self)
-            err.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowStaysOnTopHint)
-            err.setIcon(QMessageBox.Icon.Warning)
-            err.setWindowTitle("Save Error")
-            err.setText(f"Error saving project: {str(e)}")
-            err.exec()
+        if hasattr(self, 'workspace_docks'):
+            for ws in self.workspace_docks: 
+                try: ws.save_workspace_state()
+                except Exception: pass
+
+        # 1. Clean the list of dead C++ docks to prevent deadlocks
+        valid_essays = []
+        for dock in getattr(self, 'essay_docks', []):
+            try:
+                _ = dock.objectName() # Touch the object to confirm it is alive
+                valid_essays.append(dock)
+            except RuntimeError:
+                pass
+        self.essay_docks = valid_essays
+
+        # 2. If no essays are active, save DB instantly
+        if not self.essay_docks:
+            self.project_manager.save_all_docs()
+            if hasattr(self, '_show_save_indicator'):
+                self._show_save_indicator()
+            return
+
+        # 3. Handle asynchronous saving with countdown
+        self.pending_saves = len(self.essay_docks)
+        def check_all_saved():
+            self.pending_saves -= 1
+            if self.pending_saves <= 0:
+                self.project_manager.save_all_docs()
+                if hasattr(self, '_show_save_indicator'):
+                    self._show_save_indicator()
+
+        for essay_view in self.essay_docks:
+            try:
+                essay_view.save_essay_state(callback_after=check_all_saved)
+            except RuntimeError:
+                check_all_saved()
+
+    def autosave_project(self):
+        if not getattr(self.project_manager, 'project_filepath', None): return
+
+        if hasattr(self, 'workspace_docks'):
+            for ws in self.workspace_docks: 
+                try: ws.save_workspace_state()
+                except Exception: pass
+
+        valid_essays = []
+        for dock in getattr(self, 'essay_docks', []):
+            try:
+                _ = dock.objectName()
+                valid_essays.append(dock)
+            except RuntimeError: pass
+        self.essay_docks = valid_essays
+
+        if not self.essay_docks:
+            self.project_manager.save_all_docs()
+            return
+
+        self.pending_autosaves = len(self.essay_docks)
+        def check_all_autosaved():
+            self.pending_autosaves -= 1
+            if self.pending_autosaves <= 0:
+                self.project_manager.save_all_docs()
+
+        for essay_view in self.essay_docks:
+            try: essay_view.save_essay_state(callback_after=check_all_autosaved)
+            except RuntimeError: check_all_autosaved()
+
+    def _show_save_indicator(self):
+        self.statusBar().showMessage("💾 Project saved successfully.", 3000)
+        if hasattr(self, 'btn_save'):
+            original_text = self.btn_save.text()
+            self.btn_save.setText("✅ Saved!")
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(2000, lambda: self.btn_save.setText(original_text))
+
+    def _show_save_indicator(self):
+        """Displays visual confirmation that the master database successfully committed."""
+        self.statusBar().showMessage("💾 Project saved successfully.", 3000)
+        if hasattr(self, 'btn_save'):
+            original_text = self.btn_save.text()
+            self.btn_save.setText("✅ Saved!")
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(2000, lambda: self.btn_save.setText(original_text))
 
     def add_ai_annotation(self, quote, note, target_doc_name=None, allowed_paths=None, forced_annot_id=None, emit_signal=True):
         if not quote: return False

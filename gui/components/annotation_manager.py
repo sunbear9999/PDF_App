@@ -224,8 +224,22 @@ class AnnotationManager(QObject):
         similar_action.triggered.connect(lambda: self.trigger_similar_context(extracted_text))
         opposing_action = menu.addAction("⚖️ Find Opposing Views")
         opposing_action.triggered.connect(lambda: self.trigger_opposing_views(extracted_text))
+        cite_action = menu.addAction("📋 Copy In-Text Citation")
+        cite_action.triggered.connect(self.copy_in_text_citation)
         
         menu.exec(global_pos)
+    def copy_in_text_citation(self):
+        main_window = self.viewer.window()
+        current_doc = main_window.current_file_path
+        
+        if current_doc and self.current_page_idx >= 0:
+            cm = main_window.citation_manager
+            citation_text = cm.format_in_text(current_doc, self.current_page_idx)
+            from PySide6.QtWidgets import QApplication
+            QApplication.clipboard().setText(citation_text)
+            main_window.statusBar().showMessage(f"Copied citation: {citation_text}", 3000)
+            
+        self.clear_selection()
     def trigger_similar_context(self, selected_text):
         if not selected_text.strip(): return
         

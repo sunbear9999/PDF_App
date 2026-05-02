@@ -1,4 +1,5 @@
 # main.py
+import os
 import sys
 import traceback
 from PySide6.QtWidgets import QApplication, QMessageBox
@@ -7,7 +8,14 @@ from PySide6.QtCore import QSettings, QTimer
 
 from gui.main_window import MainWindow
 from gui.theme import ThemeManager
+if getattr(sys, 'frozen', False):
+    root_dir = sys._MEIPASS
+else:
+    root_dir = os.path.abspath(os.path.dirname(__file__))
 
+# 2. Point Qt to your custom dictionaries folder
+dict_path = os.path.join(root_dir, "qtwebengine_dictionaries")
+os.environ["QTWEBENGINE_DICTIONARIES_PATH"] = dict_path
 if getattr(sys, 'frozen', False) and len(sys.argv) > 1 and sys.argv[1] == "--run-pdf-worker":
     # 1. Modify sys.argv so pdf_worker parses the right arguments
     sys.argv = [sys.argv[0]] + sys.argv[2:] 

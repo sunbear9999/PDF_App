@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (QGraphicsView, QGraphicsScene, QMenu, QMessageBox
                              QScrollArea, QWidget, QFormLayout, QDialogButtonBox,
                              QColorDialog, QFileDialog, QTextEdit, QCheckBox, QSlider,
                              QGraphicsLineItem, QGraphicsTextItem, QListWidget,
-                             QListWidgetItem,QSizePolicy)
+                             QListWidgetItem,QSizePolicy,QApplication)
 from PySide6.QtCore import Qt, QRectF, QRunnable, QThreadPool, Slot
 from PySide6.QtGui import QColor, QPen, QBrush, QFont, QPainter, QImage, QStandardItemModel, QStandardItem, QCursor, QPainterPath, QPainterPathStroker, QShortcut, QKeySequence
 from gui.components.workspace_items import Node, Edge
@@ -23,6 +23,7 @@ from core.text_utils import get_semantic_similarity_matrix
 from gui.components.dialogs.workspace_dialogs import ColorOrganizerDialog, DeclutterSettingsDialog, OutlineDialog, WeakpointsDialog, ContextFilterDialog
 from gui.components.dialogs.tag_manager_dialog import TagAssignmentDialog
 from gui.components.dialogs.tag_relatives_dialog import AIResultsDialog
+
 
 
 class GhostLineItem(QGraphicsLineItem):
@@ -1821,6 +1822,7 @@ class WorkspaceView(QGraphicsView):
             edit_action = menu.addAction("✏️ Edit Note Text")
             color_action = menu.addAction("🎨 Change Color")
             manage_tags_action = menu.addAction("🏷️ Manage Tags")
+            cite_action = menu.addAction("📋 Copy In-Text Citation")
 
             connect_action = None
             if connect_source:
@@ -1860,6 +1862,14 @@ class WorkspaceView(QGraphicsView):
                 self.delete_node(item, delete_highlight=True)
             elif action == declutter_action:
                 self.trigger_declutter()
+            elif action == cite_action:
+                if item.pdf_path is not None:
+                    cm = self.main_window.citation_manager
+                    citation_text = cm.format_in_text(item.pdf_path, item.page_num)
+                    QApplication.clipboard().setText(citation_text)
+                    self.main_window.statusBar().showMessage(f"Copied citation: {citation_text}", 3000)
+                else:
+                    QMessageBox.warning(self, "No Citation", "This is a custom node, not a PDF highlight.")
             return
             
         if isinstance(item, Edge):

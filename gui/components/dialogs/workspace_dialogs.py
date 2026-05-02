@@ -5,7 +5,9 @@ from PySide6.QtWidgets import (QGraphicsView, QGraphicsScene, QMenu, QMessageBox
                              QColorDialog, QFileDialog, QTextEdit,QCheckBox,QSlider,QLabel,QTabWidget,QListWidget,QListWidgetItem)
 from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import QColor, QPen, QBrush, QFont, QPainter, QImage, QStandardItemModel, QStandardItem
+import uuid
 import os
+from gui.components.workspace_items import Node
 class OutlineDialog(QDialog):
     def __init__(self, outline_text, workspace_view, parent=None):
         super().__init__(parent or workspace_view)

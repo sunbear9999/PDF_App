@@ -82,6 +82,21 @@ class ProjectManager:
                 PRIMARY KEY (node_id, tag_id),
                 FOREIGN KEY(tag_id) REFERENCES tags(id) ON DELETE CASCADE
             )''')
+            cursor.execute('''CREATE TABLE IF NOT EXISTS essays (
+            id TEXT PRIMARY KEY,
+            title TEXT,
+            content TEXT,
+            last_edited DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        # Add this inside _init_db(self), right after the essays table creation
+            cursor.execute('''CREATE TABLE IF NOT EXISTS citations (
+            doc_id TEXT PRIMARY KEY,
+            title TEXT,
+            authors TEXT,
+            year TEXT,
+            journal TEXT,
+            doi TEXT
+             )''')
             self._conn.commit()
         except sqlite3.Error as e:
             print(f"Database initialization error: {e}")
@@ -131,6 +146,39 @@ class ProjectManager:
                 response TEXT,
                 model_used TEXT
             )''')
+    def upsert_citation(self, citation_data):
+        if not self._conn: return
+        try:
+            self._conn.execute("""
+                INSERT INTO citations (doc_id, title, authors, year, journal, doi)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(doc_id) DO UPDATE SET
+                    title = excluded.title,
+                    authors = excluded.authors,
+                    year = excluded.year,
+                    journal = excluded.journal,
+                    doi = excluded.doi
+            """, (
+                citation_data.get("doc_id"), citation_data.get("title", ""),
+                citation_data.get("authors", ""), citation_data.get("year", ""),
+                citation_data.get("journal", ""), citation_data.get("doi", "")
+            ))
+            self._conn.commit()
+        except sqlite3.Error as e:
+            print(f"Error saving citation for {citation_data.get('doc_id')}: {e}")
+
+    def get_citation(self, doc_id):
+        if not self._conn: return {}
+        try:
+            cursor = self._conn.cursor()
+            cursor.execute("SELECT title, authors, year, journal, doi FROM citations WHERE doc_id = ?", (doc_id,))
+            row = cursor.fetchone()
+            if row:
+                return {"doc_id": doc_id, "title": row[0], "authors": row[1], "year": row[2], "journal": row[3], "doi": row[4]}
+            return {}
+        except sqlite3.Error as e:
+            print(f"Error reading citation for {doc_id}: {e}")
+            return {}
 
     def _ensure_nodes_table(self, cursor):
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='nodes'")
@@ -295,6 +343,56 @@ class ProjectManager:
         """)
         cursor.execute("DROP TABLE nodes")
         cursor.execute("ALTER TABLE nodes_wsid RENAME TO nodes")
+    # ADD TO: core/project_manager.py
+   # UPDATE THIS IN: core/project_manager.py
+    def upsert_essay(self, essay_id, title, content):
+        if not self._conn: return
+        try:
+            # Bulletproof check: Ensure the table exists on the legacy DB before writing
+            self._conn.execute('''CREATE TABLE IF NOT EXISTS essays (
+                id TEXT PRIMARY KEY,
+                title TEXT,
+                content TEXT,
+                last_edited DATETIME DEFAULT CURRENT_TIMESTAMP
+            )''')
+            
+            self._conn.execute(
+                """
+                INSERT INTO essays (id, title, content, last_edited)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(id) DO UPDATE SET
+                    title = excluded.title,
+                    content = excluded.content,
+                    last_edited = CURRENT_TIMESTAMP
+                """,
+                (essay_id, title, content)
+            )
+            self._conn.commit()
+        except sqlite3.Error as e:
+            print(f"Error saving essay {essay_id}: {e}")
+
+    def get_all_essays(self):
+        if not self._conn: return []
+        try:
+            cursor = self._conn.cursor()
+            cursor.execute("SELECT id, title, content FROM essays ORDER BY last_edited DESC")
+            return [{"id": row[0], "title": row[1], "content": row[2]} for row in cursor.fetchall()]
+        except sqlite3.Error as e:
+            print(f"Error reading essays: {e}")
+            return []
+            
+    def get_essay(self, essay_id):
+        if not self._conn: return None
+        try:
+            cursor = self._conn.cursor()
+            cursor.execute("SELECT id, title, content FROM essays WHERE id = ?", (essay_id,))
+            row = cursor.fetchone()
+            if row:
+                return {"id": row[0], "title": row[1], "content": row[2]}
+            return None
+        except sqlite3.Error as e:
+            print(f"Error loading essay {essay_id}: {e}")
+            return None
 
     def create_project(self, filepath):
         try:
@@ -860,15 +958,31 @@ class ProjectManager:
         try:
             cursor = self._conn.cursor()
             
-            # 1. Tally the Evidence Pedigree
-            cursor.execute("SELECT COUNT(*) FROM nodes WHERE node_origin = 'human'")
+            # 1. Tally the Evidence Pedigree (Bulletproofed SQL)
+            cursor.execute("""
+                SELECT COUNT(*) FROM nodes 
+                WHERE node_origin = 'human' 
+                AND id NOT LIKE '%AINote|%' 
+                AND (highlight_id IS NULL OR highlight_id NOT LIKE '%AINote|%')
+            """)
             n_h = cursor.fetchone()[0]
             
-            cursor.execute("SELECT COUNT(*) FROM nodes WHERE node_origin = 'ai' AND is_verified = 1")
+            cursor.execute("""
+                SELECT COUNT(*) FROM nodes 
+                WHERE (node_origin = 'ai' OR id LIKE '%AINote|%' OR highlight_id LIKE '%AINote|%') 
+                AND is_verified = 1
+            """)
             n_v = cursor.fetchone()[0]
             
-            cursor.execute("SELECT COUNT(*) FROM nodes WHERE node_origin = 'ai' AND is_verified = 0")
+            cursor.execute("""
+                SELECT COUNT(*) FROM nodes 
+                WHERE (node_origin = 'ai' OR id LIKE '%AINote|%' OR highlight_id LIKE '%AINote|%') 
+                AND is_verified = 0
+            """)
             n_ai_unverified = cursor.fetchone()[0]
+            
+            # 2. Calculate the Metrics
+            # ... (leave the rest exactly as it is) ...
             
             # 2. Calculate the Metrics
             total_ai_notes = n_v + n_ai_unverified
