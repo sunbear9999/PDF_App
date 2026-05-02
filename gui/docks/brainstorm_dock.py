@@ -161,20 +161,36 @@ class BrainstormDock(QWidget):
 
     def update_theme(self, theme):
         self.setStyleSheet(f"""
+            QWidget {{
+                background-color: {theme['bg_main']};
+                color: {theme['text_main']};
+            }}
             QTextEdit {{
-                background-color: {theme.get('bg_input', '#ffffff')};
-                color: {theme.get('text_main', '#000000')};
-                border: 1px solid {theme.get('border', '#cccccc')};
+                background-color: {theme['bg_input']};
+                color: {theme['text_main']};
+                border: 1px solid {theme['border']};
                 border-radius: 4px;
             }}
             QPushButton {{
-                background-color: {theme.get('bg_panel', '#e0e0e0')};
-                color: {theme.get('text_main', '#000000')};
-                border: 1px solid {theme.get('border', '#cccccc')};
+                background-color: {theme['bg_panel']};
+                color: {theme['text_main']};
+                border: 1px solid {theme['border']};
                 border-radius: 4px;
                 padding: 4px 8px;
             }}
             QPushButton:hover {{
-                background-color: {theme.get('accent_hover', '#d0d0d0')};
+                background-color: {theme['accent_hover']};
+            }}
+            QComboBox {{
+                background-color: {theme['bg_input']};
+                color: {theme['text_main']};
+                border: 1px solid {theme['border']};
+                border-radius: 4px;
+                padding: 4px;
+            }}
+            QLabel {{
+                background: transparent;
             }}
         """)
+        # Force the send button to pop
+        self.btn_send.setStyleSheet(f"background-color: {theme['accent']}; color: #ffffff; font-weight: bold; border: none; border-radius: 4px;")

@@ -253,15 +253,20 @@ class ResearchView(QWidget):
     def update_theme(self, theme):
         self.theme = theme
         self.setStyleSheet(f"background-color: {theme['bg_main']}; color: {theme['text_main']};")
-        self.input_goal.setStyleSheet(f"background-color: {theme['bg_input']}; border: 1px solid {theme['border']};")
-        self.model_combo.setStyleSheet(f"background-color: {theme['bg_input']}; border: 1px solid {theme['border']}; padding: 4px;")
-        self.btn_generate.setStyleSheet(f"background-color: {theme['accent']}; font-weight: bold; color: white; padding: 6px;")
+        
+        input_style = f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']}; padding: 4px; border-radius: 4px;"
+        self.input_goal.setStyleSheet(input_style)
+        self.input_manual.setStyleSheet(input_style)
+        self.model_combo.setStyleSheet(input_style)
+        
+        self.btn_generate.setStyleSheet(f"background-color: {theme['accent']}; font-weight: bold; color: white; padding: 6px; border: none; border-radius: 4px;")
         self.btn_settings.setStyleSheet(f"background-color: transparent; color: {theme['text_muted']}; border: none;")
-        
-        # --- NEW STYLES ---
         self.sep.setStyleSheet(f"background-color: {theme.get('border', '#444')};")
-        self.input_manual.setStyleSheet(f"background-color: {theme['bg_input']}; border: 1px solid {theme['border']}; padding: 4px; border-radius: 4px;")
+        self.chk_advanced.setStyleSheet("background: transparent; font-weight: bold;")
         
-        btn_style = f"background-color: {theme.get('bg_panel', '#333')}; border: 1px solid {theme.get('border', '#444')}; padding: 4px; border-radius: 4px;"
-        for btn in [self.btn_man_jstor, self.btn_man_scholar, self.btn_man_custom, self.btn_man_google]:
+        btn_style = f"background-color: {theme['bg_panel']}; color: {theme['text_main']}; border: 1px solid {theme['border']}; padding: 4px; border-radius: 4px;"
+        for btn in [self.btn_man_jstor, self.btn_man_scholar, self.btn_man_custom, self.btn_man_google, self.btn_man_rag]:
             btn.setStyleSheet(btn_style)
+            
+        self.scroll_area.setStyleSheet("background: transparent; border: none;")
+        self.results_container.setStyleSheet("background: transparent;")

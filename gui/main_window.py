@@ -1,5 +1,6 @@
 # gui/main_window.py
 import os
+import sys
 import uuid
 import fitz
 import shutil
@@ -24,6 +25,10 @@ from gui.components.dialogs.tag_manager_dialog import TagManagerDialog, TagAssig
 from core.prompt_manager import PromptManager
 from core.dictionary_manager import DictionaryManager
 from core.citation_manager import CitationManager
+from gui.docks.brainstorm_dock import BrainstormDock
+from gui.docks.citation_dock import CitationDock
+from gui.docks.essay_dock import EssayTab
+from gui.components.workspace_view import WorkspaceView
 
 class ElidedLabel(QLabel):
     def minimumSizeHint(self):
@@ -56,6 +61,7 @@ class PreloadWorker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.setObjectName("PapyrusMainWindow")
         self.setWindowTitle("Papyrus - Ethical, Offline Research Assistant")
         self._apply_smart_window_size()
         self.setMinimumSize(800, 600)
@@ -70,13 +76,18 @@ class MainWindow(QMainWindow):
         self.shared_llm_manager = LocalLLMManager()
         self.shared_llm_manager.set_audit_logger(self.project_manager.log_ai_interaction_threadsafe)
         # 1. INITIALIZE VIEWER EXPLICITLY ONCE
+        def get_resource_path(relative_path):
+            if hasattr(sys, '_MEIPASS'):
+                # PyInstaller execution: use the temporary extracted folder
+                return os.path.join(sys._MEIPASS, relative_path)
+            # Normal script execution: use the project root
+            root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+            return os.path.join(root_dir, relative_path)
         self.viewer = PDFViewer()
-        root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-        dict_data_dir = os.path.join(root_dir, "data")
-        self.dictionary_manager = DictionaryManager(dict_data_dir)
+        user_data_dir = os.path.join(os.path.expanduser("~"), ".papyrus_data")
+        self.dictionary_manager = DictionaryManager(user_data_dir)
         if not self.dictionary_manager.get_available_dictionaries():
-            # Assume you placed a file named 'default_english.json' in an 'assets' folder
-            default_dict_path = os.path.join(root_dir, "assets", "default_english.json")
+            default_dict_path = get_resource_path(os.path.join("assets", "default_english.json"))
             
             if os.path.exists(default_dict_path):
                 print("[System] First launch detected. Building default dictionary...")
@@ -132,14 +143,20 @@ class MainWindow(QMainWindow):
         self.autosave_timer.timeout.connect(self.autosave_project)
         self.autosave_timer.start(5 * 60 * 1000) 
         
-        last_project = self.settings.value("last_project", "")
-        if last_project and os.path.exists(last_project):
-            self._load_project(last_project)
-
         QTimer.singleShot(1500, self._trigger_background_preload)
         if self.settings.value("show_help_on_startup", True, type=bool):
             QTimer.singleShot(500, self.show_help_window)
             
+        # DELAY THE STARTUP: Wait 50ms for the 0x0 window to physically draw on screen
+        # before attempting to calculate tabbed dock layouts.
+        QTimer.singleShot(50, self._run_startup_sequence)
+    def _run_startup_sequence(self):
+        """Runs the project load/layout sequence safely after the UI is rendered."""
+        last_project = self.settings.value("last_project", "")
+        if last_project and os.path.exists(last_project):
+            self._load_project(last_project)
+        else:
+            self._reset_default_layout()        
     def show_help_window(self,initial_tab_index=0):
         # We keep a reference to it so it doesn't get garbage collected
         self.help_dialog = HelpDialog(self,initial_tab_index=initial_tab_index)
@@ -219,13 +236,10 @@ class MainWindow(QMainWindow):
     def _trigger_background_preload(self):
         try:
             # --- THE PRE-WARM FIX ---
-            # Boot the heavy graphics engine invisibly in the background. 
-            # This completely prevents the GUI flash when you open the Essay dock later!
-            from PySide6.QtWebEngineWidgets import QWebEngineView
-            self._dummy_browser = QWebEngineView(self)
-            self._dummy_browser.setFixedSize(1, 1)
-            self._dummy_browser.hide()
-            # ------------------------
+            # Boot the heavy graphics engine using a Page instead of a View.
+            # This completely prevents the GUI flash without crashing the OS Compositor!
+            from PySide6.QtWebEngineCore import QWebEnginePage
+            self._dummy_browser = QWebEnginePage(self)
 
             if not hasattr(self, 'shared_llm_manager') or not self.shared_llm_manager.ai_enabled: 
                 return
@@ -356,6 +370,7 @@ class MainWindow(QMainWindow):
         layout_menu.addAction("⭐ Set Current as Default Layout", self._save_as_default_layout)
         layout_menu.addAction("💾 Save as Custom Template...", self._save_layout_template)
         self.custom_layouts_menu = layout_menu.addMenu("📁 Load Custom Template")
+        self.delete_layouts_menu = layout_menu.addMenu("🗑️ Delete Custom Template")
         layout_menu.addAction("🔄 Reset to Default Sane Layout", self._reset_default_layout)
         self.btn_layouts.setMenu(layout_menu)
         self.top_toolbar.addWidget(self.btn_layouts)
@@ -405,28 +420,6 @@ class MainWindow(QMainWindow):
             
         dock.show()
 
-    
-
-    # REPLACE IN: gui/main_window.py
-    def spawn_citation_dock(self):
-        if self.citation_docks:
-            view = self.citation_docks[0]
-            if view.parentWidget():
-                view.parentWidget().show()
-                view.parentWidget().raise_()
-            return
-
-        dock = QDockWidget("📚 Citation Manager", self)
-        dock.setObjectName("SingleCitationDock")
-
-        from gui.docks.citation_dock import CitationDock
-        cite_view = CitationDock(self.citation_manager, self.project_manager, self)
-        dock.setWidget(cite_view)
-
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
-        self.citation_docks.append(cite_view)
-        dock.show()
-
     def toggle_full_screen(self):
         from PySide6.QtCore import Qt
         
@@ -456,25 +449,23 @@ class MainWindow(QMainWindow):
             self._set_button_hover_state(self.btn_fullscreen, self.btn_fullscreen.property("hover_expanded"))
 
     def spawn_essay_dock(self):
-        self.essay_counter = getattr(self, 'essay_counter', 0) + 1
-        dock = QDockWidget(f"📝 Essay Writer {self.essay_counter}", self)
-        dock.setObjectName(f"EssayDock_{self.essay_counter}")
+        if not hasattr(self, 'essay_docks'):
+            self.essay_docks = []
+            
+        idx = len(self.essay_docks) + 1
+        dock = QDockWidget(f"📝 Essay Writer {idx}", self)
+        dock.setObjectName(f"EssayDock_{idx}")
         
-        from gui.docks.essay_dock import EssayTab
         essay_view = EssayTab(self.project_manager, self)
         dock.setWidget(essay_view)
         
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
-        
-        if not hasattr(self, 'essay_docks'):
-            self.essay_docks = []
         self.essay_docks.append(essay_view)
         
         if hasattr(self, 'theme_manager'): 
             essay_view.update_theme(self.theme_manager.get_theme())
             
         dock.show()
-
     def spawn_dictionary_dock(self):
         # STRICT SINGLETON: Only one dictionary dock needed
         if self.dict_docks:
@@ -507,18 +498,19 @@ class MainWindow(QMainWindow):
                 view.parentWidget().raise_()
                 return
                 
-        # 2. Otherwise, create a new one
-        self.ws_counter = getattr(self, 'ws_counter', 0) + 1
-        dock = QDockWidget(f"🧠 Workspace {self.ws_counter}", self)
-        dock.setObjectName(f"WorkspaceDock_{self.ws_counter}") 
+        # 2. Ditch the endless counter. Use deterministic ID based on list length.
+        idx = len(self.workspace_docks) + 1
+        dock = QDockWidget(f"🧠 Workspace {idx}", self)
+        dock.setObjectName(f"WorkspaceDock_{idx}") 
         
-        from gui.components.workspace_view import WorkspaceView
         ws_view = WorkspaceView(self)
         dock.setWidget(ws_view)
         
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
         self.workspace_docks.append(ws_view)
-        if hasattr(self, 'theme_manager'): ws_view.update_theme(self.theme_manager.get_theme())
+        
+        if hasattr(self, 'theme_manager'): 
+            ws_view.update_theme(self.theme_manager.get_theme())
         ws_view._sync_workspace()
         dock.show()
     def spawn_research_dock(self):
@@ -547,48 +539,28 @@ class MainWindow(QMainWindow):
             
         dock.show()
 
-    def _save_as_default_layout(self):
-        state_bytes = self.saveState().toBase64().data().decode('utf-8')
-        self.settings.setValue("default_startup_layout", state_bytes)
-        
-        # Save the dock counts so we can recreate them on Reset!
-        import json
-        counts = {
-            "workspaces": len(self.workspace_docks),
-            "notes": len(self.notes_docks),
-            "chats": len(self.chat_docks),
-            "scratchpads": len(self.scratchpad_docks),
-            "ocrs": len(self.ocr_docks),
-            "audios": len(self.audio_docks)
-        }
-        self.settings.setValue("default_startup_counts", json.dumps(counts))
-        
-        from PySide6.QtWidgets import QMessageBox
-        from PySide6.QtCore import Qt
-        msg = QMessageBox(self)
-        msg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowStaysOnTopHint)
-        msg.setIcon(QMessageBox.Icon.Information)
-        msg.setWindowTitle("Default Set")
-        msg.setText("This layout is now your permanent default!")
-        msg.exec()
+
 
     
     def spawn_notes_dock(self):
         for view in self.notes_docks:
             if view.parentWidget() and not view.parentWidget().isVisible():
-                view.parentWidget().show(); view.parentWidget().raise_(); return
+                view.parentWidget().show()
+                view.parentWidget().raise_()
+                return
                 
-        self.notes_counter = getattr(self, 'notes_counter', 0) + 1
-        dock = QDockWidget(f"📝 Notes List {self.notes_counter}", self)
-        dock.setObjectName(f"NotesDock_{self.notes_counter}")
+        idx = len(self.notes_docks) + 1
+        dock = QDockWidget(f"📝 Notes List {idx}", self)
+        dock.setObjectName(f"NotesDock_{idx}")
         
-        from gui.docks.notes_dock import NotesTab
         notes_view = NotesTab(None, self.viewer, self)
         dock.setWidget(notes_view)
         
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
         self.notes_docks.append(notes_view)
-        if hasattr(self, 'theme_manager'): notes_view.update_theme(self.theme_manager.get_theme())
+        
+        if hasattr(self, 'theme_manager'): 
+            notes_view.update_theme(self.theme_manager.get_theme())
         notes_view.refresh_notes()
         dock.show()
     def _export_llm_log(self):
@@ -644,6 +616,30 @@ class MainWindow(QMainWindow):
         chat_view.refresh_project_ui()
         dock.show()
 
+    def spawn_citation_dock(self):
+        if self.citation_docks:
+            view = self.citation_docks[0]
+            if view.parentWidget():
+                view.parentWidget().show()
+                view.parentWidget().raise_()
+            return
+
+        dock = QDockWidget("📚 Citation Manager", self)
+        dock.setObjectName("SingleCitationDock")
+
+        from gui.docks.citation_dock import CitationDock
+        cite_view = CitationDock(self.citation_manager, self.project_manager, self)
+        dock.setWidget(cite_view)
+
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        self.citation_docks.append(cite_view)
+        
+        # ---> FIX: Apply theme instantly on spawn <---
+        if hasattr(self, 'theme_manager'): 
+            cite_view.update_theme(self.theme_manager.get_theme())
+            
+        dock.show()
+
     def spawn_ocr_dock(self):
         # STRICT SINGLETON
         if self.ocr_docks:
@@ -658,6 +654,11 @@ class MainWindow(QMainWindow):
         dock.setWidget(view)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
         self.ocr_docks.append(view)
+        
+        # ---> FIX: Apply theme instantly on spawn <---
+        if hasattr(self, 'theme_manager'): 
+            view.update_theme(self.theme_manager.get_theme())
+            
         dock.show()
 
     def spawn_audio_dock(self):
@@ -674,24 +675,31 @@ class MainWindow(QMainWindow):
         dock.setWidget(view)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
         self.audio_docks.append(view)
+        
+        # ---> FIX: Apply theme instantly on spawn <---
+        if hasattr(self, 'theme_manager'): 
+            view.update_theme(self.theme_manager.get_theme())
+            
         dock.show()
         
     def spawn_scratchpad_dock(self):
         for view in self.scratchpad_docks:
             if view.parentWidget() and not view.parentWidget().isVisible():
-                view.parentWidget().show(); view.parentWidget().raise_(); return
+                view.parentWidget().show()
+                view.parentWidget().raise_()
+                return
                 
-        self.scratch_counter = getattr(self, 'scratch_counter', 0) + 1
-        dock = QDockWidget(f"✍️ Scratchpad {self.scratch_counter}", self)
-        dock.setObjectName(f"ScratchDock_{self.scratch_counter}")
+        idx = len(self.scratchpad_docks) + 1
+        dock = QDockWidget(f"✍️ Scratchpad {idx}", self)
+        dock.setObjectName(f"ScratchDock_{idx}")
         
-        from PySide6.QtWidgets import QTextEdit
         editor = QTextEdit()
         editor.setPlaceholderText("Jot down quick thoughts here...\n\n(Stays perfectly saved in memory until you load a new project)")
         dock.setWidget(editor)
         
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
         self.scratchpad_docks.append(editor)
+        
         if hasattr(self, 'theme_manager'):
             theme = self.theme_manager.get_theme()
             editor.setStyleSheet(f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: none;")
@@ -896,45 +904,29 @@ class MainWindow(QMainWindow):
         self.ocr_banner.setStyleSheet(f"background-color: {theme['warning']}; border-bottom: 1px solid {theme['border']};")
         self.lbl_ocr_banner.setStyleSheet(f"font-weight: bold; color: #1e1e1e; border: none;") 
 
-        # Broadcast to all live docks
+        # 1. BROADCAST TO ALL LIVE DOCKS (Added the missing ones!)
         for ws in self.workspace_docks: ws.update_theme(theme)
         for n in self.notes_docks: n.update_theme(theme)
-        for c in self.chat_docks: c.update_theme(theme)
+        for c in getattr(self, 'chat_docks', []): c.update_theme(theme)
+        for b in getattr(self, 'brainstorm_docks', []): b.update_theme(theme)
+        for r in getattr(self, 'research_docks', []): r.update_theme(theme)
+        for d in getattr(self, 'dict_docks', []): d.update_theme(theme)
+        for e in getattr(self, 'essay_docks', []): e.update_theme(theme)
+        for o in getattr(self, 'ocr_docks', []): o.update_theme(theme)
+        for a in getattr(self, 'audio_docks', []): a.update_theme(theme)
+        for c in getattr(self, 'citation_docks', []): c.update_theme(theme)
+
+        # 2. Fix Scratchpads explicitly since they are raw QTextEdits
+        for s in getattr(self, 'scratchpad_docks', []):
+            s.setStyleSheet(f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: none;")
 
         if hasattr(self.viewer, "update_theme"):
             self.viewer.update_theme(theme)
 
-        # Add inside update_theme(self, theme):
         dock_style = f"""
-            QDockWidget {{
-                font-weight: bold;
-                color: {theme['text_main']};
-            }}
-            QDockWidget::title {{
-                background: {theme['bg_panel']};
-                padding: 6px 10px;
-                border: 1px solid {theme['border']};
-            }}
-            QDockWidget::close-button, QDockWidget::float-button {{
-                background: transparent;
-                padding: 4px;
-                icon-size: 18px; 
-            }}
-            QDockWidget::close-button:hover, QDockWidget::float-button:hover {{
-                background: {theme['accent_hover']};
-                border-radius: 4px;
-            }}
-            /* NEW: Make dock separators fat and grabbable */
-            QMainWindow::separator {{
-                background: {theme['border']};
-                width: 6px; 
-                height: 6px;
-            }}
-            QMainWindow::separator:hover {{
-                background: {theme['accent']};
-            }}
+        /* ... keep your existing QDockWidget styles ... */
         """
-        self.setStyleSheet(self.styleSheet() + dock_style)
+        self.setStyleSheet(dock_style)
 
     def _clear_ui_for_new_project(self):
         self.current_file_path = None
@@ -978,6 +970,7 @@ class MainWindow(QMainWindow):
             self._refresh_doc_list()
             
             self.setWindowTitle(f"Papyrus - {self.project_manager.project_name}")
+            QTimer.singleShot(50, self._reset_default_layout)
             
 
     def _load_project(self, path):
@@ -997,22 +990,29 @@ class MainWindow(QMainWindow):
             self.setWindowTitle(f"Papyrus - {self.project_manager.project_name}")
             self._refresh_doc_list()
             
-            # --- Restore Saved Layouts ---
-            import json
+           # --- Restore Saved Layouts ---
+            state_str = self.project_manager.get_metadata("window_layout_state")
             dock_info = self.project_manager.get_metadata("open_docks_count")
-            if dock_info:
-                counts = json.loads(dock_info)
-                for _ in range(counts.get("workspaces", 0)): self.spawn_workspace_dock()
-                for _ in range(counts.get("notes", 0)): self.spawn_notes_dock()
-                for _ in range(counts.get("chats", 0)): self.spawn_chat_dock()
-                for _ in range(counts.get("scratchpads", 0)): self.spawn_scratchpad_dock()
-            else:
-                self.spawn_workspace_dock()
-                self.spawn_notes_dock()
-                self._reset_default_layout() 
-                
-            text_data = self.project_manager.get_metadata("scratchpad_texts")
-            if text_data:
+            
+            # Create a delayed function to apply the UI *after* zombies are cleared
+            def apply_project_ui():
+                if state_str and dock_info:
+                    import json
+                    try:
+                        counts = json.loads(dock_info)
+                        self._sync_dock_counts(counts)
+                    except Exception as e:
+                        print(f"Error loading project docks: {e}")
+                        
+                    from PySide6.QtCore import QByteArray
+                    self.restoreState(QByteArray.fromBase64(state_str.encode('utf-8')))
+                else:
+                    self._reset_default_layout()
+
+                # --- Restore Scratchpad Texts ---
+                text_data = self.project_manager.get_metadata("scratchpad_texts")
+                if text_data:
+                    import json
                     try:
                         saved_texts = json.loads(text_data)
                         for i, editor in enumerate(self.scratchpad_docks):
@@ -1020,37 +1020,81 @@ class MainWindow(QMainWindow):
                                 editor.setPlainText(saved_texts[i])
                     except Exception as e:
                         print(f"Error loading scratchpad text: {e}")
-                        
-            state_str = self.project_manager.get_metadata("window_layout_state")
-            if state_str:
-                from PySide6.QtCore import QByteArray
-                self.restoreState(QByteArray.fromBase64(state_str.encode('utf-8')))
 
-            from PySide6.QtWidgets import QDockWidget
-            for dock in self.findChildren(QDockWidget):
-                dock.show()
-            
-            for c in self.chat_docks: c.refresh_project_ui()
-            
-            if self.project_manager.pdfs:
-                self.switch_to_pdf(self.project_manager.pdfs[0])
+                # Force visibility and updates
+                from PySide6.QtWidgets import QDockWidget
+                for dock in self.findChildren(QDockWidget):
+                    dock.show()
+                
+                for c in self.chat_docks: c.refresh_project_ui()
+                
+                if self.project_manager.pdfs:
+                    self.switch_to_pdf(self.project_manager.pdfs[0])
+
+            # Trigger the UI layout sequence after 50ms
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(50, apply_project_ui)
+
         else:
+            from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "Error", "Failed to load project file.")
+            
         self._refresh_doc_tag_filter()
+    def _save_as_default_layout(self):
+        import json
+        state_bytes = self.saveState().toBase64().data().decode('utf-8')
+        counts = {
+            "workspaces": self._get_visible_count(self.workspace_docks),
+            "notes": self._get_visible_count(self.notes_docks),
+            "chats": self._get_visible_count(self.chat_docks),
+            "scratchpads": self._get_visible_count(self.scratchpad_docks),
+            "ocrs": self._get_visible_count(self.ocr_docks),
+            "audios": self._get_visible_count(self.audio_docks),
+            "essays": self._get_visible_count(getattr(self, 'essay_docks', [])),
+            "dicts": self._get_visible_count(getattr(self, 'dict_docks', [])),
+            "research": self._get_visible_count(getattr(self, 'research_docks', [])),
+            "brainstorm": self._get_visible_count(getattr(self, 'brainstorm_docks', []))
+        }
+        self.settings.setValue("default_startup_layout", state_bytes)
+        self.settings.setValue("default_startup_counts", json.dumps(counts))
+        self.settings.sync()
+        from PySide6.QtWidgets import QMessageBox
+        from PySide6.QtCore import Qt
+        msg = QMessageBox(self)
+        msg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowStaysOnTopHint)
+        msg.setIcon(QMessageBox.Icon.Information)
+        msg.setWindowTitle("Default Set")
+        msg.setText("This layout is now your permanent default!")
+        msg.exec()
+
     def _save_layout_template(self):
-        # The WindowStaysOnTopHint prevents XFCE from hiding the popup
+        import json
+        from PySide6.QtWidgets import QInputDialog, QMessageBox
+        from PySide6.QtCore import Qt
+        
         name, ok = QInputDialog.getText(
-            self, 
-            "Save Layout Template", 
-            "Enter a name for this layout (e.g., 'Writing Mode'):",
+            self, "Save Layout Template", "Enter a name for this layout:",
             flags=Qt.WindowType.Dialog | Qt.WindowType.WindowStaysOnTopHint
         )
         if ok and name.strip():
             state_bytes = self.saveState().toBase64().data().decode('utf-8')
-            self.settings.setValue(f"layouts/{name.strip()}", state_bytes)
+            counts = {
+                "workspaces": self._get_visible_count(self.workspace_docks),
+                "notes": self._get_visible_count(self.notes_docks),
+                "chats": self._get_visible_count(self.chat_docks),
+                "scratchpads": self._get_visible_count(self.scratchpad_docks),
+                "ocrs": self._get_visible_count(self.ocr_docks),
+                "audios": self._get_visible_count(self.audio_docks),
+                "essays": self._get_visible_count(getattr(self, 'essay_docks', [])),
+                "dicts": self._get_visible_count(getattr(self, 'dict_docks', [])),
+                "research": self._get_visible_count(getattr(self, 'research_docks', [])),
+                "brainstorm": self._get_visible_count(getattr(self, 'brainstorm_docks', []))
+            }
+            payload = json.dumps({"state": state_bytes, "counts": counts})
+            self.settings.setValue(f"layouts/{name.strip()}", payload)
+            self.settings.sync()
             self._refresh_layout_templates_menu()
             
-            # Force the success box to stay on top too
             msg = QMessageBox(self)
             msg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowStaysOnTopHint)
             msg.setIcon(QMessageBox.Icon.Information)
@@ -1058,51 +1102,159 @@ class MainWindow(QMainWindow):
             msg.setText(f"Layout '{name}' saved successfully!")
             msg.exec()
 
-    def _refresh_layout_templates_menu(self):
-        self.custom_layouts_menu.clear()
-        self.settings.beginGroup("layouts")
-        for key in self.settings.childKeys():
-            action = self.custom_layouts_menu.addAction(key)
-            action.triggered.connect(lambda checked, k=key: self._apply_layout_template(k))
-        self.settings.endGroup()
-        if self.custom_layouts_menu.isEmpty():
-            self.custom_layouts_menu.addAction("No custom templates saved yet").setEnabled(False)
-
-    def _apply_layout_template(self, name):
-        state_str = self.settings.value(f"layouts/{name}")
-        if state_str:
-            from PySide6.QtCore import QByteArray
-            self.restoreState(QByteArray.fromBase64(state_str.encode('utf-8')))
-
     def _reset_default_layout(self):
         import json
-        default_state = self.settings.value("default_startup_layout")
-        counts_str = self.settings.value("default_startup_counts")
-        
-        # 1. Hydrate the exact number of docks required for the layout
-        if counts_str:
-            try:
-                counts = json.loads(counts_str)
-                while len(self.workspace_docks) < counts.get("workspaces", 0): self.spawn_workspace_dock()
-                while len(self.notes_docks) < counts.get("notes", 0): self.spawn_notes_dock()
-                while len(self.chat_docks) < counts.get("chats", 0): self.spawn_chat_dock()
-                while len(self.scratchpad_docks) < counts.get("scratchpads", 0): self.spawn_scratchpad_dock()
-                while len(self.ocr_docks) < counts.get("ocrs", 0): self.spawn_ocr_dock()
-                while len(self.audio_docks) < counts.get("audios", 0): self.spawn_audio_dock()
-            except Exception as e: print(f"Error parsing layout counts: {e}")
-        
-        # 2. Restore the positions
-        if default_state:
-            from PySide6.QtCore import QByteArray
-            self.restoreState(QByteArray.fromBase64(default_state.encode('utf-8')))
-        else:
-            HARDCODED_DEFAULT = "YOUR_MASTER_STRING_HERE"
-            from PySide6.QtCore import QByteArray
-            self.restoreState(QByteArray.fromBase64(HARDCODED_DEFAULT.encode('utf-8')))
-
-        # 3. Force visibility
+        from PySide6.QtCore import QByteArray
         from PySide6.QtWidgets import QDockWidget
-        for dock in self.findChildren(QDockWidget): dock.show()
+
+        default_state = str(self.settings.value("default_startup_layout", ""))
+        counts_str = str(self.settings.value("default_startup_counts", ""))
+
+        # WIRING POINT 3: The Gatekeeper
+        # If settings are blank, missing, or corrupted, route to Factory Default
+        if not default_state or not counts_str or default_state == "None" or counts_str == "None":
+            self._apply_factory_default()
+            return
+
+        # If user settings exist, load them instead
+        counts = {}
+        try:
+            counts = json.loads(counts_str)
+        except Exception as e:
+            print(f"Error parsing layout counts: {e}")
+            self._apply_factory_default()
+            return
+
+        self._sync_dock_counts(counts)
+        self.restoreState(QByteArray.fromBase64(default_state.encode('utf-8')))
+
+        for dock in self.findChildren(QDockWidget): 
+            dock.show()
+    def _apply_factory_default(self):
+        """The hardcoded layout for fresh installs or before a user sets a custom default."""
+        from PySide6.QtCore import QByteArray
+        
+        # 1. Paste the exact dictionary your console printed out here:
+        hardcoded_counts = {'workspaces': 1, 'notes': 0, 'chats': 1, 'scratchpads': 1, 'ocrs': 0, 'audios': 0, 'essays': 1, 'dicts': 0, 'research': 1, 'brainstorm': 1}
+        
+        # 2. Paste the massive Base64 string your console printed out here:
+        hardcoded_state = "AAAA/wAAAAD9AAAAAgAAAAAAAAQRAAAD+fwCAAAAAfwAAAApAAAD+QAAAREA/////AEAAAAD/AAAAAAAAADIAAAAnAD////8AgAAAAT7AAAAHgBEAG8AYwBFAHgAcABsAG8AcgBlAHIARABvAGMAawEAAAApAAADMAAAAKoA////+wAAABoAUwBjAHIAYQB0AGMAaABEAG8AYwBrAF8AMQEAAANfAAAAwwAAAGEA////+wAAABoAUwBjAHIAYQB0AGMAaABEAG8AYwBrAF8AMQEAAALfAAABQwAAAAAAAAAA+wAAABQAQwBoAGEAdABEAG8AYwBrAF8AMQEAAADgAAADWAAAAAAAAAAA/AAAAM4AAANDAAAB5AD////6AAAAAQIAAAAC+wAAABYARQBzAHMAYQB5AEQAbwBjAGsAXwAxAQAAAAD/////AAAAWAD////7AAAAGgBQAEQARgBWAGkAZQB3AGUAcgBEAG8AYwBrAQAAACkAAAQPAAAAXQD////8AAADSwAAAT0AAAAAAP////wCAAAAAfsAAAAeAFcAbwByAGsAcwBwAGEAYwBlAEQAbwBjAGsAXwAyAQAAAjIAAAIGAAAAAAAAAAAAAAABAAADYwAAA/n8AgAAAAj7AAAAFgBOAG8AdABlAHMARABvAGMAawBfADICAAAGEwAAABkAAAFkAAAD9vsAAAAeAFMAaQBuAGcAbABlAEEAdQBkAGkAbwBEAG8AYwBrAAAAAdQAAAJkAAAAAAAAAAD7AAAAGgBTAGMAcgBhAHQAYwBoAEQAbwBjAGsAXwAyAAAAA7MAAACFAAAAAAAAAAD7AAAAFgBOAG8AdABlAHMARABvAGMAawBfADEBAAAAKQAAAIcAAAAAAAAAAPsAAAAWAE4AbwB0AGUAcwBEAG8AYwBrAF8AMQAAAAApAAAEDwAAAAAAAAAA/AAAACkAAAP5AAABmAEAACH6AAAAAAEAAAAF+wAAAB4AVwBvAHIAawBzAHAAYQBjAGUARABvAGMAawBfADEBAAAAAP////8AAABKAP////sAAAAoAFMAaQBuAGcAbABlAEIAcgBhAGkAbgBzAHQAbwByAG0ARABvAGMAawEAAAAA/////wAAAikA////+wAAACoAUgBlAHMAZQBhAHIAYwBoAEEAcwBzAGkAcwB0AGEAbgB0AEQAbwBjAGsBAAAAAP////8AAAIoAP////sAAAAcAFMAaQBuAGcAbABlAEMAaABhAHQARABvAGMAawEAAAAA/////wAAAEoA////+wAAAB4AVwBvAHIAawBzAHAAYQBjAGUARABvAGMAawBfADEBAAAD8gAAA44AAAAAAAAAAPsAAAAaAFMAaQBuAGcAbABlAE8AQwBSAEQAbwBjAGsBAAADpQAAAJMAAAAAAAAAAPsAAAAoAFMAaQBuAGcAbABlAEQAaQBjAHQAaQBvAG4AYQByAHkARABvAGMAawAAAANdAAAA2wAAAAAAAAAAAAAAAAAAA/kAAAAEAAAABAAAAAgAAAAI/AAAAAEAAAACAAAAAQAAABYATQBhAGkAbgBUAG8AbwBsAGIAYQByAQAAAAD/////AAAAAAAAAAA=" 
+        
+        # 3. Tell the orchestrator to build it!
+        self._sync_dock_counts(hardcoded_counts)
+        self.restoreState(QByteArray.fromBase64(hardcoded_state.encode('utf-8')))
+    def _apply_layout_template(self, name):
+        import json
+        payload_str = self.settings.value(f"layouts/{name}")
+        if not payload_str: return
+        
+        try:
+            # Detect if it's the new JSON format or an old broken string
+            if payload_str.startswith("{"):
+                payload = json.loads(payload_str)
+                state_str = payload.get("state", "")
+                counts = payload.get("counts", {})
+            else:
+                state_str = payload_str
+                counts = {} # Old saves don't have counts, so this will close everything safely
+
+            # 1. Let the Orchestrator build the physical windows
+            self._sync_dock_counts(counts)
+
+            # 2. Tell Qt to arrange them
+            if state_str:
+                from PySide6.QtCore import QByteArray
+                self.restoreState(QByteArray.fromBase64(state_str.encode('utf-8')))
+
+            # 3. Force visibility
+            from PySide6.QtWidgets import QDockWidget
+            for dock in self.findChildren(QDockWidget): dock.show()
+            
+        except Exception as e:
+            print(f"Failed to apply custom layout: {e}")
+
+    def _refresh_layout_templates_menu(self):
+        self.custom_layouts_menu.clear()
+        self.delete_layouts_menu.clear()
+        
+        self.settings.beginGroup("layouts")
+        keys = self.settings.childKeys()
+        self.settings.endGroup()
+        
+        if not keys:
+            self.custom_layouts_menu.addAction("No custom templates saved").setEnabled(False)
+            self.delete_layouts_menu.addAction("No custom templates saved").setEnabled(False)
+            return
+            
+        for key in keys:
+            # Load Action
+            load_action = self.custom_layouts_menu.addAction(key)
+            load_action.triggered.connect(lambda checked=False, k=key: self._apply_layout_template(k))
+            
+            # Delete Action
+            delete_action = self.delete_layouts_menu.addAction(f"Delete '{key}'")
+            delete_action.triggered.connect(lambda checked=False, k=key: self._delete_layout_template(k))
+
+    def _delete_layout_template(self, name):
+        from PySide6.QtWidgets import QMessageBox
+        from PySide6.QtCore import Qt
+        
+        # The WindowStaysOnTopHint ensures the confirmation box doesn't get hidden behind the main window
+        reply = QMessageBox.question(
+            self, "Delete Layout", 
+            f"Are you sure you want to delete the layout '{name}'?", 
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            self.settings.remove(f"layouts/{name}")
+            self.settings.sync()
+            self._refresh_layout_templates_menu()
+    def _get_visible_count(self, dock_list):
+        """Only counts docks that are currently open and visible on the screen."""
+        return sum(1 for view in dock_list if view and view.parentWidget() and view.parentWidget().isVisible())
+    def _sync_dock_counts(self, counts):
+        """Spawns missing docks and destroys excess/hidden docks to match a layout."""
+        
+        # 1. SPAWN missing docks
+        while len(self.workspace_docks) < counts.get("workspaces", 0): self.spawn_workspace_dock()
+        while len(self.notes_docks) < counts.get("notes", 0): self.spawn_notes_dock()
+        while len(self.chat_docks) < counts.get("chats", 0): self.spawn_chat_dock()
+        while len(self.scratchpad_docks) < counts.get("scratchpads", 0): self.spawn_scratchpad_dock()
+        while len(self.ocr_docks) < counts.get("ocrs", 0): self.spawn_ocr_dock()
+        while len(self.audio_docks) < counts.get("audios", 0): self.spawn_audio_dock()
+        while len(getattr(self, 'essay_docks', [])) < counts.get("essays", 0): self.spawn_essay_dock()
+        while len(getattr(self, 'dict_docks', [])) < counts.get("dicts", 0): self.spawn_dictionary_dock()
+        while len(getattr(self, 'research_docks', [])) < counts.get("research", 0): self.spawn_research_dock()
+        while len(getattr(self, 'brainstorm_docks', [])) < counts.get("brainstorm", 0): self.spawn_brainstorm_dock()
+
+        # 2. DESTROY excess docks (Targeting hidden ones first!)
+        def trim_docks(dock_list, target_count):
+            # Phase A: Purge any docks that are currently hidden/closed
+            for view in list(dock_list):
+                if len(dock_list) <= target_count: break
+                if view.parentWidget() and not view.parentWidget().isVisible():
+                    dock_list.remove(view)
+                    view.parentWidget().close()
+                    view.parentWidget().deleteLater()
+                    
+            # Phase B: If we STILL have too many, pop from the end of the list
+            while len(dock_list) > target_count:
+                view = dock_list.pop()
+                if view and view.parentWidget():
+                    view.parentWidget().close()
+                    view.parentWidget().deleteLater()
+
+        trim_docks(self.workspace_docks, counts.get("workspaces", 0))
+        trim_docks(self.notes_docks, counts.get("notes", 0))
+        trim_docks(self.chat_docks, counts.get("chats", 0))
+        trim_docks(self.scratchpad_docks, counts.get("scratchpads", 0))
+        trim_docks(self.ocr_docks, counts.get("ocrs", 0))
+        trim_docks(self.audio_docks, counts.get("audios", 0))
+        trim_docks(getattr(self, 'essay_docks', []), counts.get("essays", 0))
+        trim_docks(getattr(self, 'dict_docks', []), counts.get("dicts", 0))
+        trim_docks(getattr(self, 'research_docks', []), counts.get("research", 0))
+        trim_docks(getattr(self, 'brainstorm_docks', []), counts.get("brainstorm", 0))
 
     def _save_project_as(self):
         if not self.project_manager.project_filepath:

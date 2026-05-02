@@ -109,27 +109,29 @@ class TTSTab(QWidget):
     def update_theme(self, theme):
         self.theme = theme
         
-        # NUCLEAR FIX for PyQt white background bleed
-        self.setAutoFillBackground(True)
-        p = self.palette()
-        p.setColor(self.backgroundRole(), QColor(theme['bg_main']))
-        self.setPalette(p)
+        # Ensure base colors are correct before styling internals
+        self.setStyleSheet(f"TTSTab {{ background-color: {theme['bg_main']}; color: {theme['text_main']}; }}")
         
-        self.content_widget.setAutoFillBackground(True)
-        self.content_widget.setPalette(p)
+        # Explicitly theme the Scroll Area components
+        self.tab_scroll_area.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        self.tab_scroll_area.viewport().setStyleSheet("background: transparent;")
+        self.content_widget.setStyleSheet(f"QWidget {{ background-color: {theme['bg_main']}; color: {theme['text_main']}; }}")
         
-        # Blanket stylesheet to catch all un-styled elements
-        self.setStyleSheet(f"""
-            QWidget {{ background-color: {theme['bg_main']}; color: {theme['text_main']}; }}
-            QScrollArea {{ background-color: transparent; border: none; }}
-            QTextEdit {{ background-color: {theme['bg_input']}; border: 1px solid {theme['border']}; border-radius: 4px; padding: 4px; }}
-            QComboBox, QSpinBox {{ background-color: {theme['bg_input']}; border: 1px solid {theme['border']}; border-radius: 4px; padding: 4px; }}
-            QLabel {{ background: transparent; font-weight: bold; }}
-            QCheckBox {{ background: transparent; font-weight: bold; }}
-        """)
+        # Theme Inputs
+        input_style = f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']}; border-radius: 4px; padding: 4px;"
+        self.text_editor.setStyleSheet(input_style)
+        self.spin_start.setStyleSheet(input_style)
+        self.spin_end.setStyleSheet(input_style)
+        self.voice_combo.setStyleSheet(input_style)
+        self.speed_combo.setStyleSheet(input_style)
         
+        # Theme basic labels
+        self.instructions.setStyleSheet(f"color: {theme['text_main']}; font-weight: bold; background: transparent;")
+        self.chk_ignore.setStyleSheet(f"color: {theme['text_main']}; font-weight: bold; background: transparent;")
+        
+        # Theme Buttons
         self.btn_fetch.setStyleSheet(f"""
-            QPushButton {{ background-color: {theme['bg_input']}; color: {theme['text_main']}; padding: 6px; border: 1px solid {theme['border']}; border-radius: 4px; font-weight: bold; }}
+            QPushButton {{ background-color: {theme['bg_panel']}; color: {theme['text_main']}; padding: 6px; border: 1px solid {theme['border']}; border-radius: 4px; font-weight: bold; }}
             QPushButton:hover {{ background-color: {theme['accent_hover']}; color: white; border: none; }}
         """)
         

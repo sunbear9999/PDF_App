@@ -6,7 +6,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[('gui/components/examples/*.gif', 'gui/components/examples'),
-        ('icon.png', '.'),('core/pdf_worker.py', 'core'),('assets/quill/*', 'assets/quill'),('qtwebengine_dictionaries/*', 'qtwebengine_dictionaries')],
+        ('icon.png', '.'),('core/pdf_worker.py', 'core'),('assets/quill/*', 'assets/quill'),('qtwebengine_dictionaries/*', 'qtwebengine_dictionaries'),('assets/default_english.json', 'assets')],
     hiddenimports=['chromadb.telemetry.product.posthog','chromadb.api.rust','piper-tts'],
     hookspath=[],
     hooksconfig={},

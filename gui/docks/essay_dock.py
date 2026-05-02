@@ -3,6 +3,8 @@ import os
 import sys
 import uuid
 import json
+import fitz
+import tempfile
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, 
                              QPushButton, QComboBox, QFileDialog, QLabel, QStackedWidget)
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -62,7 +64,6 @@ class EssayTab(QWidget):
         self.loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.stack.addWidget(self.loading_label)
 
-        # Enable Native Chromium Spellcheck
         profile = QWebEngineProfile.defaultProfile()
         profile.setSpellCheckEnabled(True)
         profile.setSpellCheckLanguages(["en-US"])
@@ -79,7 +80,6 @@ class EssayTab(QWidget):
         self._init_editor()
 
     def _on_zoom_changed(self, text):
-        """Applies native Chromium scaling to the entire document."""
         if hasattr(self, 'web_view'):
             factor = float(text.replace("%", "")) / 100.0
             self.web_view.setZoomFactor(factor)
@@ -87,6 +87,10 @@ class EssayTab(QWidget):
     def _on_load_finished(self, ok):
         if ok:
             self.stack.setCurrentWidget(self.web_view)
+            
+            if hasattr(self, 'current_theme') and self.current_theme:
+                self.update_theme(self.current_theme)
+                
             if not hasattr(self, '_initial_load_done'):
                 self._initial_load_done = True
                 self.refresh_essay_list(auto_load=True)
@@ -127,7 +131,6 @@ class EssayTab(QWidget):
         self.save_essay_state(callback_after=spawn_new)
 
     def _init_editor(self):
-        # PyInstaller Safe Pathing
         if getattr(sys, 'frozen', False):
             root_dir = sys._MEIPASS
         else:
@@ -135,9 +138,6 @@ class EssayTab(QWidget):
         
         js_path = os.path.join(root_dir, "assets", "quill", "quill.js")
         css_path = os.path.join(root_dir, "assets", "quill", "quill.snow.css")
-        
-        js_uri = QUrl.fromLocalFile(js_path).url()
-        css_uri = QUrl.fromLocalFile(css_path).url()
         dummy_base_url = QUrl.fromLocalFile(os.path.join(root_dir, "dummy_origin.html"))
 
         html_template = f"""
@@ -145,26 +145,69 @@ class EssayTab(QWidget):
         <html>
         <head>
             <meta charset="utf-8">
-            <link href="{css_uri}" rel="stylesheet">
-            <script src="{js_uri}"></script>
+            <link href="{QUrl.fromLocalFile(css_path).url()}" rel="stylesheet">
+            <script src="{QUrl.fromLocalFile(js_path).url()}"></script>
             <style>
-                body, html {{ margin: 0; padding: 0; height: 100%; background: #1e1e1e; color: #e0e0e0; overflow: hidden; }}
-                .ql-toolbar.ql-snow {{ background: #2d2d2d; border: none !important; border-bottom: 1px solid #111 !important; padding: 8px !important; display: flex; justify-content: center; box-shadow: 0 2px 4px rgba(0,0,0,0.3); z-index: 10; position: relative; min-width: 800px; }}
+                body, html {{ 
+                    margin: 0; padding: 0; height: 100vh; overflow: hidden; 
+                    display: flex; flex-direction: column; background: #1e1e1e; 
+                }}
                 
-                /* CSS OVERLAP FIX */
+                .ql-toolbar.ql-snow {{ 
+                    flex-shrink: 0; 
+                    background: #2d2d2d; border: none !important; border-bottom: 1px solid #111 !important; 
+                    padding: 8px !important; display: flex; justify-content: center; z-index: 10; 
+                    box-shadow: 0px 2px 10px rgba(0,0,0,0.3);
+                }}
+                
                 .ql-snow .ql-picker.ql-font {{ width: 165px !important; text-align: left; }}
                 .ql-snow .ql-picker.ql-font .ql-picker-label {{ padding-right: 20px !important; }}
                 .ql-snow .ql-picker.ql-size {{ width: 70px !important; text-align: left; }}
                 
-                #scroller {{ height: calc(100vh - 45px); width: 100%; overflow: auto; background: #151515; padding: 30px; box-sizing: border-box; text-align: center; }}
-                #editor-container {{ width: 8.5in; min-height: 11in; display: inline-block; text-align: left; background: #252525; color: #e0e0e0; box-shadow: 0px 5px 15px rgba(0,0,0,0.6); border: 1px solid #333; }}
+                #scroller {{ 
+                    flex-grow: 1; 
+                    overflow-y: auto; 
+                    background: transparent; 
+                    display: flex; justify-content: center; align-items: flex-start;
+                    padding: 40px 0; 
+                }}
                 
-                .ql-container.ql-snow {{ border: none !important; }}
-                .ql-editor {{ padding: 1in !important; font-family: 'Times New Roman', serif; font-size: 16px; line-height: 1.8; }}
+                /* THE FIX: We move the background and shadow to our own wrapper 
+                   so it perfectly encapsulates all text, no matter how long it gets.
+                */
+                #editor-container {{ 
+                    border: none !important; 
+                    width: 8.5in;
+                    min-height: 11in;
+                    height: auto !important; /* Force it to grow with content */
+                    background-color: #252525;
+                    box-shadow: 0px 5px 15px rgba(0,0,0,0.6);
+                }}
+                
+                /* Override Quill's strict height limits */
+                .ql-container.ql-snow {{ 
+                    border: none !important; 
+                    height: auto !important; 
+                    background: transparent !important; 
+                }}
+                
+                .ql-editor {{ 
+                    height: auto !important;
+                    min-height: 11in; 
+                    padding: 1in !important; 
+                    background: transparent !important; /* Let the container's background show through */
+                    color: #e0e0e0; 
+                    font-family: 'Times New Roman', serif; 
+                    font-size: 16px; 
+                    line-height: 1.8; 
+                    overflow-y: visible !important;
+                }}
+                
                 .ql-snow .ql-stroke {{ stroke: #e0e0e0; }}
                 .ql-snow .ql-fill, .ql-snow .ql-stroke.ql-fill {{ fill: #e0e0e0; }}
                 .ql-snow .ql-picker {{ color: #e0e0e0; }}
                 .ql-snow .ql-picker-options {{ background-color: #2d2d2d; border-color: #444; }}
+                
                 .ql-editor.ql-blank::before {{ color: #888; font-style: italic; left: 1in; }}
                 .ql-snow .ql-picker.ql-size .ql-picker-label::before, .ql-snow .ql-picker.ql-size .ql-picker-item::before {{ content: attr(data-value); }}
                 .ql-snow .ql-picker.ql-size .ql-picker-label:not([data-value])::before {{ content: '16px'; }}
@@ -173,10 +216,8 @@ class EssayTab(QWidget):
                 
                 @media print {{
                     body, html, #scroller {{ background: white !important; padding: 0 !important; margin: 0 !important; overflow: visible !important; height: auto !important; display: block; }}
-                    #editor-container {{ width: 100% !important; min-height: auto !important; box-shadow: none !important; border: none !important; margin: 0 !important; background: white !important; color: black !important; display: block; }}
+                    #editor-container {{ width: 100% !important; min-height: auto !important; box-shadow: none !important; border: none !important; margin: 0 !important; background: white !important; color: black !important; display: block; filter: none; }}
                     .ql-toolbar {{ display: none !important; }}
-                    
-                    /* Strip HTML padding so native Qt handles physical margins across page breaks */
                     .ql-editor {{ padding: 0 !important; color: black !important; overflow: visible !important; }}
                 }}
             </style>
@@ -186,6 +227,29 @@ class EssayTab(QWidget):
                 <div id="editor-container"></div>
             </div>
             <script>
+                function applyTheme(bg_main, bg_panel, bg_input, text_main, border, accent) {{
+                    document.body.style.backgroundColor = bg_main;
+                    
+                    // Apply the paper color to the expanding wrapper, not Quill
+                    var editorContainer = document.getElementById('editor-container');
+                    if (editorContainer) {{
+                        editorContainer.style.backgroundColor = bg_input;
+                    }}
+                    
+                    var qlEditor = document.querySelector('.ql-editor');
+                    if (qlEditor) {{
+                        qlEditor.style.color = text_main;
+                    }}
+                    
+                    var toolbar = document.querySelector('.ql-toolbar');
+                    if (toolbar) {{
+                        toolbar.style.backgroundColor = bg_panel;
+                        toolbar.style.borderBottom = '1px solid ' + border;
+                    }}
+                    var pickers = document.querySelectorAll('.ql-picker');
+                    pickers.forEach(p => p.style.color = text_main);
+                }}
+                
                 window.onload = function() {{
                     if (typeof Quill === 'undefined') return;
                     const Size = Quill.import('attributors/style/size');
@@ -202,11 +266,17 @@ class EssayTab(QWidget):
                         ['blockquote', 'code-block', 'link'],
                         ['clean']
                     ];
+                    
                     window.quill = new Quill('#editor-container', {{
                         theme: 'snow',
                         placeholder: 'Start drafting your essay...',
                         modules: {{ toolbar: toolbarOptions }}
                     }});
+                    
+                    var toolbar = document.querySelector('.ql-toolbar');
+                    if (toolbar) {{
+                        document.body.insertBefore(toolbar, document.getElementById('scroller'));
+                    }}
                 }};
             </script>
         </body>
@@ -219,9 +289,7 @@ class EssayTab(QWidget):
         if data:
             self.current_essay_id = data["id"]
             self.title_input.setText(data["title"])
-            
             self.refresh_essay_list(auto_load=False)
-
             safe_content = json.dumps(data.get("content", ""))
             js_code = f"""
             (function checkAndPaste() {{
@@ -232,7 +300,6 @@ class EssayTab(QWidget):
                 }}
             }})();
             """
-            
             if hasattr(self, 'web_view'):
                 self.web_view.page().runJavaScript(js_code)
 
@@ -257,7 +324,6 @@ class EssayTab(QWidget):
         path, _ = QFileDialog.getSaveFileName(self, "Export Essay to PDF", default_name, "PDF Files (*.pdf)")
         
         if path:
-            # Force Qt PDF Engine to apply consistent 1-inch margins to every exported page
             layout = QPageLayout(
                 QPageSize(QPageSize.PageSizeId.Letter),
                 QPageLayout.Orientation.Portrait,
@@ -267,9 +333,22 @@ class EssayTab(QWidget):
             self.web_view.page().printToPdf(path, layout)
 
     def update_theme(self, theme):
+        self.current_theme = theme
+        
         self.top_bar.setStyleSheet(f"background: {theme['bg_panel']}; border-bottom: 1px solid {theme['border']};")
         self.title_input.setStyleSheet(f"font-size: 14px; font-weight: bold; padding: 4px; background: {theme['bg_panel']}; color: {theme['text_main']}; border: none;")
-        self.zoom_selector.setStyleSheet(f"background: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']}; padding: 2px;")
         
+        combo_style = f"background: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']}; padding: 2px; border-radius: 4px;"
+        self.zoom_selector.setStyleSheet(combo_style)
+        self.essay_selector.setStyleSheet(combo_style)
+        
+        btn_style = f"background: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']}; padding: 4px 8px; border-radius: 4px;"
+        for btn in self.top_bar.findChildren(QPushButton):
+            btn.setStyleSheet(btn_style)
+            
         if hasattr(self, 'loading_label'):
-            self.loading_label.setStyleSheet(f"font-size: 16px; font-weight: bold; background: {theme['bg_input']}; color: {theme['text_main']};")
+            self.loading_label.setStyleSheet(f"font-size: 16px; font-weight: bold; background: {theme['bg_main']}; color: {theme['text_main']};")
+            
+        if hasattr(self, 'web_view') and self.web_view.page():
+            js = f"if(typeof applyTheme === 'function') applyTheme('{theme['bg_main']}', '{theme['bg_panel']}', '{theme['bg_input']}', '{theme['text_main']}', '{theme['border']}', '{theme['accent']}');"
+            self.web_view.page().runJavaScript(js)

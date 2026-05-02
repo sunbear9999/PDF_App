@@ -37,7 +37,6 @@ class CitationDock(QWidget):
 
         # --- Bottom Toolbar ---
         self.btn_generate = QPushButton("📝 Generate Works Cited")
-        self.btn_generate.setStyleSheet("background-color: #0078D7; color: white; font-weight: bold; padding: 8px;")
         self.btn_generate.clicked.connect(self.generate_works_cited)
         layout.addWidget(self.btn_generate)
 
@@ -108,3 +107,40 @@ class CitationDock(QWidget):
         
         QApplication.clipboard().setText(clipboard_text)
         QMessageBox.information(self, "Copied!", f"Works Cited page copied to clipboard in {self.cm.current_style} format!")
+    def update_theme(self, theme):
+        self.setStyleSheet(f"CitationDock {{ background-color: {theme['bg_main']}; color: {theme['text_main']}; }}")
+        
+        self.style_combo.setStyleSheet(f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']}; padding: 4px; border-radius: 4px;")
+        self.btn_refresh.setStyleSheet(f"background-color: {theme['bg_panel']}; color: {theme['text_main']}; border: 1px solid {theme['border']}; padding: 6px; border-radius: 4px;")
+        self.btn_generate.setStyleSheet(f"background-color: {theme['accent']}; color: #ffffff; font-weight: bold; padding: 8px; border: none; border-radius: 4px;")
+        
+        # Target internal QTableWidget components to overwrite hard-coded defaults
+        self.table.setStyleSheet(f"""
+            QTableWidget {{
+                background-color: {theme['bg_main']};
+                color: {theme['text_main']};
+                gridline-color: {theme['border']};
+                border: 1px solid {theme['border']};
+            }}
+            QTableWidget::item {{
+                background-color: {theme['bg_input']};
+                color: {theme['text_main']};
+            }}
+            QTableWidget::item:selected {{
+                background-color: {theme['accent']};
+                color: #ffffff;
+            }}
+            QHeaderView::section {{
+                background-color: {theme['bg_panel']};
+                color: {theme['text_main']};
+                border: 1px solid {theme['border']};
+                border-top: none;
+                border-left: none;
+                padding: 4px;
+                font-weight: bold;
+            }}
+            QTableCornerButton::section {{
+                background-color: {theme['bg_panel']};
+                border: 1px solid {theme['border']};
+            }}
+        """)
