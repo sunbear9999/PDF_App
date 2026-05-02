@@ -62,6 +62,9 @@ class OllamaSetupDialog(QDialog):
             "Ollama isn't reachable on this Mac. Install it now via Homebrew?"
         )
         label.setWordWrap(True)
+        # Override the global dark theme — dialog renders on light Aqua chrome,
+        # so white text from the app stylesheet is invisible.
+        label.setStyleSheet("color: #1a1a1a;")
         layout.addWidget(label)
 
         self._output = QPlainTextEdit()
