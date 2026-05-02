@@ -495,10 +495,17 @@ Categories=Office;Utility;
                     except Exception as e:
                         self.log(f"❌ Failed to create Mac shortcut: {e}")
 
-        # Finish up
+        # Finish up: launch the main app and leave the installer open for log review.
         self.log("\n🎉 Installation Complete!")
-        self.log("You can now launch 'Papyrus Research' from your shortcuts, or close this window.")
-        
+        try:
+            main_path = os.path.join(project_dir, "main.py")
+            self.log("🚀 Launching Papyrus Research...")
+            subprocess.Popen([sys.executable, main_path], cwd=project_dir)
+            self.log("    App launched in a new window. Close this installer when ready.")
+        except Exception as e:
+            self.log(f"⚠️ Could not auto-launch the app: {e}")
+            self.log("    Run it manually: python main.py")
+
         self.after(0, self._finish_ui_update)
 
     def _finish_ui_update(self):
