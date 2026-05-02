@@ -124,6 +124,52 @@ class InstallerGUI(tk.Tk):
                     return True
         return False
 
+    def _brew_path(self):
+        """Return path to brew if available, considering common Apple Silicon and Intel locations."""
+        cmd = shutil.which("brew")
+        if cmd:
+            return cmd
+        # PATH may not include /opt/homebrew yet if brew was just installed in this same run
+        for candidate in ("/opt/homebrew/bin/brew", "/usr/local/bin/brew"):
+            if os.path.exists(candidate):
+                return candidate
+        return None
+
+    def _ensure_homebrew(self):
+        """Mac only. If brew is missing, run the official installer.
+        Returns True if brew is callable after this method, False otherwise."""
+        if platform.system() != "Darwin":
+            return False
+        if self._brew_path():
+            self.log("✅ Homebrew detected.")
+            return True
+
+        self.log("📥 Homebrew not found. Installing Homebrew (you'll be prompted for your password)...")
+        install_cmd = (
+            '/bin/bash -c "$(curl -fsSL '
+            'https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+        )
+        try:
+            # Run interactively so sudo can prompt; can't capture_output if we want the prompt to work
+            result = subprocess.run(install_cmd, shell=True, text=True)
+            if result.returncode != 0:
+                self.log("❌ Homebrew install failed (non-zero exit). Install manually from https://brew.sh and re-run.")
+                return False
+        except Exception as e:
+            self.log(f"❌ Homebrew install threw: {e}")
+            return False
+
+        # Make brew callable in this process for subsequent phases
+        for bin_dir in ("/opt/homebrew/bin", "/usr/local/bin"):
+            if os.path.isdir(bin_dir) and bin_dir not in os.environ.get("PATH", ""):
+                os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
+
+        if self._brew_path():
+            self.log("✅ Homebrew installed.")
+            return True
+        self.log("⚠️ Homebrew install completed but brew not on PATH. You may need to restart your shell.")
+        return False
+
     def get_project_dir(self):
         """Get the base directory, supporting PyInstaller bundled executables."""
         if getattr(sys, 'frozen', False):
@@ -141,6 +187,10 @@ class InstallerGUI(tk.Tk):
         self.log("=== Starting Installation ===")
         project_dir = self.get_project_dir()
         system = platform.system()
+
+        # Phase 0 (Mac only): ensure Homebrew is available before Tesseract / Ollama
+        if system == "Darwin":
+            self._ensure_homebrew()
 
         # 1. Tesseract OCR Installation
         self.log("\n🔍 Checking Tesseract OCR Installation...")
