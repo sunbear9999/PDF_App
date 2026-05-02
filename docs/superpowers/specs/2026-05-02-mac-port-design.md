@@ -13,9 +13,12 @@ Make `python main.py` runnable on an Apple Silicon (ARM) Mac after a single `pyt
 - New `requirements.txt`
 - Mac (`Darwin`) branches in `installer.py` rewritten to actually install dependencies (currently they're stubs that mostly open a browser)
 - One small fix in app code (`main.py` — guard the dictionaries env var)
-- Mac spellcheck dictionary download
 
-**Note:** The original spec called for a second app-code edit in `core/llm_manager.py` to guard `subprocess.CREATE_NO_WINDOW`. Verified during planning: the existing code at `llm_manager.py:94-106` already splits Windows / non-Windows into two `subprocess.Popen` calls, and `CREATE_NO_WINDOW` is only referenced inside the Windows branch. Confirmed by grep — no unguarded Windows constants exist in the app code. That edit is removed from scope.
+**Notes (corrections during planning):**
+
+1. **`core/llm_manager.py` `CREATE_NO_WINDOW`** — the existing code at `llm_manager.py:94-106` already splits Windows / non-Windows into two `subprocess.Popen` calls; `CREATE_NO_WINDOW` is only referenced inside the Windows branch. Grep confirms no unguarded Windows constants in app code. That edit is removed from scope.
+
+2. **Spellcheck dictionary download** — originally planned as installer Phase 5. Upstream commit `b9d05e0 added important files to git` (synced 2026-05-02 post-spec) bundles `qtwebengine_dictionaries/en-US.bdic` directly in the repo, along with the previously missing `assets/default_english.json` (loaded by `gui/main_window.py:90`) and `assets/quill/{quill.js,quill.snow.css}` (loaded by `gui/docks/essay_dock.py:139-140` for the in-app text editor). With the dictionary bundled, an installer download phase would always be a no-op behind the "skip if .bdic exists" guard. **Phase 5 is removed.** The `main.py` guard stays — it's a tiny defensive measure independent of whether the folder ships in the repo.
 
 **Out of scope (do not touch):**
 - `installer_win.py`, `installer_win.spec` — Windows-only build artifacts
@@ -68,21 +71,7 @@ Stream the output into the installer log box. On failure, log clearly and contin
 
 The existing logic (`ollama pull` for the chat model and embedding model; HuggingFace HTTPS for Piper voices) is already cross-platform. No edits.
 
-### Phase 5: Spellcheck dictionary (NEW)
-
-Download `en-US-10-1.bdic` from the Chromium source mirror at:
-
-```
-https://chromium.googlesource.com/chromium/deps/hunspell_dictionaries/+/main/en-US-10-1.bdic?format=TEXT
-```
-
-(Note: googlesource serves blobs base64-encoded with `?format=TEXT` — the installer must base64-decode the response before writing.)
-
-Save to `<project_dir>/qtwebengine_dictionaries/en-US-10-1.bdic`. Skip if any `.bdic` file already exists in that folder. ~200KB. Failure here is non-fatal — the app guards for missing dict in `main.py`.
-
-If the primary URL fails, fall back to: `https://redirector.gvt1.com/edgedl/chrome/dict/en-us-10-1.bdic` (Google's CDN, raw bytes, no base64). If both fail, log and continue.
-
-### Phase 6: Desktop shortcut
+### Phase 5: Desktop shortcut
 
 Existing Mac branch creates a symlink on the Desktop pointing to a built `main` binary. Change: only create the symlink if `Papyrus Research.app` or `main` actually exists in `project_dir`. For run-from-source there's nothing to link to, so skip silently.
 
