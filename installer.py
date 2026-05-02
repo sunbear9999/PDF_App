@@ -477,14 +477,23 @@ Categories=Office;Utility;
                     self.log(f"❌ Failed to create Linux shortcut: {e}")
                     
             elif system == "Darwin":
-                try:
-                    desktop_dir = os.path.expanduser("~/Desktop")
-                    symlink_path = os.path.join(desktop_dir, "Papyrus Research")
-                    if not os.path.exists(symlink_path):
-                        os.symlink(app_exe_path, symlink_path)
-                    self.log("✅ Created a shortcut on your Desktop.")
-                except Exception as e:
-                    self.log(f"❌ Failed to create Mac shortcut: {e}")
+                # Only create a shortcut if there's an actual built artifact to point at.
+                # For run-from-source the user runs `python main.py` directly; no shortcut.
+                has_app_bundle = os.path.isdir(os.path.join(project_dir, "Papyrus Research.app"))
+                has_unix_exec = os.path.isfile(os.path.join(project_dir, "main")) and os.access(
+                    os.path.join(project_dir, "main"), os.X_OK
+                )
+                if not (has_app_bundle or has_unix_exec):
+                    self.log("ℹ️ No built app/binary detected; skipping Desktop shortcut (run with `python main.py`).")
+                else:
+                    try:
+                        desktop_dir = os.path.expanduser("~/Desktop")
+                        symlink_path = os.path.join(desktop_dir, "Papyrus Research")
+                        if not os.path.exists(symlink_path):
+                            os.symlink(app_exe_path, symlink_path)
+                        self.log("✅ Created a shortcut on your Desktop.")
+                    except Exception as e:
+                        self.log(f"❌ Failed to create Mac shortcut: {e}")
 
         # Finish up
         self.log("\n🎉 Installation Complete!")
