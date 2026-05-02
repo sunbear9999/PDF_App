@@ -7,6 +7,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtCore import QSettings, QTimer, Qt
 from gui.theme import ThemeManager
 from gui.main_window import MainWindow
+from core.first_launch import run_first_launch_check
 
 if getattr(sys, 'frozen', False):
     root_dir = sys._MEIPASS
@@ -95,7 +96,11 @@ def main():
     saved_theme = settings.value("theme", "Dark (Default)")
     theme_manager.set_theme(saved_theme)
     theme_manager.apply_global_style(app)
-    
+
+    # First-launch check: offer to install Ollama if it's not running.
+    # Continues to the main window regardless of outcome.
+    run_first_launch_check()
+
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
