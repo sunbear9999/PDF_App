@@ -311,6 +311,33 @@ class InstallerGUI(tk.Tk):
             else:
                 self.log(f"⚠️ Auto-install not supported on {system}. Install manually from ollama.com.")
 
+        # 3a. Install Python dependencies from requirements.txt (all platforms)
+        req_path = os.path.join(project_dir, "requirements.txt")
+        if os.path.exists(req_path):
+            self.log("\n📦 Installing Python dependencies from requirements.txt...")
+            self.log(f"    Using interpreter: {sys.executable}")
+            try:
+                pip_result = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "-r", req_path],
+                    capture_output=True, text=True
+                )
+                if pip_result.returncode == 0:
+                    self.log("✅ Python dependencies installed.")
+                else:
+                    # Show last ~20 lines of pip output so the user can see what failed
+                    tail = "\n".join(pip_result.stdout.strip().splitlines()[-10:])
+                    err_tail = "\n".join(pip_result.stderr.strip().splitlines()[-10:])
+                    self.log(f"❌ pip install failed (exit {pip_result.returncode}).")
+                    if tail:
+                        self.log(f"   stdout tail:\n{tail}")
+                    if err_tail:
+                        self.log(f"   stderr tail:\n{err_tail}")
+                    self.log("   Retry manually: pip install -r requirements.txt")
+            except Exception as e:
+                self.log(f"❌ Could not run pip: {e}")
+        else:
+            self.log("\n⚠️ requirements.txt not found; skipping pip install.")
+
         # 3. Download Models
         ollama_cmd = self.get_ollama_cmd()
         if ollama_cmd:
