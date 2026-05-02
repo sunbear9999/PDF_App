@@ -216,7 +216,15 @@ class InstallerGUI(tk.Tk):
             elif system == "Linux":
                 self.log("⚠️ Tesseract is missing. Please open a terminal and run: sudo apt install tesseract-ocr")
             elif system == "Darwin":
-                self.log("⚠️ Tesseract is missing. Please open a terminal and run: brew install tesseract")
+                brew = self._brew_path()
+                if brew:
+                    self.log("📥 Installing Tesseract via Homebrew...")
+                    if self.run_hidden_command([brew, "install", "tesseract"]):
+                        self.log("✅ Tesseract installed via Homebrew.")
+                    else:
+                        self.log("❌ `brew install tesseract` failed. Run it manually in a terminal.")
+                else:
+                    self.log("⚠️ Homebrew not available. Install brew from https://brew.sh, then run: brew install tesseract")
 
         # 2. Ollama Installation
         self.log("\n🦙 Checking Ollama Installation...")
