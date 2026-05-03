@@ -140,6 +140,14 @@ class PromptManager:
             "<UPDATE_GOAL>Write the new, comprehensive project description here.</UPDATE_GOAL>\n\n"
             "CONTEXT:\n{context}"
         ),
+        "RAG Search Query Generator": (
+            "You are an expert semantic search query generator.\n"
+            "Current Project Goal: {project_goal}\n"
+            "User's Immediate Prompt: {query}\n\n"
+            "Based on the project goal and the user's prompt, formulate a single, highly effective semantic search query "
+            "to extract the most relevant evidence and concepts from a vector database.\n"
+            "Respond ONLY with the raw search query. Do not use quotation marks, introductions, or conversational filler."
+        ),
     }
 
     def __init__(self):

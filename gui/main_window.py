@@ -923,10 +923,129 @@ class MainWindow(QMainWindow):
         if hasattr(self.viewer, "update_theme"):
             self.viewer.update_theme(theme)
 
-        dock_style = f"""
-        /* ... keep your existing QDockWidget styles ... */
+        svg_color = theme['text_main'].replace('#', '%23')
+
+        global_style = f"""
+        /* --- 1. Fix the Separator Hitbox & Double Borders --- */
+        QMainWindow::separator {{
+            background: {theme['border']};
+            width: 5px;  /* Wider hitbox for vertical resizing */
+            height: 5px; /* Taller hitbox for horizontal resizing */
+        }}
+        QMainWindow::separator:hover {{
+            background: #b366ff; /* Purple highlight when grabbed */
+        }}
+        
+        QDockWidget {{
+            border: none; /* Kill the double-border gaps */
+            color: {theme['text_main']};
+        }}
+
+        /* --- 2. Fix Dock Title Bar & Button Alignment --- */
+        QDockWidget::title {{
+            background: {theme['bg_panel']};
+            padding: 6px 8px;
+            min-height: 18px; /* Force consistent title bar height */
+        }}
+
+        QDockWidget::close-button, QDockWidget::float-button {{
+            background: transparent;
+            border: none;
+            width: 22px; 
+            height: 22px;
+            /* Lock buttons to the vertical center */
+            subcontrol-origin: padding;
+            subcontrol-position: center right; 
+        }}
+
+        QDockWidget::close-button {{
+            right: 4px; /* Space from the far right edge */
+        }}
+
+        QDockWidget::float-button {{
+            right: 30px; /* Push it left, past the close button */
+        }}
+
+        QDockWidget::close-button:hover, QDockWidget::float-button:hover {{
+            background: rgba(128, 128, 128, 0.2);
+            border-radius: 4px;
+        }}
+
+        /* Scale the SVGs to fit perfectly */
+        QDockWidget::close-button {{
+            image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='{svg_color}' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><line x1='18' y1='6' x2='6' y2='18'></line><line x1='6' y1='6' x2='18' y2='18'></line></svg>");
+        }}
+        QDockWidget::float-button {{
+            image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='{svg_color}' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><rect x='4' y='4' width='16' height='16' rx='2' ry='2'></rect></svg>");
+        }}
+
+        /* --- 3. Nuke ALL Scrollbars Globally --- */
+        QScrollBar:vertical {{
+            border: none;
+            background: {theme['bg_panel']};
+            width: 14px; /* Slightly thicker for usability */
+            margin: 0px;
+        }}
+        QScrollBar::handle:vertical {{
+            background: {theme['border']};
+            min-height: 30px;
+            border-radius: 6px;
+            margin: 2px; /* Creates a floating pill effect */
+        }}
+        QScrollBar::handle:vertical:hover {{
+            background: {theme.get('text_dim', '#888888')};
+        }}
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+            height: 0px; 
+            border: none;
+            background: none;
+        }}
+        /* THIS FIXES THE WHITE ARTIFACTS */
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+            background: none; 
+        }}
+
+        /* Horizontal Scrollbars */
+        QScrollBar:horizontal {{
+            border: none;
+            background: {theme['bg_panel']};
+            height: 14px;
+            margin: 0px;
+        }}
+        QScrollBar::handle:horizontal {{
+            background: {theme['border']};
+            min-width: 30px;
+            border-radius: 6px;
+            margin: 2px;
+        }}
+        QScrollBar::handle:horizontal:hover {{
+            background: {theme.get('text_dim', '#888888')};
+        }}
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+            width: 0px;
+            border: none;
+            background: none;
+        }}
+        QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+            background: none;
+        }}
+
+        /* --- 4. Smooth out the Dock Tabs --- */
+        QTabBar::tab {{
+            background: {theme['bg_panel']};
+            color: #888888;
+            padding: 6px 12px;
+            border-top-left-radius: 4px;
+            border-top-right-radius: 4px;
+            border-bottom: 1px solid {theme['border']};
+        }}
+        QTabBar::tab:selected {{
+            background: {theme.get('bg_base', '#1e1e1e')};
+            color: {theme['text_main']};
+            border-bottom: 2px solid #b366ff; 
+        }}
         """
-        self.setStyleSheet(dock_style)
+        self.setStyleSheet(global_style)
 
     def _clear_ui_for_new_project(self):
         self.current_file_path = None
@@ -996,50 +1115,48 @@ class MainWindow(QMainWindow):
             
             # Create a delayed function to apply the UI *after* zombies are cleared
             def apply_project_ui():
-                if state_str and dock_info:
-                    import json
-                    try:
-                        counts = json.loads(dock_info)
-                        self._sync_dock_counts(counts)
-                    except Exception as e:
-                        print(f"Error loading project docks: {e}")
+                # --- PREVENT UI LAG / FLASHING ---
+                self.setUpdatesEnabled(False)
+                
+                try:
+                    if state_str and dock_info:
+                        import json
+                        try:
+                            counts = json.loads(dock_info)
+                            self._sync_dock_counts(counts)
+                        except Exception as e:
+                            print(f"Error loading project docks: {e}")
+                            
+                        from PySide6.QtCore import QByteArray
+                        self.restoreState(QByteArray.fromBase64(state_str.encode('utf-8')))
+                    else:
+                        self._reset_default_layout()
+
+                    # --- Restore Scratchpad Texts ---
+                    text_data = self.project_manager.get_metadata("scratchpad_texts")
+                    if text_data:
+                        import json
+                        try:
+                            saved_texts = json.loads(text_data)
+                            for i, editor in enumerate(self.scratchpad_docks):
+                                if i < len(saved_texts):
+                                    editor.setPlainText(saved_texts[i])
+                        except Exception as e:
+                            print(f"Error loading scratchpad text: {e}")
+
+                    # Force visibility and updates
+                    from PySide6.QtWidgets import QDockWidget
+                    for dock in self.findChildren(QDockWidget):
+                        dock.show()
+                    
+                    for c in self.chat_docks: c.refresh_project_ui()
+                    
+                    if self.project_manager.pdfs:
+                        self.switch_to_pdf(self.project_manager.pdfs[0])
                         
-                    from PySide6.QtCore import QByteArray
-                    self.restoreState(QByteArray.fromBase64(state_str.encode('utf-8')))
-                else:
-                    self._reset_default_layout()
-
-                # --- Restore Scratchpad Texts ---
-                text_data = self.project_manager.get_metadata("scratchpad_texts")
-                if text_data:
-                    import json
-                    try:
-                        saved_texts = json.loads(text_data)
-                        for i, editor in enumerate(self.scratchpad_docks):
-                            if i < len(saved_texts):
-                                editor.setPlainText(saved_texts[i])
-                    except Exception as e:
-                        print(f"Error loading scratchpad text: {e}")
-
-                # Force visibility and updates
-                from PySide6.QtWidgets import QDockWidget
-                for dock in self.findChildren(QDockWidget):
-                    dock.show()
-                
-                for c in self.chat_docks: c.refresh_project_ui()
-                
-                if self.project_manager.pdfs:
-                    self.switch_to_pdf(self.project_manager.pdfs[0])
-
-            # Trigger the UI layout sequence after 50ms
-            from PySide6.QtCore import QTimer
-            QTimer.singleShot(50, apply_project_ui)
-
-        else:
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.warning(self, "Error", "Failed to load project file.")
-            
-        self._refresh_doc_tag_filter()
+                finally:
+                    # --- RESUME UI DRAWING ALL AT ONCE ---
+                    self.setUpdatesEnabled(True)
     def _save_as_default_layout(self):
         import json
         state_bytes = self.saveState().toBase64().data().decode('utf-8')
@@ -1111,12 +1228,10 @@ class MainWindow(QMainWindow):
         counts_str = str(self.settings.value("default_startup_counts", ""))
 
         # WIRING POINT 3: The Gatekeeper
-        # If settings are blank, missing, or corrupted, route to Factory Default
         if not default_state or not counts_str or default_state == "None" or counts_str == "None":
             self._apply_factory_default()
             return
 
-        # If user settings exist, load them instead
         counts = {}
         try:
             counts = json.loads(counts_str)
@@ -1125,11 +1240,15 @@ class MainWindow(QMainWindow):
             self._apply_factory_default()
             return
 
-        self._sync_dock_counts(counts)
-        self.restoreState(QByteArray.fromBase64(default_state.encode('utf-8')))
+        self.setUpdatesEnabled(False) # <--- STOP DRAWING
+        try:
+            self._sync_dock_counts(counts)
+            self.restoreState(QByteArray.fromBase64(default_state.encode('utf-8')))
 
-        for dock in self.findChildren(QDockWidget): 
-            dock.show()
+            for dock in self.findChildren(QDockWidget): 
+                dock.show()
+        finally:
+            self.setUpdatesEnabled(True) # <--- RESUME DRAWING
     def _apply_factory_default(self):
         """The hardcoded layout for fresh installs or before a user sets a custom default."""
         from PySide6.QtCore import QByteArray
@@ -1158,17 +1277,21 @@ class MainWindow(QMainWindow):
                 state_str = payload_str
                 counts = {} # Old saves don't have counts, so this will close everything safely
 
-            # 1. Let the Orchestrator build the physical windows
-            self._sync_dock_counts(counts)
+            self.setUpdatesEnabled(False) # <--- STOP DRAWING
+            try:
+                # 1. Let the Orchestrator build the physical windows
+                self._sync_dock_counts(counts)
 
-            # 2. Tell Qt to arrange them
-            if state_str:
-                from PySide6.QtCore import QByteArray
-                self.restoreState(QByteArray.fromBase64(state_str.encode('utf-8')))
+                # 2. Tell Qt to arrange them
+                if state_str:
+                    from PySide6.QtCore import QByteArray
+                    self.restoreState(QByteArray.fromBase64(state_str.encode('utf-8')))
 
-            # 3. Force visibility
-            from PySide6.QtWidgets import QDockWidget
-            for dock in self.findChildren(QDockWidget): dock.show()
+                # 3. Force visibility
+                from PySide6.QtWidgets import QDockWidget
+                for dock in self.findChildren(QDockWidget): dock.show()
+            finally:
+                self.setUpdatesEnabled(True) # <--- RESUME DRAWING
             
         except Exception as e:
             print(f"Failed to apply custom layout: {e}")

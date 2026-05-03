@@ -82,7 +82,7 @@ def main():
     
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon("icon.png"))
-    
+    app.setStyle("Fusion")
     theme_manager = ThemeManager()
     settings = QSettings("PDFMultitool", "Workspace")
     saved_theme = settings.value("theme", "Dark (Default)")

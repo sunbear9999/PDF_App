@@ -20,11 +20,11 @@ a = Analysis(
 
 def apply_pyarmor_patch():
 
-    srcpath = ['/home/sunbear/Desktop/PDF Multitool']
-    obfpath = '/home/sunbear/Desktop/PDF Multitool/.pyarmor/pack/dist'
+    srcpath = ['C:\\Users\\sunbe\\Downloads\\PDF_App-argument_map\\PDF_App-argument_map']
+    obfpath = 'C:\\Users\\sunbe\\Downloads\\PDF_App-argument_map\\PDF_App-argument_map\\.pyarmor\\pack\\dist'
     pkgname = 'pyarmor_runtime_000000'
     pkgpath = os.path.join(obfpath, pkgname)
-    extpath = os.path.join(pkgname, 'pyarmor_runtime.so')
+    extpath = os.path.join(pkgname, 'pyarmor_runtime.pyd')
 
     if hasattr(a.pure, '_code_cache'):
         code_cache = a.pure._code_cache
