@@ -1,0 +1,282 @@
+from PySide6.QtWidgets import (QCheckBox, QDockWidget, QWidget, QHBoxLayout, QVBoxLayout, 
+                             QStackedWidget, QDialog,QPushButton, QLabel, QComboBox, QFrame, QButtonGroup,QMessageBox, QMenu,QTextEdit)
+from PySide6.QtCore import Qt, Signal, QThread
+from PySide6.QtGui import QCursor, QAction
+
+from gui.docks.unified_research.components.context_filter_dialog import ContextFilterDialog
+from gui.docks.unified_research.tabs.blueprint_editor_tab import BlueprintEditorTab
+from gui.docks.unified_research.tabs.custom_tools_tab import CustomToolsTab
+from .tabs.chat_tab import ChatTab
+from .tabs.brainstorm_tab import BrainstormTab
+from .tabs.search_tab import SearchTab
+from .tabs.anaylsis_tab import AnalysisTab
+from .components.note_bubble import NoteBubbleWidget
+from core.research_manager import ResearchManager
+from core.brainstorm_manager import BrainstormManager
+from gui.components.process_monitor import ProcessMonitorWidget
+class ProjectBriefDialog(QDialog):
+    """Global Project Variables Manager"""
+    def __init__(self, pm, theme, parent=None):
+        super().__init__(parent)
+        self.pm = pm
+        self.setWindowTitle("📝 Project Manifest")
+        self.resize(500, 400)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("<b>Define your core thesis, goals, and needs for this project.</b><br><i>The AI will use this across all tabs to guide its research.</i>"))
+        self.text_edit = QTextEdit()
+        self.text_edit.setPlainText(self.pm.get_metadata("project_manifest", ""))
+        layout.addWidget(self.text_edit)
+        btn_save = QPushButton("💾 Save Manifest")
+        btn_save.clicked.connect(self.save_and_close)
+        layout.addWidget(btn_save)
+        if theme:
+            self.setStyleSheet(f"background-color: {theme.get('bg_main', '#1e1e1e')}; color: {theme.get('text_main', '#fff')};")
+            self.text_edit.setStyleSheet(f"background-color: {theme.get('bg_input', '#2b2b2b')}; border: 1px solid {theme.get('border', '#444')};")
+            btn_save.setStyleSheet(f"background-color: {theme.get('accent', '#b366ff')}; color: white; padding: 8px; font-weight: bold;")
+
+    def save_and_close(self):
+        self.pm.set_metadata("project_manifest", self.text_edit.toPlainText().strip())
+        self.accept()
+class IndexWorker(QThread):
+    progress = Signal(str)
+    finished_indexing = Signal(bool, str)
+    
+    def __init__(self, llm, filepaths, parent=None):
+        super().__init__(parent)
+        self.llm = llm
+        self.filepaths = filepaths
+        
+    def run(self):
+        try:
+            self.llm.index_documents(self.filepaths, progress_callback=lambda msg: self.progress.emit(msg))
+            self.finished_indexing.emit(True, "")
+        except Exception as e:
+            self.finished_indexing.emit(False, str(e))
+
+class UnifiedResearchDock(QDockWidget):
+    global_context_changed = Signal(list, list) 
+
+    def __init__(self, main_window, project_manager, llm_manager, parent=None):
+        super().__init__("🔬 Research Workspace", parent)
+        self.setObjectName("UnifiedResearchDock")
+        self.main_window = main_window
+        self.project_manager = project_manager
+        self.llm_manager = llm_manager
+        self.research_manager = ResearchManager(self.llm_manager, self.project_manager)
+        self.brainstorm_manager = BrainstormManager(self.llm_manager, self.llm_manager.prompt_manager)
+        
+        self.central_widget = QWidget()
+        self.setWidget(self.central_widget)
+        self.main_layout = QHBoxLayout(self.central_widget)
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setSpacing(0)
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setStyleSheet("background-color: #444;")
+        self.main_layout.addWidget(line)
+        
+        # 3. Add the Process Monitor at the bottom (fixed height so it doesn't take over)
+        
+        self.active_docs, self.active_tags = [], []
+        self.tag_logic = "AND"
+        self.theme = None
+        
+        self._build_sidebar()
+        self._build_core_area()
+        
+    def _build_sidebar(self):
+        self.sidebar = QFrame()
+        self.sidebar.setFixedWidth(50)
+        sidebar_layout = QVBoxLayout(self.sidebar)
+        sidebar_layout.setContentsMargins(4, 10, 4, 10)
+        self.nav_group = QButtonGroup(self)
+        self.nav_group.setExclusive(True)
+        
+        # --- ADD THE NEW TAB ICON HERE ---
+        nav_items = [("💬",0), ("💡", 1), ("🔍",  2), ("📊",  3), ("🧰", 4), ("🛠️", 5)]
+        
+        for icon, index in nav_items:
+            btn = QPushButton(f"{icon}")
+            btn.setCheckable(True)
+            btn.setFixedSize(40, 60)
+            btn.setStyleSheet("QPushButton { border: none; background: transparent; font-size: 10px; font-weight: bold; color: #888; } QPushButton:checked { color: #b366ff; }")
+            btn.clicked.connect(lambda checked, idx=index: self.stacked_widget.setCurrentIndex(idx))
+            self.nav_group.addButton(btn, index)
+            sidebar_layout.addWidget(btn)
+        sidebar_layout.addStretch()
+        self.nav_group.button(0).setChecked(True)
+        self.main_layout.addWidget(self.sidebar)
+
+    def _build_core_area(self):
+        core_widget = QWidget()
+        core_layout = QVBoxLayout(core_widget)
+        core_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.header = QFrame()
+        from PySide6.QtWidgets import QGridLayout
+        header_layout = QGridLayout(self.header)
+        header_layout.setContentsMargins(10, 5, 10, 5)
+        
+        self.lbl_status = QLabel("🔴 Unindexed")
+        header_layout.addWidget(self.lbl_status, 0, 0)
+        
+        self.model_combo = QComboBox()
+        self.model_combo.addItems(self.llm_manager.get_available_models() or ["llama3"])
+        header_layout.addWidget(self.model_combo, 0, 1)
+
+        self.btn_brief = QPushButton("📝 Project Manifest")
+        self.btn_brief.clicked.connect(lambda: ProjectBriefDialog(self.project_manager, self.theme, self).exec())
+        header_layout.addWidget(self.btn_brief, 0, 2)
+
+        self.btn_filter = QPushButton("⚙️ Filter Context")
+        self.btn_filter.clicked.connect(self._open_filter_dialog)
+        header_layout.addWidget(self.btn_filter, 0, 3)
+
+        self.btn_index = QPushButton("🔄 Index")
+        self.btn_index.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_index.clicked.connect(self.start_indexing)
+        header_layout.addWidget(self.btn_index, 0, 4)
+        core_layout.addWidget(self.header)
+
+        self.stacked_widget = QStackedWidget()
+        self.tab_chat = ChatTab(self.main_window, parent=self)
+        self.tab_plan = BrainstormTab(self.main_window, parent=self)
+        self.tab_search = SearchTab(self.main_window,parent=self)
+        self.tab_analysis = AnalysisTab(self.main_window, parent=self)
+        self.tab_custom = CustomToolsTab(self.main_window, parent=self)
+        self.tab_editor = BlueprintEditorTab(self.main_window, parent=self)
+        
+        for tab in [self.tab_chat, self.tab_plan, self.tab_search, self.tab_analysis, self.tab_custom, self.tab_editor]:
+            self.stacked_widget.addWidget(tab)
+        core_layout.addWidget(self.stacked_widget)
+        self.main_layout.addWidget(core_widget)
+
+    # --- THE UNIVERSAL "SEND TO" MENU ATTACHER ---
+    def attach_send_to_menu(self, text_browser_widget):
+        """Attaches a custom context menu to any text widget to send text between tabs."""
+        text_browser_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        text_browser_widget.customContextMenuRequested.connect(lambda pos: self._show_send_menu(text_browser_widget, pos))
+
+    def _show_send_menu(self, widget, pos):
+        menu = widget.createStandardContextMenu()
+        selected_text = widget.textCursor().selectedText().strip()
+        if selected_text:
+            menu.addSeparator()
+            send_menu = QMenu("Send to Tab...", menu)
+            
+            chat_action = QAction("💬 Chat", menu)
+            chat_action.triggered.connect(lambda: self.route_text_to_tab(selected_text, 0))
+            send_menu.addAction(chat_action)
+            
+            plan_action = QAction("💡 Plan", menu)
+            plan_action.triggered.connect(lambda: self.route_text_to_tab(selected_text, 1))
+            send_menu.addAction(plan_action)
+            
+            search_action = QAction("🔍 Search", menu)
+            search_action.triggered.connect(lambda: self.route_text_to_tab(selected_text, 2))
+            send_menu.addAction(search_action)
+
+            menu.addMenu(send_menu)
+        menu.exec_(widget.mapToGlobal(pos))
+
+    def route_text_to_tab(self, text, tab_idx):
+        self.nav_group.button(tab_idx).setChecked(True)
+        self.stacked_widget.setCurrentIndex(tab_idx)
+        target = self.stacked_widget.widget(tab_idx)
+        if hasattr(target, 'inject_text'): target.inject_text(text)
+
+    def update_theme(self, theme):
+        self.theme = theme
+        self.sidebar.setStyleSheet(f"background-color: {theme.get('bg_panel', '#222')}; border-right: 1px solid {theme.get('border', '#444')};")
+        self.header.setStyleSheet(f"background-color: {theme.get('bg_input', '#2b2b2b')}; border-bottom: 1px solid {theme.get('border', '#444')};")
+        self.central_widget.setStyleSheet(f"background-color: {theme.get('bg_main', '#1e1e1e')}; color: {theme.get('text_main', '#fff')};")
+        
+        # Apply standard styling to the remaining top header widgets
+        widget_style = f"background-color: {theme.get('bg_panel', '#333')}; color: {theme.get('text_main', '#fff')}; border: 1px solid {theme.get('border', '#444')}; padding: 4px 8px; border-radius: 4px;"
+        
+        self.model_combo.setStyleSheet(widget_style)
+        self.btn_brief.setStyleSheet(widget_style)
+        self.btn_filter.setStyleSheet(widget_style)
+        self.btn_index.setStyleSheet(widget_style) 
+        
+        # (Removed chk_analysis, combo_analysis, and chk_rag styling since they are gone!)
+        
+        self.tab_chat.update_theme(theme)
+        self.tab_plan.update_theme(theme)
+        self.tab_search.update_theme(theme)
+        self.tab_analysis.update_theme(theme)
+        self.tab_editor.update_theme(theme)
+        self.check_index_status()
+    
+    def _open_filter_dialog(self):
+        if not self.active_docs and self.project_manager.pdfs:
+            import os
+            self.active_docs = [os.path.basename(p) for p in self.project_manager.pdfs]
+
+        dialog = ContextFilterDialog(
+            self.project_manager, 
+            self.active_docs, 
+            self.active_tags, 
+            self.tag_logic, 
+            self.theme, 
+            self
+        )
+        if dialog.exec():
+            self.active_docs, self.active_tags, self.tag_logic = dialog.get_results()
+            doc_count = len(self.active_docs)
+            tag_count = len(self.active_tags)
+            self.btn_filter.setText(f"⚙️ Filter Context ({doc_count} Docs, {tag_count} Tags)")
+    def check_index_status(self):
+        """Silently checks if the database is loaded and indexed."""
+        proj_path = self.project_manager.project_filepath
+        if proj_path and self.llm_manager:
+            # Ensure the Chroma client is pointed at the current project
+            if self.llm_manager.collection is None:
+                self.llm_manager.set_project_database(proj_path)
+                
+            try:
+                if self.llm_manager.collection and self.llm_manager.collection.count() > 0:
+                    self.lbl_status.setText("🟢 Indexed")
+                    color = self.theme['success'] if self.theme and 'success' in self.theme else "#00cc66"
+                    self.lbl_status.setStyleSheet(f"font-weight: bold; margin-right: 15px; color: {color};")
+                else:
+                    self.lbl_status.setText("🔴 Unindexed")
+                    color = self.theme['warning'] if self.theme and 'warning' in self.theme else "#ffaa00"
+                    self.lbl_status.setStyleSheet(f"font-weight: bold; margin-right: 15px; color: {color};")
+            except Exception:
+                self.lbl_status.setText("🔴 Unindexed")
+
+    def start_indexing(self):
+        """Starts the background embedding thread."""
+        paths_to_index = self.project_manager.pdfs
+        if not paths_to_index:
+            QMessageBox.warning(self, "Error", "No PDFs available in project to index.")
+            return
+            
+        self.btn_index.setEnabled(False)
+        self.idx_worker = IndexWorker(self.llm_manager, paths_to_index, parent=self)
+        self.idx_worker.progress.connect(self._update_index_progress)
+        self.idx_worker.finished_indexing.connect(self._on_index_complete)
+        self.idx_worker.start()
+
+    def _update_index_progress(self, msg):
+        self.lbl_status.setText(f"🟡 {msg}")
+        self.lbl_status.setStyleSheet("font-weight: bold; margin-right: 15px; color: #ffcc00;")
+
+    def _on_index_complete(self, success, error_msg):
+        """Called when the background thread finishes."""
+        self.btn_index.setEnabled(True)
+        if success:
+            # Sync any new tags to ChromaDB
+            pm = self.project_manager
+            if hasattr(pm, '_sync_doc_tags_for_llm'):
+                for pdf_path in pm.pdfs:
+                    pm._sync_doc_tags_for_llm(pdf_path)
+            
+            # Re-evaluate the status label
+            self.check_index_status()
+        else:
+            self.lbl_status.setText("❌ Indexing Failed")
+            color = self.theme['error'] if self.theme and 'error' in self.theme else "#ff4444"
+            self.lbl_status.setStyleSheet(f"font-weight: bold; margin-right: 15px; color: {color};")
+            print(f"Indexing Error: {error_msg}")

@@ -11,12 +11,13 @@ from PySide6.QtWidgets import (QMainWindow, QSizePolicy, QWidget, QHBoxLayout, Q
 from PySide6.QtGui import QColor, QShortcut, QKeySequence
 from PySide6.QtCore import Qt, QSettings, QTimer, QThread, QEvent
 
+from core.engine.ui_router import BlueprintUIRouter
 from core.project_manager import ProjectManager
 from gui.components.dialogs.extract_pages_dialog import ExtractPagesDialog
 from gui.components.pdf_viewer import PDFViewer
+from gui.components.process_monitor import ProcessMonitorWidget
 from gui.docks.ocr_dock import OCRTab
 from gui.docks.tts_dock import TTSTab
-from gui.docks.llm_dock import LLMTab
 from gui.docks.notes_dock import NotesTab
 from gui.theme import ThemeManager
 from gui.components.help_dialog import HelpDialog
@@ -25,11 +26,13 @@ from gui.components.dialogs.tag_manager_dialog import TagManagerDialog, TagAssig
 from core.prompt_manager import PromptManager
 from core.dictionary_manager import DictionaryManager
 from core.citation_manager import CitationManager
-from gui.docks.brainstorm_dock import BrainstormDock
 from gui.docks.citation_dock import CitationDock
 from gui.docks.essay_dock import EssayTab
 from gui.components.workspace_view import WorkspaceView
-
+from core.engine.process_manager import ProcessRegistry
+from gui.components.universal_overlay import UniversalInternalOverlay
+from core.engine.master_runner import MasterActionRunner
+from core.engine.blueprint_manager import BlueprintManager
 class ElidedLabel(QLabel):
     def minimumSizeHint(self):
         from PySide6.QtCore import QSize
@@ -71,10 +74,12 @@ class MainWindow(QMainWindow):
         self.project_manager = ProjectManager()
         self.project_manager.main_window = self
         self.current_file_path = None
-        
+        self.process_registry = ProcessRegistry()
         from core.llm_manager import LocalLLMManager
         self.shared_llm_manager = LocalLLMManager()
         self.shared_llm_manager.set_audit_logger(self.project_manager.log_ai_interaction_threadsafe)
+        self.prompt_manager = PromptManager()
+        
         # 1. INITIALIZE VIEWER EXPLICITLY ONCE
         def get_resource_path(relative_path):
             if hasattr(sys, '_MEIPASS'):
@@ -108,7 +113,7 @@ class MainWindow(QMainWindow):
             QMainWindow.DockOption.GroupedDragging
         )
         self.setDockNestingEnabled(True)
-
+        self.blueprint_manager = BlueprintManager()
         # 4. SET CENTRAL WIDGET PROPERLY
         self.central_wrapper = QWidget()
         self.central_layout = QVBoxLayout(self.central_wrapper)
@@ -128,6 +133,7 @@ class MainWindow(QMainWindow):
         self.essay_docks = []
         self.citation_docks = [] 
         self.brainstorm_docks = []
+        self.slideshow_docks = []
         # 6. BUILD UI
         self._build_top_menu()
         self._build_ocr_banner()
@@ -150,6 +156,20 @@ class MainWindow(QMainWindow):
         # DELAY THE STARTUP: Wait 50ms for the 0x0 window to physically draw on screen
         # before attempting to calculate tabbed dock layouts.
         QTimer.singleShot(50, self._run_startup_sequence)
+        self.universal_overlay = UniversalInternalOverlay(self, self.theme_manager.get_theme())
+        self.ui_router = BlueprintUIRouter(self)   
+    def execute_ai_blueprint(self, blueprint, initial_state):
+        """
+        The singular entry point for ALL AI operations in the app.
+        Tabs just call this, and the UI Router handles the rest.
+        """
+        # Ensure database is mounted
+        if self.shared_llm_manager.collection is None:
+            self.project_manager._mount_project_database()
+
+        runner = MasterActionRunner(self, blueprint, initial_state)
+        self.ui_router.attach_runner(runner) # Router hooks into signals
+        runner.start()
     def _run_startup_sequence(self):
         """Runs the project load/layout sequence safely after the UI is rendered."""
         last_project = self.settings.value("last_project", "")
@@ -184,7 +204,26 @@ class MainWindow(QMainWindow):
         self.setGeometry(x, y, width, height)
 
     
+    def spawn_slideshow_dock(self):
+        if not hasattr(self, 'slideshow_docks'):
+            self.slideshow_docks = []
 
+        idx = len(self.slideshow_docks) + 1
+        dock = QDockWidget(f"📊 Slideshow Maker {idx}", self)
+        dock.setObjectName(f"SlideshowDock_{idx}")
+
+        # Depending on where SlideshowTab is placed. Assuming gui.docks.slideshow_dock
+        from gui.docks.slideshow_dock import SlideshowTab
+        view = SlideshowTab(self.project_manager, self)
+        dock.setWidget(view)
+
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        self.slideshow_docks.append(view)
+
+        if hasattr(self, 'theme_manager'): 
+            view.update_theme(self.theme_manager.get_theme())
+
+        dock.show()
     def _sync_full_screen_button(self):
         if hasattr(self, "btn_fullscreen"):
             is_full = self.isFullScreen()
@@ -306,22 +345,20 @@ class MainWindow(QMainWindow):
         self.btn_spawn_ws.clicked.connect(self.spawn_workspace_dock)
         self.top_toolbar.addWidget(self.btn_spawn_ws)
 
-        self.btn_spawn_chat = QPushButton("🤖 AI Chat")
-        self.btn_spawn_chat.clicked.connect(self.spawn_chat_dock)
-        self.top_toolbar.addWidget(self.btn_spawn_chat)
+       
 
         self.btn_spawn_research = QPushButton("🔬 Research Assistant")
         self.btn_spawn_research.clicked.connect(self.spawn_research_dock)
         self.top_toolbar.addWidget(self.btn_spawn_research)
 
-        self.btn_spawn_brainstorm = QPushButton("💡 Brainstorm")
-        self.btn_spawn_brainstorm.clicked.connect(self.spawn_brainstorm_dock)
-        self.top_toolbar.addWidget(self.btn_spawn_brainstorm)
+
 
         self.btn_spawn_essay = QPushButton("📝 Writing")
         self.btn_spawn_essay.clicked.connect(self.spawn_essay_dock)
         self.top_toolbar.addWidget(self.btn_spawn_essay)
-
+        self.btn_spawn_slideshow = QPushButton("📊 Slideshow Maker")
+        self.btn_spawn_slideshow.clicked.connect(self.spawn_slideshow_dock)
+        self.top_toolbar.addWidget(self.btn_spawn_slideshow)
         # 5. Dropdown Spawner (Other Tools)
         self.btn_other_tools = QPushButton("➕ Other Tools")
         other_tools_menu = QMenu(self)
@@ -354,6 +391,11 @@ class MainWindow(QMainWindow):
         self.top_toolbar.addWidget(spacer2)
 
         # 6. Right-side Tools
+        self.process_monitor = ProcessMonitorWidget(self.process_registry)
+        self._configure_hover_expand_button(self.process_monitor, "🟢", "Process Monitor", expanded_width=150, collapsed_width=44)
+        self.process_monitor.setMaximumHeight(30) # Keep it compact
+        self.top_toolbar.addWidget(self.process_monitor)
+
         self.btn_tag_manager = QPushButton()
         self._configure_hover_expand_button(self.btn_tag_manager, "🏷️", "Tag Manager", expanded_width=130, collapsed_width=60)
         self.btn_tag_manager.clicked.connect(self._open_tag_manager)
@@ -393,32 +435,7 @@ class MainWindow(QMainWindow):
         self.btn_fullscreen.clicked.connect(self.toggle_full_screen)
         self.top_toolbar.addWidget(self.btn_fullscreen)
 
-    def spawn_brainstorm_dock(self):
-        # STRICT SINGLETON: Like AI Chat, we only need one of these to manage context
-        if self.brainstorm_docks:
-            view = self.brainstorm_docks[0]
-            if view.parentWidget():
-                view.parentWidget().show()
-                view.parentWidget().raise_()
-            return
-                
-        from PySide6.QtWidgets import QDockWidget
-        from PySide6.QtCore import Qt
-        
-        dock = QDockWidget("💡 Brainstorm Assistant", self)
-        dock.setObjectName("SingleBrainstormDock") 
-        
-        from gui.docks.brainstorm_dock import BrainstormDock
-        bs_view = BrainstormDock(self.shared_llm_manager, self.project_manager, self)
-        dock.setWidget(bs_view)
-        
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
-        self.brainstorm_docks.append(bs_view)
-        
-        if hasattr(self, 'theme_manager'): 
-            bs_view.update_theme(self.theme_manager.get_theme())
-            
-        dock.show()
+    
 
     def toggle_full_screen(self):
         from PySide6.QtCore import Qt
@@ -514,7 +531,7 @@ class MainWindow(QMainWindow):
         ws_view._sync_workspace()
         dock.show()
     def spawn_research_dock(self):
-        # STRICT SINGLETON: Like AI Chat, we only need one of these
+        # STRICT SINGLETON: We only need one of these
         if self.research_docks:
             view = self.research_docks[0]
             if view.parentWidget():
@@ -522,20 +539,18 @@ class MainWindow(QMainWindow):
                 view.parentWidget().raise_()
             return
                 
-        dock = QDockWidget("🔬 Research Assistant", self)
-        dock.setObjectName("ResearchAssistantDock") 
+        # Import the NEW Unified Dock
+        from gui.docks.unified_research.unified_dock import UnifiedResearchDock
         
-        # Import our new controller
-        from gui.docks.research_assistant.controller import ResearchDockWidget
-        
-        research_view = ResearchDockWidget(self)
-        dock.setWidget(research_view)
+        # The UnifiedResearchDock inherits directly from QDockWidget, 
+        # so we don't need to create an empty QDockWidget wrapper.
+        dock = UnifiedResearchDock(self, self.project_manager, self.shared_llm_manager, self)
         
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
-        self.research_docks.append(research_view)
+        self.research_docks.append(dock) # Track it so the singleton logic works
         
         if hasattr(self, 'theme_manager'): 
-            research_view.update_theme(self.theme_manager.get_theme())
+            dock.update_theme(self.theme_manager.get_theme())
             
         dock.show()
 
@@ -594,27 +609,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "Success", f"LLM Log successfully exported to:\n{path}")
             else:
                 QMessageBox.warning(self, "Error", "Failed to generate the report. Check the console for details.")
-    def spawn_chat_dock(self):
-        # STRICT SINGLETON: AI doesn't run well concurrently
-        if self.chat_docks:
-            view = self.chat_docks[0]
-            if view.parentWidget():
-                view.parentWidget().show()
-                view.parentWidget().raise_()
-            return
-                
-        dock = QDockWidget("🤖 AI Chat", self)
-        dock.setObjectName("SingleChatDock") # Constant name for layout saving
-        
-        from gui.docks.llm_dock import LLMTab
-        chat_view = LLMTab(self.shared_llm_manager, None, self)
-        dock.setWidget(chat_view)
-        
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
-        self.chat_docks.append(chat_view)
-        if hasattr(self, 'theme_manager'): chat_view.update_theme(self.theme_manager.get_theme())
-        chat_view.refresh_project_ui()
-        dock.show()
+    
 
     def spawn_citation_dock(self):
         if self.citation_docks:
@@ -915,7 +910,7 @@ class MainWindow(QMainWindow):
         for o in getattr(self, 'ocr_docks', []): o.update_theme(theme)
         for a in getattr(self, 'audio_docks', []): a.update_theme(theme)
         for c in getattr(self, 'citation_docks', []): c.update_theme(theme)
-
+        for s in getattr(self, 'slideshow_docks', []): s.update_theme(theme)
         # 2. Fix Scratchpads explicitly since they are raw QTextEdits
         for s in getattr(self, 'scratchpad_docks', []):
             s.setStyleSheet(f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: none;")
@@ -1062,7 +1057,7 @@ class MainWindow(QMainWindow):
             
         # Clean up all dynamic docks cleanly
         for lst in [self.workspace_docks, self.notes_docks, self.chat_docks, 
-                    self.scratchpad_docks, self.ocr_docks, self.audio_docks,self.brainstorm_docks]:
+                    self.scratchpad_docks, self.ocr_docks, self.audio_docks,self.brainstorm_docks,self.slideshow_docks]:
             for item in list(lst):
                 if item.parentWidget(): 
                     item.parentWidget().deleteLater()

@@ -61,7 +61,7 @@ class OCRTab(QWidget):
         self.rb_text = QRadioButton("Extract Text")
         self.rb_new = QRadioButton("Save New PDF")
         self.rb_replace = QRadioButton("Replace Original")
-        self.rb_text.setChecked(True)
+        self.rb_replace.setChecked(True)
 
         self.mode_group.addButton(self.rb_text, 1)
         self.mode_group.addButton(self.rb_new, 2)
@@ -129,7 +129,10 @@ class OCRTab(QWidget):
         
         if self.status_label.text() in ["Ready", ""] or self.status_label.text().startswith("Target:"):
             self.status_label.setStyleSheet(f"color: {theme['text_muted']}; font-size: 13px; font-weight: bold; margin-left: 10px; background: transparent;")
-
+    def get_output_mode(self):
+        if self.rb_text.isChecked(): return "text"
+        if self.rb_new.isChecked(): return "save_new"
+        if self.rb_replace.isChecked(): return "replace"
     def sync_file(self, file_path):
         self.text_area.clear()
         self.status_label.setText(f"Target: {os.path.basename(file_path)}")

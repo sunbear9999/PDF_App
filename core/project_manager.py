@@ -5,7 +5,7 @@ import os
 import shutil
 import tempfile
 import fitz
-
+import sys
 class ProjectManager:
     def __init__(self, max_cache_size=5):
         self.project_filepath = None
@@ -17,6 +17,12 @@ class ProjectManager:
         self.max_cache_size = max_cache_size
         self.active_file = None
         self._conn = None
+        if getattr(sys, 'frozen', False):
+            root_dir = sys._MEIPASS
+        else:
+            root_dir = os.path.abspath(os.path.dirname(__file__))
+        self.templates_path = os.path.join(root_dir, "analysis_templates.json")
+        self._ensure_default_templates()
 
     def _init_db(self):
         try:
@@ -98,6 +104,28 @@ class ProjectManager:
             doi TEXT
              )''')
             self._conn.commit()
+            
+
+            # --- NEW ANALYSIS TABLES ---
+            cursor.execute('''CREATE TABLE IF NOT EXISTS analysis_templates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT UNIQUE,
+                prompt_instructions TEXT,
+                json_schema TEXT
+            )''')
+
+        
+
+            # 2. Recreate the table with text-based template_id and NO foreign keys
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS document_analyses (
+                    doc_path TEXT,
+                    template_id TEXT,
+                    chunk_index INTEGER,
+                    json_data TEXT
+                )
+            ''')
+            self._conn.commit()
         except sqlite3.Error as e:
             print(f"Database initialization error: {e}")
         try:
@@ -166,7 +194,51 @@ class ProjectManager:
             self._conn.commit()
         except sqlite3.Error as e:
             print(f"Error saving citation for {citation_data.get('doc_id')}: {e}")
+    def _ensure_default_templates(self):
+        """Creates default editable templates if the user hasn't made any yet."""
+        if not os.path.exists(self.templates_path):
+            defaults = [
+                {
+                    "id": "default_argument",
+                    "title": "Argument Structure",
+                    "instructions": "Extract the core claims and supporting logic from this text.",
+                    "schema": '{\n  "section_summary": "1 sentence",\n  "core_claims": [\n    {"claim": "string", "logic": "string"}\n  ]\n}'
+                }
+            ]
+            self.save_analysis_templates(defaults)
 
+    def get_analysis_templates(self):
+        try:
+            with open(self.templates_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return []
+
+    def save_analysis_templates(self, templates_list):
+        with open(self.templates_path, 'w', encoding='utf-8') as f:
+            json.dump(templates_list, f, indent=4)
+
+    def save_document_analysis(self, doc_path, template_id, chunk_index, json_data):
+        if not self._conn: return
+        self._conn.execute(
+            "INSERT INTO document_analyses (doc_path, template_id, chunk_index, json_data) VALUES (?, ?, ?, ?)",
+            (doc_path, template_id, chunk_index, json_data)
+        )
+        self._conn.commit()
+
+    def get_document_analyses(self, doc_path, template_id):
+        if not self._conn: return []
+        cursor = self._conn.cursor()
+        cursor.execute(
+            "SELECT chunk_index, json_data FROM document_analyses WHERE doc_path = ? AND template_id = ? ORDER BY chunk_index",
+            (doc_path, template_id)
+        )
+        return [{"chunk_index": r[0], "json_data": r[1]} for r in cursor.fetchall()]
+    
+    def clear_document_analyses(self, doc_path, template_id):
+        if not self._conn: return
+        self._conn.execute("DELETE FROM document_analyses WHERE doc_path = ? AND template_id = ?", (doc_path, template_id))
+        self._conn.commit()
     def get_citation(self, doc_id):
         if not self._conn: return {}
         try:

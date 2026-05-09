@@ -659,7 +659,34 @@ class PDFViewer(QGraphicsView):
             self.viewport().setCursor(Qt.CursorShape.ArrowCursor)
             self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         super().mouseReleaseEvent(event)
+    def jump_to_source(self, doc_name, quote):
+        """
+        Receives jump requests from Universal Note Bubbles.
+        Leverages the existing search infrastructure to cross-document jump,
+        highlight, and perfectly frame the AI's quote.
+        """
+        if not quote: return
         
+        # 1. Clean the string (LLMs love wrapping citations in quotes)
+        clean_quote = quote.strip('"\'').strip()
+        
+        # 2. Open the search bar so the user has visual UI feedback
+        if not self.search_bar.isVisible():
+            self.toggle_search_bar()
+            
+        # 3. Inject the quote and force a global search to handle doc switching
+        self.search_bar.search_input.setText(clean_quote)
+        self.search_bar.scope_combo.setCurrentText("Entire Project")
+        self.trigger_search()
+        
+        # 4. Anti-Hallucination Fallback: If PyMuPDF chokes on a weird line-break 
+        # or hyphen, search for the first 6 words to guarantee we still find the context.
+        if not self.search_hits:
+            words = clean_quote.split()
+            if len(words) > 6:
+                partial_quote = " ".join(words[:6])
+                self.search_bar.search_input.setText(partial_quote)
+                self.trigger_search()    
     def jump_to_page(self, page_num):
         if 0 <= page_num < len(self.page_rects):
             self._scroll_to_scene_y(self.page_rects[page_num].top())

@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (QGraphicsView, QGraphicsScene, QMenu, QMessageBox
                              QScrollArea, QWidget, QFormLayout, QDialogButtonBox, 
                              QColorDialog, QFileDialog, QTextEdit,QCheckBox,QSlider,QLabel,QTabWidget,QListWidget,QListWidgetItem)
 from PySide6.QtCore import Qt, QRectF
-from PySide6.QtGui import QColor, QPen, QBrush, QFont, QPainter, QImage, QStandardItemModel, QStandardItem
+from PySide6.QtGui import QColor, QPen, QBrush, QFont, QPainter, QImage, QStandardItemModel, QStandardItem, QCursor
 import uuid
 import os
 from gui.components.workspace_items import Node
@@ -398,3 +398,121 @@ class ContextFilterDialog(QDialog):
                 self.project_manager.assign_tag_to_node(node_id, tag_id)
             else:
                 self.project_manager.remove_tag_from_node(node_id, tag_id)
+from PySide6.QtWidgets import QGraphicsDropShadowEffect
+
+class WorkspaceProcessOverlay(QFrame):
+    """A floating, semi-transparent bubble that tracks AI tasks in the workspace."""
+    def __init__(self, registry, parent=None):
+        super().__init__(parent)
+        self.registry = registry
+        self.active_jobs = {}
+        
+        self.setObjectName("WorkspaceOverlay")
+        self.setStyleSheet("""
+            #WorkspaceOverlay {
+                background-color: rgba(35, 35, 35, 0.90);
+                border: 1px solid #b366ff;
+                border-radius: 12px;
+            }
+        """)
+        
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(15)
+        shadow.setColor(QColor(0, 0, 0, 180))
+        shadow.setOffset(0, 4)
+        self.setGraphicsEffect(shadow)
+        
+        self.layout = QHBoxLayout(self)
+        self.layout.setContentsMargins(16, 10, 16, 10)
+        self.layout.setSpacing(10)
+        
+        self.lbl_icon = QLabel("✨")
+        self.layout.addWidget(self.lbl_icon)
+        
+        self.lbl_status = QLabel("AI is analyzing...")
+        self.lbl_status.setStyleSheet("color: white; font-weight: bold; font-size: 13px;")
+        self.layout.addWidget(self.lbl_status)
+        
+        self.btn_stop = QPushButton("🛑 Stop")
+        self.btn_stop.setFixedSize(65, 26)
+        self.btn_stop.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_stop.setStyleSheet("""
+            QPushButton { background-color: #882222; color: white; border: none; border-radius: 4px; font-weight: bold; font-size: 12px;}
+            QPushButton:hover { background-color: #aa3333; }
+        """)
+        self.btn_stop.clicked.connect(self._stop_current_job)
+        self.layout.addWidget(self.btn_stop)
+        
+        self.hide() 
+        
+        self.registry.job_added.connect(self._on_job_added)
+        self.registry.job_updated.connect(self._on_job_updated)
+        self.registry.job_removed.connect(self._on_job_removed)
+
+    def _on_job_added(self, job):
+        if "Workspace" in job.name:
+            self.active_jobs[job.id] = job
+            self._update_display()
+
+    def _on_job_updated(self, job):
+        if job.id in self.active_jobs:
+            # Handle error displays natively inside the bubble
+            color = "#ff5555" if "Error" in job.status else "#a8ff9d"
+            self.lbl_status.setText(f"<b>{job.name.replace('Workspace: ', '')}</b><br><span style='color:{color}; font-size: 11px;'>{job.status}</span>")
+            self.adjustSize()
+            self._reposition()
+
+    def _on_job_removed(self, job_id):
+        """Show success OR failure for 2.5 seconds before hiding."""
+        if job_id in self.active_jobs:
+            job = self.active_jobs[job_id]
+            
+            # FIX: Check if it actually failed
+            if "Error" in job.status:
+                self.lbl_status.setText(f"<b>{job.name.replace('Workspace: ', '')}</b><br><span style='color:#ff5555; font-size: 11px;'>❌ Failed (See status bar)</span>")
+            else:
+                self.lbl_status.setText(f"<b>{job.name.replace('Workspace: ', '')}</b><br><span style='color:#a8ff9d; font-size: 11px;'>✅ Complete</span>")
+                
+            self.btn_stop.hide()
+            self.adjustSize()
+            self._reposition()
+            
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(2500, lambda: self._cleanup_job(job_id))
+    def _cleanup_job(self, job_id):
+        if job_id in self.active_jobs:
+            del self.active_jobs[job_id]
+        self.btn_stop.show() # Reset for next time
+        self._update_display()
+
+    def _update_display(self):
+        if not self.active_jobs:
+            self.hide()
+        else:
+            latest_job = list(self.active_jobs.values())[-1]
+            self._on_job_updated(latest_job)
+            self.show()
+            self.raise_() # <-- FIX: Force it to the very top layer of the UI
+            self._reposition()
+
+    def _stop_current_job(self):
+        if self.active_jobs:
+            latest_job = list(self.active_jobs.values())[-1]
+            self.btn_stop.setText("Stopping...")
+            self.btn_stop.setEnabled(False)
+            self.registry.kill_job(latest_job.id)
+            
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(1500, self._reset_btn)
+
+    def _reset_btn(self):
+        self.btn_stop.setText("🛑 Stop")
+        self.btn_stop.setEnabled(True)
+        
+    def _reposition(self):
+        if self.parent():
+            padding = 24
+            # Keep it pinned to the bottom right
+            x = self.parent().width() - self.width() - padding
+            y = self.parent().height() - self.height() - padding
+            self.move(x, y)

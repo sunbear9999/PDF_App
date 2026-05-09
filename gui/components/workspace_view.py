@@ -9,18 +9,16 @@ from PySide6.QtWidgets import (QGraphicsView, QGraphicsScene, QMenu, QMessageBox
                              QColorDialog, QFileDialog, QTextEdit, QCheckBox, QSlider,
                              QGraphicsLineItem, QGraphicsTextItem, QListWidget,
                              QListWidgetItem,QSizePolicy,QApplication)
-from PySide6.QtCore import Qt, QRectF, QRunnable, QThreadPool, Slot
+from PySide6.QtCore import QPointF, Qt, QRectF, QRunnable, QThreadPool, Slot
 from PySide6.QtGui import QColor, QPen, QBrush, QFont, QPainter, QImage, QStandardItemModel, QStandardItem, QCursor, QPainterPath, QPainterPathStroker, QShortcut, QKeySequence
+from core.engine.default_blueprints import DefaultBlueprints
 from gui.components.workspace_items import Node, Edge
-from core.ai_organize_worker import AIOrganizeWorker
-from core.ai_connections_worker import AIFindConnectionsWorker
-from core.ai_outline_worker import AIOutlineWorker
-from core.ai_weakpoints_worker import AIWeakpointsWorker
-from core.ai_fill_graph_worker import AIFillGraphWorker
-from core.ai_consolidate_worker import AIConsolidateWorker
+from core.engine.action_model import AIActionBlueprint, ActionStep
+from core.engine.master_runner import MasterActionRunner
+import re
 from core.layout_engine import calculate_force_directed_layout
 from core.text_utils import get_semantic_similarity_matrix
-from gui.components.dialogs.workspace_dialogs import ColorOrganizerDialog, DeclutterSettingsDialog, OutlineDialog, WeakpointsDialog, ContextFilterDialog
+from gui.components.dialogs.workspace_dialogs import ColorOrganizerDialog, DeclutterSettingsDialog, OutlineDialog, WeakpointsDialog, WorkspaceProcessOverlay
 from gui.components.dialogs.tag_manager_dialog import TagAssignmentDialog
 from gui.components.dialogs.tag_relatives_dialog import AIResultsDialog
 
@@ -355,7 +353,7 @@ class WorkspaceView(QGraphicsView):
         self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
-
+    
         self.current_workspace_id = 1
         self._switching_workspace = False
 
@@ -374,7 +372,7 @@ class WorkspaceView(QGraphicsView):
         self.is_restoring = False
 
         self.clipboard = {'nodes': [], 'edges': []}
-
+        self.ai_overlay = WorkspaceProcessOverlay(self.main_window.process_registry, parent=self)
         # Keep as instance vars so Qt/Python don't GC them.
         # Use explicit key sequences (not StandardKey enums) to avoid multi-binding ambiguity.
         # Connect activatedAmbiguously as well so the slot fires even when another widget
@@ -651,7 +649,430 @@ class WorkspaceView(QGraphicsView):
             QThreadPool.globalInstance().start(task)
         except Exception:
             pass
+    # =========================================================================
+    # UNIVERSAL AI WORKSPACE API
+    # =========================================================================
 
+
+
+    def get_workspace_state_as_json(self, only_selected=False, filters=None):
+        """
+        Extracts a highly optimized JSON snapshot for the LLM based on tool permissions.
+        Filters allow tools to only see what they are allowed to edit/understand.
+        """
+        if filters is None: 
+            filters = ["text", "layout", "color", "edges"] # Default legacy behavior
+
+        items = self.scene_obj.selectedItems() if only_selected else self.nodes.values()
+        nodes = [n for n in items if hasattr(n, 'node_id')]
+        
+        if not nodes:
+            return None
+
+        self.ai_to_real_id = {}
+        data = {"nodes": []}
+        
+        for idx, n in enumerate(nodes):
+            short_id = f"n{idx+1}" 
+            self.ai_to_real_id[short_id] = n.node_id
+            
+            node_data = {"id": short_id}
+            
+            # 1. Content Filters
+            if "text" in filters or "all" in filters:
+                node_data["text"] = f"{getattr(n, 'quote', '')} {getattr(n, 'note', '')}".strip()
+            
+            # 2. Spatial Filters
+            if "layout" in filters or "all" in filters:
+                node_data["x"] = int(n.scenePos().x())
+                node_data["y"] = int(n.scenePos().y())
+            
+            # 3. Metadata Filters (Crucial for RAG tools)
+            if "doc_meta" in filters or "all" in filters:
+                if getattr(n, 'pdf_path', None):
+                    node_data["doc_name"] = os.path.basename(n.pdf_path)
+                    node_data["page"] = getattr(n, 'page_num', 0)
+                else:
+                    node_data["type"] = "user_concept"
+
+            # 4. Visual Filters
+            if "color" in filters or "all" in filters:
+                node_data["color"] = getattr(n, 'color', '#333333')
+                
+            data["nodes"].append(node_data)
+
+        # 5. Relational Filters
+        if "edges" in filters or "all" in filters:
+            data["edges"] = []
+            node_ids = set([n.node_id for n in nodes])
+            for e in self.edges:
+                if e.source_node.node_id in node_ids and e.dest_node.node_id in node_ids:
+                    # Reverse lookup the short IDs
+                    src_short = next((k for k, v in self.ai_to_real_id.items() if v == e.source_node.node_id), None)
+                    dst_short = next((k for k, v in self.ai_to_real_id.items() if v == e.dest_node.node_id), None)
+                    if src_short and dst_short:
+                        data["edges"].append({
+                            "source": src_short, "target": dst_short, "label": e.label_text
+                        })
+                
+        return json.dumps(data, indent=2)
+    def review_and_apply_ai_graph_update(self, json_str):
+        """Safely reviews AI changes before applying them to the canvas."""
+        from gui.components.dialogs.workspace_review_dialog import WorkspaceReviewDialog
+        
+        # Grab theme safely
+        theme = getattr(self.main_window, 'theme_manager', None).get_theme() if hasattr(self.main_window, 'theme_manager') else None
+        
+        # Spawn the dialog using the view as the parent
+        dialog = WorkspaceReviewDialog(json_str, theme, self)
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.apply_ai_graph_update(json_str)
+        else:
+            print("[Workspace] User rejected AI changes.")
+    def apply_ai_graph_update(self, json_str):
+        """
+        Parses LLM JSON output. If it detects a 'doc_name' and 'quote', it triggers
+        the native PDF highlighting system. Otherwise, it updates/creates standard nodes.
+        """
+        try:
+            data = json.loads(json_str) if isinstance(json_str, str) else json_str
+            self.save_state_for_undo()
+            
+            node_obj_map = {}
+            new_nodes_added = []
+            
+            # 1. Process Deletions
+            for d_id in data.get("delete_nodes", []):
+                real_id = self.ai_to_real_id.get(d_id)
+                if real_id and real_id in self.nodes:
+                    self.delete_node(self.nodes[real_id])
+
+            # 2. Process Creations and Updates
+            for n_data in data.get("nodes", []):
+                short_id = n_data.get("id")
+                real_id = self.ai_to_real_id.get(short_id)
+                
+                # UPDATE EXISTING NODE
+                if real_id and real_id in self.nodes:
+                    node = self.nodes[real_id]
+                    if "color" in n_data: node.color = n_data["color"]
+                    if "text" in n_data and node.is_custom: node.note = n_data["text"]
+                    if "x" in n_data and "y" in n_data: node.setPos(n_data["x"], n_data["y"])
+                    node.refresh_layout()
+                    node_obj_map[short_id] = node
+                
+                # CREATE NEW NODE
+                else:
+                    x = n_data.get("x", self.mapToScene(self.viewport().rect().center()).x() + (len(new_nodes_added) * 20))
+                    y = n_data.get("y", self.mapToScene(self.viewport().rect().center()).y() + (len(new_nodes_added) * 20))
+                    
+                    doc_name = n_data.get("doc_name")
+                    quote_text = n_data.get("quote", "")
+                    note_text = n_data.get("text", n_data.get("note", "AI Generated"))
+                    
+                    # --- NATIVE PDF HIGHLIGHTING (RAG EVIDENCE) ---
+                    if doc_name and quote_text and hasattr(self.main_window, 'add_ai_annotation'):
+                        new_annot_id = f"AINote|{uuid.uuid4()}"
+                        success = self.main_window.add_ai_annotation(
+                            quote_text, note_text, target_doc_name=doc_name, 
+                            allowed_paths=self.main_window.project_manager.pdfs, 
+                            forced_annot_id=new_annot_id, emit_signal=False
+                        )
+                        if success:
+                            hl_record = self.main_window.project_manager.get_highlight(new_annot_id)
+                            if hl_record:
+                                new_node = self.add_node_from_annotation({
+                                    "id": hl_record["id"], "subject": quote_text, "content": note_text,
+                                    "pdf_path": hl_record.get("doc_id"), "page_num": hl_record.get("page_num"),
+                                    "color": hl_record.get("color", n_data.get("color", "#9c27b0"))
+                                }, persist=True, target_workspace_id=self.current_workspace_id, position=QPointF(x, y))
+                                node_obj_map[short_id] = new_node
+                                new_nodes_added.append(new_node)
+                                continue 
+                    
+                    # --- STANDARD CUSTOM NODE (THEMES / CLAIMS) ---
+                    new_node = Node(
+                        highlight_id=None, quote=quote_text, node_id=f"custom_{uuid.uuid4()}",
+                        note=note_text, color=n_data.get("color", "#4a148c"), 
+                        is_custom=True, pdf_path=None, page_num=None, node_origin="ai" 
+                    )
+                    self.add_node(new_node, QPointF(x, y))
+                    node_obj_map[short_id] = new_node
+                    new_nodes_added.append(new_node)
+
+            # 3. Process Edges
+            for e_data in data.get("edges", []):
+                src = node_obj_map.get(e_data.get("source")) or self.nodes.get(self.ai_to_real_id.get(e_data.get("source")))
+                tgt = node_obj_map.get(e_data.get("target")) or self.nodes.get(self.ai_to_real_id.get(e_data.get("target")))
+                if src and tgt and src != tgt:
+                    self.add_edge(src, tgt, e_data.get("label", ""))
+
+            self._mark_workspace_dirty(autosave=True)
+            return True, "Success"
+        except Exception as e:
+            return False, str(e)
+
+
+    def apply_ai_graph_update(self, ai_output_string):
+        """Universal Sparse API with Stack-Based Auto-Healing."""
+        print(f"\n--- RAW AI WORKSPACE OUTPUT ---\n{ai_output_string}\n-------------------------------\n")
+        
+        if not ai_output_string.strip():
+            return False, "The AI returned a completely empty string."
+
+        import re
+        match = re.search(r'\[.*\]|\{.*\}', ai_output_string, re.DOTALL)
+        if not match: 
+            return False, "Could not locate JSON brackets in AI response."
+
+        raw_json = match.group(0).strip()
+
+        # =========================================================
+        # THE ULTIMATE JSON AUTO-HEALER
+        # =========================================================
+        try:
+            parsed_data = json.loads(raw_json)
+        except json.JSONDecodeError:
+            print("⚠️ [Workspace API] JSON cut off! Engaging Stack-Based Auto-Repair...")
+            raw_json = raw_json.rstrip(', \n')
+            
+            # 1. Close unclosed string values (e.g. "label": "examines... )
+            if raw_json.count('"') % 2 != 0:
+                raw_json += '"'
+                
+            # 2. If it cut off inside a key/value pair, close the object
+            if not raw_json.endswith('}') and not raw_json.endswith(']'):
+                raw_json += '}'
+                
+            # 3. Balance arrays and objects mathematically
+            while raw_json.count('[') > raw_json.count(']'):
+                raw_json += ']'
+            while raw_json.count('{') > raw_json.count('}'):
+                raw_json += '}'
+                
+            print(f"Repaired JSON:\n{raw_json}")
+            
+            try:
+                parsed_data = json.loads(raw_json)
+            except json.JSONDecodeError as e:
+                return False, f"Failed to parse AI graph JSON even after repair: {e}"
+        # =========================================================
+
+        if isinstance(parsed_data, list): parsed_data = {"nodes": parsed_data}
+        self.save_state_for_undo()
+
+        # ... [KEEP THE REST OF YOUR METHOD EXACTLY THE SAME BELOW THIS] ...
+        from PySide6.QtCore import QPointF
+        from PySide6.QtGui import QBrush, QColor
+        
+        node_obj_map = {} 
+        new_nodes_added = []
+        groups = {}
+
+        # 1. PROCESS NODES
+        for n_data in parsed_data.get("nodes", []):
+            short_id = str(n_data.get("id", ""))
+            if not short_id: continue
+            
+            real_id = getattr(self, 'ai_to_real_id', {}).get(short_id, short_id) 
+            existing_node = self.nodes.get(real_id)
+            
+            if existing_node:
+                if "x" in n_data and "y" in n_data: existing_node.setPos(n_data["x"], n_data["y"])
+                if "color" in n_data:
+                    existing_node.color = n_data["color"]
+                    existing_node.setBrush(QBrush(QColor(existing_node.color)))
+                    
+                new_text = n_data.get("note", n_data.get("text"))
+                if new_text and str(new_text).strip() and "Updated text" not in str(new_text):
+                    existing_node.note = str(new_text)
+                    
+                if "group" in n_data or "cluster_name" in n_data:
+                    group_name = n_data.get("group", n_data.get("cluster_name", "Uncategorized"))
+                    groups.setdefault(group_name, []).append(existing_node)
+                    
+                existing_node.refresh_layout()
+                node_obj_map[short_id] = existing_node
+            else:
+                x = n_data.get("x", self.mapToScene(self.viewport().rect().center()).x() + (len(new_nodes_added) * 20))
+                y = n_data.get("y", self.mapToScene(self.viewport().rect().center()).y() + (len(new_nodes_added) * 20))
+                
+                # --- NATIVE PDF HIGHLIGHTING UPGRADE ---
+                doc_name = n_data.get("doc_name")
+                quote_text = n_data.get("quote", "")
+                note_text = n_data.get("text", n_data.get("note", "AI Generated"))
+                
+                if doc_name and quote_text and hasattr(self.main_window, 'add_ai_annotation'):
+                    # It's an evidence node! Ask the main window to physically highlight the PDF.
+                    new_annot_id = f"AINote|{uuid.uuid4()}"
+                    allowed_paths = self.main_window.project_manager.pdfs
+                    
+                    success = self.main_window.add_ai_annotation(
+                        quote_text, note_text, target_doc_name=doc_name, 
+                        allowed_paths=allowed_paths, forced_annot_id=new_annot_id, emit_signal=False
+                    )
+                    
+                    if success:
+                        # Grab the real highlighting record from the DB
+                        hl_record = self.main_window.project_manager.get_highlight(new_annot_id)
+                        if hl_record:
+                            new_node = self.add_node_from_annotation({
+                                "id": hl_record["id"],
+                                "subject": quote_text,
+                                "content": note_text,
+                                "pdf_path": hl_record.get("doc_id"),
+                                "page_num": hl_record.get("page_num"),
+                                "color": hl_record.get("color", "#9c27b0")
+                            }, persist=True, target_workspace_id=self.current_workspace_id, position=QPointF(x, y))
+                            node_obj_map[short_id] = new_node
+                            new_nodes_added.append(new_node)
+                            continue # Skip the custom node creation below
+                
+                # Fallback: Create a standard custom node
+                cluster_node_id = f"custom_{uuid.uuid4()}"
+                new_node = Node(
+                    highlight_id=None, quote=quote_text, node_id=cluster_node_id,
+                    note=note_text,
+                    color=n_data.get("color", "#4a148c"), 
+                    is_custom=True, pdf_path=None, page_num=None, node_origin="ai" 
+                )
+                new_node.is_verified = 0 
+                self.add_node(new_node, QPointF(x, y))
+                node_obj_map[short_id] = new_node
+                new_nodes_added.append(new_node)
+                if "group" in n_data: groups.setdefault(n_data["group"], []).append(new_node)
+
+        # 2. AUTO-GRID LAYOUT
+        if groups:
+            colors = ["#4a148c", "#004d40", "#b71c1c", "#e65100", "#1a237e", "#01579b", "#33691e", "#3e2723"]
+            base_x = self.mapToScene(self.viewport().rect().center()).x() - 400
+            base_y = self.mapToScene(self.viewport().rect().center()).y() - 300
+            for idx, (group_name, nodes_in_group) in enumerate(groups.items()):
+                color = colors[idx % len(colors)]
+                cluster_x = base_x + (idx % 3) * 350
+                cluster_y = base_y + (idx // 3) * 350
+                for i, node in enumerate(nodes_in_group):
+                    node.setPos(cluster_x + (i % 2) * 160, cluster_y + (i // 2) * 120)
+                    ai_node_data = next((n for n in parsed_data.get("nodes", []) if str(n.get("id")) == getattr(self, 'real_to_ai_id', {}).get(node.node_id, "")), {})
+                    if "color" not in ai_node_data:
+                        node.color = color
+                        node.setBrush(QBrush(QColor(color)))
+                    node.refresh_layout()
+
+        # 3. PROCESS EDGES (WITH THE MISSING NODE FIX!)
+        for e_data in parsed_data.get("edges", []):
+            src_short, tgt_short = str(e_data.get("source", "")), str(e_data.get("target", ""))
+            
+            # --- THE FIX: Look in the new nodes list AND the global workspace nodes list ---
+            def _resolve_node(short_id):
+                if short_id in node_obj_map: return node_obj_map[short_id]
+                real_id = getattr(self, 'ai_to_real_id', {}).get(short_id, short_id)
+                return self.nodes.get(real_id)
+
+            src_node, tgt_node = _resolve_node(src_short), _resolve_node(tgt_short)
+            
+            if src_node and tgt_node and src_node != tgt_node:
+                exists = any(e.source_node == src_node and e.dest_node == tgt_node for e in self.edges)
+                if not exists: self.add_edge(src_node, tgt_node, label=e_data.get("label", ""))
+
+        # 4. PROCESS DELETIONS
+        for short_id in parsed_data.get("delete_nodes", []):
+            real_id = getattr(self, 'ai_to_real_id', {}).get(short_id, short_id)
+            node_to_delete = self.nodes.get(real_id)
+            if node_to_delete:
+                if getattr(node_to_delete, 'quote', '').strip(): continue # Protect quotes
+                for edge in list(node_to_delete.edges):
+                    if edge in self.edges:
+                        self.edges.remove(edge)
+                        if edge.scene(): self.scene().removeItem(edge)
+                    if edge in edge.source_node.edges: edge.source_node.edges.remove(edge)
+                    if edge in edge.dest_node.edges: edge.dest_node.edges.remove(edge)
+                if node_to_delete.node_id in self.nodes: del self.nodes[node_to_delete.node_id]
+                if node_to_delete.scene(): self.scene().removeItem(node_to_delete)
+
+        self._mark_workspace_dirty(autosave=True)
+        return True, "Universal graph applied."
+
+    def _run_workspace_ai_tool(self, blueprint: AIActionBlueprint, require_selection=True):
+        """The Master trigger that executes a predefined Blueprint against the Workspace."""
+        if not self.main_window.shared_llm_manager.ai_enabled:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "AI Disabled", "Local AI is not running.")
+            return
+
+        # Pass permissions directly to the json generator
+        permissions = blueprint.steps[0].permissions if blueprint.steps else ["all"]
+        json_data = self.get_workspace_state_as_json(only_selected=require_selection, permissions=permissions)
+        
+        if require_selection and not json_data:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Selection Required", "Please select nodes to process.")
+            return
+
+        model_name = self.get_active_ai_model()
+
+        initial_state = {
+            "workspace_data": json_data,
+            "selected_model": model_name
+        }
+
+        # --- THE FIX: The Overlay listens for jobs containing "Workspace". 
+        # We inject it here so we don't have to permanently rename the base blueprints.
+        import copy
+        runtime_blueprint = copy.copy(blueprint)
+        if not runtime_blueprint.name.startswith("Workspace:"):
+            runtime_blueprint.name = f"Workspace: {runtime_blueprint.name}"
+
+        # Launch via Master Runner (No UI locking!)
+        self.ai_worker = MasterActionRunner(self.main_window, runtime_blueprint, initial_state)
+        
+        def _handle_completion(state):
+            # The overlay automatically handles the "✅ Complete" visual, but we still need to apply the data
+            ai_output = state.get(runtime_blueprint.steps[-1].output_key, "")
+            output_mode = runtime_blueprint.steps[-1].output_mode if runtime_blueprint.steps else "workspace_update"
+            
+            if output_mode == "dialog":
+                from gui.components.dialogs.workspace_dialogs import OutlineDialog, WeakpointsDialog
+                if "Outline" in runtime_blueprint.name:
+                    OutlineDialog(ai_output, self).exec()
+                elif "Weakpoints" in runtime_blueprint.name:
+                    WeakpointsDialog(ai_output, self).exec()
+                else:
+                    from PySide6.QtWidgets import QMessageBox
+                    QMessageBox.information(self, runtime_blueprint.name.replace("Workspace: ", ""), ai_output)
+                return
+
+            # Otherwise, map it to the workspace graph
+            success, msg = self.apply_ai_graph_update(ai_output)
+            if not success:
+                self.main_window.process_registry.update_job_status(self.ai_worker.job.id, "Error: Invalid AI Format")
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.warning(self, "AI Formatting Error", f"The AI failed to generate a valid graph. It output:\n\n{ai_output[:250]}...")
+
+        def _handle_error(e):
+            self.main_window.statusBar().showMessage(f"⚠️ AI Error: {e}", 5000)
+
+        self.ai_worker.action_complete.connect(_handle_completion)
+        self.ai_worker.error.connect(_handle_error)
+        self.ai_worker.start()
+    def add_node(self,node:Node, position:QPointF):
+        self.scene_obj.addItem(node)
+        node.setPos(position)
+        self.nodes[node.node_id] = node
+        self.update_scene_bounds()
+        self._mark_workspace_dirty(autosave=True)
+        self.update_ghost_connections()
+        self._queue_background_embedding(node)
+    def add_edge(self,source_node:Node, target_node:Node, label=""):
+        edge = Edge(source_node, target_node, label)
+        self.scene_obj.addItem(edge)
+        self.edges.append(edge)
+        source_node.edges.append(edge)
+        target_node.edges.append(edge)
+        self._mark_workspace_dirty(autosave=True)
+   
+        
     def update_scene_bounds(self):
         """Dynamically resizes the canvas to wrap around the nodes with a healthy padding."""
         if not self.nodes:
@@ -691,14 +1112,14 @@ class WorkspaceView(QGraphicsView):
         action_consolidate = menu.addAction("🏗️ Consolidate Notes")
         
         # Make the Consolidate Notes action visibly disabled/unusable for now
-        action_consolidate.setEnabled(False)
+        action_consolidate.setEnabled(True)
         
-        action_categorize.triggered.connect(lambda: self.trigger_ai_organize([n for n in self.scene_obj.selectedItems() if isinstance(n, Node)]))
-        action_find_connections.triggered.connect(self.trigger_find_connections)
-        action_generate_outline.triggered.connect(self.trigger_generate_outline)
-        action_identify_weakpoints.triggered.connect(self.trigger_identify_weakpoints)
-        action_fill_graph.triggered.connect(self.trigger_fill_graph)
-        action_consolidate.triggered.connect(self.trigger_consolidate_notes)
+        action_categorize.triggered.connect(self._organize_selection_ai)
+        action_find_connections.triggered.connect(self._find_connections_ai)
+        action_generate_outline.triggered.connect(self._generate_outline_ai)
+        action_identify_weakpoints.triggered.connect(self._weakpoints_ai)
+        action_fill_graph.triggered.connect(self._fill_graph_ai)
+        action_consolidate.triggered.connect(self._consolidate_nodes_ai)
         
         return menu
 
@@ -1457,6 +1878,10 @@ class WorkspaceView(QGraphicsView):
             self.delete_selected_nodes()
 
     def paste_selection(self):
+        clipboard_text = QApplication.clipboard().text()
+        if "<workspace_graph>" in clipboard_text and "</workspace_graph>" in clipboard_text:
+            self._paste_llm_graph(clipboard_text)
+            return
         if not self.clipboard['nodes']:
             return
 
@@ -1529,7 +1954,91 @@ class WorkspaceView(QGraphicsView):
         self._mark_workspace_dirty(autosave=True)
         self.update_ghost_connections()
         self.update_scene_bounds()
+    def _paste_llm_graph(self, clip_text):
+        """Parses LLM JSON structure and spawns Custom Nodes natively onto the canvas."""
+        import re
+        import json
+        import uuid
 
+        match = re.search(r'<workspace_graph>(.*?)</workspace_graph>', clip_text, re.DOTALL)
+        if not match: return
+
+        try:
+            graph_data = json.loads(match.group(1).strip())
+        except json.JSONDecodeError:
+            QMessageBox.warning(self, "Paste Error", "Failed to decode the AI graph format.")
+            return
+
+        self.save_state_for_undo()
+
+        view_center = self.mapToScene(self.viewport().rect().center())
+        start_x = view_center.x()
+        start_y = view_center.y()
+
+        id_mapping = {}
+        new_nodes = []
+        pm = self.main_window.project_manager
+        ws_id = self.current_workspace_id
+
+        # Simple staggered layout for incoming nodes
+        offset_x = 0
+        offset_y = 0
+
+        # 1. Spawn Nodes
+        for n_data in graph_data.get("nodes", []):
+            old_id = n_data.get("id")
+            text = n_data.get("text", "")
+            color = n_data.get("color", "#005577")
+
+            new_id = f"custom_{uuid.uuid4()}"
+            if old_id: id_mapping[old_id] = new_id
+
+            node = Node(
+                new_id, quote="", note=text, color=color, is_custom=True,
+                width=220, height=100
+            )
+            
+            node.setPos(start_x + offset_x, start_y + offset_y)
+            offset_x += 240
+            if offset_x > 900:  # Wrap to next row
+                offset_x = 0
+                offset_y += 140
+
+            self.scene_obj.addItem(node)
+            self.nodes[new_id] = node
+            new_nodes.append(node)
+            self._queue_background_embedding(node)
+
+            pm.upsert_node_record({
+                'id': new_id, 'highlight_id': None, 'quote': "", 'note': text, 
+                'color': color, 'is_custom': True, 'pdf_path': None, 'page_num': None, 
+                'manual_font_size': None, 'x': node.pos().x(), 'y': node.pos().y(),
+                'width': 220, 'height': 100, 'origin': 'ai'
+            }, ws_id)
+
+        # 2. Wire Connections
+        for e_data in graph_data.get("edges", []):
+            src_old = e_data.get("source")
+            tgt_old = e_data.get("target")
+            label = e_data.get("label", "")
+
+            src_id = id_mapping.get(src_old)
+            tgt_id = id_mapping.get(tgt_old)
+
+            if src_id in self.nodes and tgt_id in self.nodes:
+                edge = Edge(self.nodes[src_id], self.nodes[tgt_id], label)
+                self.scene_obj.addItem(edge)
+                self.edges.append(edge)
+
+        # 3. Visually select new imports
+        self.scene_obj.clearSelection()
+        for n in new_nodes:
+            n.setSelected(True)
+
+        self._similarity_signature = None
+        self._mark_workspace_dirty(autosave=True)
+        self.update_ghost_connections()
+        self.update_scene_bounds()
    # gui/components/workspace_view.py -> WorkspaceView class
     def keyPressEvent(self, event):
         # 🔥 FIX 5: If the text editor has focus, let the editor handle Backspace/Delete!
@@ -1561,7 +2070,11 @@ class WorkspaceView(QGraphicsView):
                 self.zoom_out()
         else:
             super().wheelEvent(event)
-
+    def resizeEvent(self, event):
+        """Ensures the floating AI bubble stays pinned to the corner when the window resizes."""
+        super().resizeEvent(event)
+        if hasattr(self, 'ai_overlay') and self.ai_overlay.isVisible():
+            self.ai_overlay._reposition()
     def zoom_in(self):
         self.scale(1.15, 1.15)
         
@@ -2139,36 +2652,35 @@ class WorkspaceView(QGraphicsView):
         self.opposing_worker.finished.connect(on_finished)
         self.loading_dialog.canceled.connect(self.opposing_worker.terminate)
         self.opposing_worker.start()
-    def trigger_ai_organize(self, selected_nodes):
-        if self.is_llm_busy:
-            QMessageBox.warning(self, "AI Busy", "The AI is currently processing another request.")
-            return
-        if not self.loading_overlay.isHidden(): return
+    
 
-        model = self.get_active_ai_model()
-        if not model or "Error" in model or "running" in model:
-            QMessageBox.warning(self, "No Model Selected", "Please select a valid AI model in the LLM Chat tab first.")
-            return
+    # =========================================================================
+    # CONTEXT MENU TRIGGERS
+    # =========================================================================
 
-        instructions, ok = QInputDialog.getText(
-            self, 
-            "AI Organize Options", 
-            "Enter custom organization instructions (e.g., 'Group by Timeline' or 'Pros vs Cons'):\nLeave blank for default semantic grouping."
-        )
-        if not ok: return
+    def _organize_selection_ai(self):
+        blueprint = DefaultBlueprints.get_workspace_organize_blueprint()
+        self._run_workspace_ai_tool(blueprint, require_selection=True)
 
-        nodes_data = [{"id": n.node_id, "text": n.note or n.quote} for n in selected_nodes]
-        llm_manager = self.main_window.shared_llm_manager
-        if llm_manager.collection is None:
-            self._start_llm_manager()
-        self.loading_label.setText("✨ AI is analyzing and organizing your notes...\nThis may take a moment.")
-        self.loading_overlay.resize(self.viewport().size())
-        self.loading_overlay.show()
+    def _find_connections_ai(self):
+        blueprint = DefaultBlueprints.get_workspace_connections_blueprint()
+        self._run_workspace_ai_tool(blueprint, require_selection=True)
 
-        self.worker = AIOrganizeWorker(llm_manager, model, nodes_data, custom_instructions=instructions.strip(), parent=self)
-        self.worker.finished.connect(self._on_ai_organize_finished)
-        self.worker.start()
+    def _generate_outline_ai(self):
+        blueprint = DefaultBlueprints.get_workspace_outline_blueprint()
+        self._run_workspace_ai_tool(blueprint, require_selection=True)
 
+    def _weakpoints_ai(self):
+        blueprint = DefaultBlueprints.get_workspace_weakpoints_blueprint()
+        self._run_workspace_ai_tool(blueprint, require_selection=True)
+
+    def _fill_graph_ai(self):
+        blueprint = DefaultBlueprints.get_workspace_fill_blueprint()
+        self._run_workspace_ai_tool(blueprint, require_selection=True)
+
+    def _consolidate_nodes_ai(self):
+        blueprint = DefaultBlueprints.get_workspace_consolidate_blueprint()
+        self._run_workspace_ai_tool(blueprint, require_selection=True)
     def _manage_tags_for_nodes(self, selected_nodes):
         if not selected_nodes:
             return
@@ -2267,38 +2779,7 @@ class WorkspaceView(QGraphicsView):
         except Exception as e:
             QMessageBox.warning(self, "Layout Error", str(e))
 
-    def trigger_find_connections(self):
-        if self.is_llm_busy:
-            QMessageBox.warning(self, "AI Busy", "The AI is currently processing another request.")
-            return
-        if not self.loading_overlay.isHidden(): return
-
-        model = self.get_active_ai_model()
-        if not model or "Error" in model or "running" in model:
-            QMessageBox.warning(self, "No Model Selected", "Please select a valid AI model in the LLM Chat tab first.")
-            return
-
-        selected_nodes = [n for n in self.scene_obj.selectedItems() if isinstance(n, Node)]
-        target_nodes = selected_nodes if selected_nodes else [n for n in self.nodes.values() if n.isVisible()]
-
-        if len(target_nodes) < 2:
-            QMessageBox.warning(self, "Not Enough Nodes", "Please select at least 2 nodes to find connections between.")
-            return
-
-        nodes_data = [{"id": n.node_id, "text": f"{n.quote} \n {n.note}".strip()} for n in target_nodes]
-        edges_data = [{"source_id": e.source_node.node_id, "target_id": e.dest_node.node_id} 
-                      for e in self.edges if e.source_node in target_nodes and e.dest_node in target_nodes]
-
-        llm_manager = self.main_window.shared_llm_manager
-        if llm_manager.collection is None:
-            self._start_llm_manager()
-        self.loading_label.setText("✨ AI is analyzing relationships and finding new connections...\nThis may take a moment.")
-        self.loading_overlay.resize(self.viewport().size())
-        self.loading_overlay.show()
-        self.is_llm_busy = True
-        self.conn_worker = AIFindConnectionsWorker(llm_manager, model, nodes_data, edges_data, parent=self)
-        self.conn_worker.finished.connect(self._on_find_connections_finished)
-        self.conn_worker.start()
+    
 
     def _on_find_connections_finished(self, new_connections, error_msg):
         self.is_llm_busy = False
@@ -2345,38 +2826,7 @@ class WorkspaceView(QGraphicsView):
         else:
             QMessageBox.information(self, "No Connections Added", "The AI suggested connections that already existed.")
 
-    def trigger_generate_outline(self):
-        if self.is_llm_busy:
-            QMessageBox.warning(self, "AI Busy", "The AI is currently processing another request.")
-            return
-        if not self.loading_overlay.isHidden(): return
-
-        model = self.get_active_ai_model()
-        if not model or "Error" in model or "running" in model:
-            QMessageBox.warning(self, "No Model Selected", "Please select a valid AI model in the LLM Chat tab first.")
-            return
-
-        selected_nodes = [n for n in self.scene_obj.selectedItems() if isinstance(n, Node)]
-        target_nodes = selected_nodes if selected_nodes else [n for n in self.nodes.values() if n.isVisible()]
-
-        if not target_nodes:
-            QMessageBox.warning(self, "No Nodes", "Please add or select some notes in the workspace first.")
-            return
-
-        nodes_data = [{"id": n.node_id, "type": "user_created" if n.is_custom else "pdf_note", "text": f"{n.quote} \n {n.note}".strip()} for n in target_nodes]
-        edges_data = [{"source_id": e.source_node.node_id, "target_id": e.dest_node.node_id, "label": e.label_text} 
-                      for e in self.edges if e.source_node in target_nodes and e.dest_node in target_nodes]
-
-        llm_manager = self.main_window.shared_llm_manager
-        if llm_manager.collection is None:
-            self._start_llm_manager()
-        self.loading_label.setText("✨ AI is analyzing argument structure and drafting outline...\nThis may take a moment.")
-        self.loading_overlay.resize(self.viewport().size())
-        self.loading_overlay.show()
-        self.is_llm_busy = True
-        self.outline_worker = AIOutlineWorker(llm_manager, model, nodes_data, edges_data, parent=self)
-        self.outline_worker.finished.connect(self._on_generate_outline_finished)
-        self.outline_worker.start()
+    
 
     def _on_generate_outline_finished(self, outline_text, error_msg):
         self.is_llm_busy = False
@@ -2400,38 +2850,7 @@ class WorkspaceView(QGraphicsView):
 
         dialog.exec()
 
-    def trigger_identify_weakpoints(self):
-        if self.is_llm_busy:
-            QMessageBox.warning(self, "AI Busy", "The AI is currently processing another request.")
-            return
-        if not self.loading_overlay.isHidden(): return
-
-        model = self.get_active_ai_model()
-        if not model or "Error" in model or "running" in model:
-            QMessageBox.warning(self, "No Model Selected", "Please select a valid AI model in the LLM Chat tab first.")
-            return
-
-        selected_nodes = [n for n in self.scene_obj.selectedItems() if isinstance(n, Node)]
-        target_nodes = selected_nodes if selected_nodes else [n for n in self.nodes.values() if n.isVisible()]
-
-        if not target_nodes:
-            QMessageBox.warning(self, "No Nodes", "Please add or select some notes in the workspace to evaluate.")
-            return
-
-        nodes_data = [{"id": n.node_id, "type": "user_created" if n.is_custom else "pdf_note", "text": f"{n.quote} \n {n.note}".strip()} for n in target_nodes]
-        edges_data = [{"source_id": e.source_node.node_id, "target_id": e.dest_node.node_id, "label": e.label_text} 
-                      for e in self.edges if e.source_node in target_nodes and e.dest_node in target_nodes]
-
-        llm_manager = self.main_window.shared_llm_manager
-        if llm_manager.collection is None:
-            self._start_llm_manager()
-        self.loading_label.setText("✨ AI is evaluating argument strength and identifying weak points...\nThis may take a moment.")
-        self.loading_overlay.resize(self.viewport().size())
-        self.loading_overlay.show()
-        self.is_llm_busy = True
-        self.weakpoints_worker = AIWeakpointsWorker(llm_manager, model, nodes_data, edges_data, parent=self)
-        self.weakpoints_worker.finished.connect(self._on_identify_weakpoints_finished)
-        self.weakpoints_worker.start()
+   
 
     def _on_identify_weakpoints_finished(self, analysis_text, error_msg):
         self.is_llm_busy = False
@@ -2456,91 +2875,7 @@ class WorkspaceView(QGraphicsView):
 
         dialog.exec()
 
-    def trigger_fill_graph(self):
-        if self.is_llm_busy:
-            QMessageBox.warning(self, "AI Busy", "The AI is currently processing another request.")
-            return
-        if not self.loading_overlay.isHidden(): return
-
-        model = self.get_active_ai_model()
-        if not model or "Error" in model or "running" in model:
-            QMessageBox.warning(self, "No Model Selected", "Please select a valid AI model in the LLM Chat tab first.")
-            return
-        pm = self.main_window.project_manager
-        llm_manager = self.main_window.shared_llm_manager
-        if llm_manager.collection is None and pm.project_filepath:
-            llm_manager.set_project_database(pm.project_filepath)
-        
-        
-        # 1. ERROR HANDLING FIX: Explicitly check for an empty or missing index
-        if llm_manager.collection is None or llm_manager.collection.count() == 0:
-            QMessageBox.critical(self, "Search Index Missing", "The search index is empty. Please add PDFs and build the project index in the LLM Chat tab before using AI tools.")
-            return
-
-        selected_nodes = [n for n in self.scene_obj.selectedItems() if isinstance(n, Node)]
-        target_nodes = selected_nodes if selected_nodes else [n for n in self.nodes.values() if n.isVisible()]
-
-        if not target_nodes:
-            QMessageBox.warning(self, "No Nodes", "Please add or select some nodes in the workspace first.")
-            return
-
-       
-        enforce_tags = False
-        node_tags_map = {}
-
-        # 2. THRESHOLD INTERCEPTION: Force tagging on large projects
-        if len(pm.pdfs) > 3:
-            dialog = ContextFilterDialog(pm, target_nodes, self)
-            if dialog.exec() != QDialog.DialogCode.Accepted:
-                return # User cancelled the operation
-            
-            enforce_tags = True
-            
-            # Pre-fetch node tag mappings to safely pass to the background thread
-            for n in target_nodes:
-                tags = pm.get_tags_for_node(n.node_id)
-                if tags:
-                    # We extract the tag names since that's how ChromaDB metadata is keyed
-                    node_tags_map[n.node_id] = [t.get("name") for t in tags if t.get("name")]
-
-            if not node_tags_map:
-                QMessageBox.warning(self, "No Tags Assigned", "You must tag at least one node to proceed. The AI needs this to filter context.")
-                return
-
-        nodes_data = []
-        for n in target_nodes:
-            # RULE ENFORCEMENT: Completely skip untagged nodes if threshold was met
-            if enforce_tags and n.node_id not in node_tags_map:
-                continue
-                
-            nodes_data.append({
-                "id": n.node_id, 
-                "type": "user_created" if n.is_custom else "pdf_note", 
-                "text": f"{n.quote} \n {n.note}".strip()
-            })
-
-        if not nodes_data:
-            QMessageBox.warning(self, "No Valid Nodes", "No tagged nodes were found. Please tag your nodes to proceed.")
-            return
-
-        edges_data = [{"source_id": e.source_node.node_id, "target_id": e.dest_node.node_id, "label": e.label_text} 
-                    for e in self.edges if e.source_node in target_nodes and e.dest_node in target_nodes]
-
-        allowed_docs = self.get_allowed_docs()
-
-        self.loading_label.setText("✨ AI is analyzing graph to find missing evidence...\nThis may take a moment.")
-        self.loading_overlay.resize(self.viewport().size())
-        self.loading_overlay.show()
-        self.is_llm_busy = True
-        
-        # 3. Pass the new tagging parameters to the worker
-        self.fill_worker = AIFillGraphWorker(
-            llm_manager, model, nodes_data, edges_data, allowed_docs, 
-            enforce_tags=enforce_tags, node_tags_map=node_tags_map, parent=self
-        )
-        self.fill_worker.progress.connect(self._update_loading_label)
-        self.fill_worker.finished.connect(self._on_fill_graph_finished)
-        self.fill_worker.start()
+    
     def _update_loading_label(self, text):
         self.loading_label.setText(text + "\nThis may take a moment.")
 

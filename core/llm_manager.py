@@ -354,140 +354,84 @@ class LocalLLMManager:
             self.collection.update(ids=ids, metadatas=updated_metadatas)
         except Exception as e:
             print(f"[System] Failed to sync tags for doc '{doc_id}': {e}")
+    
 
-    def query(self, question, selected_model, allowed_docs=None, callback=None, rag_enabled=True, use_agents=True, custom_system_prompt=None, existing_highlights=None, tag_filters=None):
+    def query(self, question, selected_model, allowed_docs=None, callback=None, rag_enabled=False, custom_system_prompt=None, existing_highlights=None, tag_filters=None, abort_event=None, **kwargs):
+        """A lean, standard inference function. Advanced agent routing is now handled by MasterRunner Blueprints."""
+        try:
+            # Auto-correct model names to prevent 404s
+            resp = requests.get(f"{self.api_base}/tags", timeout=2)
+            if resp.status_code == 200:
+                installed_models = [m["name"] for m in resp.json().get("models", [])]
+                if installed_models and selected_model not in installed_models:
+                    old_model = selected_model
+                    partial_match = next((m for m in installed_models if old_model.lower().strip() in m.lower()), None)
+                    selected_model = partial_match if partial_match else installed_models[0]
+        except Exception as e:
+            print(f"[LLM Manager] Warning: Could not verify installed models: {e}")
+
         context = ""
         system_prompt = ""
         
-        if existing_highlights is None:
-            existing_highlights = []
-
         if not selected_model:
             err = "\n[Generation Error: No AI model selected.]"
             if callback: callback(err)
             return err
 
-        highlight_rules = (
-            "--- HIGHLIGHTS ---\n"
-            "To autonomously highlight quotes in the PDF for the user, you MUST create a final section at the VERY END of your response exactly titled '--- HIGHLIGHTS ---'.\n"
-            "Under this section, list your quotes using this exact single-line format:\n"
-            "%%QUOTE | Document_Name.pdf | The exact phrase from the text | Your explanation\n\n"
-            "CRITICAL RULES (FAILURE TO FOLLOW WILL BREAK THE SYSTEM):\n"
-            "1. STRICT ANTI-HALLUCINATION: You MUST ONLY extract exact, verbatim phrases that physically appear in the provided CONTEXT text below. NEVER alter text, paraphrase, or invent 'implied' quotes.\n"
-            "2. EXACT DOCUMENT NAMES: Use ONLY the exact document names provided in the CONTEXT headers. NEVER invent or repeat document names if they aren't in the context.\n"
-            "3. NO FORCED QUOTAS: If a document does not contain highly relevant text, SKIP IT entirely. Do not force quotes.\n"
-            "4. NO REPETITION: Every quote must be entirely distinct.\n"
-            "5. ISOLATION: The '--- FINAL ANSWER ---' section MUST NOT contain any quotes, highlight tags, or direct document citations. It should only be a high-level conceptual summary. Reserve ALL quotes and explanations exclusively for the '--- HIGHLIGHTS ---' section.\n"
-        )
-
-        if existing_highlights:
-            highlight_rules += "6. DO NOT highlight the following phrases as they are ALREADY highlighted by the user:\n"
-            for h in set(existing_highlights):
-                highlight_rules += f" - {h}\n"
-
+        # Legacy Highlight Rules for standard single-pass queries
+        
+        # --- FETCH RAG DATA (Standard Single-Pass Only) ---
         if rag_enabled:
             if not self.collection or self.collection.count() == 0:
                 if callback: callback("Please build the search index first.")
                 return ""
 
             try:
-                search_queries = [question]
                 tag_filters = [str(t).strip() for t in (tag_filters or []) if str(t).strip()]
                 
-                # 🔥 FIX: Build the global where_clause safely without empty or single-item $and operators
-                global_conditions = []
+                top_level_and = []
                 if allowed_docs:
                     base_names = [os.path.basename(d) for d in allowed_docs]
                     if len(base_names) == 1:
-                        global_conditions.append({"doc_name": base_names[0]})
+                        top_level_and.append({"doc_name": base_names[0]})
                     else:
-                        global_conditions.append({"doc_name": {"$in": base_names}})
+                        top_level_and.append({"doc_name": {"$in": base_names}})
                                         
-                for t in tag_filters:
-                    global_conditions.append({f"tag_{t}": True})
+                if tag_filters:
+                    tag_conditions = [{f"tag_{t}": True} for t in tag_filters]
+                    tag_logic = kwargs.get("tag_logic", "AND") 
+                    
+                    if tag_logic == "OR":
+                        if len(tag_conditions) > 1:
+                            top_level_and.append({"$or": tag_conditions})
+                        else:
+                            top_level_and.append(tag_conditions[0])
+                    else:
+                        top_level_and.extend(tag_conditions) 
                     
                 where_clause = None
-                if len(global_conditions) == 1:
-                    where_clause = global_conditions[0]
-                elif len(global_conditions) > 1:
-                    where_clause = {"$and": global_conditions}
+                if len(top_level_and) == 1:
+                    where_clause = top_level_and[0]
+                elif len(top_level_and) > 1:
+                    where_clause = {"$and": top_level_and}
 
-                if use_agents:
-                    if callback: callback("@@AGENT@@🔍 Performing initial scan based on your query...")
-                    
-                    try:
-                        sq_emb = self.get_embedding(question)
-                        initial_results = self.collection.query(
-                            query_embeddings=[sq_emb],
-                            n_results=3, 
-                            where=where_clause
-                        )
-                        
-                        initial_context = ""
-                        if initial_results.get('documents') and initial_results['documents'][0]:
-                            initial_context = "\n\n".join(initial_results['documents'][0])
-                        
-                        if callback: callback("@@AGENT@@🤖 Analyzing context to formulate advanced search strategy...")
-                        
-                        search_prompt = (
-                            "You are an expert researcher. A user asked the following question:\n"
-                            f"USER QUERY: '{question}'\n\n"
-                            "I performed an initial database search and retrieved this preliminary context:\n"
-                            "--- START INITIAL CONTEXT ---\n"
-                            f"{initial_context}\n"
-                            "--- END INITIAL CONTEXT ---\n\n"
-                            "Based on the user's query and the preliminary context, generate exactly 3 highly specific search phrases (2-6 words each) "
-                            "that will help me find the most relevant and complete information across the documents to properly answer the user. Focus on key entities, core concepts, or missing details.\n"
-                            "Output ONLY a bulleted list using a dash (-). Do not output any other text or reasoning.\n"
-                        )
-                        
-                        exp_payload = {"model": selected_model, "prompt": search_prompt, "stream": False, "options": {"temperature": 0.2, "num_predict": 100, "num_ctx": 4096}}
-                        try:
-                            exp_resp = requests.post(f"{self.api_base}/generate", json=exp_payload, timeout=15)
-                            if exp_resp.status_code == 200:
-                                raw_resp = exp_resp.json().get("response", "").strip()
-                                for line in raw_resp.split('\n'):
-                                    clean_q = re.sub(r'^[-*0-9.\s]+', '', line).strip(' "\'')
-                                    if clean_q and len(clean_q) > 3 and clean_q.lower() not in question.lower():
-                                        search_queries.append(clean_q)
-                        except Exception:
-                            pass 
-                    except Exception:
-                        pass
-                    
-                    search_queries = list(dict.fromkeys(search_queries))[:4] 
-
-                    if callback: 
-                        clean_qs = ", ".join(f"'{q}'" for q in search_queries[1:])
-                        if clean_qs:
-                            callback(f"@@AGENT@@📚 Exploring deeper across project using terms: <b>{clean_qs}</b>")
+                sq_emb = self.get_embedding(question)
+                results = self.collection.query(
+                    query_embeddings=[sq_emb],
+                    n_results=10, 
+                    where=where_clause
+                )
 
                 aggregated_docs = {}
-                
-                # 🔥 FIX: Rip out the per-document loop. 
-                # Use the global where_clause so ChromaDB natively enforces the tags AND the PDF checks simultaneously.
-                for sq in search_queries:
-                    try:
-                        sq_emb = self.get_embedding(sq)
-                        results = self.collection.query(
-                            query_embeddings=[sq_emb],
-                            n_results=10 if use_agents else 15, # Pull top results globally across allowed context
-                            where=where_clause
-                        )
-                        
-                        if results.get('documents') and results['documents'][0]:
-                            for idx, doc_text in enumerate(results['documents'][0]):
-                                doc_id = results['ids'][0][idx]
-                                meta = results['metadatas'][0][idx]
-                                if doc_id not in aggregated_docs:
-                                    aggregated_docs[doc_id] = {
-                                        "text": doc_text,
-                                        "doc_name": meta['doc_name'],
-                                        "page": meta['page']
-                                    }
-                    except Exception as e:
-                        print(f"[System] Search error for query '{sq}': {e}")
-                        continue
+                if results.get('documents') and results['documents'][0]:
+                    for idx, doc_text in enumerate(results['documents'][0]):
+                        doc_id = results['ids'][0][idx]
+                        meta = results['metadatas'][0][idx]
+                        aggregated_docs[doc_id] = {
+                            "text": doc_text,
+                            "doc_name": meta['doc_name'],
+                            "page": meta['page']
+                        }
 
                 if not aggregated_docs:
                     err_msg = "\n[System Warning: No readable text was found in the selected documents.]\n"
@@ -496,50 +440,23 @@ class LocalLLMManager:
 
                 sorted_docs = sorted(aggregated_docs.values(), key=lambda x: (x['doc_name'], x['page']))
                 context_pieces = [f"--- DOCUMENT: {d['doc_name']} | PAGE {d['page'] + 1} ---\n{d['text']}" for d in sorted_docs]
-
-                context = "\n\n".join(context_pieces)
-
-                # Explicitly inject the strictly valid document names to prevent name hallucinations
-                available_docs_list = list(set([d['doc_name'] for d in sorted_docs]))
-                if available_docs_list:
-                    highlight_rules += f"\nCRITICAL: The ONLY VALID DOCUMENT NAMES you can use for %%QUOTE are: {', '.join(available_docs_list)}\n"
+                context += "\n\n".join(context_pieces) 
 
             except Exception as e:
                 if callback: callback(f"\n[System Error: {str(e)}]\n")
                 return f"[System Error: {str(e)}]"
 
-            if use_agents:
-                system_prompt = self._format_prompt_template(
-                    "RAG Agent Mode",
-                    (
-                        "You are an expert AI research agent.\n"
-                        "Provide comprehensive, highly detailed answers using ONLY the provided context.\n"
-                        "CRITICAL: Follow this exact structure to simulate your thought process. Do NOT deviate:\n\n"
-                        "--- AGENT REASONING ---\n"
-                        "(Write your step-by-step thoughts here. Analyze the context, plan your answer, and brainstorm VERBATIM quotes. Realize if a document lacks relevant quotes, you should skip it.)\n\n"
-                        "--- FINAL ANSWER ---\n"
-                        "(Provide a high-level conceptual summary answering the user's prompt. DO NOT use quotation marks. DO NOT output specific quotes here. All quotes belong in the highlights section.)\n\n"
-                        "{highlight_rules}\n\n"
-                        "CONTEXT:\n{context}"
-                    ),
-                    highlight_rules=highlight_rules,
-                    context=context,
-                )
-            else:
-                system_prompt = self._format_prompt_template(
-                    "RAG Assistant Mode",
-                    (
-                        "You are an expert AI research assistant.\n"
-                        "Provide comprehensive answers using ONLY the provided context.\n"
-                        "{highlight_rules}\n\n"
-                        "CONTEXT:\n{context}"
-                    ),
-                    highlight_rules=highlight_rules,
-                    context=context,
-                )
+        # --- PROMPT COMPILATION ---
+        if custom_system_prompt:
+            # We completely trust the Blueprint's system prompt now. No forced injections.
+            system_prompt = custom_system_prompt.replace("{context}", context)
         else:
-            system_prompt = custom_system_prompt or self.prompt_manager.get_prompt("General Assistant")
-
+            system_prompt = self._format_prompt_template(
+                "RAG Assistant Mode",
+                "You are a helpful assistant. Use this context: {context}", 
+                context=context
+            )
+        # --- STREAMING EXECUTION ---
         payload = {
             "model": selected_model, 
             "prompt": question, 
@@ -547,25 +464,34 @@ class LocalLLMManager:
             "stream": True, 
             "keep_alive": "60m", 
             "options": {
-                "temperature": 0.1, 
-                "top_p": 0.7,
-                "num_ctx": 16384 # Critical fix: ensures the model reads the full context without truncation
+                "temperature": kwargs.get("temperature", 0.1), 
+                "top_p": kwargs.get("top_p", 0.7),
+                "num_ctx": kwargs.get("num_ctx", 16384) 
             }
         }
         
+        if "num_predict" in kwargs:
+            payload["options"]["num_predict"] = kwargs["num_predict"]
+            
+        if kwargs.get("json_mode"):
+            payload["format"] = "json"
+            
         full_response = ""
         try:
             with requests.post(f"{self.api_base}/generate", json=payload, stream=True, timeout=(15, 600)) as response:
                 if response.status_code != 200:
-                    try: err_msg = response.json().get("error", response.text)
-                    except: err_msg = response.text
-                    raise Exception(f"Ollama API Error ({response.status_code}): {err_msg}")
+                    raise Exception(f"Ollama API Error ({response.status_code})")
 
                 for line in response.iter_lines():
+                    # --- THE KILL SWITCH ---
+                    if abort_event and abort_event.is_set():
+                        abort_msg = "\n[Process Aborted by User]"
+                        if callback: callback(abort_msg)
+                        full_response += abort_msg
+                        break
+
                     if line:
                         chunk = json.loads(line)
-                        if "error" in chunk:
-                            raise Exception(chunk["error"])
                         txt = chunk.get("response", "")
                         full_response += txt
                         if callback: callback(txt)
@@ -577,7 +503,8 @@ class LocalLLMManager:
             err = f"\n[Generation Error: {str(e)}]"
             if callback: callback(err)
             full_response += err
+            
         if self.audit_logger and full_response and "[System Error" not in full_response:
-            # Fire and forget; the thread-safe DB method handles the rest
             self.audit_logger(question, full_response, selected_model)
+            
         return full_response
