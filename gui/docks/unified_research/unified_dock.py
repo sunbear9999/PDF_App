@@ -12,7 +12,6 @@ from .tabs.search_tab import SearchTab
 from .tabs.anaylsis_tab import AnalysisTab
 from .components.note_bubble import NoteBubbleWidget
 from core.research_manager import ResearchManager
-from core.brainstorm_manager import BrainstormManager
 from gui.components.process_monitor import ProcessMonitorWidget
 class ProjectBriefDialog(QDialog):
     """Global Project Variables Manager"""
@@ -63,7 +62,7 @@ class UnifiedResearchDock(QDockWidget):
         self.project_manager = project_manager
         self.llm_manager = llm_manager
         self.research_manager = ResearchManager(self.llm_manager, self.project_manager)
-        self.brainstorm_manager = BrainstormManager(self.llm_manager, self.llm_manager.prompt_manager)
+        
         
         self.central_widget = QWidget()
         self.setWidget(self.central_widget)

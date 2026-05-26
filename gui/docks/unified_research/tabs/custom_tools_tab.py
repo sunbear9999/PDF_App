@@ -1,4 +1,3 @@
-# gui/docks/unified_research/tabs/custom_tools_tab.py
 import os
 import re
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, 
@@ -77,6 +76,7 @@ class CustomToolsTab(QWidget):
 
         inputs_to_render = blueprint.expected_inputs.copy() if blueprint.expected_inputs else []
 
+        # If user didn't explicitly define expected_inputs, auto-discover variables in the blueprint
         if not inputs_to_render:
             discovered_vars = set()
             for step in blueprint.steps:
@@ -101,8 +101,7 @@ class CustomToolsTab(QWidget):
             return
 
         for inp in inputs_to_render:
-            # --- THE FIX: Bulletproof Key Resolution ---
-            # If the LLM hallucinates 'name' or 'id' instead of 'key', this catches it safely.
+            # Safely grab the key whether the LLM architect generated 'key', 'name', or 'id'
             inp_key = inp.get('key') or inp.get('name') or inp.get('id') or "unknown_input"
             inp_label = inp.get('label') or inp.get('description') or inp_key.replace('_', ' ').title()
             
@@ -136,7 +135,7 @@ class CustomToolsTab(QWidget):
     def refresh_tools(self):
         self.combo_tools.clear()
         if not self.bpm: return
-        core_tools = ["Chat - RAG Assistant", "Chat - Advanced Agent", "Brainstorm - Default", "Search Terms", "Master Outline"]
+        core_tools = ["Chat - RAG Assistant", "Chat - Advanced Agent", "Brainstorm - Default", "Search Terms", "Master Outline", "Keyword Density Analyzer (Python)"]
         custom_tools = [k for k in self.bpm.blueprints.keys() if k not in core_tools]
         if custom_tools:
             self.combo_tools.addItems(custom_tools)
@@ -157,13 +156,21 @@ class CustomToolsTab(QWidget):
         for key, widget in self.dynamic_widgets.items():
             if isinstance(widget, QComboBox):
                 state_dict[key] = widget.currentData() or widget.currentText()
-                if "doc" in key.lower(): state_dict[f"{key}_name"] = widget.currentText()
+                # Crucial for RAG searches: populate both the path and the readable basename
+                if "doc" in key.lower(): 
+                    state_dict[f"{key}_name"] = os.path.basename(widget.currentData() or widget.currentText())
             elif isinstance(widget, QTextEdit):
                 state_dict[key] = widget.toPlainText().strip()
 
+        ui_target = blueprint.steps[-1].ui_target if blueprint.steps else "custom_tools_tab"
+        
         msg = ChatMessageWidget(f"Running Tool: {tool_name}", theme=self.theme, is_user=True)
         msg.append_chunk("Data dispatched to pipeline...")
-        self.add_message_widget(msg)
+        
+        # Only inject the starting notification here if the tool outputs to this tab
+        if ui_target == "custom_tools_tab":
+            self.add_message_widget(msg)
+            
         self.main_window.execute_ai_blueprint(blueprint, state_dict)
 
     def update_theme(self, theme):

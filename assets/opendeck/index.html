@@ -40,7 +40,7 @@
 
     <meta http-equiv="Content-Security-Policy" content="
         default-src 'self'; 
-        script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://static.cloudflareinsights.com; 
+        script-src 'self' 'unsafe-inline' 'unsafe-eval' qrc: https://cdn.tailwindcss.com https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://static.cloudflareinsights.com; 
         style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://fonts.googleapis.com; 
         font-src 'self' data: https://cdnjs.cloudflare.com https://fonts.gstatic.com; 
         img-src 'self' data: blob: https://picsum.photos https://opendeck.work; 
@@ -55,7 +55,7 @@
 
     <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
-
+    <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
     <link
         href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800;900&family=Playfair+Display:wght@400;700&family=Roboto:wght@300;400;700&family=Space+Grotesk:wght@400;700&display=swap"
         rel="stylesheet">
@@ -719,13 +719,112 @@
             </div>
 
             <div class="flex border-b border-slate-700 mb-6">
-                <button onclick="switchTemplateTab('tech')" id="tabBtn_tech" class="template-tab active">Modern
-                    Tech</button>
-                <button onclick="switchTemplateTab('corp')" id="tabBtn_corp" class="template-tab">Corporate
-                    Edge</button>
-                <button onclick="switchTemplateTab('pitch')" id="tabBtn_pitch" class="template-tab">Creative
-                    Pitch</button>
+    <button onclick="switchTemplateTab('research')" id="tabBtn_research" class="template-tab active">Research Focus</button>
+    <button onclick="switchTemplateTab('tech')" id="tabBtn_tech" class="template-tab">Modern Tech</button>
+    <button onclick="switchTemplateTab('corp')" id="tabBtn_corp" class="template-tab">Corporate Edge</button>
+    <button onclick="switchTemplateTab('pitch')" id="tabBtn_pitch" class="template-tab">Creative Pitch</button>
+   <button onclick="openTemplateBuilder()" class="bg-blue-600/20 hover:bg-blue-600 text-blue-400 hover:text-white border border-blue-500/50 px-4 py-1.5 rounded text-sm font-bold transition flex items-center mb-1">
+    <i class="fa-solid fa-hammer mr-2"></i> Advanced Builder
+</button>
+    </button>
+</div>
+
+            <div id="tabContent_research" class="grid grid-cols-3 gap-6">
+    <div class="template-card" onclick="addSlide('res_title')">
+        <div class="w-full h-24 bg-slate-900 rounded mb-4 flex flex-col items-center justify-center border border-slate-700 shadow-inner relative overflow-hidden">
+            <div class="w-8 h-8 rounded-full border border-blue-500 flex items-center justify-center mb-2 z-10"><i class="fa-solid fa-microscope text-[10px] text-blue-400"></i></div>
+            <div class="h-2 w-2/3 bg-white rounded mb-1 z-10"></div>
+            <div class="h-1.5 w-1/2 bg-slate-500 rounded z-10"></div>
+        </div>
+        <h3 class="font-bold text-white mb-1">Research Title</h3>
+        <p class="text-xs text-slate-400">Polished academic header with institution subtitle.</p>
+    </div>
+    <div class="template-card" onclick="addSlide('res_abstract')">
+        <div class="w-full h-24 bg-slate-900 rounded mb-4 flex border border-slate-700 p-2 gap-2 shadow-inner">
+            <div class="w-1/2 flex flex-col justify-center gap-1.5"><div class="h-2 w-full bg-white rounded mb-1"></div><div class="h-1 w-full bg-slate-500 rounded"></div></div>
+            <div class="w-1/2 bg-blue-900/20 border border-blue-500/30 rounded flex flex-col items-center justify-center p-1"><i class="fa-solid fa-book-open text-blue-400 text-xs mb-1"></i><div class="h-1 w-3/4 bg-blue-300/50 rounded"></div></div>
+        </div>
+        <h3 class="font-bold text-white mb-1">Abstract & Scope</h3>
+        <p class="text-xs text-slate-400">Narrative overview with key contribution sidebar.</p>
+    </div>
+    <div class="template-card" onclick="addSlide('res_methodology')">
+        <div class="w-full h-24 bg-slate-950 rounded mb-4 grid grid-cols-3 gap-1 border border-slate-700 p-2 shadow-inner">
+            <div class="rounded bg-slate-800 border border-slate-700 p-1"><div class="h-1 w-full bg-blue-500 mb-1"></div><div class="h-1 w-2/3 bg-slate-500 rounded"></div></div>
+            <div class="rounded bg-slate-800 border border-slate-700 p-1"><div class="h-1 w-full bg-purple-500 mb-1"></div><div class="h-1 w-2/3 bg-slate-500 rounded"></div></div>
+            <div class="rounded bg-slate-800 border border-slate-700 p-1"><div class="h-1 w-full bg-orange-500 mb-1"></div><div class="h-1 w-2/3 bg-slate-500 rounded"></div></div>
+        </div>
+        <h3 class="font-bold text-white mb-1">Methodology Flow</h3>
+        <p class="text-xs text-slate-400">Visual stages of research design and data collection.</p>
+    </div>
+    <div class="template-card" onclick="addSlide('res_data')">
+        <div class="w-full h-24 bg-slate-900 rounded mb-4 flex flex-col items-center justify-center border border-slate-700 p-2 shadow-inner">
+            <div class="flex gap-4"><div class="text-blue-400 font-bold text-xl">84%</div><div class="text-emerald-400 font-bold text-xl">12x</div></div>
+            <div class="h-1 w-1/2 bg-slate-500 rounded mt-1"></div>
+        </div>
+        <h3 class="font-bold text-white mb-1">Data Insights</h3>
+        <p class="text-xs text-slate-400">Large quantitative metrics for highlighting primary results.</p>
+    </div>
+    <div class="template-card" onclick="addSlide('res_citations')">
+        <div class="w-full h-24 bg-slate-900 rounded mb-4 flex flex-col border border-slate-700 p-2 gap-2 shadow-inner">
+            <div class="h-1.5 w-1/3 bg-slate-400 rounded"></div>
+            <div class="space-y-1.5"><div class="h-1 w-full bg-slate-600 rounded"></div><div class="h-1 w-full bg-slate-600 rounded"></div></div>
+        </div>
+        <h3 class="font-bold text-white mb-1">Citations</h3>
+        <p class="text-xs text-slate-400">Clean list for bibliography and source attribution.</p>
+    </div>
+</div>
+    <div id="tabContent_research" class="grid grid-cols-3 gap-6">
+        <div class="template-card" onclick="addSlide('res_lit_review')">
+            <div class="w-full aspect-video bg-slate-950 rounded-lg mb-3 border border-slate-800 p-3 flex flex-col gap-2 shadow-inner">
+                <div class="h-2 w-1/2 bg-blue-500/50 rounded"></div>
+                <div class="grid grid-cols-2 gap-2 mt-1">
+                    <div class="h-8 bg-slate-800 rounded border border-slate-700"></div>
+                    <div class="h-8 bg-slate-800 rounded border border-slate-700"></div>
+                </div>
             </div>
+            <h3 class="font-bold text-white text-sm">Literature Review</h3>
+            <p class="text-[10px] text-slate-500 uppercase tracking-wider">Thematic grouping</p>
+        </div>
+
+        <div class="template-card" onclick="addSlide('res_variables')">
+            <div class="w-full aspect-video bg-slate-950 rounded-lg mb-3 border border-slate-800 p-4 flex items-center justify-center gap-2 shadow-inner">
+                <div class="w-1/3 h-8 bg-blue-600/20 border border-blue-500/40 rounded"></div>
+                <i class="fa-solid fa-arrow-right text-slate-700 text-[10px]"></i>
+                <div class="w-1/3 h-8 bg-emerald-600/20 border border-emerald-500/40 rounded"></div>
+            </div>
+            <h3 class="font-bold text-white text-sm">Variables & Hypothesis</h3>
+            <p class="text-[10px] text-slate-500 uppercase tracking-wider">Causal mapping</p>
+        </div>
+
+        <div class="template-card" onclick="addSlide('res_limits')">
+            <div class="w-full aspect-video bg-slate-950 rounded-lg mb-3 border border-slate-800 p-4 flex flex-col gap-2 shadow-inner">
+                <div class="flex items-center gap-2"><div class="w-2 h-2 rounded-full bg-red-500"></div><div class="h-1.5 w-full bg-slate-800 rounded"></div></div>
+                <div class="flex items-center gap-2"><div class="w-2 h-2 rounded-full bg-blue-500"></div><div class="h-1.5 w-full bg-slate-800 rounded"></div></div>
+                <div class="flex items-center gap-2"><div class="w-2 h-2 rounded-full bg-slate-700"></div><div class="h-1.5 w-full bg-slate-800 rounded"></div></div>
+            </div>
+            <h3 class="font-bold text-white text-sm">Scope & Limitations</h3>
+            <p class="text-[10px] text-slate-500 uppercase tracking-wider">Boundary setting</p>
+        </div>
+
+        <div class="template-card" onclick="addSlide('res_collaborators')">
+            <div class="w-full aspect-video bg-slate-950 rounded-lg mb-3 border border-slate-800 p-4 grid grid-cols-3 gap-2 shadow-inner">
+                <div class="bg-slate-800 rounded-full aspect-square border border-slate-700"></div>
+                <div class="bg-slate-800 rounded-full aspect-square border border-slate-700"></div>
+                <div class="bg-slate-800 rounded-full aspect-square border border-slate-700"></div>
+            </div>
+            <h3 class="font-bold text-white text-sm">Collaborators</h3>
+            <p class="text-[10px] text-slate-500 uppercase tracking-wider">Institutional logos</p>
+        </div>
+
+        <div class="template-card" onclick="addSlide('res_key_takeaway')">
+            <div class="w-full aspect-video bg-slate-950 rounded-lg mb-3 border border-slate-800 flex items-center justify-center relative overflow-hidden shadow-inner">
+                <div class="absolute inset-0 bg-blue-500/10 blur-xl"></div>
+                <div class="h-2 w-1/2 bg-white rounded z-10"></div>
+            </div>
+            <h3 class="font-bold text-white text-sm">Major Conclusion</h3>
+            <p class="text-[10px] text-slate-500 uppercase tracking-wider">High-impact summary</p>
+        </div>
+    </div>
 
             <div id="tabContent_tech" class="grid grid-cols-3 gap-6">
                 <div class="template-card" onclick="addSlide('glass_intro')">
@@ -917,7 +1016,17 @@
                     <p class="text-xs text-slate-400">Narrative copy paired with a polished macOS-style code window.</p>
                 </div>
             </div>
+            <button onclick="switchTemplateTab('custom')" id="tabBtn_custom" class="template-tab">My Templates</button>
 
+<div id="tabContent_custom" class="hidden">
+    <div class="mb-6 flex justify-between items-center">
+        <p class="text-slate-400 text-sm">Templates created by you and your AI Assistant.</p>
+        <button onclick="openTemplateBuilder()" class="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded font-bold shadow transition">
+    <i class="fa-solid fa-hammer mr-2"></i> Build New Template
+</button>
+    <div id="customTemplateGrid" class="grid grid-cols-3 gap-6">
+        </div>
+</div>
             <div id="tabContent_corp" class="grid grid-cols-3 gap-6 hidden">
                 <div class="template-card" onclick="addSlide('corp_title')">
                     <div
@@ -1108,7 +1217,15 @@
                 <button onclick="closeIconModal()" class="text-slate-400 hover:text-white text-2xl"><i
                         class="fa-solid fa-xmark"></i></button>
             </div>
-            <div class="grid grid-cols-6 gap-3" id="iconGrid"></div>
+            <div class="mb-4 p-4 bg-slate-900 rounded-lg border border-slate-700">
+    <label class="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-2 block">Custom FontAwesome Class</label>
+    <div class="flex gap-2">
+        <input type="text" id="manualIconInput" placeholder="e.g. fa-microscope" 
+               class="flex-grow bg-[#020617] border border-slate-700 text-white text-xs rounded-md px-3 py-2 outline-none focus:border-blue-500">
+        <button onclick="applyManualIcon()" class="bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold px-4 py-2 rounded-md transition">Apply</button>
+    </div>
+</div>
+<div class="grid grid-cols-6 gap-3" id="iconGrid"></div>
         </div>
     </div>
 
@@ -1291,7 +1408,7 @@
         <script src="js/tutorial.js"></script>
         <script src="js/editor.js"></script>
         <script src="js/export.js"></script>
-        <script src="js/ui.js"></script>
+        <script src="js/ui.js?v=2"></script>
+    <script src="js/template_builder.js?v=2"></script>
 </body>
-
 </html>

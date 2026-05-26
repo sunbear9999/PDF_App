@@ -12,8 +12,6 @@ from PySide6.QtGui import QCursor, QDesktopServices
 from core.engine.action_model import AIActionBlueprint, ActionStep
 from gui.docks.research_assistant.model import ResearchModel
 
-# [CitationWidget and TermWidget classes remain identical to your current files]
-
 class CitationWidget(QFrame):
     jump_requested = Signal(str, str)
     def __init__(self, doc_name, text, score, theme, parent=None):
@@ -238,8 +236,6 @@ class SearchTab(QWidget):
 
     def render_search_terms(self, terms_list):
         """Called by ui_router.py to populate the cards safely on the main thread."""
-        
-        # Bulletproof List/Dict flattening (Fixes the "str object has no attribute 'get'" crash)
         if isinstance(terms_list, dict):
             for v in terms_list.values():
                 if isinstance(v, list): terms_list = v; break
@@ -284,16 +280,21 @@ class SearchTab(QWidget):
             self.math_worker.citation_received.connect(self._add_citation_card)
             self.math_worker.start()
 
-        # 100% Decoupled: The UI just asks for a blueprint and provides the state
         from core.engine.default_blueprints import DefaultBlueprints
         blueprint = self.main_window.blueprint_manager.get_blueprint(
             "Search Terms", 
             DefaultBlueprints.get_search_terms_blueprint, 
             model=model
         )
-        self.main_window.execute_ai_blueprint(blueprint, {"goal": goal})
         
-        self.main_window.execute_ai_blueprint(blueprint, {})
+        # FIX 1: Provide all variables needed for custom tools
+        state_dict = {
+            "goal": goal,
+            "selected_model": model 
+        }
+        
+        self.main_window.execute_ai_blueprint(blueprint, state_dict)
+        # FIX 2: Removed the rogue duplicate self.main_window.execute_ai_blueprint(blueprint, {}) call
 
     def _jump_to_source(self, doc_name, text):
         pm = self.main_window.project_manager

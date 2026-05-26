@@ -3,6 +3,7 @@ from PySide6.QtCore import QObject
 from PySide6.QtWidgets import QWidget, QGraphicsView
 from gui.docks.unified_research.components.chat_streamer import ChatMessageWidget
 from gui.docks.unified_research.components.note_bubble import NoteBubbleWidget
+from gui.docks.unified_research.components.user_input_form import UserInputFormWidget
 import json
 import re 
 
@@ -18,8 +19,40 @@ class BlueprintUIRouter(QObject):
         self.runner = runner
         self.runner.progress_update.connect(self._handle_stream)
         self.runner.step_complete.connect(self._handle_step_complete)
-        self.active_chat_widget = None 
         self.runner.step_started.connect(self._handle_step_started)
+        
+        # NEW: Catch the pause signal
+        if hasattr(self.runner, 'user_input_requested'):
+            self.runner.user_input_requested.connect(self._handle_user_input)
+            
+        self.active_chat_widget = None 
+
+    def _handle_user_input(self, step_id, expected_inputs):
+        """Spawns the interactive form directly inline in the active chat layout."""
+        if not self.runner: return
+        
+        # Ensure we target the right UI area based on the current executing step
+        current_step = getattr(self.runner, 'current_executing_step', None)
+        target = getattr(current_step, 'ui_target', 'chat_dock') if current_step else 'chat_dock'
+        
+        # Create the dynamic form widget
+        form_widget = UserInputFormWidget(step_id, expected_inputs, theme=self.theme)
+        
+        # Connect the form's output directly to the Runner's wake-up method
+        form_widget.form_submitted.connect(self.runner.submit_user_input)
+        
+        # Inject it inline like a chat message
+        if target == "chat_dock":
+            tab = next((c for c in self.main_window.findChildren(QWidget) if c.__class__.__name__ == "ChatTab"), None)
+            if tab and hasattr(tab, 'add_message_widget'): tab.add_message_widget(form_widget)
+                
+        elif target == "brainstorm_dock":
+            tab = next((c for c in self.main_window.findChildren(QWidget) if c.__class__.__name__ == "BrainstormTab"), None)
+            if tab and hasattr(tab, 'add_message_widget'): tab.add_message_widget(form_widget)
+            
+        elif target == "custom_tools_tab":
+            tab = next((c for c in self.main_window.findChildren(QWidget) if c.__class__.__name__ == "CustomToolsTab"), None)
+            if tab and hasattr(tab, 'add_message_widget'): tab.add_message_widget(form_widget)
 
     def _handle_step_started(self, step_id):
         if not self.runner: return
@@ -46,7 +79,7 @@ class BlueprintUIRouter(QObject):
         widget = self._get_or_create_chat_widget(target)
         if hasattr(widget, 'update_status'):
             widget.update_status(text)
-
+    
     def _get_or_create_chat_widget(self, target):
         if not self.active_chat_widget:
             self.active_chat_widget = ChatMessageWidget("AI Agent", theme=self.theme)
@@ -84,7 +117,12 @@ class BlueprintUIRouter(QObject):
 
     def _handle_step_complete(self, step_id, result_str):
         if not self.runner: return
+        
+        # --- THE FIX: Check if the step is an executing sub-step before falling back ---
         step = next((s for s in self.runner.blueprint.steps if s.step_id == step_id), None)
+        if not step and hasattr(self.runner, 'current_executing_step') and self.runner.current_executing_step and self.runner.current_executing_step.step_id == step_id:
+            step = self.runner.current_executing_step
+
         ui_format = getattr(step, 'ui_format', 'silent') if step else 'silent'
         ui_target = getattr(step, 'ui_target', 'floating')
 
@@ -103,23 +141,35 @@ class BlueprintUIRouter(QObject):
         if self.runner and self.runner.blueprint.steps[-1].step_id == step_id:
             if self.active_chat_widget and hasattr(self.active_chat_widget, 'hide_status'):
                 self.active_chat_widget.hide_status()
-
-        # 1. Update the Workspace Graph
-        if ui_format == "workspace_graph":
-            workspace_view = next((c for c in self.main_window.findChildren(QGraphicsView) if c.__class__.__name__ == "WorkspaceView"), None)
-            if workspace_view:
-                if hasattr(workspace_view, 'review_and_apply_ai_graph_update'): workspace_view.review_and_apply_ai_graph_update(result_str)
-                elif hasattr(workspace_view, 'apply_ai_graph_update'): workspace_view.apply_ai_graph_update(result_str)
-
-        # 2. Draw Universal Note Bubbles
-        elif ui_format == "chat_widgets":
-            try:
-                if isinstance(result_str, str):
-                    match = re.search(r'\[.*\]', result_str, re.DOTALL)
-                    cleaned_str = match.group(0) if match else result_str.replace("```json", "").replace("```", "").strip()
-                    items = json.loads(cleaned_str)
-                else: items = result_str
                 
+            # --- THE FIX: Explicitly notify the Analysis Tab when the entire blueprint is done ---
+            if getattr(self.runner.blueprint, 'name', '') == "Document Analysis":
+                analysis_tab = next((c for c in self.main_window.findChildren(QWidget) if c.__class__.__name__ == "AnalysisTab"), None)
+                if analysis_tab and hasattr(analysis_tab, 'status_lbl'):
+                    analysis_tab.status_lbl.setText("✅ Full Document Analysis Complete.")
+
+        # --- THE UNIVERSAL WIDGET FACTORY ---
+        target_widget = None
+
+        if ui_format == "data_table":
+            from gui.docks.unified_research.components.dynamic_data_table import DynamicDataTableWidget
+            target_widget = DynamicDataTableWidget(result_str, self.theme)
+
+        elif ui_format == "card_grid" or ui_format == "search_terms":
+            from gui.docks.unified_research.components.dynamic_card_grid import DynamicCardGridWidget
+            target_widget = DynamicCardGridWidget(result_str, self.theme)
+
+        elif ui_format == "chat_widgets":
+            # This handles Citation/Note bubbles inline in the chat
+            try:
+                
+                # Strip markdown/filler just in case it bypassed the Master Runner
+                match = re.search(r'(\[.*\]|\{.*\})', result_str, re.DOTALL)
+                cleaned_str = match.group(0) if match else result_str
+                
+                items = json.loads(cleaned_str)
+                
+                # Handle dictionary wrappers (e.g., {"citations": [...]})
                 if isinstance(items, dict):
                     for val in items.values():
                         if isinstance(val, list): items = val; break
@@ -127,76 +177,33 @@ class BlueprintUIRouter(QObject):
                 
                 widget = self._get_or_create_chat_widget(ui_target)
                 for item in items:
-                    # --- THE FIX: Bulletproof Type Check ---
                     if isinstance(item, dict):
                         widget.add_bubble(
                             doc_name=item.get("doc_name", "Unknown Document"),
                             quote=item.get("quote", item.get("text", "")),
                             note=item.get("note", item.get("reason", ""))
                         )
-            except Exception as e: print(f"[UI Router] Failed to parse chat widgets JSON: {e}")
-        elif ui_format == "custom_view" and hasattr(self.main_window, 'universal_overlay'):
-            template = getattr(step, 'html_template', None)
-            
-            # If no template is provided, just wrap the JSON in a pretty standard pre tag
-            if not template:
-                html = f"<html><body style='color:#fff; font-family:sans-serif;'><h3>Data Result</h3><pre>{result_str}</pre></body></html>"
-            else:
-                # Safely parse the result and inject it into the HTML
-                try:
-                    data = json.loads(result_str)
-                    html = safe_format(template, data) if isinstance(data, dict) else template.replace("{result}", result_str)
-                except:
-                    html = template.replace("{result}", result_str)
-            
-            self.main_window.universal_overlay.clear_content()
-            self.main_window.universal_overlay.lbl_title.setText(getattr(step, 'ui_title', 'Custom Dashboard'))
-            
-            from PySide6.QtWidgets import QTextBrowser
-            browser = QTextBrowser()
-            browser.setStyleSheet("background-color: transparent; border: none;")
-            browser.setHtml(html)
-            self.main_window.universal_overlay.content_layout.addWidget(browser)
-            
-            self.main_window.universal_overlay.show()
-            self.main_window.universal_overlay.raise_()
+            except Exception as e: 
+                print(f"[UI Router] Failed to parse chat widgets JSON. Result was: {result_str[:100]}... Error: {e}")
 
-        # 3. Handle Search Terms Generation
-        elif ui_format == "search_terms":
-            try:
-                match = re.search(r'\[.*\]', result_str, re.DOTALL)
-                cleaned = match.group(0) if match else result_str.replace("```json", "").replace("```", "").strip()
-                terms = json.loads(cleaned)
-                search_tab = next((c for c in self.main_window.findChildren(QWidget) if c.__class__.__name__ == "SearchTab"), None)
-                if search_tab and hasattr(search_tab, 'render_search_terms'):
-                    search_tab.render_search_terms(terms)
-            except Exception as e: print(f"[UI Router] Error routing search terms: {e}")
+        elif ui_format == "workspace_graph":
+            from PySide6.QtWidgets import QGraphicsView
+            workspace_view = next((c for c in self.main_window.findChildren(QGraphicsView) if c.__class__.__name__ == "WorkspaceView"), None)
+            if workspace_view:
+                if hasattr(workspace_view, 'review_and_apply_ai_graph_update'): workspace_view.review_and_apply_ai_graph_update(result_str)
 
-        # 4. Handle Analysis Chunking
-        elif ui_format == "analysis_chunk":
-            try:
-                match = re.search(r'\{.*\}', result_str, re.DOTALL)
-                cleaned = match.group(0) if match else result_str.replace("```json", "").replace("```", "").strip()
-                data = json.loads(cleaned)
-                
-                # Extract meta-data injected by the FOREACH step
-                item = self.runner.state.get('item', {})
-                page_range = item.get('page_range', 'Unknown')
-                chunk_idx = item.get('chunk_index', 0)
-                doc_path = item.get('doc_path', '')
-                template_id = item.get('template_id', '')
-                
-                analysis_tab = next((c for c in self.main_window.findChildren(QWidget) if c.__class__.__name__ == "AnalysisTab"), None)
-                if analysis_tab and hasattr(analysis_tab, 'render_and_save_chunk'):
-                    analysis_tab.render_and_save_chunk(doc_path, template_id, chunk_idx, data, page_range)
-            except Exception as e: print(f"[UI Router] Error routing analysis chunk: {e}")
-
-        # 5. Handle Full-Screen Static Documents
-        elif ui_format == "static_document" and hasattr(self.main_window, 'universal_overlay'):
-            self.main_window.universal_overlay.clear_content()
-            self.main_window.universal_overlay.lbl_title.setText(getattr(step, 'ui_title', 'AI Result'))
-            msg_widget = ChatMessageWidget("Final Document", theme=self.theme)
-            msg_widget.append_chunk(result_str)
-            self.main_window.universal_overlay.content_layout.addWidget(msg_widget)
-            self.main_window.universal_overlay.show()
-            self.main_window.universal_overlay.raise_()
+        # --- DYNAMIC INJECTION ---
+        # If a widget was generated, inject it into whatever tab the blueprint specified
+        if target_widget:
+            if ui_target == "chat_dock":
+                tab = next((c for c in self.main_window.findChildren(QWidget) if c.__class__.__name__ == "ChatTab"), None)
+                if tab and hasattr(tab, 'add_message_widget'): tab.add_message_widget(target_widget)
+            elif ui_target == "search_tab":
+                tab = next((c for c in self.main_window.findChildren(QWidget) if c.__class__.__name__ == "SearchTab"), None)
+                if tab and hasattr(tab, 'results_layout'): tab.results_layout.insertWidget(tab.results_layout.count() - 1, target_widget)
+            elif ui_target == "analysis_tab":
+                tab = next((c for c in self.main_window.findChildren(QWidget) if c.__class__.__name__ == "AnalysisTab"), None)
+                if tab and hasattr(tab, 'results_layout'): tab.results_layout.addWidget(target_widget)
+            elif ui_target == "custom_tools_tab":
+                tab = next((c for c in self.main_window.findChildren(QWidget) if c.__class__.__name__ == "CustomToolsTab"), None)
+                if tab and hasattr(tab, 'add_message_widget'): tab.add_message_widget(target_widget)

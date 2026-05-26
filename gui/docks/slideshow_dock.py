@@ -1,11 +1,67 @@
 # gui/docks/slideshow_dock.py
 import os
 import sys
+import json
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QStackedWidget
 from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtWebEngineCore import QWebEngineSettings, QWebEngineProfile
-from PySide6.QtCore import QUrl, Qt
+from PySide6.QtWebEngineCore import QWebEngineSettings, QWebEngineProfile, QWebEnginePage
+from PySide6.QtWebChannel import QWebChannel
+from PySide6.QtCore import QUrl, Qt, QObject, Slot
 
+TEMPLATES_FILE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'papyrus_custom_templates.json'))
+class SafeWebEnginePage(QWebEnginePage):
+    """Intercepts JS popups to prevent PySide6 from freezing."""
+    def javaScriptAlert(self, securityOrigin, msg):
+        print(f"[OpenDeck Alert Shield] {msg}")
+
+    def javaScriptConfirm(self, securityOrigin, msg):
+        print(f"[OpenDeck Confirm Shield] {msg}")
+        return True
+
+    def javaScriptPrompt(self, securityOrigin, msg, defaultValue):
+        print(f"[OpenDeck Prompt Shield] Blocked prompt: {msg}")
+        # Automatically returns a safe string so the old cached JS doesn't crash
+        return True, "Custom Layout"
+class PapyrusOpenDeckBridge(QObject):
+    def __init__(self, project_manager, main_window):
+        super().__init__()
+        self.project_manager = project_manager
+        self.main_window = main_window
+
+    @Slot(str)
+    def logToPython(self, message):
+        print(f"[OpenDeck] {message}")
+
+    @Slot(str)
+    def saveCustomTemplate(self, template_json_str):
+        """Called by JS when a user clicks 'Save & Use' in the template builder."""
+        try:
+            template_data = json.loads(template_json_str)
+            
+            # 1. Load existing templates
+            existing_templates = []
+            if os.path.exists(TEMPLATES_FILE_PATH):
+                with open(TEMPLATES_FILE_PATH, 'r') as f:
+                    try:
+                        existing_templates = json.load(f)
+                    except json.JSONDecodeError:
+                        pass # File was empty or corrupted
+            
+            # 2. Add the new template to the list
+            existing_templates.append(template_data)
+            
+            # 3. Save it back to the hard drive safely
+            with open(TEMPLATES_FILE_PATH, 'w') as f:
+                json.dump(existing_templates, f, indent=4)
+                
+            print(f"[OpenDeck] Successfully saved custom template: {template_data.get('name')}")
+            
+        except Exception as e:
+            print(f"[OpenDeck Error] Failed to save custom template: {e}")
+
+    @Slot(str)
+    def requestLLMSlideGeneration(self, prompt):
+        print(f"LLM requested to build slide based on: {prompt}")
 class SlideshowTab(QWidget):
     def __init__(self, project_manager, main_window):
         super().__init__()
@@ -22,14 +78,26 @@ class SlideshowTab(QWidget):
         self.stack.addWidget(self.loading_label)
 
         # Profile setup - Critical for OpenDeck's LocalStorage saves
+        # Profile setup - Critical for OpenDeck's LocalStorage saves
         profile = QWebEngineProfile.defaultProfile()
         
+        # 🔥 NUKE THE STUBBORN CACHE 🔥
+        profile.clearHttpCache()
+        
         self.web_view = QWebEngineView(profile)
+        
+        # 🔥 APPLY THE ANTI-FREEZE SHIELD 🔥
+        self.custom_page = SafeWebEnginePage(profile, self.web_view)
+        self.web_view.setPage(self.custom_page)
+        
         settings = self.web_view.settings()
         settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
         settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
         settings.setAttribute(QWebEngineSettings.WebAttribute.LocalStorageEnabled, True)
-        
+        self.bridge = PapyrusOpenDeckBridge(self.project_manager, self.main_window)
+        self.channel = QWebChannel()
+        self.channel.registerObject("papyrusBridge", self.bridge)
+        self.web_view.page().setWebChannel(self.channel)
         self.stack.addWidget(self.web_view)
         self.layout.addWidget(self.stack)
 
@@ -49,26 +117,34 @@ class SlideshowTab(QWidget):
             self.web_view.load(QUrl.fromLocalFile(index_path))
         else:
             self.loading_label.setText(f"Error: Could not find OpenDeck at:\n{index_path}\nMake sure the folder is placed in assets/opendeck/")
+    def inject_llm_slide(self, slide_json_str):
+        """Call this from Papyrus to force OpenDeck to add a slide."""
+        js_code = f"window.papyrusAPI.addSlideFromLLM({slide_json_str});"
+        self.web_view.page().runJavaScript(js_code)
+
+    def get_current_presentation_state(self, callback):
+        """Fetches the current deck so the LLM can read it."""
+        self.web_view.page().runJavaScript("window.papyrusAPI.getCurrentDeck();", callback)
 
     def _on_load_finished(self, ok):
+        """When OpenDeck finishes loading, push our saved templates into its memory."""
         if ok:
-            # 1. Inject JS to permanently skip the landing page
-            bypass_js = """
-                // Tell OpenDeck's local storage to always remember we want the dashboard
-                localStorage.setItem('openDeckAppState', 'dashboard');
-                
-                // If the landing view happens to be visible (first boot), hide it and force-start
-                var landing = document.getElementById('landingView');
-                if (landing && landing.style.display !== 'none') {
-                    if (typeof startAppFromLanding === 'function') {
-                        startAppFromLanding();
-                    }
-                }
-            """
-            self.web_view.page().runJavaScript(bypass_js)
+            # THIS IS THE MISSING LINE: Reveal the web view!
             self.stack.setCurrentWidget(self.web_view)
-            if hasattr(self, 'current_theme') and self.current_theme:
-                self.update_theme(self.current_theme)
+            
+            # 1. Read the saved templates from the hard drive
+            if os.path.exists(TEMPLATES_FILE_PATH):
+                try:
+                    with open(TEMPLATES_FILE_PATH, 'r') as f:
+                        templates_json = f.read()
+                        
+                    # 2. Inject them into OpenDeck's JavaScript
+                    if templates_json.strip():
+                        js_injection = f"if (window.papyrusAPI) {{ window.papyrusAPI.loadCustomTemplates({templates_json}); }}"
+                        self.web_view.page().runJavaScript(js_injection)
+                        print("[OpenDeck] Custom templates loaded into frontend.")
+                except Exception as e:
+                    print(f"[OpenDeck Error] Could not load templates on boot: {e}")
 
     def update_theme(self, theme):
         self.current_theme = theme

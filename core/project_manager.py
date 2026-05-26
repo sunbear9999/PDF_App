@@ -6,6 +6,7 @@ import shutil
 import tempfile
 import fitz
 import sys
+from core.models.workspace_models import NodeModel, EdgeModel, WorkspaceModel
 class ProjectManager:
     def __init__(self, max_cache_size=5):
         self.project_filepath = None
@@ -174,6 +175,7 @@ class ProjectManager:
                 response TEXT,
                 model_used TEXT
             )''')
+    
     def upsert_citation(self, citation_data):
         if not self._conn: return
         try:
@@ -679,11 +681,16 @@ class ProjectManager:
             
         return True
 
-    def get_workspace_data(self, workspace_id=1):
-        if not self._conn: return {"nodes": {}, "edges": []}
+    def get_workspace_data(self, workspace_id=1) -> WorkspaceModel:
+        """Reads the database and constructs a complete WorkspaceModel."""
+        workspace = WorkspaceModel(workspace_id=workspace_id)
+        if not self._conn: 
+            return workspace
+            
         try:
             cursor = self._conn.cursor()
-            nodes = {}
+            
+            # Fetch Nodes
             try:
                 cursor.execute(
                     "SELECT id, highlight_id, workspace_id, quote, note_text, color, is_custom, "
@@ -691,85 +698,143 @@ class ProjectManager:
                     "FROM nodes WHERE workspace_id = ?", (workspace_id,)
                 )
                 for row in cursor.fetchall():
-                    node_id, highlight_id, ws_id, quote, note, color, is_custom, pdf_path, page_num, font_size, x, y, w, h, origin, verified, orig_text = row
-                    nodes[node_id] = {
-                        "highlight_id": highlight_id, "workspace_id": ws_id or 1,
-                        "quote": quote, "note": note, "color": color, "is_custom": bool(is_custom),
-                        "pdf_path": pdf_path, "page_num": page_num, "manual_font_size": font_size,
-                        "x": x, "y": y, "width": w, "height": h,
-                        "node_origin": origin or "human", "is_verified": int(verified or 0),
-                        "original_text": orig_text if orig_text is not None else note
-                    }
+                    node = NodeModel(
+                        id=row[0], highlight_id=row[1], workspace_id=row[2] or 1, quote=row[3], note=row[4],
+                        color=row[5], is_custom=bool(row[6]), pdf_path=row[7], page_num=row[8], manual_font_size=row[9],
+                        x=row[10], y=row[11], width=row[12], height=row[13], node_origin=row[14] or "human", 
+                        is_verified=int(row[15] or 0), original_text=row[16] if row[16] is not None else row[4]
+                    )
+                    workspace.nodes.append(node)
             except sqlite3.OperationalError:
+                # Fallback for older databases missing the tracking columns
                 cursor.execute(
                     "SELECT id, highlight_id, workspace_id, quote, note_text, color, is_custom, "
                     "pdf_path, page_num, manual_font_size, x, y, width, height "
                     "FROM nodes WHERE workspace_id = ?", (workspace_id,)
                 )
                 for row in cursor.fetchall():
-                    node_id, highlight_id, ws_id, quote, note, color, is_custom, pdf_path, page_num, font_size, x, y, w, h = row
-                    nodes[node_id] = {
-                        "highlight_id": highlight_id, "workspace_id": ws_id or 1,
-                        "quote": quote, "note": note, "color": color, "is_custom": bool(is_custom),
-                        "pdf_path": pdf_path, "page_num": page_num, "manual_font_size": font_size,
-                        "x": x, "y": y, "width": w, "height": h,
-                        "node_origin": "human", "is_verified": 0, "original_text": note
-                    }
+                    node = NodeModel(
+                        id=row[0], highlight_id=row[1], workspace_id=row[2] or 1, quote=row[3], note=row[4],
+                        color=row[5], is_custom=bool(row[6]), pdf_path=row[7], page_num=row[8], manual_font_size=row[9],
+                        x=row[10], y=row[11], width=row[12], height=row[13], node_origin="human", 
+                        is_verified=0, original_text=row[4]
+                    )
+                    workspace.nodes.append(node)
 
-            edges = []
+            # Fetch Edges
             cursor.execute("SELECT edge_id, source_id, target_id, label, color, weight FROM edges WHERE workspace_id = ?", (workspace_id,))
             for row in cursor.fetchall():
-                edge_id, source_id, target_id, label, color, weight = row
-                edges.append({
-                    "id": edge_id, "source": source_id, "target": target_id,
-                    "label": label, "color": color, "weight": weight
-                })
-            return {"nodes": nodes, "edges": edges}
+                edge = EdgeModel(
+                    id=row[0], source=row[1], target=row[2], label=row[3], color=row[4], weight=row[5]
+                )
+                workspace.edges.append(edge)
+                
+            return workspace
         except sqlite3.Error as e:
-            return {"nodes": {}, "edges": []}
+            print(f"Error reading workspace data: {e}")
+            return workspace
 
-    def save_workspace_data(self, workspace_data, workspace_id=1):
+    def sync_workspace(self, workspace: WorkspaceModel):
+        """Intelligently syncs a full WorkspaceModel by determining the delta."""
         if not self._conn: return
         try:
             cursor = self._conn.cursor()
             cursor.execute("BEGIN TRANSACTION")
-            cursor.execute("DELETE FROM nodes WHERE workspace_id = ?", (workspace_id,))
-            cursor.execute("DELETE FROM edges WHERE workspace_id = ?", (workspace_id,))
 
-            nodes = workspace_data.get("nodes", {})
+            # 1. Upsert Nodes
+            incoming_node_ids = [n.id for n in workspace.nodes]
             node_insert_data = [
-                (
-                    n_id, d.get("highlight_id"), workspace_id, d.get("quote"), d.get("note"),
-                    d.get("color"), int(d.get("is_custom", 0)), d.get("pdf_path"),
-                    d.get("page_num"), d.get("manual_font_size"), d.get("x"), d.get("y"),
-                    d.get("width"), d.get("height"), d.get("node_origin", "human"), 
-                    int(d.get("is_verified", 0)), d.get("original_text", d.get("note", "")) # <--- 17th ITEM
-                )
-                for n_id, d in nodes.items()
+                (n.id, n.highlight_id, workspace.workspace_id, n.quote, n.note,
+                 n.color, int(n.is_custom), n.pdf_path, n.page_num, n.manual_font_size,
+                 n.x, n.y, n.width, n.height, n.node_origin, int(n.is_verified), n.original_text)
+                for n in workspace.nodes
             ]
+            if node_insert_data:
+                cursor.executemany("""
+                    INSERT OR REPLACE INTO nodes (
+                        id, highlight_id, workspace_id, quote, note_text, color,
+                        is_custom, pdf_path, page_num, manual_font_size, x, y, width, height, node_origin, is_verified, original_text
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, node_insert_data)
 
-            cursor.executemany("""
-                INSERT INTO nodes (
-                    id, highlight_id, workspace_id, quote, note_text, color,
-                    is_custom, pdf_path, page_num, manual_font_size, x, y, width, height, node_origin, is_verified, original_text
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, node_insert_data)
+            # Delete missing nodes
+            if incoming_node_ids:
+                placeholders = ",".join("?" for _ in incoming_node_ids)
+                cursor.execute(f"DELETE FROM nodes WHERE workspace_id = ? AND id NOT IN ({placeholders})", [workspace.workspace_id] + incoming_node_ids)
+            else:
+                cursor.execute("DELETE FROM nodes WHERE workspace_id = ?", (workspace.workspace_id,))
 
-            edges = workspace_data.get("edges", [])
+            # 2. Upsert Edges
+            incoming_edge_ids = [e.id for e in workspace.edges]
             edge_insert_data = [
-                (e.get("id"), e.get("source"), e.get("target"), e.get("label"), e.get("color"), int(e.get("weight", 2)), workspace_id)
-                for e in edges
+                (e.id, e.source, e.target, e.label, e.color, int(e.weight), workspace.workspace_id)
+                for e in workspace.edges
             ]
-            cursor.executemany("""
-                INSERT INTO edges (edge_id, source_id, target_id, label, color, weight, workspace_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, edge_insert_data)
+            if edge_insert_data:
+                cursor.executemany("""
+                    INSERT OR REPLACE INTO edges (
+                        edge_id, source_id, target_id, label, color, weight, workspace_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, edge_insert_data)
+
+            # Delete missing edges
+            if incoming_edge_ids:
+                placeholders = ",".join("?" for _ in incoming_edge_ids)
+                cursor.execute(f"DELETE FROM edges WHERE workspace_id = ? AND edge_id NOT IN ({placeholders})", [workspace.workspace_id] + incoming_edge_ids)
+            else:
+                cursor.execute("DELETE FROM edges WHERE workspace_id = ?", (workspace.workspace_id,))
 
             self._conn.commit()
         except sqlite3.Error as e:
             self._conn.rollback()
-            print(f"Error saving workspace data: {e}")
+            print(f"Error syncing workspace: {e}")
+
+    def sync_workspace_delta(self, delta: WorkspaceModel):
+        """Applies explicit Upserts and Deletions without affecting untouched nodes."""
+        if not self._conn: return
+        try:
+            cursor = self._conn.cursor()
+            cursor.execute("BEGIN TRANSACTION")
+
+            node_data = [
+                (n.id, n.highlight_id, delta.workspace_id, n.quote, n.note,
+                 n.color, int(n.is_custom), n.pdf_path, n.page_num, n.manual_font_size,
+                 n.x, n.y, n.width, n.height, n.node_origin, int(n.is_verified), n.original_text)
+                for n in delta.nodes
+            ]
+            if node_data:
+                cursor.executemany("""
+                    INSERT OR REPLACE INTO nodes (
+                        id, highlight_id, workspace_id, quote, note_text, color,
+                        is_custom, pdf_path, page_num, manual_font_size, x, y, width, height, node_origin, is_verified, original_text
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, node_data)
+
+            if delta.deleted_node_ids:
+                placeholders = ",".join("?" for _ in delta.deleted_node_ids)
+                cursor.execute(f"DELETE FROM edges WHERE source_id IN ({placeholders}) OR target_id IN ({placeholders})", delta.deleted_node_ids * 2)
+                cursor.execute(f"DELETE FROM nodes WHERE id IN ({placeholders})", delta.deleted_node_ids)
+
+            edge_data = [
+                (e.id, e.source, e.target, e.label, e.color, int(e.weight), delta.workspace_id)
+                for e in delta.edges
+            ]
+            if edge_data:
+                cursor.executemany("""
+                    INSERT OR REPLACE INTO edges (
+                        edge_id, source_id, target_id, label, color, weight, workspace_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, edge_data)
+
+            if delta.deleted_edge_ids:
+                placeholders = ",".join("?" for _ in delta.deleted_edge_ids)
+                cursor.execute(f"DELETE FROM edges WHERE edge_id IN ({placeholders})", delta.deleted_edge_ids)
+
+            self._conn.commit()
+        except sqlite3.Error as e:
+            self._conn.rollback()
+            print(f"Error applying workspace delta: {e}")
+
     def get_metadata(self, key, default=None):
         if not self._conn:
             return default
@@ -885,23 +950,7 @@ class ProjectManager:
             print(f"Error reading unused highlights for workspace {workspace_id}: {e}")
             return []
 
-    def delete_node_record(self, node_id):
-        if not self._conn:
-            return
-        try:
-            self._conn.execute("DELETE FROM nodes WHERE id = ?", (node_id,))
-            self._conn.commit()
-        except sqlite3.Error as e:
-            print(f"Error deleting node {node_id}: {e}")
-
-    def delete_edge_record(self, edge_id):
-        if not self._conn:
-            return
-        try:
-            self._conn.execute("DELETE FROM edges WHERE edge_id = ?", (edge_id,))
-            self._conn.commit()
-        except sqlite3.Error as e:
-            print(f"Error deleting edge {edge_id}: {e}")
+    
 
     def delete_highlight_record(self, highlight_id):
         if not self._conn:
@@ -963,46 +1012,7 @@ class ProjectManager:
             self._conn.rollback()
             print(f"Error deleting workspace {workspace_id}: {e}")
 
-    def upsert_node_record(self, node_data, workspace_id):
-        if not self._conn: return
-        try:
-            cursor = self._conn.cursor()
-            
-            # --- CRITICAL FIX: Check if an original backup already exists in the DB ---
-            cursor.execute("SELECT original_text FROM nodes WHERE id = ?", (node_data.get("id"),))
-            row = cursor.fetchone()
-            
-            # 1. If passed explicitly from the UI, use it.
-            # 2. If it's already safely in the DB, KEEP IT (don't overwrite it).
-            # 3. Otherwise, it's a brand new note, so back up the current text.
-            if "original_text" in node_data:
-                orig_text = node_data["original_text"]
-            elif row and row[0] is not None:
-                orig_text = row[0] 
-            else:
-                orig_text = node_data.get("note", "")
-                
-            cursor.execute(
-                """
-                INSERT OR REPLACE INTO nodes (
-                    id, highlight_id, workspace_id, quote, note_text, color,
-                    is_custom, pdf_path, page_num, manual_font_size, x, y, width, height, node_origin, is_verified, original_text
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    node_data.get("id"), node_data.get("highlight_id"), workspace_id,
-                    node_data.get("quote"), node_data.get("note"), node_data.get("color"),
-                    int(node_data.get("is_custom", 0)), node_data.get("pdf_path"),
-                    node_data.get("page_num"), node_data.get("manual_font_size"),
-                    node_data.get("x", 0.0), node_data.get("y", 0.0),
-                    node_data.get("width", 150.0), node_data.get("height", 80.0),
-                    node_data.get("node_origin", "human"), int(node_data.get("is_verified", 0)),
-                    orig_text # <--- Safely injected here
-                ),
-            )
-            self._conn.commit()
-        except sqlite3.Error as e:
-            print(f"Error upserting node {node_data.get('id')}: {e}")
+    
 
     # ------------------------------------------------------------------ tags
 

@@ -23,6 +23,37 @@ body {
     padding: 1.25rem;
     background: radial-gradient(circle at top, rgba(59, 130, 246, 0.16), rgba(2, 6, 23, 0.96) 42%), #020617;
 }
+.bg-academic {
+    background: #fdfbf7;
+    color: #1a1a1a !important;
+}
+.bg-academic .od-deck-shell {
+    background: rgba(255, 255, 255, 0.8);
+    border-color: rgba(0, 0, 0, 0.05);
+    box-shadow: 0 20px 50px rgba(0,0,0,0.05);
+}
+
+/* Blueprint: Great for methodology and technical data */
+.bg-blueprint {
+    background-color: #001f3f;
+    background-image: 
+        linear-gradient(rgba(255,255,255,.05) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.05) 1px, transparent 1px);
+    background-size: 40px 40px;
+}
+
+/* Deep Emerald: An organic, premium dark mode */
+.bg-forest {
+    background: radial-gradient(circle at 50% 50%, #062c21 0%, #020f0b 100%);
+}
+
+/* Nebula: A high-contrast space aesthetic */
+.bg-nebula {
+    background: 
+        radial-gradient(circle at 20% 30%, rgba(139, 92, 246, 0.15), transparent 40%),
+        radial-gradient(circle at 80% 70%, rgba(59, 130, 246, 0.15), transparent 40%),
+        #020617;
+}
 
 .viewport-guard__panel {
     width: min(560px, 96vw);

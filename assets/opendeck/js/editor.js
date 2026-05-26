@@ -156,18 +156,33 @@ function handleImageUpload(event, key, arrayName = null, index = null) {
     const reader = new FileReader();
     reader.onload = function (e) {
         resizeImageForStorage(e.target.result, (resizedUrl) => {
-            if (arrayName !== null && index !== null) updateArrayItem(arrayName, index, key, resizedUrl);
-            else updateSlide(key, resizedUrl);
-            renderEditor();
+            // This logic allows it to save to e.g. slide['icon'] OR slide['themes'][0]['icon']
+            if (arrayName !== null && index !== null) {
+                updateArrayItem(arrayName, index, key, resizedUrl);
+            } else {
+                updateSlide(key, resizedUrl);
+            }
+            renderEditor(); // Refresh the sidebar UI to show the new thumbnail
         });
     };
     reader.readAsDataURL(file);
 }
 
-// Helper for sleek icon inputs in properties panel
-function generateProIconInput(label, value, onUpdateStr) {
+function renderIconOrImage(val, classes) {
+    if (!val) return '';
+    if (val.startsWith('data:image')) {
+        return `<img src="${val}" class="${classes} object-contain" style="max-height: 1em; width: auto; display: inline-block; vertical-align: middle;">`;
+    }
+    return `<i class="fa-solid ${escapeHtml(val)} ${classes}"></i>`;
+}
+
+// Updated input generator to handle file uploads for icon slots
+function generateProIconInput(label, value, onUpdateStr, key, arrayName = null, index = null) {
     const randId = Math.random().toString(36).substr(2, 5);
     const inputId = `iconInput_${randId}`;
+    const fileId = `fileInput_${randId}`;
+    
+    // Bridge the pick-icon modal back to the new logic
     window[`iconCb_${randId}`] = function (icon) {
         const input = document.getElementById(inputId);
         if (!input) return;
@@ -175,12 +190,25 @@ function generateProIconInput(label, value, onUpdateStr) {
         input.dispatchEvent(new Event('input', { bubbles: true }));
         renderApp();
     };
+
+    const updateArgs = arrayName ? `'${key}', '${arrayName}', ${index}` : `'${key}'`;
+    const isImage = value && value.startsWith('data:image');
+
     return `
         <div class="flex flex-col gap-1.5 mb-3">
             <label class="text-[0.65rem] font-bold text-slate-400 uppercase tracking-widest">${label}</label>
-            <div class="flex gap-2 w-full">
-                <input type="text" id="${inputId}" class="w-full bg-[#020617] border border-slate-700 focus:border-blue-500 rounded-xl px-3 py-2.5 text-xs text-white outline-none font-mono transition-colors shadow-inner" value="${escapeHtml(value)}" oninput="${onUpdateStr}">
-                <button class="bg-slate-800 hover:bg-slate-700 text-white px-3 py-2.5 rounded-xl border border-slate-700 transition-colors shadow-inner" onclick="openIconModal(window.iconCb_${randId})"><i class="fa-solid fa-icons"></i></button>
+            <div class="flex gap-2 w-full items-center bg-[#020617] border border-slate-700 rounded-xl px-2 py-1.5 shadow-inner">
+                <div class="w-8 h-8 flex items-center justify-center bg-slate-800 rounded-lg text-blue-400 shrink-0 border border-slate-600 overflow-hidden">
+                    ${isImage ? `<img src="${value}" class="w-full h-full object-cover">` : `<i class="fa-solid ${escapeHtml(value)} text-sm"></i>`}
+                </div>
+                <input type="text" id="${inputId}" class="hidden" value="${escapeHtml(value)}" oninput="${onUpdateStr}">
+                <input type="file" id="${fileId}" class="hidden" accept="image/*" onchange="handleImageUpload(event, ${updateArgs})">
+                
+                <button class="bg-slate-800 hover:bg-slate-700 text-white text-[9px] font-bold px-2 py-2 rounded-lg border border-slate-700 transition-colors uppercase tracking-tighter" 
+                        onclick="document.getElementById('${fileId}').click()">Upload File</button>
+                <div class="h-4 w-px bg-slate-700"></div>
+                <button class="bg-slate-800 hover:bg-slate-700 text-white text-[9px] font-bold px-2 py-2 rounded-lg border border-slate-700 transition-colors uppercase tracking-tighter" 
+                        onclick="openIconModal(window.iconCb_${randId})">Pick Icon</button>
             </div>
         </div>
     `;
@@ -252,8 +280,19 @@ function renderEditor() {
         pitch_hero: 'Cinematic Hero',
         pitch_stats: 'Metrics',
         pitch_timeline: 'Timeline',
-        pitch_pricing: 'Pricing'
-    };
+        pitch_pricing: 'Pricing',
+        res_title: 'Research Title',
+        res_abstract: 'Abstract/Summary',
+        res_methodology: 'Methodology Flow',
+        res_data: 'Data Insight',
+        res_citations: 'Bibliography',
+        res_lit_review: 'Literature Review',
+        res_variables: 'Variables & Hypotheses',
+        res_limits: 'Scope & Limitations',
+        res_collaborators: 'Collaborators',
+        res_key_takeaway: 'Major Conclusion',
+        custom_block_layout: 'Custom Layout'
+};
     const slideTypeLabel = slideTypeLabels[slide.type] || 'Custom Slide';
     const slideCapacityHint = getSlideCapacityHint(slide);
 
@@ -294,6 +333,10 @@ function renderEditor() {
                             <option value="bg-sunset" ${slide.bgOverride === 'bg-sunset' ? 'selected' : ''}>Sunset Glow</option>
                             <option value="bg-pitchblack" ${slide.bgOverride === 'bg-pitchblack' ? 'selected' : ''}>Solid Black</option>
                             <option value="bg-purewhite" ${slide.bgOverride === 'bg-purewhite' ? 'selected' : ''}>Pure White</option>
+                            <option value="bg-academic" ${slide.bgOverride === 'bg-academic' ? 'selected' : ''}>Academic Ivory</option>
+                            <option value="bg-blueprint" ${slide.bgOverride === 'bg-blueprint' ? 'selected' : ''}>Technical Blueprint</option>
+                            <option value="bg-forest" ${slide.bgOverride === 'bg-forest' ? 'selected' : ''}>Deep Emerald</option>
+                            <option value="bg-nebula" ${slide.bgOverride === 'bg-nebula' ? 'selected' : ''}>Space Nebula</option>
                         </select>
                     </div>
                 </div>
@@ -351,11 +394,11 @@ function renderEditor() {
         </button>
     ` + closeBlock;
 
-    if (slide.type === 'intro') {
+    if (slide.type === 'intro' || slide.type === 'res_title') {
         const tagsLimit = getArrayLimit(slide, 'tags');
         const reachedTagsLimit = tagsLimit && (slide.tags || []).length >= tagsLimit.limit;
         html += openBlock('Hero Assets', 'fa-image');
-        html += generateProIconInput('Main Icon', slide.icon, "updateSlide('icon', this.value)");
+        html += generateProIconInput('Main Icon', slide.icon, "updateSlide('icon', this.value)", 'icon');
         html += closeBlock;
 
         html += openBlock('Pill Badges', 'fa-tags');
@@ -375,7 +418,7 @@ function renderEditor() {
         html += `<button class="w-full border text-xs font-bold py-2.5 rounded-lg transition-colors ${reachedTagsLimit ? 'bg-slate-900 text-slate-500 border-slate-800 cursor-not-allowed' : 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-white'}" onclick="addArrayItem('tags', {text:'New Tag', icon:'fa-star', color:'#3B82F6'})" ${reachedTagsLimit ? 'disabled' : ''}><i class="fa-solid fa-plus mr-2"></i>Add Tag</button>`;
         html += closeBlock;
     }
-    else if (slide.type === 'split') {
+    else if (slide.type === 'split' || slide.type === 'res_abstract') {
         const splitBulletsLimit = getArrayLimit(slide, 'bullets');
         const reachedSplitBulletsLimit = splitBulletsLimit && (slide.bullets || []).length >= splitBulletsLimit.limit;
         html += openBlock('Right Visual', 'fa-image');
@@ -434,7 +477,7 @@ function renderEditor() {
         html += `<button class="w-full border text-xs font-bold py-2.5 rounded-lg transition-colors ${reachedCardsLimit ? 'bg-slate-900 text-slate-500 border-slate-800 cursor-not-allowed' : 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-white'}" onclick="addArrayItem('cards', {title:'New Feature', text:'Description', icon:'fa-star', color:'#3B82F6'})" ${reachedCardsLimit ? 'disabled' : ''}><i class="fa-solid fa-plus mr-2"></i>Add Card</button>`;
         html += closeBlock;
     }
-    else if (slide.type === 'list') {
+    else if (slide.type === 'list' || slide.type === 'res_citations') {
         const itemsLimit = getArrayLimit(slide, 'items');
         const reachedItemsLimit = itemsLimit && (slide.items || []).length >= itemsLimit.limit;
         html += openBlock('Status Rows', 'fa-list-check');
@@ -490,7 +533,7 @@ function renderEditor() {
         const badgesLimit = getArrayLimit(slide, 'badges');
         const reachedBadgesLimit = badgesLimit && (slide.badges || []).length >= badgesLimit.limit;
         html += openBlock('Hero Identity', 'fa-wand-magic-sparkles');
-        html += generateProIconInput('Main Icon', slide.icon, "updateSlide('icon', this.value)");
+        html += generateProIconInput('Main Icon', slide.icon, "updateSlide('icon', this.value)", 'icon');
         html += closeBlock;
 
         html += openBlock('Support Badges', 'fa-tags');
@@ -572,40 +615,23 @@ function renderEditor() {
                  </div>`;
         html += closeBlock;
     }
-    else if (slide.type === 'roadmap_cards') {
-        const phasesLimit = getArrayLimit(slide, 'phases');
-        const reachedPhasesLimit = phasesLimit && (slide.phases || []).length >= phasesLimit.limit;
-        html += openBlock('Roadmap Stages', 'fa-timeline');
-        (slide.phases || []).forEach((phase, i) => {
-            html += `<div class="bg-[#0b1121] border border-slate-700/50 rounded-lg p-3 mb-3 relative group transition hover:border-slate-500">
-                        <div class="absolute -top-2 -right-2 bg-slate-800 hover:bg-red-500 text-slate-400 hover:text-white w-6 h-6 rounded-full flex items-center justify-center text-[10px] cursor-pointer opacity-0 group-hover:opacity-100 transition-all border border-slate-600 shadow-md" onclick="removeArrayItem('phases', ${i})"><i class="fa-solid fa-trash"></i></div>
-                        <div class="flex gap-3 mb-3 mt-2">
-                            <div class="flex-grow flex flex-col gap-1.5">
-                                <label class="text-[0.65rem] font-bold text-slate-400 uppercase tracking-widest">Stage Title</label>
-                                <input type="text" class="w-full bg-[#020617] border border-slate-700 focus:border-blue-500 rounded-md px-3 py-1.5 text-xs text-white outline-none" value="${escapeHtml(phase.title)}" oninput="updateArrayItem('phases', ${i}, 'title', this.value)">
-                            </div>
-                            <div class="flex flex-col gap-1.5 w-16">
-                                <label class="text-[0.65rem] font-bold text-slate-400 uppercase tracking-widest">Color</label>
-                                <input type="color" class="w-full h-8 bg-transparent rounded cursor-pointer border-0 p-0" value="${phase.color || '#3B82F6'}" onchange="updateArrayItem('phases', ${i}, 'color', this.value)">
-                            </div>
-                        </div>
-                        <div class="flex flex-col gap-1.5 mb-3">
-                            <label class="text-[0.65rem] font-bold text-slate-400 uppercase tracking-widest">Status</label>
-                            <input type="text" class="w-full bg-[#020617] border border-slate-700 focus:border-blue-500 rounded-md px-3 py-1.5 text-xs text-white outline-none" value="${escapeHtml(phase.status)}" oninput="updateArrayItem('phases', ${i}, 'status', this.value)">
-                        </div>
-                        <div class="flex flex-col gap-1.5">
-                            <label class="text-[0.65rem] font-bold text-slate-400 uppercase tracking-widest">Description</label>
-                            <textarea class="w-full bg-[#020617] border border-slate-700 focus:border-blue-500 rounded-md px-3 py-2 text-xs text-white outline-none resize-y min-h-[80px]" oninput="updateArrayItem('phases', ${i}, 'text', this.value)">${escapeHtml(phase.text)}</textarea>
-                        </div>
-                     </div>`;
-        });
-        if (reachedPhasesLimit) {
-            html += `<div class="mb-3 rounded-lg border border-amber-700/40 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-200">Roadmap Cards supports up to ${phasesLimit.limit} ${phasesLimit.label} per slide to guarantee fit on all screens. Create another ${phasesLimit.slideName} slide for additional content.</div>`;
-        }
-        html += `<button class="w-full border text-xs font-bold py-2.5 rounded-lg transition-colors ${reachedPhasesLimit ? 'bg-slate-900 text-slate-500 border-slate-800 cursor-not-allowed' : 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-white'}" onclick="addArrayItem('phases', {title:'New Stage', text:'Describe this stage.', status:'Planned', color:'#3B82F6'})" ${reachedPhasesLimit ? 'disabled' : ''}><i class="fa-solid fa-plus mr-2"></i>Add Stage</button>`;
-        html += closeBlock;
-    }
-    else if (slide.type === 'pitch_stats') {
+    else if (slide.type === 'res_methodology') {
+    html += openBlock('Methodology Stages', 'fa-timeline');
+    (slide.phases || []).forEach((phase, i) => {
+        html += `
+            <div class="bg-[#0b1121] border border-slate-700/50 rounded-lg p-3 mb-3 relative group">
+                <div class="text-[10px] font-bold text-slate-500 uppercase mb-2">Stage ${i+1}</div>
+                ${generateProIconInput('Stage Icon', phase.icon, `updateArrayItem('phases', ${i}, 'icon', this.value)`, 'icon', 'phases', i)}
+                <div class="flex gap-2">
+                    <input type="color" class="w-10 h-8 bg-transparent" value="${phase.color}" onchange="updateArrayItem('phases', ${i}, 'color', this.value)">
+                    <input type="text" class="flex-grow bg-slate-900 text-xs p-2 rounded" value="${phase.status}" oninput="updateArrayItem('phases', ${i}, 'status', this.value)">
+                </div>
+            </div>
+        `;
+    });
+    html += closeBlock;
+}
+    else if (slide.type === 'pitch_stats' || slide.type === 'res_data') {
         const statsLimit = getArrayLimit(slide, 'stats');
         const reachedStatsLimit = statsLimit && (slide.stats || []).length >= statsLimit.limit;
         html += openBlock('Key Metrics', 'fa-chart-simple');
@@ -757,6 +783,15 @@ function renderEditor() {
         html += `<button class="w-full border text-xs font-bold py-2.5 rounded-lg transition-colors ${reachedPricingLimit ? 'bg-slate-900 text-slate-500 border-slate-800 cursor-not-allowed' : 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-white'}" onclick="addArrayItem('tiers', {name:'New Plan', price:'$99', feature:'Description', highlight:false})" ${reachedPricingLimit ? 'disabled' : ''}><i class="fa-solid fa-plus mr-2"></i>Add Tier</button>`;
         html += closeBlock;
     }
+    else if (slide.type === 'custom_baked_template') {
+    // The Layout Engine has already done the heavy lifting of converting 
+    // fractional columns and properties into Tailwind HTML.
+    slideHtml = `
+        <div class="deck-preview h-full w-full relative">
+            ${slide.htmlContent || ''}
+        </div>
+    `;
+}
     else {
         html += `<div class="bg-blue-900/20 border border-blue-800 rounded-xl p-4 text-xs text-blue-200 leading-relaxed shadow-inner mb-6"><i class="fa-solid fa-wand-magic-sparkles text-blue-400 mr-2 text-lg float-left"></i> This template is fully editable directly on the slide preview.</div>`;
     }
@@ -781,12 +816,78 @@ function renderEditor() {
     html += presentationSettings;
     form.innerHTML = html;
 }
+// Add this helper function somewhere in your JS scope
+function renderCustomBlockLayout(slide) {
+    if (!slide.layout || !Array.isArray(slide.layout) || slide.layout.length === 0) return '<div class="text-slate-500 p-10 text-center w-full h-full flex items-center justify-center font-bold uppercase tracking-widest text-xs">Empty Custom Layout</div>';
 
-// --- INLINE EDITING SYNC ---
+    let html = `<div class="w-full h-full flex flex-col justify-center p-12 gap-8 z-10 relative">`;
+    
+    slide.layout.forEach((row, rIndex) => {
+        let gridClass = 'grid-cols-1';
+        if (row.layoutType === 'split-50-50') gridClass = 'grid-cols-2';
+        if (row.layoutType === 'split-33-33-33') gridClass = 'grid-cols-3';
+
+        html += `<div class="grid ${gridClass} gap-8 w-full items-center">`;
+        
+        row.blocks.forEach((block, bIndex) => {
+            html += `<div class="flex flex-col gap-2">`;
+            const editAttrs = `contenteditable="true" onblur="handleBlockEdit(event, ${rIndex}, ${bIndex}, 'content')"`;
+            
+            switch (block.type) {
+                case 'header':
+                    html += `<h2 class="text-4xl font-bold ${block.color || 'text-white'} outline-none" ${editAttrs}>${escapeHtml(block.content || 'Header Text')}</h2>`;
+                    break;
+                case 'text':
+                    html += `<p class="text-lg ${block.color || 'text-slate-300'} leading-relaxed outline-none" ${editAttrs}>${escapeHtml(block.content || 'Enter paragraph text here...')}</p>`;
+                    break;
+                case 'image':
+                    let imgStyle = block.content ? `background-image: url('${block.content}'); background-size: cover; background-position: center;` : `background-color: rgba(255,255,255,0.05);`;
+                    html += `<div class="w-full aspect-video rounded-xl border border-slate-700/50 shadow-lg flex items-center justify-center cursor-pointer transition hover:border-blue-500" style="${imgStyle}" onclick="document.getElementById('customImgUpload_${rIndex}_${bIndex}').click()">
+                                ${!block.content ? '<i class="fa-solid fa-image text-4xl text-slate-600 pointer-events-none"></i>' : ''}
+                             </div>
+                             <input type="file" id="customImgUpload_${rIndex}_${bIndex}" class="hidden" accept="image/*" onchange="handleBlockImage(event, ${rIndex}, ${bIndex})">`;
+                    break;
+                case 'metric':
+                    html += `<div class="flex flex-col">
+                                <div class="text-6xl font-black outline-none" style="color: var(--accent-color)" ${editAttrs}>${escapeHtml(block.content || '99%')}</div>
+                                <div class="text-sm font-bold text-slate-400 uppercase tracking-widest mt-1 outline-none" contenteditable="true" onblur="handleBlockEdit(event, ${rIndex}, ${bIndex}, 'label')">${escapeHtml(block.label || 'Metric Label')}</div>
+                             </div>`;
+                    break;
+                case 'list':
+                    html += `<ul class="space-y-3">
+                                <li class="flex items-start gap-3"><i class="fa-solid fa-check-circle mt-1" style="color: var(--accent-color)"></i> <span class="text-slate-300 outline-none w-full block" ${editAttrs}>${escapeHtml(block.content || 'List item')}</span></li>
+                             </ul>`;
+                    break;
+                case 'code':
+                    html += `<div class="w-full bg-slate-950 rounded-lg border border-slate-800 overflow-hidden shadow-2xl">
+                                <div class="h-8 bg-slate-900 flex items-center px-4 gap-1.5 border-b border-slate-800">
+                                    <div class="w-2.5 h-2.5 rounded-full bg-red-500/80"></div>
+                                    <div class="w-2.5 h-2.5 rounded-full bg-yellow-500/80"></div>
+                                    <div class="w-2.5 h-2.5 rounded-full bg-green-500/80"></div>
+                                </div>
+                                <pre class="p-4 text-sm font-mono text-emerald-400 overflow-x-auto outline-none whitespace-pre-wrap" ${editAttrs}>${escapeHtml(block.content || 'console.log("Hello World");')}</pre>
+                             </div>`;
+                    break;
+            }
+            html += `</div>`;
+        });
+        html += `</div>`;
+    });
+    
+    html += `</div>`;
+    return html;
+}
+// ---f INLINE EDITING SYNC ---
+function handleInlineEditPrimitive(event, arrayName, index) {
+    let val = event.target.innerText;
+    const slide = slides.find(s => s.id === currentSlideId);
+    if (slide && slide[arrayName]) { slide[arrayName][index] = val; saveProjects(); renderEditor(); }
+}
 function handleInlineEdit(event, key, arrayName = null, index = null) {
     let val = event.target.innerText;
     const slide = slides.find(s => s.id === currentSlideId);
     if (!slide) return;
+    
     if (arrayName !== null && index !== null) slide[arrayName][index][key] = val;
     else slide[key] = val;
     saveProjects();
@@ -799,11 +900,32 @@ function handleInlineEdit(event, key, arrayName = null, index = null) {
         });
     }
 }
-function handleInlineEditPrimitive(event, arrayName, index) {
-    let val = event.target.innerText;
+// ADD THESE NEW BLOCK EDITING HANDLERS:
+window.handleBlockEdit = function(event, rIndex, bIndex, field) {
     const slide = slides.find(s => s.id === currentSlideId);
-    if (slide && slide[arrayName]) { slide[arrayName][index] = val; saveProjects(); renderEditor(); }
-}
+    if (slide && slide.layout && slide.layout[rIndex] && slide.layout[rIndex].blocks[bIndex]) {
+        slide.layout[rIndex].blocks[bIndex][field] = event.target.innerText;
+        saveProjects();
+    }
+};
+
+window.handleBlockImage = function(event, rIndex, bIndex) {
+    const file = event.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function (e) {
+        resizeImageForStorage(e.target.result, (resizedUrl) => {
+            const slide = slides.find(s => s.id === currentSlideId);
+            if (slide && slide.layout && slide.layout[rIndex] && slide.layout[rIndex].blocks[bIndex]) {
+                slide.layout[rIndex].blocks[bIndex].content = resizedUrl;
+                saveProjects();
+                renderPreview();
+            }
+        });
+    };
+    reader.readAsDataURL(file);
+};
+
 function createEditableTag(tagName, classNames, content, key, arrayName = null, index = null) {
     let args = arrayName ? `'${key}', '${arrayName}', ${index}` : `'${key}'`;
     return `<${tagName} class="${classNames}" contenteditable="true" onblur="handleInlineEdit(event, ${args})">${escapeHtml(content)}</${tagName}>`;
@@ -829,7 +951,17 @@ const ARRAY_LIMITS = {
     pitch_stats: { stats: { limit: 4, label: 'metrics', slideName: 'Metrics' } },
     pitch_timeline: { timeline: { limit: 4, label: 'milestones', slideName: 'Timeline' } },
     pitch_pricing: { tiers: { limit: 4, label: 'tiers', slideName: 'Pricing' } },
-    roadmap_cards: { phases: { limit: 4, label: 'stages', slideName: 'Roadmap Cards' } }
+    roadmap_cards: { phases: { limit: 4, label: 'stages', slideName: 'Roadmap Cards' } },
+    res_title: { badges: { limit: 4, label: 'badges', slideName: 'Research Title' } },
+    res_abstract: { bullets: { limit: 4, label: 'bullets', slideName: 'Abstract' } },
+    res_methodology: { phases: { limit: 4, label: 'stages', slideName: 'Methodology' } },
+    res_data: { stats: { limit: 4, label: 'metrics', slideName: 'Data Insight' } },
+    res_citations: { items: { limit: 10, label: 'citations', slideName: 'Citations' } },
+    res_lit_review: { themes: { limit: 4, label: 'themes', slideName: 'Literature Review' } },
+    res_variables: { hypotheses: { limit: 3, label: 'hypotheses', slideName: 'Hypothesis' } },
+    res_limits: { points: { limit: 5, label: 'points', slideName: 'Limitations' } },
+    res_collaborators: { logos: { limit: 6, label: 'partners', slideName: 'Funding' } },
+    res_key_takeaway: { points: { limit: 3, label: 'summary points', slideName: 'Takeaway' } }
 };
 
 function getArrayLimit(slide, arrayName) {
@@ -893,10 +1025,24 @@ function removeImage(key, arrayName = null, index = null) {
     renderEditor(); saveProjects();
 }
 
-function addSlide(type) {
+function addSlide(type, templateId = null) {
     slideCounter++;
     let newSlide = { id: 'slide_' + Date.now() + '_' + Math.floor(Math.random() * 1000), type: type, navName: 'New Slide', title: 'Main Topic Heading', transition: 'fade-in', bgOverride: 'bg-default', notes: '' };
 
+    // ADD THIS NEW BLOCK:
+    if (type === 'custom_block_layout') {
+        newSlide.kicker = 'Custom Layout';
+        if (templateId) {
+            let templates = window.customTemplates || JSON.parse(localStorage.getItem('openDeckCustomTemplates') || '[]');
+            let t = templates.find(x => x.id === templateId);
+            if (t && t.layout) {
+                newSlide.navName = t.name || 'Custom Layout';
+                newSlide.layout = JSON.parse(JSON.stringify(t.layout)); // Deep copy the grid
+            }
+        } else {
+            newSlide.layout = [];
+        }
+    }
     // Enhanced "Empty State" text for existing templates
     if (type === 'intro') { newSlide.subtitle = 'Type your subtitle or presenter name here'; newSlide.icon = 'fa-desktop'; newSlide.tags = []; }
     if (type === 'split') { newSlide.subtitle = 'Explain the core details of this concept in a few sentences here. Click to edit.'; newSlide.bullets = ['Type your first supporting point here', 'Add a secondary detail here']; newSlide.boxTitle = 'Key Takeaway'; newSlide.boxText = 'Summarize the most important metric or outcome here.'; newSlide.boxIcon = 'fa-lightbulb'; }
@@ -922,7 +1068,69 @@ function addSlide(type) {
     if (type === 'pitch_hero') { newSlide.kicker = 'Creative Pitch'; newSlide.subtitle = 'State your big visionary idea here.'; }
     if (type === 'pitch_stats') { newSlide.subtitle = 'Highlight your key performance indicators.'; newSlide.stats = [{ value: '99%', label: 'Uptime', color: '#3B82F6' }, { value: '10x', label: 'Growth', color: '#10B981' }]; }
     if (type === 'pitch_timeline') { newSlide.subtitle = 'Showcase your roadmap or history.'; newSlide.timeline = [{ year: '2025', text: 'Launch Phase', color: '#3B82F6' }, { year: '2026', text: 'Scale Operations', color: '#3B82F6' }]; }
-
+    if (type === 'res_title') { 
+        newSlide.title = 'Project Title'; newSlide.subtitle = 'University or Department Name'; 
+        newSlide.kicker = 'Research Paper Presentation'; newSlide.icon = 'fa-microscope'; 
+        newSlide.badges = [{text: 'May 2026', icon: 'fa-calendar', color: '#3B82F6'}];
+    }
+    if (type === 'res_abstract') { 
+        newSlide.title = 'Abstract & Scope'; newSlide.subtitle = 'Define the problem statement and research questions.'; 
+        newSlide.bullets = ['Hypothesis A', 'Expected Outcome']; 
+        newSlide.boxTitle = 'Contribution'; newSlide.boxText = 'Summarize the unique value of this study.'; 
+        newSlide.boxIcon = 'fa-book-open'; 
+    }
+    if (type === 'res_methodology') { 
+        newSlide.title = 'Research Design'; newSlide.phases = [
+            {title: 'Data Collection', text: 'Surveying 500 participants.', status: 'Done', color: '#10B981'},
+            {title: 'Analysis', text: 'Running regression models.', status: 'Active', color: '#3B82F6'}
+        ]; 
+    }
+    if (type === 'res_data') { 
+        newSlide.title = 'Quantitative Analysis'; newSlide.stats = [
+            {value: 'p < 0.05', label: 'Significance', color: '#3B82F6'},
+            {value: 'N=1200', label: 'Sample Size', color: '#10B981'}
+        ]; 
+    }
+    if (type === 'res_citations') { 
+        newSlide.title = 'Selected Bibliography'; newSlide.items = [
+            {label: 'Rawls, J. (1971). A Theory of Justice.', value: 'PRIMARY', icon: 'fa-quote-right', color: '#3B82F6'}
+        ]; 
+    }
+    if (type === 'res_lit_review') {
+        newSlide.title = 'Current State of Research';
+        newSlide.subtitle = 'Thematic review of contemporary literature.';
+        newSlide.themes = [
+            { title: 'Theoretic Framework', text: 'Core principles of justice.', icon: 'fa-scale-balanced' },
+            { title: 'Practical Application', text: 'How it works in law.', icon: 'fa-gavel' }
+        ];
+    }
+    if (type === 'res_variables') {
+        newSlide.title = 'Theoretical Model';
+        newSlide.ivTitle = 'Independent Variables';
+        newSlide.dvTitle = 'Dependent Variables';
+        newSlide.hypotheses = ['Higher IV correlates to increased DV outcome.'];
+    }
+    if (type === 'res_limits') {
+        newSlide.title = 'Critical Limitations';
+        newSlide.subtitle = 'Addressing the constraints of this study.';
+        newSlide.points = [
+            { label: 'LIMITATION', text: 'Small sample size (N=45).', color: '#EF4444', icon: 'fa-circle-exclamation' },
+            { label: 'FUTURE WORK', text: 'Longitudinal study over 10 years.', color: '#3B82F6', icon: 'fa-arrow-right' }
+        ];
+    }
+    if (type === 'res_collaborators') {
+        newSlide.title = 'Institutional Support';
+        newSlide.logos = [
+            { name: 'University of Hawaii', role: 'Primary Research', icon: 'fa-building-columns' },
+            { name: 'Grant Agency', role: 'Funding Body', icon: 'fa-hand-holding-dollar' }
+        ];
+    }
+    if (type === 'res_key_takeaway') {
+        newSlide.title = 'The Bottom Line';
+        newSlide.subtitle = 'What this means for the field.';
+        newSlide.impact = 'Justice is achieved only when the rules are transparent.';
+        newSlide.icon = 'fa-lightbulb';
+    }
     slides.push(newSlide);
     currentSlideId = newSlide.id;
     hideModal('templateModal');
@@ -963,21 +1171,21 @@ function generateSlideHTML(slide, isExport = false) {
 
     let html = '';
 
-    if (slide.type === 'intro') {
+    if (slide.type === 'intro' || slide.type === 'res_title') {
         let tagsHtml = (slide.tags || []).map((t, i) => `<span class="flex items-center"><i class="fa-solid ${escapeHtml(t.icon)} mr-2" style="color: ${t.color || 'var(--accent-color)'}"></i>${createEditableTag('span', '', t.text, 'text', 'tags', i)}</span>`).join('');
         html = `
             <div class="od-deck-shell text-center ${animClass}">
                 <div class="od-title-mark mx-auto"></div>
-                <div class="mb-6 inline-flex items-center justify-center w-24 h-24 rounded-[1.75rem] border border-white/10 bg-white/5 shadow-[0_0_35px_-12px_var(--accent-color)]">
-                    <i class="fa-solid ${escapeHtml(slide.icon)} text-4xl accent-text drop-shadow-[0_0_18px_var(--accent-color)]"></i>
-                </div>
+                <div class="mb-6 inline-flex items-center justify-center w-24 h-24 rounded-[1.75rem] border border-white/10 bg-white/5 shadow-[0_0_35px_-12px_var(--accent-color)] overflow-hidden p-4">
+    ${renderIconOrImage(slide.icon, "text-4xl accent-text drop-shadow-[0_0_18px_var(--accent-color)]")}
+</div>
                 ${createEditableTag('h1', 'text-7xl font-black tracking-[-0.06em] mb-4 leading-[0.95] w-full text-white', slide.title, 'title')}
                 ${createEditableTag('p', 'text-2xl text-slate-300 uppercase tracking-[0.22em] font-light mb-12 w-full block', slide.subtitle, 'subtitle')}
                 <div class="od-badge-row justify-center text-sm font-mono">${tagsHtml}</div>
             </div>
         `;
     }
-    else if (slide.type === 'split') {
+    else if (slide.type === 'split' || slide.type === 'res_abstract') {
         let bulletsHtml = (slide.bullets || []).map((b, i) => `<li class="flex items-start w-full"><i class="fa-solid fa-angle-right accent-text mr-3 mt-1.5"></i> ${createEditablePrimitive('span', 'flex-grow w-full block', b, 'bullets', i)}</li>`).join('');
         let rightHtml = slide.image ? `<img src="${slide.image}" class="w-full h-80 object-cover rounded-2xl border border-slate-700 shadow-2xl">` : `
             <div class="od-card h-full flex flex-col justify-center items-center text-center w-full" style="--card-accent: var(--accent-color)">
@@ -1019,7 +1227,7 @@ function generateSlideHTML(slide, isExport = false) {
             </div>
         `;
     }
-    else if (slide.type === 'list') {
+    else if (slide.type === 'list' || slide.type === 'res_citations') {
         let itemsHtml = (slide.items || []).map((item, i) => `
             <li class="od-check-row w-full">
                 <div class="flex items-center w-full"><i class="fa-solid ${escapeHtml(item.icon)} mr-4 text-xl shrink-0" style="color: ${item.color || 'var(--accent-color)'}"></i>${createEditableTag('span', 'text-lg font-semibold w-full block', item.label, 'label', 'items', i)}</div>
@@ -1090,9 +1298,9 @@ function generateSlideHTML(slide, isExport = false) {
             <div class="od-orb od-orb--orange"></div>
             <div class="od-shell text-center ${animClass}">
                 ${createEditableTag('div', 'od-kicker mx-auto mb-8', slide.kicker || 'Presentation System', 'kicker')}
-                <div class="mb-8 inline-flex items-center justify-center w-24 h-24 rounded-[1.75rem] border border-white/10 bg-white/5 shadow-[0_0_35px_-12px_var(--accent-color)]">
-                    <i class="fa-solid ${escapeHtml(slide.icon)} text-4xl accent-text drop-shadow-[0_0_18px_var(--accent-color)]"></i>
-                </div>
+               <div class="mb-8 inline-flex items-center justify-center w-24 h-24 rounded-[1.75rem] border border-white/10 bg-white/5 shadow-[0_0_35px_-12px_var(--accent-color)] overflow-hidden p-4">
+    ${renderIconOrImage(slide.icon, "text-4xl accent-text drop-shadow-[0_0_18px_var(--accent-color)]")}
+</div>
                 ${createEditableTag('h1', 'text-7xl font-black tracking-[-0.06em] mb-5 leading-[0.95] w-full text-white', slide.title, 'title')}
                 ${createEditableTag('p', 'text-2xl text-slate-300 font-light leading-relaxed max-w-4xl mx-auto block', slide.subtitle, 'subtitle')}
                 <div class="od-badge-row justify-center">${badgesHtml}</div>
@@ -1162,7 +1370,7 @@ function generateSlideHTML(slide, isExport = false) {
             </div>
         `;
     }
-    else if (slide.type === 'roadmap_cards') {
+    else if (slide.type === 'roadmap_cards'|| slide.type === 'res_methodology') {
         const roadmapDensity = getDensityClasses((slide.phases || []).length);
         let phasesHtml = (slide.phases || []).map((phase, i) => `
             <div class="od-roadmap-card" style="--phase-color:${phase.color || 'var(--accent-color)'}">
@@ -1184,7 +1392,7 @@ function generateSlideHTML(slide, isExport = false) {
             </div>
         `;
     }
-    else if (slide.type === 'pitch_stats') {
+    else if (slide.type === 'pitch_stats' || slide.type === 'res_data') {
         const statsDensity = getDensityClasses((slide.stats || []).length);
         const statCount = (slide.stats || []).length;
         let metricLayoutClass = '';
@@ -1338,6 +1546,103 @@ function generateSlideHTML(slide, isExport = false) {
                 <div class="od-pricing-grid ${pricingDensity.grid}">${tiersHtml}</div>
             </div>
         `;
+    }
+    // Example for Literature Review
+    else if (slide.type === 'res_lit_review') {
+        let themesHtml = (slide.themes || []).map((t, i) => `
+            <div class="od-card">
+                <div class="od-card__icon">${renderIconOrImage(t.icon, 'text-blue-400')}</div>
+                ${createEditableTag('h4', 'text-lg font-bold text-white mb-2', t.title, 'title', 'themes', i)}
+                ${createEditableTag('p', 'text-xs text-slate-400 leading-relaxed', t.text, 'text', 'themes', i)}
+            </div>
+        `).join('');
+        html = `
+            <div class="od-deck-shell ${animClass}">
+                <div class="od-title-mark"></div>
+                ${createEditableTag('h2', 'text-5xl font-black mb-4 tracking-tight', slide.title, 'title')}
+                ${createEditableTag('p', 'od-lead mb-10 block', slide.subtitle, 'subtitle')}
+                <div class="grid grid-cols-2 gap-6 w-full">${themesHtml}</div>
+            </div>
+        `;
+    }
+    // 2. Variables & Hypothesis (Flow Design)
+else if (slide.type === 'res_variables') {
+    let hypothesesHtml = (slide.hypotheses || []).map((h, i) => `
+        <div class="bg-white/5 border border-white/10 p-5 rounded-2xl mb-4 flex items-center gap-5 shadow-sm">
+            <div class="w-10 h-10 rounded-full bg-blue-600/20 flex items-center justify-center font-black text-blue-400 border border-blue-500/30 shrink-0">H${i+1}</div>
+            ${createEditablePrimitive('span', 'text-xl text-slate-200 flex-grow leading-relaxed font-light', h, 'hypotheses', i)}
+        </div>
+    `).join('');
+    html = `
+        <div class="od-deck-shell ${animClass} !max-w-6xl">
+            <div class="od-title-mark mx-auto"></div>
+            ${createEditableTag('h2', 'text-6xl font-black mb-14 text-center text-white tracking-tight', slide.title, 'title')}
+            <div class="flex items-center justify-center gap-12 mb-16 w-full">
+                <div class="od-card !p-10 flex-1 text-center bg-blue-950/20 border-blue-500/30" style="--card-accent: #3B82F6">
+                    <div class="text-[10px] uppercase tracking-[0.3em] text-blue-400 mb-4 font-black">Independent Variable (IV)</div>
+                    ${createEditableTag('h3', 'text-4xl font-extrabold text-white leading-tight', slide.ivTitle, 'ivTitle')}
+                </div>
+                <div class="flex flex-col items-center gap-2">
+                    <i class="fa-solid fa-arrow-right-long text-5xl text-slate-700"></i>
+                    <span class="text-[9px] font-bold text-slate-600 uppercase tracking-widest">Prediction</span>
+                </div>
+                <div class="od-card !p-10 flex-1 text-center bg-emerald-950/20 border-emerald-500/30" style="--card-accent: #10B981">
+                    <div class="text-[10px] uppercase tracking-[0.3em] text-emerald-400 mb-4 font-black">Dependent Variable (DV)</div>
+                    ${createEditableTag('h3', 'text-4xl font-extrabold text-white leading-tight', slide.dvTitle, 'dvTitle')}
+                </div>
+            </div>
+            <div class="max-w-4xl mx-auto w-full">${hypothesesHtml}</div>
+        </div>
+    `;
+}
+
+// 2. Scope & Limitations (High-Contrast Status)
+else if (slide.type === 'res_limits') {
+    let pointsHtml = (slide.points || []).map((p, i) => `
+        <div class="flex items-start gap-8 p-6 rounded-3xl bg-slate-900/40 border border-white/5 mb-5 transition hover:border-white/20 hover:bg-slate-800/40">
+            <div class="w-16 h-16 rounded-2xl flex items-center justify-center shrink-0 shadow-2xl p-4" style="background: color-mix(in srgb, ${p.color} 15%, transparent); border: 1px solid color-mix(in srgb, ${p.color} 30%, transparent)">
+                ${renderIconOrImage(p.icon, "text-2xl", p.color)}
+            </div>
+            <div class="flex-grow">
+                <div class="text-[11px] font-black uppercase tracking-[0.25em] mb-2" style="color: ${p.color}">${createEditableTag('span', '', p.label, 'label', 'points', i)}</div>
+                ${createEditableTag('p', 'text-2xl text-white font-semibold leading-snug tracking-tight', p.text, 'text', 'points', i)}
+            </div>
+        </div>
+    `).join('');
+    html = `
+        <div class="od-deck-shell ${animClass}">
+            <div class="od-title-mark"></div>
+            ${createEditableTag('h2', 'text-6xl font-black mb-6 text-white tracking-tighter', slide.title, 'title')}
+            ${createEditableTag('p', 'od-lead mb-12 block text-2xl font-light', slide.subtitle, 'subtitle')}
+            <div class="grid grid-cols-1 w-full max-w-5xl">${pointsHtml}</div>
+        </div>
+    `;
+}
+
+// 3. Final Takeaway (Aurora Impact Layout)
+else if (slide.type === 'res_key_takeaway') {
+    let pointsHtml = (slide.points || []).map((p, i) => `
+        <div class="flex items-center gap-4 text-2xl text-blue-100/70 font-light">
+            <i class="fa-solid fa-circle-check text-blue-500/50 text-sm"></i>
+            ${createEditablePrimitive('span', '', p, 'points', i)}
+        </div>
+    `).join('');
+    html = `
+        <div class="od-orb od-orb--blue" style="filter: blur(120px); opacity: 0.4;"></div>
+        <div class="od-shell ${animClass} text-center !bg-slate-950/20 !backdrop-blur-3xl border-white/5 shadow-2xl">
+            <div class="mb-12 inline-flex items-center justify-center w-28 h-28 rounded-[2rem] bg-blue-600/10 border border-blue-400/20 shadow-[0_0_60px_rgba(59,130,246,0.2)] p-6">
+                ${renderIconOrImage(slide.icon, 'text-6xl text-blue-400 drop-shadow-[0_0_25px_rgba(59,130,246,0.6)]')}
+            </div>
+            <div class="text-[12px] font-black uppercase tracking-[0.4em] text-blue-400/80 mb-6">Primary Conclusion</div>
+            ${createEditableTag('h1', 'text-8xl font-black mb-10 tracking-tighter text-white leading-[0.9] drop-shadow-2xl', slide.title, 'title')}
+            <div class="h-1 w-32 bg-gradient-to-r from-transparent via-blue-500 to-transparent mx-auto mb-12 opacity-50"></div>
+            ${createEditableTag('p', 'text-4xl font-serif italic text-blue-50/90 leading-tight max-w-5xl mx-auto mb-14 block', slide.subtitle, 'subtitle')}
+            <div class="flex flex-col items-center gap-6 py-8 border-t border-white/5 w-full">${pointsHtml}</div>
+        </div>
+    `;
+}
+else if (slide.type === 'custom_block_layout') {
+        html = renderCustomBlockLayout(slide);
     }
     else {
         html = `<div class="theme-card ${animClass}">${createEditableTag('h2', 'text-4xl font-bold mb-10 w-full', slide.title, 'title')}</div>`;

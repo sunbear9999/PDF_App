@@ -26,46 +26,23 @@ class EditableTextItem(QGraphicsTextItem):
 
     def focusOutEvent(self, event):
         super().focusOutEvent(event)
-        # Disable editing when clicking away
         self.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
         
         new_text = self.toPlainText()
         if new_text != self.parent_node.note:
-            # 1. Capture state for undo
             view = self.scene().view if self.scene() and hasattr(self.scene(), "view") else None
             if view: view.save_state_for_undo()
                 
-            # 2. Freeze the AI's original text on the VERY FIRST manual edit
             current_orig = getattr(self.parent_node, "original_text", self.parent_node.note)
             if current_orig == self.parent_node.note:
                 self.parent_node.original_text = self.parent_node.note
                 
-            # 3. Apply the human's edit
             self.parent_node.note = new_text
             self.parent_node.refresh_layout()
             
-            # 4. Save safely to DB
+            # Simplified save!
             if view:
                 view._mark_workspace_dirty(autosave=True)
-                if hasattr(view.main_window, 'project_manager'):
-                    view.main_window.project_manager.upsert_node_record({
-                        "id": self.parent_node.node_id,
-                        "highlight_id": getattr(self.parent_node, "highlight_id", None),
-                        "quote": getattr(self.parent_node, "quote", ""),
-                        "note": self.parent_node.note,
-                        "color": getattr(self.parent_node, "color", "#ffff99"),
-                        "is_custom": getattr(self.parent_node, "is_custom", False),
-                        "pdf_path": getattr(self.parent_node, "pdf_path", None),
-                        "page_num": getattr(self.parent_node, "page_num", None),
-                        "manual_font_size": getattr(self.parent_node, "manual_font_size", None),
-                        "x": self.parent_node.pos().x(),
-                        "y": self.parent_node.pos().y(),
-                        "width": self.parent_node.base_width,
-                        "height": self.parent_node.base_height,
-                        "node_origin": getattr(self.parent_node, "node_origin", "human"),
-                        "is_verified": getattr(self.parent_node, "is_verified", 0),
-                        "original_text": self.parent_node.original_text # Protects the backup!
-                    }, view.current_workspace_id)
 
 class Edge(QGraphicsLineItem):
     def __init__(self, source_node, dest_node, label_text="", edge_id=None, color="#888888", weight=2):
@@ -686,7 +663,6 @@ class Node(QGraphicsRectItem):
             self.scene().view.setFocus()
 
     def finish_in_place_edit(self):
-        # Guard clause: Prevents saving logic from firing twice
         if not (self.text_item.textInteractionFlags() & Qt.TextInteractionFlag.TextEditorInteraction):
             return
             
@@ -694,38 +670,18 @@ class Node(QGraphicsRectItem):
         new_text = self.text_item.toPlainText().strip()
         
         if new_text != self.note:
-            # 1. Freeze the AI's original text on the VERY FIRST manual edit
             current_orig = getattr(self, "original_text", self.note)
             if current_orig == self.note:
                 self.original_text = self.note
                 
-            # 2. Apply the human's edit
             self.note = new_text
             
-            # 3. Save safely to DB with tracking fields intact
+            # Simplified save!
             view = self.scene().view if self.scene() and hasattr(self.scene(), "view") else None
-            if view and hasattr(view.main_window, 'project_manager'):
-                view.main_window.project_manager.upsert_node_record({
-                    "id": self.node_id,
-                    "highlight_id": getattr(self, "highlight_id", None),
-                    "quote": getattr(self, "quote", ""),
-                    "note": self.note,
-                    "color": getattr(self, "color", "#ffff99"),
-                    "is_custom": getattr(self, "is_custom", False),
-                    "pdf_path": getattr(self, "pdf_path", None),
-                    "page_num": getattr(self, "page_num", None),
-                    "manual_font_size": getattr(self, "manual_font_size", None),
-                    "x": self.pos().x(),
-                    "y": self.pos().y(),
-                    "width": self.base_width,
-                    "height": self.base_height,
-                    "node_origin": getattr(self, "node_origin", "human"),
-                    "is_verified": getattr(self, "is_verified", 0),
-                    "original_text": getattr(self, "original_text", self.note) # Protects the backup!
-                }, view.current_workspace_id)
+            if view:
+                view._mark_workspace_dirty(autosave=True)
 
         self.refresh_layout()
-        self._mark_workspace_dirty(autosave=True)
         self.hoverLeaveEvent(None)
 
     def trigger_color_change(self):

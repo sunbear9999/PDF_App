@@ -1,7 +1,122 @@
 // ==========================================
 // 4. DASHBOARD & UI LOGIC
 // ==========================================
+/// ==========================================
+// TEMPLATE BUILDER & CUSTOM TAB
+// ==========================================
 
+function openTemplateBuilder() {
+    try {
+        // 1. Safely hide the existing slide library modal to prevent PySide6 freezing overlay bugs
+        const existingModal = document.getElementById('templateModal');
+        if (existingModal) existingModal.style.display = 'none';
+        
+        // 2. Safely launch the Advanced Builder
+        if (window.templateBuilder) {
+            window.templateBuilder.open();
+        } else {
+            console.error("[Papyrus Error] Template Builder is missing. Forcing initialization...");
+            window.templateBuilder = new AdvancedTemplateBuilder();
+            window.templateBuilder.open();
+        }
+    } catch (error) {
+        console.error("[Papyrus Critical Error] Failed to open template builder: " + error.message);
+    }
+}
+
+function renderCustomTemplateTab() {
+    const grid = document.getElementById('customTemplateGrid');
+    if(!grid) return;
+    
+    let templates = window.customTemplates || JSON.parse(localStorage.getItem('openDeckCustomTemplates') || '[]');
+    
+    if (templates.length === 0) {
+        grid.innerHTML = `<div class="col-span-3 text-center text-slate-500 py-10">No custom templates built yet. Click 'Build New Template' to start.</div>`;
+        return;
+    }
+    
+    grid.innerHTML = templates.map(t => {
+        // Handle both old and new schema structures dynamically
+        const rowCount = t.layout ? t.layout.length : (t.slideData && t.slideData.layout ? t.slideData.layout.length : 0);
+        return `
+        <div class="template-card" onclick="addCustomSlide('${t.id}')">
+            <div class="w-full h-24 bg-slate-900 rounded mb-4 flex border border-blue-500/50 border-dashed items-center justify-center text-blue-500 relative overflow-hidden">
+                <i class="fa-solid fa-layer-group text-3xl z-10 opacity-70"></i>
+            </div>
+            <h3 class="font-bold text-white mb-1">${escapeHtml(t.name || 'Custom Template')}</h3>
+            <p class="text-xs text-blue-400 font-mono z-10">Rows: ${rowCount}</p>
+        </div>`;
+    }).join('');
+}
+
+// Global hook to cleanly inject custom templates back into the editor
+window.addCustomSlide = function(templateId) {
+    if (!window.customTemplates) return;
+    const template = window.customTemplates.find(t => t.id === templateId);
+    if (!template || !template.slideData) return;
+    
+    // Deep clone the slide data so multiple of the same template don't share reference memory
+    const newSlide = JSON.parse(JSON.stringify(template.slideData));
+    newSlide.id = 'slide_' + Date.now() + Math.floor(Math.random() * 1000);
+    
+    // Inject and save
+    if (typeof normalizeSlide === 'function') {
+        slides.push(normalizeSlide(newSlide, slides.length));
+    } else {
+        slides.push(newSlide);
+    }
+    
+    slideCounter++;
+    saveProjects();
+    
+    if (window.renderApp) window.renderApp();
+    if (window.closeTemplateModal) window.closeTemplateModal();
+};
+window.papyrusBridge = null;
+
+// Initialize the Qt WebChannel connection
+document.addEventListener("DOMContentLoaded", () => {
+    if (typeof qt !== 'undefined' && qt.webChannelTransport) {
+        new QWebChannel(qt.webChannelTransport, function(channel) {
+            window.papyrusBridge = channel.objects.papyrusBridge;
+            window.papyrusBridge.logToPython("OpenDeck successfully connected to Papyrus GUI.");
+        });
+    }
+});
+
+// API Exposed TO Python (For LLM Interactions)
+window.papyrusAPI = {
+    // LLM reads the current state
+    getCurrentDeck: () => {
+        const p = projects.find(x => x.id === activeProjectId);
+        return p ? JSON.stringify(p) : null;
+    },
+    
+    // LLM injects a new slide
+    addSlideFromLLM: (slideData) => {
+        if (!activeProjectId) return;
+        const normalizedSlide = normalizeSlide(slideData, slides.length);
+        slides.push(normalizedSlide);
+        slideCounter++;
+        saveProjects();
+        if (window.renderApp) window.renderApp();
+    },
+
+    // Inject custom templates loaded from the Papyrus DB
+    loadCustomTemplates: (templatesArray) => {
+        window.customTemplates = templatesArray;
+        renderCustomTemplateTab();
+    },
+    loadCustomTemplates: (templatesArray) => {
+        // Save them to a global variable so the UI can access them
+        window.customTemplates = templatesArray;
+        
+        // If the custom template tab is open, refresh it to show the new data
+        if (typeof renderCustomTemplateTab === 'function') {
+            renderCustomTemplateTab();
+        }
+    }
+};
 function startAppFromLanding() {
     localStorage.setItem('openDeckAppState', 'dashboard');
     document.getElementById('landingView').style.display = 'none';
@@ -458,7 +573,8 @@ function hideModal(id) {
 
 function openTemplateModal() {
     showModal('templateModal');
-    switchTemplateTab('tech');
+    if (window.renderCustomTemplateTab) renderCustomTemplateTab();
+    switchTemplateTab('research'); 
 }
 
 function closeTemplateModal() { hideModal('templateModal'); }
@@ -467,11 +583,16 @@ function switchTemplateTab(tab) {
     document.querySelectorAll('.template-tab').forEach(t => t.classList.remove('active'));
     document.getElementById('tabBtn_' + tab).classList.add('active');
 
-    document.getElementById('tabContent_tech').classList.add('hidden');
-    document.getElementById('tabContent_corp').classList.add('hidden');
-    document.getElementById('tabContent_pitch').classList.add('hidden');
+    // Hide all tabs
+    if(document.getElementById('tabContent_research')) document.getElementById('tabContent_research').classList.add('hidden');
+    if(document.getElementById('tabContent_tech')) document.getElementById('tabContent_tech').classList.add('hidden');
+    if(document.getElementById('tabContent_corp')) document.getElementById('tabContent_corp').classList.add('hidden');
+    if(document.getElementById('tabContent_pitch')) document.getElementById('tabContent_pitch').classList.add('hidden');
+    if(document.getElementById('tabContent_custom')) document.getElementById('tabContent_custom').classList.add('hidden');
 
-    document.getElementById('tabContent_' + tab).classList.remove('hidden');
+    // Show selected
+    const targetContent = document.getElementById('tabContent_' + tab);
+    if (targetContent) targetContent.classList.remove('hidden');
 }
 
 const defaultFonts = [
