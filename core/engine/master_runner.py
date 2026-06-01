@@ -32,7 +32,8 @@ def safe_format(template_str, state_dict):
         var_path = match.group(1) 
         
         val = get_nested_value(state_dict, var_path)
-        return val if val is not None else full_match
+        # --- THE FIX: Fall back to empty string instead of leaving raw template tokens ---
+        return val if val is not None else ""
 
     # Matches {variable}, {variable.key}, {variable[0]}, etc.
     pattern = r'\{([a-zA-Z_][a-zA-Z0-9_\[\]\.]*)\}'
@@ -41,7 +42,7 @@ def safe_format(template_str, state_dict):
 
 class MasterActionRunner(QThread):
     progress_update = Signal(str)
-    step_complete = Signal(str, str) 
+    step_complete = Signal(str, str, dict)
     action_complete = Signal(dict)   
     error = Signal(str)
     step_started = Signal(str)
@@ -54,13 +55,70 @@ class MasterActionRunner(QThread):
         self.prompt_manager = main_window.prompt_manager
         self.registry = getattr(main_window, 'process_registry', None)
         
-        self.blueprint = blueprint
+        self.blueprint = AIActionBlueprint(
+            name=blueprint.name, 
+            description=blueprint.description, 
+            steps=blueprint.steps.copy(),
+            expected_inputs=blueprint.expected_inputs
+        )
         self.state = initial_state.copy() 
         self.job = None
         self.current_executing_step = None
         self._pause_mutex = QMutex()
         self._wait_condition = QWaitCondition()
         self._user_response = None
+
+        # --- NEW: UNIVERSAL AUTO-PILOT INJECTION ---
+        pm = getattr(self.main_window, 'project_manager', None)
+        if pm:
+            try:
+                global_settings = json.loads(pm.get_metadata("global_ai_settings", "{}"))
+                if global_settings.get("autopilot_enabled", False):
+                    self._inject_autopilot()
+            except Exception as e:
+                print(f"[Master Runner] Failed to inject Auto-Pilot: {e}")
+    def _inject_autopilot(self):
+        """Dynamically prepends a context planner and router to ANY blueprint."""
+        # Find the primary intent to send to the planner (Chat uses user_query, Search uses goal, Brainstorm uses query)
+        intent = self.state.get("user_query") or self.state.get("query") or self.state.get("goal") or "Execute tool"
+        self.state["__autopilot_intent__"] = intent
+        
+        target = self.blueprint.steps[-1].ui_target if self.blueprint.steps else "floating"
+
+        planner_step = ActionStep(
+            step_id="sys_autopilot_planner",
+            step_type="LLM_QUERY",
+            inputs={"query": "USER INTENT: {__autopilot_intent__}\n\nAnalyze this goal. Decide if answering it requires: 1) Searching document text (RAG). 2) Reading the Project Manifest. 3) Reading the Workspace Map."},
+            system_prompt="You are an autonomous routing agent. Output ONLY a JSON object evaluating context needs.",
+            output_schema={"needs_document_search": True, "needs_project_manifest": True, "needs_workspace_graph": False},
+            output_key="sys_autopilot_plan",
+            ui_format="silent",
+            ui_target=target
+        )
+
+        router_script = """
+import json
+plan = state.get('sys_autopilot_plan', '{}')
+try: p = json.loads(plan)
+except: p = {}
+
+if not p.get('needs_project_manifest', True): state['project_manifest'] = "{}"
+if not p.get('needs_workspace_graph', False): state['workspace_data'] = "{}"
+if not p.get('needs_document_search', True): state['autopilot_disable_rag'] = True
+
+result = "Auto-Pilot Routing Complete"
+"""
+        router_step = ActionStep(
+            step_id="sys_autopilot_router",
+            step_type="PYTHON_SCRIPT",
+            inputs={"script": router_script},
+            output_key="sys_route_status",
+            ui_format="silent",
+            ui_target=target
+        )
+
+        # Prepend the routing steps
+        self.blueprint.steps = [planner_step, router_step] + self.blueprint.steps
 
     def run(self):
         if self.registry:
@@ -133,6 +191,10 @@ class MasterActionRunner(QThread):
         
         resolved_inputs = {k: self._resolve_val(v, self.state) for k, v in step.inputs.items()}
         resolved_model = self._resolve_val(step.model, self.state)
+        
+        # --- THE FIX: Guard step execution against empty/legacy blueprint configurations ---
+        if not resolved_model or resolved_model == "None":
+            resolved_model = self.state.get("selected_model")
 
         # Route to new executors
         if step.step_type == 'LLM_QUERY': result = self._run_llm(step, resolved_inputs, resolved_model)
@@ -152,7 +214,7 @@ class MasterActionRunner(QThread):
         except: pass
 
         if not self.job or not self.job.abort_event.is_set():
-            self.step_complete.emit(step.step_id, str(result))
+            self.step_complete.emit(step.step_id, str(result), self.state.copy())
     def _run_python(self, step, inputs):
         """Executes raw python locally to parse data, do math, or manipulate state."""
         # This allows the script to be hardcoded in the blueprint OR generated dynamically by a previous LLM step
@@ -257,7 +319,7 @@ class MasterActionRunner(QThread):
                  
                  # --- THE FIX: Emit step complete for the INNER step so it triggers the UI injection ---
                  if not self.job or not self.job.abort_event.is_set():
-                     self.step_complete.emit(sub_step.step_id, str(output))
+                     self.step_complete.emit(sub_step.step_id, str(output), sub_state.copy())
             
             if self.job and self.job.abort_event.is_set(): break
             final_result = sub_state.get(sub_blueprint.steps[-1].output_key)
@@ -269,7 +331,7 @@ class MasterActionRunner(QThread):
             except Exception:
                 aggregated_results.append(final_result)
                 
-            self.step_complete.emit(f"{step.step_id}_item_{idx}", str(final_result))
+            self.step_complete.emit(f"{step.step_id}_item_{idx}", str(final_result), sub_state.copy())
             
         # Restore the parent step context
         self.current_executing_step = step 
@@ -289,11 +351,33 @@ class MasterActionRunner(QThread):
         return json.dumps(deduped_results)
 
     def _run_llm(self, step, inputs, resolved_model):
+        # --- UNIVERSAL PROMPT COMPILATION ---
         system_prompt = getattr(step, 'system_prompt', None) or inputs.get('system_prompt', '')
         if step.prompt_key:
             raw_prompt = self.prompt_manager.get_prompt(step.prompt_key)
-            if raw_prompt: system_prompt = safe_format(raw_prompt, inputs)
+            if raw_prompt: 
+                # THE FIX: Combine prompts safely so the base persona isn't lost
+                if system_prompt and system_prompt != raw_prompt:
+                    system_prompt = f"{system_prompt}\n\n{safe_format(raw_prompt, inputs)}"
+                else:
+                    system_prompt = safe_format(raw_prompt, inputs)
 
+        # --- NEW: UNIVERSAL MANIFEST DIRECTIVE INJECTION ---
+        allow_updates = self.state.get("allow_manifest_updates", False)
+        if allow_updates:
+            system_prompt += (
+                "\n\n--- SECONDARY BACKGROUND TASK & TONE ---\n"
+                "TONE DIRECTIVE: Be highly direct, factual, and strictly professional. No conversational filler, greetings, or forced follow-up questions.\n"
+                "MANIFEST UPDATE: You are the active manager of the Project Manifest. If the user proposes a research topic, dynamically organize it into a structured hierarchy.\n"
+                "CRITICAL RULES FOR MANIFEST:\n"
+                "1. AVOID REDUNDANCY: Do NOT create overlapping keys (e.g., having both 'main_goal' and 'current_goal'). Merge them.\n"
+                "2. HIERARCHY: Organize research into clear, actionable keys. Prefer using 'Core Thesis', 'Major Topics' (use nested dictionaries for subtopics), and 'Open Questions'.\n"
+                "3. CONSOLIDATION: If asked to clean up or consolidate, aggressively DELETE redundant keys by setting their values to `null`, and merge their contents into the remaining keys.\n"
+                "To ADD or EDIT a category, provide the key and its new value.\n"
+                "To DELETE a category, set its value exactly to `null`.\n"
+                "To save, append at the VERY END of your text as a raw JSON object wrapped EXACTLY in these tags (No markdown ticks):\n"
+                "<UPDATE_MANIFEST>{\"Core Thesis\": \"...\", \"Major Topics\": {\"Topic A\": [\"Sub 1\"]}, \"obsolete_key\": null}</UPDATE_MANIFEST>"
+            )
         # --- NEW: UI FORMAT ENFORCER ---
         format_instructions = {
             "chat_widgets": "CRITICAL: You are extracting exact citations. Your output must strictly represent verbatim quotes from the source text. Provide the exact 'quote', the 'doc_name', and a brief 'note' explaining its relevance.",
@@ -338,17 +422,29 @@ EXPECTED JSON SCHEMA:
             num_predict=options.get("num_predict"), 
             stop=options.get("stop_sequences")
         )
+
+        # --- THE FIX: Universal Engine Error Intercept ---
+        # This MUST run before any JSON parsing is attempted
+        if raw_result.strip().startswith("[Generation Error"):
+            raise ConnectionError(f"Engine Failed: {raw_result.strip()}")
         
+    
         # --- THE UPGRADE: Auto-Unwrap the Schema (Bulletproofed) ---
         if step.output_schema:
             try:
                 import json
-                import re
                 
-                # Aggressively strip markdown backticks and conversational filler
-                # This regex looks for the first '{' or '[' and captures everything to the last '}' or ']'
-                match = re.search(r'(\{.*\}|\[.*\])', raw_result, re.DOTALL)
-                clean_str = match.group(0) if match else raw_result
+                first_brace = raw_result.find('{')
+                last_brace = raw_result.rfind('}')
+                first_bracket = raw_result.find('[')
+                last_bracket = raw_result.rfind(']')
+                
+                is_dict = first_brace != -1 and last_brace != -1 and (first_bracket == -1 or first_brace < first_bracket)
+                is_list = first_bracket != -1 and last_bracket != -1 and (first_brace == -1 or first_bracket < first_brace)
+                
+                if is_dict: clean_str = raw_result[first_brace:last_brace+1]
+                elif is_list: clean_str = raw_result[first_bracket:last_bracket+1]
+                else: clean_str = raw_result
                 
                 parsed = json.loads(clean_str)
                 
@@ -358,9 +454,11 @@ EXPECTED JSON SCHEMA:
                 print(f"[Master Runner] Failed to unwrap schema: {e}")
                 # Fallback: if it fails, try returning the clean string so the UI router has a fighting chance
                 return clean_str if 'clean_str' in locals() else raw_result
-
         return raw_result
+
     def _run_rag(self, step, inputs):
+        if self.state.get('autopilot_disable_rag', False):
+            return "[]" if step.ui_format == "chat_widgets" else "Context skipped by Auto-Pilot. Rely on internal knowledge."
         if not self.llm_manager.ai_enabled or not self.llm_manager.collection:
             return "[]" if step.ui_format == "chat_widgets" else "RAG is offline or collection is empty."
             

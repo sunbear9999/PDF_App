@@ -10,7 +10,7 @@ from PySide6.QtCore import Qt, QThread, Signal, QUrl
 from PySide6.QtGui import QCursor, QDesktopServices
 
 from core.engine.action_model import AIActionBlueprint, ActionStep
-from gui.docks.research_assistant.model import ResearchModel
+
 
 class CitationWidget(QFrame):
     jump_requested = Signal(str, str)
@@ -136,7 +136,6 @@ class SearchTab(QWidget):
         super().__init__(parent)
         self.main_window = main_window
         self.theme = self.main_window.theme_manager.get_theme()
-        self.model = ResearchModel()
         self._build_ui()
 
     def _build_ui(self):

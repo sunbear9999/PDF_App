@@ -24,6 +24,39 @@ class DefaultBlueprints:
             output_key="citations"
         )
 
+    # --- NEW: The Dedicated Graph Architect Step ---
+    @staticmethod
+    def get_auto_build_graph_step(source_key="final_answer") -> ActionStep:
+        """Standardized step to convert LLM text into a Workspace Graph."""
+        graph_schema = {
+            "nodes": [{
+                "id": "n1",
+                "quote": "OPTIONAL: Exact verbatim quote from a document (Leave blank if generating an original concept).",
+                "note": "The core concept, generated idea, or detailed text.",
+                "doc_name": "OPTIONAL: Source document filename if a quote is used.",
+                "color": "#4a148c"
+            }],
+            "edges": [{
+                "source": "n1",
+                "target": "n2",
+                "label": "relationship description"
+            }]
+        }
+        return ActionStep(
+            step_id="auto_build_graph",
+            step_type="LLM_QUERY",
+            inputs={
+                "query": f"Translate the preceding AI Response into a spatial workspace graph map. Extract the main ideas as separate nodes, and link them logically with edges.\n\nCRITICAL RULES:\n1. If an idea is an original brainstorm concept, put the text in 'note' and leave 'quote' and 'doc_name' EMPTY.\n2. ONLY use the 'quote' and 'doc_name' fields if the AI Response contains an explicit, verbatim quote from a source document.\n\nAI RESPONSE TO MAP:\n{{{source_key}}}\n\nCURRENT WORKSPACE GRAPH MAP (Do not duplicate these):\n{{workspace_data}}"
+            },
+            system_prompt="You are a strict graph architect. Convert the provided text into a logical diagram. Output ONLY valid, fully closed JSON matching the exact schema. Do not truncate the JSON output.",
+            output_schema=graph_schema,
+            output_key="ai_graph",
+            ui_format="workspace_graph", 
+            ui_target="floating",
+            # --- THE FIX: Boost token output limit so massive graphs don't get cut off ---
+            llm_options={"temperature": 0.1, "json_mode": True, "num_predict": 4000} 
+        )
+
     @staticmethod
     def _build_modular_workspace_step(step_id: str, prompt_key: str, permissions: list, output_mode: str = "workspace_update", additional_context: str = "") -> ActionStep:
         node_schema = {"id": "n1"}
@@ -73,9 +106,21 @@ class DefaultBlueprints:
         ])
 
     @staticmethod
-    def get_chat_blueprint(prompt_key: str, model: str = "{selected_model}") -> AIActionBlueprint:
+    def get_chat_blueprint(prompt_key: str, model: str = "{selected_model}", output_workspace: bool = False) -> AIActionBlueprint:
         steps = []
-        if "RAG" in prompt_key:
+        
+        # --- NEW: Advanced RAG Multi-Pass Pipeline ---
+        if "Advanced RAG" in prompt_key:
+            steps.extend([
+                ActionStep(step_id="initial_rag", step_type="RAG_SEARCH", inputs={"queries": ["{user_query}"]}, output_key="initial_context", ui_target="chat_dock", ui_format="silent"),
+                ActionStep(step_id="optimize_query", step_type="LLM_QUERY",
+                           inputs={"query": "USER QUERY: {user_query}\n\nINITIAL CONTEXT:\n{initial_context}\n\nWrite 3 highly specific boolean search terms to find the exact details required. Output ONLY a JSON array."},
+                           output_schema={"better_queries": ["query 1", "query 2"]},
+                           output_key="deep_queries", ui_target="chat_dock", ui_format="silent"),
+                ActionStep(step_id="deep_rag_search", step_type="RAG_SEARCH", inputs={"queries": "{deep_queries}"}, output_key="context", ui_target="chat_dock", ui_format="silent")
+            ])
+        elif "RAG" in prompt_key:
+            # Standard Single-Pass RAG
             steps.append(
                 ActionStep(
                     step_id="gather_context", step_type="RAG_SEARCH",
@@ -83,38 +128,82 @@ class DefaultBlueprints:
                     ui_format="silent", ui_target="chat_dock"
                 )
             )
+
         steps.append(
             ActionStep(
                 step_id="chat_reply", step_type="LLM_QUERY",
-                inputs={"query": "USER QUERY: {user_query}\n\nWORKSPACE DATA:\n{workspace_data}\n\nCONTEXT:\n{context}"},
+                inputs={
+                    "query": (
+                        "USER QUERY: {user_query}\n\n"
+                        "PROJECT MANIFEST DATA (JSON):\n{project_manifest}\n\n"
+                        "CURRENTLY SELECTED WORKSPACE NODES:\n{selected_nodes}\n\n"
+                        "GLOBAL WORKSPACE MAP MATRIX:\n{workspace_data}\n\n"
+                        "RETRIEVED DOCUMENT CONTEXT:\n{context}\n\n"
+                        "INSTRUCTIONS:\n{manifest_permissions}"
+                    )
+                },
                 model=model, prompt_key=prompt_key,
                 ui_format="live_stream", ui_target="chat_dock", output_key="final_answer"
             )
         )
         if "RAG" in prompt_key: 
             steps.append(DefaultBlueprints.get_universal_citation_step("final_answer", "context", "chat_dock"))
+            
+        # --- NEW: Append the graph builder if requested ---
+        if output_workspace:
+            steps.append(DefaultBlueprints.get_auto_build_graph_step("final_answer"))
+            
         return AIActionBlueprint(name="Chat Interaction", description="", steps=steps)
 
     @staticmethod
-    def get_brainstorm_blueprint(prompt_key: str, model: str = "{selected_model}") -> AIActionBlueprint:
+    def get_brainstorm_blueprint(prompt_key: str, model: str = "{selected_model}", output_workspace: bool = False) -> AIActionBlueprint:
         steps = []
+        
+        # 1. Gather Context ONLY if RAG is part of the mode
         if "RAG" in prompt_key:
-            steps.append(ActionStep(step_id="gather_context", step_type="RAG_SEARCH", inputs={"queries": ["{query}"]}, output_key="context", ui_format="silent", ui_target="brainstorm_dock"))
+            steps.append(ActionStep(
+                step_id="gather_context", step_type="RAG_SEARCH", 
+                inputs={"queries": ["{query}"]}, output_key="context", 
+                ui_format="silent", ui_target="brainstorm_dock"
+            ))
             
+        # 2. Dynamic System Prompts to explicitly control AI strictness
+        if prompt_key == "Brainstorm - RAG Only":
+            sys_prompt = "You are a strict research strategist. You MUST base your ideas ONLY on the provided DOCUMENT CONTEXT. Do not hallucinate outside knowledge."
+        elif prompt_key == "Brainstorm - RAG Enabled":
+            sys_prompt = "You are a creative brainstorming assistant. Synthesize the provided DOCUMENT CONTEXT with your general knowledge to generate expansive, helpful ideas."
+        else: # Brainstorm - Default
+            sys_prompt = "You are a highly creative brainstorming assistant. Provide expansive, helpful ideas based on your vast general knowledge. Align your ideas with the Project Manifest if provided."
+
+        # 3. Dynamic Query Construction
+        query_text = (
+            "USER BRAINSTORM PROMPT: {query}\n\n"
+            "PROJECT MANIFEST DATA (JSON):\n{project_manifest}\n\n"
+            "CURRENTLY SELECTED WORKSPACE NODES:\n{selected_nodes}\n\n"
+            "INSTRUCTIONS:\n{manifest_permissions}"
+        )
+        if "RAG" in prompt_key:
+            query_text += "\n\nDOCUMENT CONTEXT:\n{context}"
+
         steps.append(
             ActionStep(
                 step_id="brainstorm_reply", step_type="LLM_QUERY",
-                inputs={"query": "USER QUERY: {query}\n\nPROJECT GOAL: {project_goal}\n\nCONTEXT: {context}"},
-                model=model, prompt_key=prompt_key if prompt_key in ["Brainstorm - Default", "Brainstorm - RAG Enabled"] else "Brainstorming Agent",
+                inputs={"query": query_text},
+                system_prompt=sys_prompt, 
+                model=model, prompt_key=prompt_key,
                 ui_format="live_stream", ui_target="brainstorm_dock", output_key="final_answer"
             )
         )
         
-        # FIX: The citations MUST happen after the brainstorm reply, not before!
+        # 4. Only attempt citations if RAG was pulled
         if "RAG" in prompt_key:
             steps.append(DefaultBlueprints.get_universal_citation_step("final_answer", "context", "brainstorm_dock"))
             
-        return AIActionBlueprint(name="Brainstorming", description="", steps=steps)
+        # --- NEW: Append the graph builder if requested ---
+        if output_workspace:
+            steps.append(DefaultBlueprints.get_auto_build_graph_step("final_answer"))
+            
+        return AIActionBlueprint(name="Brainstorming", description="Strategy agent", steps=steps)
 
     @staticmethod
     def get_search_terms_blueprint(model: str = "{selected_model}") -> AIActionBlueprint:
@@ -166,9 +255,12 @@ class DefaultBlueprints:
         sub_blueprint = AIActionBlueprint(name="Analyze Chunk", description="", steps=[
             ActionStep(
                 step_id="analyze_chunk", step_type="LLM_QUERY",
-                inputs={"query": "INSTRUCTIONS: {item[template_instructions]}\nREQUIRED JSON SCHEMA:\n{item[template_schema]}\n\n--- TEXT TO ANALYZE (Pages: {item[page_range]}) ---\n{item[text]}"},
-                prompt_key="Document Analyzer", llm_options={"json_mode": True, "num_predict": 1000},
-                ui_format="analysis_chunk", ui_target="analysis_tab", output_key="chunk_json"
+                inputs={"query": "INSTRUCTIONS: {item.template_instructions}\nREQUIRED JSON SCHEMA:\n{item.template_schema}\n\n--- TEXT TO ANALYZE (Pages: {item.page_range}) ---\n{item.text}"},
+                prompt_key="Document Analyzer", llm_options={"json_mode": True, "num_predict": 2000},
+                ui_format="nested_outline", 
+                ui_target="analysis_tab", 
+                ui_title="Section: {item.page_range}",
+                output_key="chunk_json"
             )
         ])
         return AIActionBlueprint(name="Document Analysis", description="", steps=[
@@ -183,8 +275,6 @@ class DefaultBlueprints:
                 prompt_key="Master Outline Generator", ui_format="static_document", ui_target="floating", ui_title=f"Master Outline: {doc_name}"
             )
         ])
-
-    # ... (Keep existing workspace blueprints exactly as they are) ...
 
     @staticmethod
     def get_blueprint_architect(model: str = "{selected_model}") -> AIActionBlueprint:

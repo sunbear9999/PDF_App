@@ -13,7 +13,9 @@ class ChatMessageWidget(QWidget):
         
         self.layout = QVBoxLayout(self)
         # Tighten the margins to remove the weird gaps between messages
-        self.layout.setContentsMargins(4, 4, 4, 12)
+        self.layout.setContentsMargins(8, 4, 8, 4) 
+        
+        # 2. Shrink the gap between the sender name and the message text
         self.layout.setSpacing(2)
 
         lbl_sender = QLabel(f"<b>{sender_name}</b>")

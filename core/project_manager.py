@@ -175,6 +175,46 @@ class ProjectManager:
                 response TEXT,
                 model_used TEXT
             )''')
+        # --- NEW: UI Chat History Table ---
+        cursor.execute('''CREATE TABLE IF NOT EXISTS chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tab_name TEXT,
+                role TEXT,
+                content TEXT,
+                ui_format TEXT DEFAULT 'live_stream',
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            )''')
+    def save_chat_message(self, tab_name, role, content, ui_format="live_stream"):
+        if not self._conn: return
+        try:
+            self._conn.execute(
+                "INSERT INTO chat_messages (tab_name, role, content, ui_format) VALUES (?, ?, ?, ?)",
+                (tab_name, role, content, ui_format)
+            )
+            self._conn.commit()
+        except sqlite3.Error as e:
+            print(f"Error saving chat message: {e}")
+
+    def get_chat_history(self, tab_name):
+        if not self._conn: return []
+        try:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                "SELECT role, content, ui_format FROM chat_messages WHERE tab_name = ? ORDER BY timestamp ASC",
+                (tab_name,)
+            )
+            return [{"role": row[0], "content": row[1], "ui_format": row[2]} for row in cursor.fetchall()]
+        except sqlite3.Error as e:
+            print(f"Error fetching chat history: {e}")
+            return []
+
+    def clear_chat_history(self, tab_name):
+        if not self._conn: return
+        try:
+            self._conn.execute("DELETE FROM chat_messages WHERE tab_name = ?", (tab_name,))
+            self._conn.commit()
+        except sqlite3.Error as e:
+            print(f"Error clearing chat history: {e}")
     
     def upsert_citation(self, citation_data):
         if not self._conn: return

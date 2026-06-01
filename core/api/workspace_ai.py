@@ -6,6 +6,7 @@ from core.utils.text_utils import extract_and_heal_json
 class WorkspaceAIApi:
     def __init__(self, project_manager):
         self.pm = project_manager
+        self.ai_to_real_id = {}
 
     def build_ai_context(self, workspace: WorkspaceModel, filters: list = None) -> str:
         """
@@ -63,23 +64,21 @@ class WorkspaceAIApi:
         # 1. Process Nodes
         for n_data in parsed_data.get("nodes", []):
             short_id = str(n_data.get("id", ""))
-            if not short_id: continue
             
-            # If the AI used a short ID, map it back. Otherwise, it's a brand new node.
+            # --- THE FIX: Map the AI's short ID to the new real UUID ---
             real_id = self.ai_to_real_id.get(short_id)
-            is_new = False
-            
             if not real_id:
-                real_id = f"custom_{uuid.uuid4()}"
-                is_new = True
+                real_id = str(uuid.uuid4())
+                if short_id: 
+                    self.ai_to_real_id[short_id] = real_id  # Save it so edges can find it!
 
             node = NodeModel(
                 id=real_id,
                 quote=n_data.get("quote", ""),
-                note=n_data.get("text", n_data.get("note", "AI Generated")),
+                note=n_data.get("note", n_data.get("text", "")),
                 color=n_data.get("color", "#4a148c"),
                 is_custom=not bool(n_data.get("doc_name")),
-                x=n_data.get("x", 0.0), # GUI layer will handle smart positioning later if 0.0
+                x=n_data.get("x", 0.0), 
                 y=n_data.get("y", 0.0),
                 width=220, height=100,
                 node_origin="ai",
@@ -105,8 +104,9 @@ class WorkspaceAIApi:
 
         # 3. Process Deletions
         for short_id in parsed_data.get("delete_nodes", []):
-            real_id = self.ai_to_real_id.get(short_id)
-            if real_id: delta.deleted_node_ids.append(real_id)
+            real_id = self.ai_to_real_id.get(short_id, short_id) 
+            if real_id:
+                delta.deleted_node_ids.append(real_id)
             
         for short_id in parsed_data.get("delete_edges", []):
             real_id = self.ai_to_real_id.get(short_id)

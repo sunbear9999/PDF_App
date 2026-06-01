@@ -40,8 +40,10 @@ class LocalLLMManager:
     def set_audit_logger(self, logger_func):
         """Injects the database logging function once at startup."""
         self.audit_logger = logger_func
+   
     def query_by_raw_embedding(self, embedding_vector, n_results=5, allowed_docs=None,tag_filters=None):
         """Directly queries ChromaDB using a pre-calculated mathematical vector."""
+       
         if not self.collection or self.collection.count() == 0:
             return None
 
@@ -147,8 +149,13 @@ class LocalLLMManager:
         if not model_name: return
         try:
             payload = {"model": model_name, "keep_alive": "60m"}
-            requests.post(f"{self.api_base}/generate", json=payload, timeout=(15, 600))
-            print(f"[System] Successfully preloaded {model_name} into memory.")
+            response = requests.post(f"{self.api_base}/generate", json=payload, timeout=(15, 600))
+            
+            # Actually check if Ollama succeeded
+            if response.status_code == 200:
+                print(f"[System] Successfully preloaded {model_name} into memory.")
+            else:
+                print(f"[System] Failed to preload model: Ollama returned {response.status_code} - {response.text}")
         except Exception as e:
             print(f"[System] Failed to preload model: {e}")
 
@@ -358,14 +365,19 @@ class LocalLLMManager:
 
     def query(self, question, selected_model, allowed_docs=None, callback=None, rag_enabled=False, custom_system_prompt=None, existing_highlights=None, tag_filters=None, abort_event=None, **kwargs):
         """A lean, standard inference function. Advanced agent routing is now handled by MasterRunner Blueprints."""
+         
+        # --- THE FIX: Filter embedding models out of the fallback array ---
         try:
-            # Auto-correct model names to prevent 404s
             resp = requests.get(f"{self.api_base}/tags", timeout=2)
             if resp.status_code == 200:
-                installed_models = [m["name"] for m in resp.json().get("models", [])]
+                # Filter out embedding models entirely from text generation queries
+                installed_models = [
+                    m["name"] for m in resp.json().get("models", [])
+                    if m["name"] != self.embedding_model and not m["name"].startswith(f"{self.embedding_model}:")
+                ]
                 if installed_models and selected_model not in installed_models:
                     old_model = selected_model
-                    partial_match = next((m for m in installed_models if old_model.lower().strip() in m.lower()), None)
+                    partial_match = next((m for m in installed_models if old_model and old_model.lower().strip() in m.lower()), None)
                     selected_model = partial_match if partial_match else installed_models[0]
         except Exception as e:
             print(f"[LLM Manager] Warning: Could not verify installed models: {e}")
@@ -480,7 +492,12 @@ class LocalLLMManager:
         try:
             with requests.post(f"{self.api_base}/generate", json=payload, stream=True, timeout=(15, 600)) as response:
                 if response.status_code != 200:
-                    raise Exception(f"Ollama API Error ({response.status_code})")
+                    # EXTRACT THE REAL ERROR: Read Ollama's explanation
+                    err_detail = response.text
+                    try:
+                        err_detail = response.json().get("error", response.text)
+                    except: pass
+                    raise Exception(f"Ollama Error ({response.status_code}): {err_detail}")
 
                 for line in response.iter_lines():
                     # --- THE KILL SWITCH ---

@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import (QCheckBox, QDockWidget, QWidget, QHBoxLayout, QVBoxLayout, 
-                             QStackedWidget, QDialog,QPushButton, QLabel, QComboBox, QFrame, QButtonGroup,QMessageBox, QMenu,QTextEdit)
-from PySide6.QtCore import Qt, Signal, QThread
+                             QStackedWidget, QDialog,QPushButton, QLabel, QComboBox, QFrame, QButtonGroup,QMessageBox, QMenu,QTextEdit,QScrollArea, QLineEdit)
+from PySide6.QtCore import Qt, Signal, QThread, QTimer
 from PySide6.QtGui import QCursor, QAction
 
 from gui.docks.unified_research.components.context_filter_dialog import ContextFilterDialog
@@ -13,29 +13,10 @@ from .tabs.anaylsis_tab import AnalysisTab
 from .components.note_bubble import NoteBubbleWidget
 from core.research_manager import ResearchManager
 from gui.components.process_monitor import ProcessMonitorWidget
-class ProjectBriefDialog(QDialog):
-    """Global Project Variables Manager"""
-    def __init__(self, pm, theme, parent=None):
-        super().__init__(parent)
-        self.pm = pm
-        self.setWindowTitle("📝 Project Manifest")
-        self.resize(500, 400)
-        layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("<b>Define your core thesis, goals, and needs for this project.</b><br><i>The AI will use this across all tabs to guide its research.</i>"))
-        self.text_edit = QTextEdit()
-        self.text_edit.setPlainText(self.pm.get_metadata("project_manifest", ""))
-        layout.addWidget(self.text_edit)
-        btn_save = QPushButton("💾 Save Manifest")
-        btn_save.clicked.connect(self.save_and_close)
-        layout.addWidget(btn_save)
-        if theme:
-            self.setStyleSheet(f"background-color: {theme.get('bg_main', '#1e1e1e')}; color: {theme.get('text_main', '#fff')};")
-            self.text_edit.setStyleSheet(f"background-color: {theme.get('bg_input', '#2b2b2b')}; border: 1px solid {theme.get('border', '#444')};")
-            btn_save.setStyleSheet(f"background-color: {theme.get('accent', '#b366ff')}; color: white; padding: 8px; font-weight: bold;")
+import json
+from gui.docks.unified_research.components.manifest_bubble import ProjectBriefDialog
+from gui.docks.unified_research.components.chat_streamer import ChatMessageWidget
 
-    def save_and_close(self):
-        self.pm.set_metadata("project_manifest", self.text_edit.toPlainText().strip())
-        self.accept()
 class IndexWorker(QThread):
     progress = Signal(str)
     finished_indexing = Signal(bool, str)
@@ -149,7 +130,61 @@ class UnifiedResearchDock(QDockWidget):
             self.stacked_widget.addWidget(tab)
         core_layout.addWidget(self.stacked_widget)
         self.main_layout.addWidget(core_widget)
+    def load_tab_history(self, tab_widget, tab_id):
+        """Universally rebuilds chat UI for any tab from the SQLite history."""
+        if not self.project_manager: return
+        
+        # 1. Clear existing UI (leaving the bottom stretch)
+        if hasattr(tab_widget, 'chat_layout'):
+            while tab_widget.chat_layout.count() > 1:
+                item = tab_widget.chat_layout.takeAt(0)
+                if item.widget(): item.widget().deleteLater()
+                
+        # 2. Fetch and build
+        history = self.project_manager.get_chat_history(tab_id)
+        for msg in history:
+            is_user = (msg["role"] == "user")
+            name = "You" if is_user else "AI Agent"
+            
+            if msg["ui_format"] == "chat_widgets":
+                try:
+                    items = json.loads(msg["content"])
+                    if isinstance(items, dict):
+                        for val in items.values():
+                            if isinstance(val, list): items = val; break
+                        if isinstance(items, dict): items = [items] 
+                    
+                    widget = ChatMessageWidget(name, theme=self.theme, is_user=is_user)
+                    for item in items:
+                        if isinstance(item, dict):
+                            widget.add_bubble(
+                                doc_name=item.get("doc_name", "Unknown Document"),
+                                quote=item.get("quote", item.get("text", "")),
+                                note=item.get("note", item.get("reason", ""))
+                            )
+                    if hasattr(tab_widget, 'add_message_widget'): tab_widget.add_message_widget(widget)
+                except Exception as e:
+                    print(f"Failed to rebuild chat widget: {e}")
+            else:
+                widget = ChatMessageWidget(name, theme=self.theme, is_user=is_user)
+                widget.append_chunk(msg["content"])
+                if hasattr(tab_widget, 'add_message_widget'): tab_widget.add_message_widget(widget)
+                
+        # 3. Universal Scroll to Bottom
+        if hasattr(tab_widget, 'scroll_area'):
+            scrollbar = tab_widget.scroll_area.verticalScrollBar()
+            QTimer.singleShot(50, lambda: scrollbar.setValue(scrollbar.maximum()))
 
+    def clear_tab_history(self, tab_widget, tab_id):
+        """Universally wipes SQLite history and clears the UI for a specific tab."""
+        if not self.project_manager: return
+        
+        self.project_manager.clear_chat_history(tab_id)
+        
+        if hasattr(tab_widget, 'chat_layout'):
+            while tab_widget.chat_layout.count() > 1:
+                item = tab_widget.chat_layout.takeAt(0)
+                if item.widget(): item.widget().deleteLater()
     # --- THE UNIVERSAL "SEND TO" MENU ATTACHER ---
     def attach_send_to_menu(self, text_browser_widget):
         """Attaches a custom context menu to any text widget to send text between tabs."""
@@ -206,6 +241,9 @@ class UnifiedResearchDock(QDockWidget):
         self.tab_analysis.update_theme(theme)
         self.tab_editor.update_theme(theme)
         self.check_index_status()
+        self.load_tab_history(self.tab_chat, "chat_dock")
+        self.load_tab_history(self.tab_plan, "brainstorm_dock")
+        self.load_tab_history(self.tab_custom, "custom_tools_tab") # Works immediately for custom tools too! 
     
     def _open_filter_dialog(self):
         if not self.active_docs and self.project_manager.pdfs:

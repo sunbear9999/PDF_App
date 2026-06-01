@@ -556,8 +556,17 @@ class BlueprintEditorTab(QWidget):
         self.step_widgets.clear()
         
         tool_names = self._get_all_tool_names()
+        universal_vars = [
+            "user_query", 
+            "selected_model", 
+            "project_manifest", 
+            "manifest_permissions", 
+            "selected_nodes", 
+            "workspace_data"
+        ]
+        
         for step in self.current_blueprint.steps:
-            card = StepCardWidget(step, [], tool_names, self.theme)
+            card = StepCardWidget(step, universal_vars, tool_names, self.theme)
             card.delete_requested.connect(self._remove_step)
             card.move_up_requested.connect(self._move_step_up)
             card.move_down_requested.connect(self._move_step_down)

@@ -36,6 +36,11 @@ class BlueprintManager:
     def get_blueprint(self, key_name, fallback_func, *args, **kwargs):
         """Fetches the user-edited blueprint. If none exists, runs the fallback."""
         if key_name in self.blueprints:
-            # Deep copy ensures the engine state doesn't mutate the saved template!
+            # Deep copy ensures the engine state doesn't mutate saved persistent templates!
             return copy.deepcopy(self.blueprints[key_name])
-        return fallback_func(*args, **kwargs)
+            
+        # Call factory fallback initialization
+        fallback_blueprint = fallback_func(*args, **kwargs)
+        if fallback_blueprint:
+            fallback_blueprint.name = key_name
+        return copy.deepcopy(fallback_blueprint)

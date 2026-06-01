@@ -533,26 +533,26 @@ class MainWindow(QMainWindow):
     def spawn_research_dock(self):
         # STRICT SINGLETON: We only need one of these
         if self.research_docks:
-            view = self.research_docks[0]
-            if view.parentWidget():
-                view.parentWidget().show()
-                view.parentWidget().raise_()
+            dock = self.research_docks[0]
+            # THE FIX: The UnifiedResearchDock IS the dock itself now, no parentWidget() needed
+            dock.show()
+            dock.raise_()
             return
                 
         # Import the NEW Unified Dock
         from gui.docks.unified_research.unified_dock import UnifiedResearchDock
         
-        # The UnifiedResearchDock inherits directly from QDockWidget, 
-        # so we don't need to create an empty QDockWidget wrapper.
         dock = UnifiedResearchDock(self, self.project_manager, self.shared_llm_manager, self)
         
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
-        self.research_docks.append(dock) # Track it so the singleton logic works
+        self.research_docks.append(dock) 
         
         if hasattr(self, 'theme_manager'): 
             dock.update_theme(self.theme_manager.get_theme())
             
         dock.show()
+
+    
 
 
 
@@ -1337,7 +1337,6 @@ class MainWindow(QMainWindow):
         # 1. SPAWN missing docks
         while len(self.workspace_docks) < counts.get("workspaces", 0): self.spawn_workspace_dock()
         while len(self.notes_docks) < counts.get("notes", 0): self.spawn_notes_dock()
-        while len(self.chat_docks) < counts.get("chats", 0): self.spawn_chat_dock()
         while len(self.scratchpad_docks) < counts.get("scratchpads", 0): self.spawn_scratchpad_dock()
         while len(self.ocr_docks) < counts.get("ocrs", 0): self.spawn_ocr_dock()
         while len(self.audio_docks) < counts.get("audios", 0): self.spawn_audio_dock()
@@ -1459,30 +1458,24 @@ class MainWindow(QMainWindow):
             self.doc_list.addItem(item)
             
             # Custom Widget for the List Item
+            from PySide6.QtWidgets import QWidget, QHBoxLayout, QLabel, QSizePolicy
             widget = QWidget()
-            widget.setStyleSheet("background: transparent;") # Crucial so selection styling works
+            widget.setStyleSheet("background: transparent;") 
             layout = QHBoxLayout(widget)
             layout.setContentsMargins(5, 2, 5, 2)
             layout.setSpacing(4)
             
-            # Use the ElidedLabel, and set its policy to Expanding!
             lbl = ElidedLabel(os.path.basename(path))
             lbl.setStyleSheet("background: transparent;")
-            from PySide6.QtWidgets import QSizePolicy
             lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            
-            # ---> CRITICAL FIX: The '1' gives the label a stretch factor, 
-            # effectively turning it into the "spring" that fills the remaining space.
             layout.addWidget(lbl, 1) 
             
-            # Group the dots into a fixed-size container so they ALWAYS show on the right edge
             tag_container = QWidget()
             tag_layout = QHBoxLayout(tag_container)
             tag_layout.setContentsMargins(0, 0, 0, 0)
             tag_layout.setSpacing(2)
             tag_container.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
-            # Add up to 4 colored tag dots to the row
             for t in doc_tags[:4]:
                 dot = QLabel("●")
                 color = t.get('color', '#888')
@@ -1490,13 +1483,18 @@ class MainWindow(QMainWindow):
                 dot.setToolTip(t.get("name", ""))
                 tag_layout.addWidget(dot)
             
-            layout.addWidget(tag_container, 0) # '0' means this container will not stretch
+            layout.addWidget(tag_container, 0) 
             
             item.setSizeHint(widget.sizeHint())
             self.doc_list.setItemWidget(item, widget)
             item.setData(Qt.ItemDataRole.UserRole, path)
             
         self.doc_list.blockSignals(False)
+
+        # --- THE FIX: Broadcast document changes to the Analysis Tab ---
+        for r_dock in getattr(self, 'research_docks', []):
+            if hasattr(r_dock, 'tab_analysis') and hasattr(r_dock.tab_analysis, 'refresh_project_ui'):
+                r_dock.tab_analysis.refresh_project_ui()
 
     def _on_doc_list_clicked(self, item):
         pdf_path = item.data(Qt.ItemDataRole.UserRole)

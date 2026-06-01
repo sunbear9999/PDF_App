@@ -10,107 +10,7 @@ from core.engine.action_model import AIActionBlueprint, ActionStep
 from core.engine.master_runner import MasterActionRunner
 from gui.docks.unified_research.components.template_editor import TemplateEditorDialog
 from gui.docks.unified_research.components.chat_streamer import ChatMessageWidget
-
-class InteractiveListButton(QPushButton):
-    """A beautiful button styled like a tag that triggers RAG searches when clicked."""
-    def __init__(self, text, theme, parent=None):
-        super().__init__(text, parent)
-        self.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {theme.get('bg_panel', '#333')};
-                color: {theme.get('accent', '#b366ff')};
-                border: 1px solid {theme.get('border', '#444')};
-                border-radius: 6px; padding: 6px 10px; text-align: left; font-weight: bold;
-            }}
-            QPushButton:hover {{ background-color: {theme.get('accent', '#b366ff')}; color: white; }}
-        """)
-        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-
-class CollapsibleSection(QWidget):
-    """A smooth collapsible widget for sections and categories."""
-    def __init__(self, title, content_widget, theme, is_expanded=True, parent=None):
-        super().__init__(parent)
-        self.layout = QVBoxLayout(self)
-        self.layout.setContentsMargins(0, 0, 0, 8)
-        self.layout.setSpacing(0)
-        
-        self.btn_toggle = QPushButton(f"▼ {title}" if is_expanded else f"▶ {title}")
-        self.btn_toggle.setCheckable(True)
-        self.btn_toggle.setChecked(not is_expanded)
-        self.btn_toggle.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.btn_toggle.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {theme.get('bg_panel', '#333')}; color: {theme.get('accent', '#b366ff')};
-                border: 1px solid {theme.get('border', '#444')}; border-radius: 6px;
-                padding: 8px; font-weight: bold; text-align: left; font-size: 14px;
-            }}
-            QPushButton:hover {{ background-color: {theme.get('bg_input', '#2b2b2b')}; }}
-        """)
-        self.btn_toggle.clicked.connect(self._toggle)
-        
-        self.content_widget = content_widget
-        self.content_widget.setVisible(is_expanded)
-        
-        # Wrap content in a frame with a left border to show hierarchy
-        self.content_frame = QFrame()
-        self.content_frame.setStyleSheet(f"QFrame {{ border-left: 2px solid {theme.get('border', '#444')}; margin-left: 8px; padding-left: 8px; }}")
-        cf_layout = QVBoxLayout(self.content_frame)
-        cf_layout.setContentsMargins(0, 8, 0, 8)
-        cf_layout.addWidget(self.content_widget)
-        self.content_frame.setVisible(is_expanded)
-        
-        self.layout.addWidget(self.btn_toggle)
-        self.layout.addWidget(self.content_frame)
-
-    def _toggle(self):
-        is_collapsed = self.btn_toggle.isChecked()
-        self.content_frame.setVisible(not is_collapsed)
-        self.btn_toggle.setText(self.btn_toggle.text().replace("▼" if is_collapsed else "▶", "▶" if is_collapsed else "▼"))
-
-
-class InteractiveAnalysisViewer(QWidget):
-    """Dynamically renders JSON dictionaries into an interactive GUI layout."""
-    def __init__(self, json_data, annot_manager, theme, parent=None):
-        super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-
-        for key, value in json_data.items():
-            if not value: continue
-            
-            friendly_title = key.replace("_", " ").title()
-            lbl_title = QLabel(f"<b>{friendly_title}</b>")
-            lbl_title.setStyleSheet(f"color: {theme.get('text_main', '#fff')}; margin-top: 4px;")
-            layout.addWidget(lbl_title)
-
-            if isinstance(value, str):
-                lbl_text = QLabel(value)
-                lbl_text.setWordWrap(True)
-                lbl_text.setStyleSheet(f"color: {theme.get('text_muted', '#aaa')};")
-                layout.addWidget(lbl_text)
-                
-            elif isinstance(value, list) and all(isinstance(i, str) for i in value):
-                for term in value:
-                    btn = InteractiveListButton(f"🔍 {term}", theme)
-                    if annot_manager: btn.clicked.connect(lambda _, t=term: annot_manager.trigger_similar_context(t))
-                    layout.addWidget(btn)
-                
-            elif isinstance(value, list) and all(isinstance(i, dict) for i in value):
-                for item_dict in value:
-                    keys = list(item_dict.keys())
-                    if not keys: continue
-                    
-                    main_val = item_dict[keys[0]]
-                    btn = InteractiveListButton(f"📌 {main_val}", theme)
-                    if annot_manager: btn.clicked.connect(lambda _, t=main_val: annot_manager.trigger_similar_context(str(t)))
-                    layout.addWidget(btn)
-                    
-                    for sub_key in keys[1:]:
-                        sub_lbl = QLabel(f"<i>{item_dict[sub_key]}</i>")
-                        sub_lbl.setWordWrap(True)
-                        sub_lbl.setStyleSheet(f"color: {theme.get('text_muted', '#aaa')}; padding-left: 16px; margin-bottom: 4px; border-left: 2px solid {theme.get('border', '#444')};")
-                        layout.addWidget(sub_lbl)
+from gui.docks.unified_research.components.dynamic_outlines import UniversalOutlineWidget, InteractiveListButton
 
 class AnalysisTab(QWidget):
     def __init__(self, main_window, parent=None):
@@ -289,6 +189,30 @@ class AnalysisTab(QWidget):
         for t in self.templates:
             self.combo_templates.addItem(t.get("title", "Unnamed Mode"), t)
             self.cmp_template.addItem(t.get("title", "Unnamed Mode"), t)
+    def refresh_project_ui(self):
+        """Called automatically by the Main Window when PDFs are added, removed, or renamed."""
+        # 1. Save current selections
+        curr_doc = self.doc_selector.currentData()
+        curr_a = self.cmp_doc_a.currentData()
+        curr_b = self.cmp_doc_b.currentData()
+        
+        # 2. Block signals so we don't trigger unwanted UI refreshes/clears
+        self.doc_selector.blockSignals(True)
+        self.cmp_doc_a.blockSignals(True)
+        self.cmp_doc_b.blockSignals(True)
+        
+        # 3. Repopulate with fresh data
+        self._populate_docs()
+        
+        # 4. Restore previous selections if they still exist
+        if curr_doc: self.doc_selector.setCurrentIndex(max(0, self.doc_selector.findData(curr_doc)))
+        if curr_a: self.cmp_doc_a.setCurrentIndex(max(0, self.cmp_doc_a.findData(curr_a)))
+        if curr_b: self.cmp_doc_b.setCurrentIndex(max(0, self.cmp_doc_b.findData(curr_b)))
+        
+        # 5. Unblock signals
+        self.doc_selector.blockSignals(False)
+        self.cmp_doc_a.blockSignals(False)
+        self.cmp_doc_b.blockSignals(False)
 
     def _open_editor(self):
         dlg = TemplateEditorDialog(self.pm, self.theme, self)
@@ -303,10 +227,28 @@ class AnalysisTab(QWidget):
     def _build_master_outline_dict(self, records):
         """Aggregates and deduplicates data across all chunks purely using Python logic."""
         master_data = {}
+        import re
         for rec in records:
             try:
-                data = json.loads(rec["json_data"])
-                page_ref = rec.get("page_range", "Unknown")
+                # --- BULLETPROOF REPAIR ---
+                clean_str = rec["json_data"]
+                clean_str = re.sub(r'^```json', '', clean_str, flags=re.MULTILINE)
+                clean_str = re.sub(r'^```', '', clean_str, flags=re.MULTILINE).strip()
+                
+                try: 
+                    data = json.loads(clean_str, strict=False)
+                except:
+                    clean_str = re.sub(r',\s*\}', '}', clean_str)
+                    clean_str = re.sub(r',\s*\]', ']', clean_str)
+                    try: 
+                        data = json.loads(clean_str, strict=False)
+                    except:
+                        try: data = json.loads(clean_str + "}", strict=False)
+                        except: data = json.loads(clean_str + "]}", strict=False)
+
+                page_ref = rec.get("page_range", f"Part {rec.get('chunk_index', 0) + 1}")
+                
+                if not isinstance(data, dict): continue
                 
                 for key, val in data.items():
                     if not val: continue
@@ -316,7 +258,6 @@ class AnalysisTab(QWidget):
                     if isinstance(val, list):
                         for item in val:
                             if isinstance(item, dict):
-                                # Convert dict to a unique string signature to prevent duplicates
                                 sig = json.dumps(item, sort_keys=True)
                                 if not any(json.dumps(existing, sort_keys=True) == sig for existing in master_data[key]):
                                     master_data[key].append(item)
@@ -324,9 +265,9 @@ class AnalysisTab(QWidget):
                                 if item not in master_data[key]:
                                     master_data[key].append(item)
                     elif isinstance(val, str):
-                        # For strings (like section summaries), append chronologically
                         master_data[key] += f"<b>[{page_ref}]</b> {val}<br><br>"
-            except Exception as e: print(f"Master Outline Error: {e}")
+            except Exception as e: 
+                print(f"Master Outline Error: {e}")
             
         return master_data
 
@@ -345,20 +286,27 @@ class AnalysisTab(QWidget):
         is_master_mode = self.btn_view_master.isChecked()
         self.status_lbl.setText(f"Loaded {'Master Outline' if is_master_mode else 'Section View'} ({len(records)} sections found).")
         
+        # Import the robust component
+        from gui.docks.unified_research.components.dynamic_outlines import UniversalOutlineWidget
+        
         if is_master_mode:
             master_data = self._build_master_outline_dict(records)
-            viewer = InteractiveAnalysisViewer(master_data, self.main_window.viewer.annot_manager, self.theme)
+            viewer = UniversalOutlineWidget("Master Outline", master_data, self.theme, self.main_window.viewer.annot_manager)
             self.results_layout.addWidget(viewer)
         else:
             for rec in records:
                 try:
-                    data = json.loads(rec["json_data"])
-                    viewer = InteractiveAnalysisViewer(data, self.main_window.viewer.annot_manager, self.theme)
-                    title = f"Section: {rec['page_range']}"
-                    # Wrap in Collapsible
-                    col_sec = CollapsibleSection(title, viewer, self.theme, is_expanded=False)
-                    self.results_layout.addWidget(col_sec)
-                except: pass
+                    # THE FIX: Safely fall back to the chunk_index since the DB doesn't store page_range
+                    chunk_idx = rec.get('chunk_index', 0)
+                    page_ref = rec.get('page_range', f"Part {chunk_idx + 1}")
+                    title = f"Section: {page_ref}"
+                    
+                    # Use the universal component directly - it auto-parses JSON strings safely
+                    viewer = UniversalOutlineWidget(title, rec["json_data"], self.theme, self.main_window.viewer.annot_manager, is_expanded=False)
+                    self.results_layout.addWidget(viewer)
+                except Exception as e:
+                    # Expose errors to the terminal instead of swallowing them
+                    print(f"Error loading section {rec.get('chunk_index', 'Unknown')}: {e}")
 
     def _load_comparison(self):
         self._clear_results(self.lyt_a)
@@ -410,60 +358,64 @@ class AnalysisTab(QWidget):
         self.cmp_runner.progress_update.connect(ai_msg.append_chunk)
         self.cmp_runner.start()
 
-    def render_and_save_chunk(self, doc_path, template_id, chunk_idx, json_data, page_range):
-        """Called by ui_router.py on the Main Thread when a chunk finishes."""
-        if not self.btn_view_master.isChecked():
-            viewer = InteractiveAnalysisViewer(json_data, self.main_window.viewer.annot_manager, self.theme)
-            col_sec = CollapsibleSection(f"Section: {page_range}", viewer, self.theme, is_expanded=True)
-            self.results_layout.addWidget(col_sec)
+    def save_chunk_to_db(self, state, json_str):
+        """Silently saves the chunk data to the project database."""
+        item = state.get('item', {})
+        try:
+            self.pm.save_document_analysis(
+                item.get('doc_path'), 
+                item.get('template_id'), 
+                item.get('chunk_index'), 
+                json_str
+            )
+            self.status_lbl.setText(f"✅ Analyzed Section: {item.get('page_range')}")
             
-        self.status_lbl.setText(f"✅ Analyzed Section: {page_range}")
-        
-        json_str = json.dumps(json_data)
-        self.pm.save_document_analysis(doc_path, template_id, chunk_idx, json_str)
-        
-        # Auto-refresh if we are in Master Outline mode
-        if self.btn_view_master.isChecked():
-            self._load_existing_analysis()
+            # Auto-refresh if we are in Master Outline mode
+            if self.btn_view_master.isChecked():
+                self._load_existing_analysis()
+        except Exception as e:
+            print(f"Failed to save chunk to DB: {e}")
 
     def _trigger_analysis(self):
-        if self.combo_templates.count() == 0 or self.doc_selector.count() == 0: return
-        self._clear_results(self.results_layout)
-        
-        template = self.combo_templates.currentData()
         doc_path = self.doc_selector.currentData()
+        template = self.combo_templates.currentData()
         
+        if not doc_path or not template: return
+        
+        doc = fitz.open(doc_path)
         chunks = []
-        try:
-            doc = fitz.open(doc_path)
-            current_text = ""
-            start_page = 1
-            for page_num in range(len(doc)):
-                current_text += doc.load_page(page_num).get_text("text") + "\n"
-                if len(current_text.split()) >= 2000 or page_num == len(doc) - 1:
-                    end_page = page_num + 1
-                    chunks.append({
-                        "text": current_text,
-                        "page_range": f"p.{start_page}" if start_page == end_page else f"p.{start_page}-{end_page}",
-                        "chunk_index": len(chunks),
-                        "doc_path": doc_path,
-                        "template_id": template['id'],
-                        "template_instructions": template.get('instructions', ''),
-                        "template_schema": template.get('schema', '{}')
-                    })
-                    current_text = ""
-                    start_page = page_num + 2
-            doc.close()
-        except Exception as e:
-            self.status_lbl.setText(f"Error reading PDF: {e}")
-            return
+        
+        for i in range(0, doc.page_count, 4):
+            chunk_text = ""
+            for j in range(i, min(i+4, doc.page_count)):
+                chunk_text += f"\n--- Page {j+1} ---\n" + doc.load_page(j).get_text()
+            
+            chunks.append({
+                "doc_path": doc_path,
+                "template_id": template['id'],
+                
+                # --- THE FIX: Inject the missing instructions and schema! ---
+                "template_instructions": template.get('instructions', ''),
+                "template_schema": template.get('schema', '{}'),
+                
+                "chunk_index": i // 4,
+                "page_range": f"{i+1}-{min(i+4, doc.page_count)}",
+                "text": chunk_text
+            })
             
         self.pm.clear_document_analyses(doc_path, template['id'])
         self.status_lbl.setText("⏳ Processing Document...")
 
         from core.engine.default_blueprints import DefaultBlueprints
         blueprint = DefaultBlueprints.get_analysis_blueprint(chunks)
-        self.main_window.execute_ai_blueprint(blueprint, {})
+        
+        from PySide6.QtWidgets import QDockWidget
+        dock = self.main_window.findChild(QDockWidget, "UnifiedResearchDock")
+        selected_model = dock.model_combo.currentText() if dock and hasattr(dock, 'model_combo') else ""
+        
+        state_dict = {"selected_model": selected_model}
+        
+        self.main_window.execute_ai_blueprint(blueprint, state_dict)
 
     def update_theme(self, theme):
         self.theme = theme
