@@ -497,9 +497,10 @@ class BlueprintEditorTab(QWidget):
     def _create_new_tool(self):
         name, ok = QInputDialog.getText(self, "New Tool", "Enter a name for your custom tool:")
         if ok and name and name not in self.bpm.blueprints:
-            new_bp = AIActionBlueprint(name=name, description="A custom user tool.", steps=[
-                ActionStep(step_id="query_llm", step_type="LLM_QUERY", inputs={"query": "{user_input}"}, ui_format="live_stream", ui_target="custom_tools_tab", llm_options={"num_predict": 2048, "temperature": 0.7})
-            ])
+            # --- FIXED: Route through Default Blueprints ---
+            from core.engine.default_blueprints import DefaultBlueprints
+            new_bp = DefaultBlueprints.get_blank_custom_tool(name)
+            
             self.bpm.blueprints[name] = new_bp
             self._populate_combo_box()
             self.combo_blueprints.setCurrentText(name)
@@ -576,7 +577,12 @@ class BlueprintEditorTab(QWidget):
 
     def _add_new_step(self):
         if not self.current_blueprint: return
-        new_step = ActionStep(step_id=f"step_{len(self.current_blueprint.steps)+1}", step_type="LLM_QUERY", llm_options={"num_predict": 2048, "temperature": 0.7})
+        step_id = f"step_{len(self.current_blueprint.steps)+1}"
+        
+        # --- FIXED: Route through Default Blueprints ---
+        from core.engine.default_blueprints import DefaultBlueprints
+        new_step = DefaultBlueprints.get_blank_step(step_id)
+        
         self.current_blueprint.steps.append(new_step)
         card = StepCardWidget(new_step, [], self._get_all_tool_names(), self.theme)
         card.delete_requested.connect(self._remove_step)

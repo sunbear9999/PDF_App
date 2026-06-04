@@ -281,3 +281,133 @@ class DefaultBlueprints:
                 required_context=["manifest", "workspace"] # Gives the architect full context
             )
         ])
+    @staticmethod
+    def get_compare_outlines_blueprint(pm) -> AIActionBlueprint:
+        return AIActionBlueprint(name="Compare Outlines", description="AI compares two document outlines.", steps=[
+            ActionStep(
+                step_id="compare", step_type="LLM_QUERY",
+                system_prompt="{prompt:Compare Outlines System}",
+                inputs={"query": "{prompt:Compare Outlines Query}"},
+                ui_format="silent" 
+            )
+        ])
+
+    @staticmethod
+    def get_autopilot_injection_steps(pm, target_ui: str) -> list[ActionStep]:
+        router_script = """
+import json
+plan = state.get('sys_autopilot_plan', '{}')
+try: p = json.loads(plan)
+except: p = {}
+
+if not p.get('needs_project_manifest', True): state['project_manifest'] = "{}"
+if not p.get('needs_workspace_graph', False): state['workspace_data'] = "{}"
+if not p.get('needs_document_search', True): state['autopilot_disable_rag'] = True
+
+result = "Auto-Pilot Routing Complete"
+"""
+        return [
+            ActionStep(
+                step_id="sys_autopilot_planner",
+                step_type="LLM_QUERY",
+                inputs={"query": pm.get_prompt("Autopilot Planner Query")},
+                system_prompt=pm.get_prompt("Autopilot Planner System"),
+                output_schema={"needs_document_search": True, "needs_project_manifest": True, "needs_workspace_graph": False},
+                output_key="sys_autopilot_plan",
+                ui_format="silent",
+                ui_target=target_ui
+            ),
+            ActionStep(
+                step_id="sys_autopilot_router",
+                step_type="PYTHON_SCRIPT",
+                inputs={"script": router_script},
+                output_key="sys_route_status",
+                ui_format="silent",
+                ui_target=target_ui
+            )
+        ]
+
+    @staticmethod
+    def get_analysis_search_injection_steps(pm) -> list[ActionStep]:
+        fetch_script = """
+import sqlite3
+db_path = state.get('__db_path__')
+analyses_text = ""
+if db_path:
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT doc_path, json_data FROM document_analyses")
+        for r in cursor.fetchall():
+            analyses_text += f"Doc: {r[0]}\\n{r[1]}\\n\\n"
+        conn.close()
+    except Exception:
+        pass
+result = analyses_text[:25000]
+"""
+        enhance_script = """
+analysis = state.get('analysis_context', '')
+intent = state.get('__analysis_intent__', '')
+if analysis.strip().lower() in ['none', 'none.', '']:
+    enhanced = intent
+else:
+    enhanced = f"{intent}. Context: {analysis[:300]}"
+result = enhanced
+"""
+        return [
+            ActionStep(
+                step_id="sys_fetch_analyses", step_type="PYTHON_SCRIPT",
+                inputs={"script": fetch_script}, output_key="raw_analyses",
+                ui_format="silent", ui_target="floating"
+            ),
+            ActionStep(
+                step_id="sys_search_analyses", step_type="LLM_QUERY",
+                inputs={"query": pm.get_prompt("Analysis Search Query")},
+                system_prompt=pm.get_prompt("Analysis Search System"),
+                output_key="analysis_context", ui_format="silent", ui_target="floating"
+            ),
+            ActionStep(
+                step_id="sys_enhance_intent", step_type="PYTHON_SCRIPT",
+                inputs={"script": enhance_script}, output_key="enhanced_intent",
+                ui_format="silent", ui_target="floating"
+            )
+        ]
+
+    @staticmethod
+    def get_inline_foreach_blueprint(inline_type: str, inputs: dict, llm_options: dict, ui_format: str) -> AIActionBlueprint:
+        if inline_type == "LLM_QUERY":
+            return AIActionBlueprint(name="inline_llm", description="", steps=[
+                ActionStep(
+                    step_id="inline", step_type="LLM_QUERY", 
+                    inputs={"query": inputs.get("inline_prompt", "{item}")}, 
+                    system_prompt=inputs.get("inline_system", ""), 
+                    llm_options=llm_options
+                )
+            ])
+        elif inline_type == "RAG_SEARCH":
+            return AIActionBlueprint(name="inline_rag", description="", steps=[
+                ActionStep(
+                    step_id="inline", step_type="RAG_SEARCH", 
+                    inputs={"queries": [inputs.get("inline_query", "{item}")]}, 
+                    ui_format=ui_format
+                )
+            ])
+        return AIActionBlueprint(name="empty", description="", steps=[])
+
+    @staticmethod
+    def get_blank_custom_tool(name: str) -> AIActionBlueprint:
+        return AIActionBlueprint(name=name, description="A custom user tool.", steps=[
+            ActionStep(
+                step_id="query_llm", step_type="LLM_QUERY", 
+                inputs={"query": "{user_input}"}, 
+                ui_format="live_stream", ui_target="custom_tools_tab", 
+                llm_options={"num_predict": 2048, "temperature": 0.7}
+            )
+        ])
+
+    @staticmethod
+    def get_blank_step(step_id: str) -> ActionStep:
+        return ActionStep(
+            step_id=step_id, step_type="LLM_QUERY", 
+            llm_options={"num_predict": 2048, "temperature": 0.7}
+        )

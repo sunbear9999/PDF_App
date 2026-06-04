@@ -104,102 +104,21 @@ class MasterActionRunner(QThread):
         self.state["__autopilot_intent__"] = intent
         target = self.blueprint.steps[-1].ui_target if self.blueprint.steps else "floating"
 
-        planner_step = ActionStep(
-            step_id="sys_autopilot_planner",
-            step_type="LLM_QUERY",
-            inputs={"query": self.prompt_manager.get_prompt("Autopilot Planner Query")},
-            system_prompt=self.prompt_manager.get_prompt("Autopilot Planner System"),
-            output_schema={"needs_document_search": True, "needs_project_manifest": True, "needs_workspace_graph": False},
-            output_key="sys_autopilot_plan",
-            ui_format="silent",
-            ui_target=target
-        )
-
-        router_script = """
-import json
-plan = state.get('sys_autopilot_plan', '{}')
-try: p = json.loads(plan)
-except: p = {}
-
-if not p.get('needs_project_manifest', True): state['project_manifest'] = "{}"
-if not p.get('needs_workspace_graph', False): state['workspace_data'] = "{}"
-if not p.get('needs_document_search', True): state['autopilot_disable_rag'] = True
-
-result = "Auto-Pilot Routing Complete"
-"""
-        router_step = ActionStep(
-            step_id="sys_autopilot_router",
-            step_type="PYTHON_SCRIPT",
-            inputs={"script": router_script},
-            output_key="sys_route_status",
-            ui_format="silent",
-            ui_target=target
-        )
-
+        # --- FIXED: Route through Default Blueprints ---
+        from core.engine.default_blueprints import DefaultBlueprints
+        auto_steps = DefaultBlueprints.get_autopilot_injection_steps(self.prompt_manager, target)
+        
         # Prepend the routing steps
-        self.blueprint.steps = [planner_step, router_step] + self.blueprint.steps
+        self.blueprint.steps = auto_steps + self.blueprint.steps
     def _inject_analysis_search(self):
         intent = self.state.get("user_query") or self.state.get("query") or self.state.get("goal") or "Execute tool"
         self.state["__analysis_intent__"] = intent
         pm = getattr(self.main_window, 'project_manager', None)
         self.state["__db_path__"] = pm.project_filepath if pm else ""
 
-        # Step 1: Raw Python extraction of the SQLite analyses table
-        fetch_script = """
-import sqlite3
-db_path = state.get('__db_path__')
-analyses_text = ""
-if db_path:
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        cursor.execute("SELECT doc_path, json_data FROM document_analyses")
-        for r in cursor.fetchall():
-            analyses_text += f"Doc: {r[0]}\\n{r[1]}\\n\\n"
-        conn.close()
-    except Exception:
-        pass
-result = analyses_text[:25000] # Cap length to avoid context overflow
-"""
-        fetch_step = ActionStep(
-            step_id="sys_fetch_analyses",
-            step_type="PYTHON_SCRIPT",
-            inputs={"script": fetch_script},
-            output_key="raw_analyses",
-            ui_format="silent",
-            ui_target="floating"
-        )
-
-        # Step 2: Agent summarizes the analyses based on the user intent
-        analyze_step = ActionStep(
-            step_id="sys_search_analyses",
-            step_type="LLM_QUERY",
-            inputs={"query": self.prompt_manager.get_prompt("Analysis Search Query")},
-            system_prompt=self.prompt_manager.get_prompt("Analysis Search System"),
-            output_key="analysis_context",
-            ui_format="silent",
-            ui_target="floating"
-        )
-
-        # Step 3: Enhance the user intent for the embedding RAG search 
-        enhance_script = """
-analysis = state.get('analysis_context', '')
-intent = state.get('__analysis_intent__', '')
-if analysis.strip().lower() in ['none', 'none.', '']:
-    enhanced = intent
-else:
-    # Append a short snippet of the analysis to the raw query to improve vector matches
-    enhanced = f"{intent}. Context: {analysis[:300]}"
-result = enhanced
-"""
-        enhance_step = ActionStep(
-            step_id="sys_enhance_intent",
-            step_type="PYTHON_SCRIPT",
-            inputs={"script": enhance_script},
-            output_key="enhanced_intent",
-            ui_format="silent",
-            ui_target="floating"
-        )
+        # --- FIXED: Route through Default Blueprints ---
+        from core.engine.default_blueprints import DefaultBlueprints
+        analysis_steps = DefaultBlueprints.get_analysis_search_injection_steps(self.prompt_manager)
 
         # Step 4: Dynamically rewrite all Original Blueprint Steps to utilize the new context
         for step in self.blueprint.steps:
@@ -227,7 +146,7 @@ result = enhanced
                         step.inputs['queries'] = new_queries
 
         # Step 5: Prepend our new setup steps to the execution pipeline
-        self.blueprint.steps = [fetch_step, analyze_step, enhance_step] + self.blueprint.steps
+        self.blueprint.steps = analysis_steps + self.blueprint.steps
     def _inject_universal_context(self, global_settings):
         """Dynamically injects universal context into the pipeline for ANY tool."""
         pm = getattr(self.main_window, 'project_manager', None)
@@ -471,14 +390,10 @@ result = enhanced
             sub_blueprint = inputs['sub_blueprint']
         else:
             inline_type = inputs.get('inline_type')
-            if inline_type == "LLM_QUERY":
-                sub_blueprint = AIActionBlueprint(name="inline", description="", steps=[
-                    ActionStep(step_id="inline", step_type="LLM_QUERY", inputs={"query": inputs.get("inline_prompt", "{item}")}, system_prompt=inputs.get("inline_system", ""), llm_options=step.llm_options)
-                ])
-            elif inline_type == "RAG_SEARCH":
-                sub_blueprint = AIActionBlueprint(name="inline", description="", steps=[
-                    ActionStep(step_id="inline", step_type="RAG_SEARCH", inputs={"queries": [inputs.get("inline_query", "{item}")]}, ui_format=step.ui_format)
-                ])
+            if inline_type in ["LLM_QUERY", "RAG_SEARCH"]:
+                # --- FIXED: Route through Default Blueprints ---
+                from core.engine.default_blueprints import DefaultBlueprints
+                sub_blueprint = DefaultBlueprints.get_inline_foreach_blueprint(inline_type, inputs, step.llm_options, step.ui_format)
             else:
                 sub_bp_name = inputs.get('sub_blueprint_name')
                 sub_blueprint = None

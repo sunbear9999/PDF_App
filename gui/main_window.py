@@ -168,8 +168,11 @@ class MainWindow(QMainWindow):
             self.project_manager._mount_project_database()
 
         runner = MasterActionRunner(self, blueprint, initial_state)
-        self.ui_router.attach_runner(runner) # Router hooks into signals
-        runner.start()
+        self.ui_router.attach_runner(runner) 
+        
+        # Enqueue the runner instead of starting it directly
+        job_name = getattr(blueprint, 'name', 'AI Action')
+        self.process_registry.enqueue_runner(runner, job_name)
     def _run_startup_sequence(self):
         """Runs the project load/layout sequence safely after the UI is rendered."""
         last_project = self.settings.value("last_project", "")
@@ -391,9 +394,8 @@ class MainWindow(QMainWindow):
         self.top_toolbar.addWidget(spacer2)
 
         # 6. Right-side Tools
-        self.process_monitor = ProcessMonitorWidget(self.process_registry)
-        self._configure_hover_expand_button(self.process_monitor, "🟢", "Process Monitor", expanded_width=150, collapsed_width=44)
-        self.process_monitor.setMaximumHeight(30) # Keep it compact
+        self.process_monitor = ProcessMonitorWidget(self.process_registry, self.theme_manager.get_theme())
+        self.process_monitor.setMaximumHeight(30)
         self.top_toolbar.addWidget(self.process_monitor)
 
         self.btn_tag_manager = QPushButton()
@@ -930,6 +932,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'dict_docks'): self.dict_docks = safe_update_list(self.dict_docks)
         if hasattr(self, 'essay_docks'): self.essay_docks = safe_update_list(self.essay_docks)
         if hasattr(self, 'ocr_docks'): self.ocr_docks = safe_update_list(self.ocr_docks)
+        if hasattr(self, 'process_monitor'):self.process_monitor.set_theme(theme)
         if hasattr(self, 'audio_docks'): self.audio_docks = safe_update_list(self.audio_docks)
         if hasattr(self, 'citation_docks'): self.citation_docks = safe_update_list(self.citation_docks)
         if hasattr(self, 'slideshow_docks'): self.slideshow_docks = safe_update_list(self.slideshow_docks)

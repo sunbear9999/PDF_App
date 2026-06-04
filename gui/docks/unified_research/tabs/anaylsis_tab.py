@@ -322,16 +322,16 @@ class AnalysisTab(BaseTab):
         self.cmp_chat_lyt.addWidget(ai_msg)
         QTimer.singleShot(50, lambda: self.cmp_chat_output.verticalScrollBar().setValue(self.cmp_chat_output.verticalScrollBar().maximum()))
         
-        bp = AIActionBlueprint(name="Compare Outlines", description="", steps=[
-            ActionStep(
-                step_id="compare", step_type="LLM_QUERY",
-                system_prompt="You are an expert analyst. Compare the two provided document outlines to answer the user's question.",
-                inputs={"query": f"USER QUESTION: {text}\n\n--- DOCUMENT A OUTLINE ---\n{{doc_a}}\n\n--- DOCUMENT B OUTLINE ---\n{{doc_b}}"},
-                ui_format="silent" 
-            )
-        ])
+        # --- FIXED: Route through Default Blueprints ---
+        from core.engine.default_blueprints import DefaultBlueprints
+        bp = DefaultBlueprints.get_compare_outlines_blueprint(self.pm)
         
-        state = {"doc_a": self.current_cmp_data_a, "doc_b": self.current_cmp_data_b}
+        state = {
+            "user_query": text, 
+            "doc_a": self.current_cmp_data_a, 
+            "doc_b": self.current_cmp_data_b
+        }
+        
         self.cmp_runner = MasterActionRunner(self.main_window, bp, state)
         self.cmp_runner.progress_update.connect(ai_msg.append_chunk)
         self.cmp_runner.start()

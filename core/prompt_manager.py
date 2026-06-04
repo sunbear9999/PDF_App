@@ -7,7 +7,7 @@ class PromptManager:
         "Agent Personas": [
             "General Assistant", "RAG Agent Mode", "RAG Assistant Mode",
             "Evidence Extractor", "Search Term Generator", "Document Analyzer",
-            "Master Outline Generator", "Brainstorming Agent", "Comparison Agent",
+            "Master Outline Generator", "Brainstorming Agent", "Compare Outlines System",
             "Blueprint Architect System", "Auto Build Graph System", 
             "Analysis Search System", "Autopilot Planner System"
         ],
@@ -43,7 +43,7 @@ class PromptManager:
         "Document Analyzer": "You are an expert document analysis engine. Analyze ONLY the current section of text and extract insights strictly from the text provided.",
         "Master Outline Generator": "You are an expert academic writer. Synthesize the provided notes into a highly structured, chronological Master Outline that removes duplicate claims and stitches the narrative together logically.",
         "Brainstorming Agent": "You are a strategic research partner. Help the user brainstorm ideas, refine their thesis, and explore new angles.",
-        "Comparison Agent": "You are an expert analyst. Compare the two provided document outlines to answer the user's question.",
+        "Compare Outlines System": "You are an expert analyst. Compare the two provided document outlines to answer the user's question.",
         "Blueprint Architect System": "You are the Papyrus AI Tool Builder. Analyze the user's request and build a valid JSON pipeline matching the AIActionBlueprint schema.\nCRITICAL RULES:\n1. 'expected_inputs' MUST strictly use 'key', 'type', and 'label'. NEVER use 'name'. Example: {\"key\": \"target_doc\", \"type\": \"doc_selector\", \"label\": \"Target Doc\"}\n2. RAG_SEARCH inputs MUST use 'queries' (array) and 'allowed_docs' (array).\n3. Use ui_format=\"data_table\" for spreadsheet data, or ui_format=\"card_grid\" for items with action buttons.",
         "Auto Build Graph System": "You are a strict graph architect. Convert the provided text into a logical diagram. Output ONLY valid, fully closed JSON matching the exact schema. Do not truncate the JSON output.",
         "Analysis Search System": "You are an analytical assistant extracting relevant context from saved document analyses.",
@@ -61,7 +61,7 @@ class PromptManager:
         "Universal Citation Query": "Analyze the SOURCE TEXT and the AI ANSWER. You MUST extract 3 to 5 highly relevant, VERBATIM quotes from the text that directly support the claims made in the answer.\n\nSOURCE TEXT:\n{{{context_key}}}\n\nAI ANSWER:\n{{{answer_key}}}",
         "Analyze Chunk Query": "INSTRUCTIONS: {item.template_instructions}\nREQUIRED JSON SCHEMA:\n{item.template_schema}\n\n--- TEXT TO ANALYZE (Pages: {item.page_range}) ---\n{item.text}",
         "Master Outline Query": "NOTES:\n{combined_text}",
-        "Compare Outlines Query": "USER QUESTION: {query}\n\n--- DOCUMENT A OUTLINE ---\n{doc_a}\n\n--- DOCUMENT B OUTLINE ---\n{doc_b}",
+        "Compare Outlines Query": "USER QUESTION: {user_query}\n\n--- DOCUMENT A OUTLINE ---\n{doc_a}\n\n--- DOCUMENT B OUTLINE ---\n{doc_b}",
         "Blueprint Architect Query": "CURRENT TOOL JSON:\n{current_json}\n\nUSER REQUEST:\n{user_text}",
         "Auto Build Graph Query": "Translate the preceding AI Response into a spatial workspace graph map. Extract the main ideas as separate nodes, and link them logically with edges.\n\nCRITICAL RULES:\n1. If an idea is an original brainstorm concept, put the text in 'note' and leave 'quote' and 'doc_name' EMPTY.\n2. ONLY use the 'quote' and 'doc_name' fields if the AI Response contains an explicit, verbatim quote from a source document.\n\nAI RESPONSE TO MAP:\n{{{source_key}}}\n\nCURRENT WORKSPACE GRAPH MAP (Do not duplicate these):\n{workspace_data}",
         "Modular Workspace Query": "Analyze the workspace data and return the updated graph.\n\nCRITICAL RULE: You MUST output ONLY valid JSON matching this exact schema shape. Do not add keys outside this schema.\n\nSCHEMA:\n{schema_str}\n\nWORKSPACE DATA:\n{workspace_data}",
