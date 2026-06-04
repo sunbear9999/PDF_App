@@ -135,10 +135,7 @@ class UnifiedResearchDock(QDockWidget):
         if not self.project_manager: return
         
         # 1. Clear existing UI (leaving the bottom stretch)
-        if hasattr(tab_widget, 'chat_layout'):
-            while tab_widget.chat_layout.count() > 1:
-                item = tab_widget.chat_layout.takeAt(0)
-                if item.widget(): item.widget().deleteLater()
+        
                 
         # 2. Fetch and build
         history = self.project_manager.get_chat_history(tab_id)

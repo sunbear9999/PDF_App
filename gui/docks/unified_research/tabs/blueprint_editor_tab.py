@@ -17,6 +17,8 @@ TYPES = {
     "Semantic RAG Search": "RAG_SEARCH", 
     "Loop (Run Action on List)": "FOREACH", 
     "Condition (If/Then)": "CONDITION", 
+    "Branch (If/Else Paths)": "BRANCH",               # NEW
+    "Database Write": "DATABASE_WRITE",             # NEW
     "Run Python Script": "PYTHON_SCRIPT"
 }
 
@@ -75,6 +77,10 @@ class StepCardWidget(QFrame):
         self.combo_type.addItems(list(TYPES.keys()))
         self.combo_type.currentIndexChanged.connect(self._toggle_dynamic_inputs)
         
+        self.input_step_ref = QLineEdit()
+        self.input_step_ref.setPlaceholderText("Library Ref (optional)")
+        self.input_step_ref.setFixedWidth(150)
+
         header.addWidget(QLabel("<b>ID:</b>"))
         header.addWidget(self.input_id)
         header.addWidget(QLabel("<b>Action Type:</b>"))
@@ -127,6 +133,29 @@ class StepCardWidget(QFrame):
         cond_lyt.addWidget(self.input_cond)
         self.inp_layout.addWidget(self.condition_widget)
 
+        # --- NEW: Branch Widget ---
+        self.branch_widget = QWidget()
+        branch_lyt = QVBoxLayout(self.branch_widget)
+        branch_lyt.setContentsMargins(0,0,0,0)
+        branch_lyt.addWidget(QLabel("<b>Branch Logic:</b> <span style='color:#888;'>(e.g. state.get('use_advanced_rag') == True)</span>"))
+        self.input_branch_logic = QLineEdit()
+        branch_lyt.addWidget(self.input_branch_logic)
+        branch_lyt.addWidget(QLabel("<i>Note: Edit nested true/false steps in the JSON directly for now.</i>"))
+        self.inp_layout.addWidget(self.branch_widget)
+
+        # --- NEW: Database Write Widget ---
+        self.db_widget = QWidget()
+        db_lyt = QVBoxLayout(self.db_widget)
+        db_lyt.setContentsMargins(0,0,0,0)
+        db_lyt.addWidget(QLabel("<b>Table Name:</b>"))
+        self.input_db_table = QLineEdit()
+        db_lyt.addWidget(self.input_db_table)
+        db_lyt.addWidget(QLabel("<b>Payload (JSON):</b>"))
+        self.input_db_payload = QTextEdit()
+        self.input_db_payload.setMaximumHeight(60)
+        db_lyt.addWidget(self.input_db_payload)
+        self.inp_layout.addWidget(self.db_widget)
+        
         self.python_widget = QWidget()
         py_lyt = QVBoxLayout(self.python_widget)
         py_lyt.setContentsMargins(0,0,0,0)
@@ -196,7 +225,8 @@ class StepCardWidget(QFrame):
     def _populate_data(self):
         self.input_id.setText(self.step.step_id)
         self.combo_type.setCurrentText(get_key(TYPES, self.step.step_type, "AI Text Generation"))
-        
+        self.input_step_ref.setText(getattr(self.step, 'step_ref', '') or "")
+
         if self.step.step_type == "LLM_QUERY":
             self.input_llm_query.setText(self.step.inputs.get("query", ""))
         elif self.step.step_type == "CONDITION":
@@ -206,6 +236,12 @@ class StepCardWidget(QFrame):
         elif self.step.step_type == "RAG_SEARCH":
             q = self.step.inputs.get("queries", [""])[0] if "queries" in self.step.inputs else ""
             self.input_rag_query.setText(q)
+        elif self.step.step_type == "BRANCH":
+            self.input_branch_logic.setText(self.step.inputs.get("logic", ""))
+        elif self.step.step_type == "DATABASE_WRITE":
+            self.input_db_table.setText(self.step.inputs.get("table", ""))
+            payload = self.step.inputs.get("payload", {})
+            self.input_db_payload.setText(json.dumps(payload) if isinstance(payload, dict) else str(payload))
             
         self.input_system.setText(self.step.system_prompt or "")
         self.combo_ui_format.setCurrentText(get_key(FORMATS, self.step.ui_format, "Silent (Background Data Only)"))
@@ -233,14 +269,16 @@ class StepCardWidget(QFrame):
         self.foreach_widget.setVisible(t == "FOREACH")
         self.condition_widget.setVisible(t == "CONDITION")
         self.python_widget.setVisible(t == "PYTHON_SCRIPT")
-        
+        self.branch_widget.setVisible(t == "BRANCH")           # NEW
+        self.db_widget.setVisible(t == "DATABASE_WRITE")       # NEW
         show_ai = (t == "LLM_QUERY") or (t == "FOREACH")
         self.ai_frame.setVisible(show_ai)
 
     def update_step_from_ui(self):
         self.step.step_id = self.input_id.text().strip()
         self.step.step_type = TYPES.get(self.combo_type.currentText(), "LLM_QUERY")
-        
+        self.step.step_ref = self.input_step_ref.text().strip() or None
+
         self.step.inputs = {}
         if self.step.step_type == "LLM_QUERY":
             self.step.inputs["query"] = self.input_llm_query.toPlainText().strip()
@@ -250,6 +288,12 @@ class StepCardWidget(QFrame):
             self.step.inputs["script"] = self.input_script.toPlainText().strip()
         elif self.step.step_type == "RAG_SEARCH":
             self.step.inputs["queries"] = [self.input_rag_query.text().strip()]
+        elif self.step.step_type == "BRANCH":
+            self.step.inputs["logic"] = self.input_branch_logic.text().strip()
+        elif self.step.step_type == "DATABASE_WRITE":
+            self.step.inputs["table"] = self.input_db_table.text().strip()
+            try: self.step.inputs["payload"] = json.loads(self.input_db_payload.toPlainText() or "{}")
+            except: self.step.inputs["payload"] = {}
             
         self.step.system_prompt = self.input_system.toPlainText().strip() or None
         self.step.ui_format = FORMATS.get(self.combo_ui_format.currentText(), "silent")
@@ -284,7 +328,13 @@ class BlueprintEditorTab(QWidget):
         self.bpm = getattr(self.main_window, 'blueprint_manager', None)
         self.current_blueprint = None
         self.step_widgets = []
-        self.core_tools = ["Chat - RAG Assistant", "Chat - Advanced Agent", "Brainstorm - Default", "Search Terms", "Master Outline", "Keyword Density Analyzer (Python)"]
+        self.core_tools = [
+            "Chat - Universal Agent", 
+            "Brainstorm - Default", 
+            "Search Terms", 
+            "Master Outline", 
+            "Keyword Density Analyzer (Python)"
+        ]
         self._build_ui()
 
     def _build_ui(self):
@@ -539,12 +589,18 @@ class BlueprintEditorTab(QWidget):
             self.bpm.blueprints[self.current_blueprint.name] = self.current_blueprint
             
         if key in self.core_tools:
-            if key == "Chat - RAG Assistant": default_bp = DefaultBlueprints.get_chat_blueprint(self.main_window.prompt_manager, "RAG Assistant Mode")
-            elif key == "Chat - Advanced Agent": default_bp = DefaultBlueprints.get_chat_blueprint(self.main_window.prompt_manager, "RAG Agent Mode")
-            elif key == "Brainstorm - Default": default_bp = DefaultBlueprints.get_brainstorm_blueprint(self.main_window.prompt_manager, "Brainstorm - Default")
-            elif key == "Search Terms": default_bp = DefaultBlueprints.get_search_terms_blueprint(self.main_window.prompt_manager)
-            elif key == "Keyword Density Analyzer (Python)": default_bp = DefaultBlueprints.get_python_example_blueprint(self.main_window.prompt_manager)
-            else: default_bp = DefaultBlueprints.get_master_outline_blueprint(self.main_window.prompt_manager, "Project")
+            if key == "Chat - Universal Agent": 
+                # Ensure you added get_universal_chat_blueprint to default_blueprints.py in Phase 3!
+                default_bp = DefaultBlueprints.get_universal_chat_blueprint(self.main_window.prompt_manager)
+            elif key == "Brainstorm - Default": 
+                default_bp = DefaultBlueprints.get_brainstorm_blueprint(self.main_window.prompt_manager, "Brainstorm - Default")
+            elif key == "Search Terms": 
+                default_bp = DefaultBlueprints.get_search_terms_blueprint(self.main_window.prompt_manager)
+            elif key == "Keyword Density Analyzer (Python)": 
+                default_bp = DefaultBlueprints.get_python_example_blueprint(self.main_window.prompt_manager)
+            else: 
+                default_bp = DefaultBlueprints.get_master_outline_blueprint(self.main_window.prompt_manager, "Project")
+            
             self.current_blueprint = self.bpm.get_blueprint(key, lambda: default_bp)
         else:
             self.current_blueprint = self.bpm.get_blueprint(key, lambda: AIActionBlueprint(name=key, description=""))

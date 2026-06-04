@@ -1,7 +1,7 @@
 # core/api/workspace_ai.py
 import uuid
 from core.models.workspace_models import WorkspaceModel, NodeModel, EdgeModel
-from core.utils.text_utils import extract_and_heal_json
+from core.utils.json_utils import extract_and_heal_json
 
 class WorkspaceAIApi:
     def __init__(self, project_manager):

@@ -1,6 +1,6 @@
 import fitz  # PyMuPDF
 
-from core.text_utils import sanitize_extracted_text
+from core.utils.text_utils import sanitize_extracted_text
 
 def extract_filtered_blocks(pdf_path: str, ignore_margins: bool = True, start_page: int = 1, end_page: int = None) -> str:
     """

@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 
 from core.pdf_utils import extract_filtered_blocks
 from core.tts_engine import generate_audio
-from core.text_utils import sanitize_extracted_text
+from core.utils.text_utils import sanitize_extracted_text
 
 
 class TestTTSTextHandling(unittest.TestCase):

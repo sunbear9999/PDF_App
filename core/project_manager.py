@@ -362,6 +362,8 @@ class ProjectManager:
     def get_highlight(self, highlight_id): return self.db_annotations.get_highlight(highlight_id)
     def get_unused_highlights(self, workspace_id): return self.db_annotations.get_unused_highlights(workspace_id)
     def delete_highlight_record(self, highlight_id): return self.db_annotations.delete_highlight_record(highlight_id)
+    def update_highlight_text(self, highlight_id, new_text): return self.db_annotations.update_highlight_text(highlight_id, new_text)
+    def update_highlight_color(self, highlight_id, hex_color): return self.db_annotations.update_highlight_color(highlight_id, hex_color)
 
     # --- Tags ---
     def create_tag(self, name, color): return self.db_tags.create_tag(name, color)

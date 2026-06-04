@@ -3,7 +3,7 @@ import os
 import shutil
 import sys
 
-from core.text_utils import sanitize_extracted_text
+from core.utils.text_utils import sanitize_extracted_text
 
 
 def _resolve_piper_command():

@@ -33,6 +33,7 @@ from core.engine.process_manager import ProcessRegistry
 from gui.components.universal_overlay import UniversalInternalOverlay
 from core.engine.master_runner import MasterActionRunner
 from core.engine.blueprint_manager import BlueprintManager
+from core.engine.step_manager import StepManager
 class ElidedLabel(QLabel):
     def minimumSizeHint(self):
         from PySide6.QtCore import QSize
@@ -79,7 +80,7 @@ class MainWindow(QMainWindow):
         self.shared_llm_manager = LocalLLMManager()
         self.shared_llm_manager.set_audit_logger(self.project_manager.log_ai_interaction_threadsafe)
         self.prompt_manager = PromptManager()
-        
+        self.step_manager = StepManager()
         # 1. INITIALIZE VIEWER EXPLICITLY ONCE
         def get_resource_path(relative_path):
             if hasattr(sys, '_MEIPASS'):

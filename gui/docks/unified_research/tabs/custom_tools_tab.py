@@ -8,7 +8,7 @@ from gui.docks.unified_research.tabs.base_tab import BaseTab
 
 class CustomToolsTab(BaseTab):
     def __init__(self, main_window, parent=None):
-        super().__init__(main_window, parent)
+        super().__init__(main_window, target_id="custom_tools_tab", parent=parent)
         self.dynamic_widgets = {}
         self._build_ui()
 
@@ -131,8 +131,11 @@ class CustomToolsTab(BaseTab):
     def refresh_tools(self):
         self.combo_tools.clear()
         if not self.blueprint_manager: return
-        core_tools = ["Chat - RAG Assistant", "Chat - Advanced Agent", "Brainstorm - Default", "Search Terms", "Master Outline", "Keyword Density Analyzer (Python)"]
+        
+        # Use the new Universal names
+        core_tools = ["Chat - Universal Agent", "Brainstorm - Default", "Search Terms", "Master Outline", "Keyword Density Analyzer (Python)"]
         custom_tools = [k for k in self.blueprint_manager.blueprints.keys() if k not in core_tools]
+        
         if custom_tools:
             self.combo_tools.addItems(custom_tools)
         else:

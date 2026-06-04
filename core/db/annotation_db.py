@@ -75,3 +75,14 @@ class AnnotationDB(BaseDB):
             self._conn.commit()
         except sqlite3.Error as e:
             print(f"Error deleting highlight {highlight_id}: {e}")
+    def update_highlight_text(self, highlight_id, new_text):
+    if not self.pm._conn: return
+    cursor = self.pm._conn.cursor()
+    cursor.execute("UPDATE highlights SET text_content = ? WHERE id = ?", (new_text, highlight_id))
+    self.pm._conn.commit()
+
+def update_highlight_color(self, highlight_id, hex_color):
+    if not self.pm._conn: return
+    cursor = self.pm._conn.cursor()
+    cursor.execute("UPDATE highlights SET color = ? WHERE id = ?", (hex_color, highlight_id))
+    self.pm._conn.commit()

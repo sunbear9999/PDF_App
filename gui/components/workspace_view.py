@@ -18,7 +18,7 @@ from gui.components.workspace_items import Node, Edge
 from core.engine.action_model import AIActionBlueprint, ActionStep
 from core.engine.master_runner import MasterActionRunner
 from core.layout_engine import calculate_force_directed_layout
-from core.text_utils import get_semantic_similarity_matrix
+from core.utils.text_utils import get_semantic_similarity_matrix
 from core.utils.workspace_utils import (
     normalize_annotation_text,
     compute_node_dimensions,

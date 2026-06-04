@@ -178,30 +178,24 @@ class PromptEditorDialog(QDialog):
         self.blueprint_combo.clear()
         self._all_blueprints_cache = {}
         
+        if self.blueprint_manager and hasattr(self.blueprint_manager, 'blueprints'):
+            for name, bp in self.blueprint_manager.blueprints.items():
+                self._all_blueprints_cache[f"{name} (Custom)"] = bp
+
         try:
             from core.engine.default_blueprints import DefaultBlueprints
             pm = self.prompt_manager
             
-            # --- FIX: explicitly load EVERY major permutation into the cache ---
-            self._all_blueprints_cache["Chat (General Assistant)"] = DefaultBlueprints.get_chat_blueprint(pm, "General Assistant")
-            self._all_blueprints_cache["Chat (RAG Agent Mode)"] = DefaultBlueprints.get_chat_blueprint(pm, "RAG Agent Mode")
-            self._all_blueprints_cache["Chat (RAG Assistant Mode)"] = DefaultBlueprints.get_chat_blueprint(pm, "RAG Assistant Mode")
-            
-            self._all_blueprints_cache["Brainstorm (Default)"] = DefaultBlueprints.get_brainstorm_blueprint(pm, "Brainstorm System - Default")
-            self._all_blueprints_cache["Brainstorm (RAG Enabled)"] = DefaultBlueprints.get_brainstorm_blueprint(pm, "Brainstorm System - RAG Enabled")
-            self._all_blueprints_cache["Brainstorm (RAG Only)"] = DefaultBlueprints.get_brainstorm_blueprint(pm, "Brainstorm System - RAG Only")
-            
-            self._all_blueprints_cache["Document Analysis Pipeline"] = DefaultBlueprints.get_analysis_blueprint(pm, ["{chunk}"])
-            self._all_blueprints_cache["Search Term Generator"] = DefaultBlueprints.get_search_terms_blueprint(pm)
-            self._all_blueprints_cache["Workspace Consolidation"] = DefaultBlueprints.get_workspace_consolidate_blueprint(pm)
+            # Dynamically instantiate the core tools to read their schemas
+            self._all_blueprints_cache["Chat - Universal Agent"] = DefaultBlueprints.get_universal_chat_blueprint(pm)
+            self._all_blueprints_cache["Brainstorming"] = DefaultBlueprints.get_brainstorm_blueprint(pm, "Brainstorm System - Default")
+            self._all_blueprints_cache["Generate Search Terms"] = DefaultBlueprints.get_search_terms_blueprint(pm)
+            self._all_blueprints_cache["Document Analysis"] = DefaultBlueprints.get_analysis_blueprint(pm, chunks=[])
+            self._all_blueprints_cache["Compare Outlines"] = DefaultBlueprints.get_compare_outlines_blueprint(pm)
+            self._all_blueprints_cache["Master Project Outline"] = DefaultBlueprints.get_master_outline_blueprint(pm, "Project")
             self._all_blueprints_cache["Blueprint Architect"] = DefaultBlueprints.get_blueprint_architect(pm)
         except Exception as e:
-            print(f"[Prompt Editor] Failed to load defaults: {e}")
-
-        # Overlay user custom blueprints
-        if self.blueprint_manager and hasattr(self.blueprint_manager, 'blueprints'):
-            for name, bp in self.blueprint_manager.blueprints.items():
-                self._all_blueprints_cache[f"{name} (Custom)"] = bp
+            print(f"[Prompt Editor] Failed to load dynamic blueprints: {e}")
 
         if self._all_blueprints_cache:
             self.blueprint_combo.addItems(sorted(self._all_blueprints_cache.keys()))
@@ -286,21 +280,27 @@ class PromptEditorDialog(QDialog):
         explicit = set()
         implicit = set()
         
-        # 1. Explicit extractions
+        import re
+        
+        # 1. Explicit Prompt Keys
         if getattr(step, 'prompt_key', None): 
             explicit.add(step.prompt_key)
             
-        sys_prompt = getattr(step, 'system_prompt', '')
-        if sys_prompt: 
-            explicit.update(re.findall(r'\{prompt:(.*?)\}', sys_prompt))
+        # 2. Aggressively scan all text inputs for dynamic {prompt:XYZ} tags
+        texts_to_scan = [getattr(step, 'system_prompt', '')]
+        if isinstance(getattr(step, 'inputs', None), dict):
+            texts_to_scan.extend([str(v) for v in step.inputs.values()])
             
-        for val in getattr(step, 'inputs', {}).values():
-            if isinstance(val, str):
-                explicit.update(re.findall(r'\{prompt:(.*?)\}', val))
+        for text in texts_to_scan:
+            if text:
+                # Extracts any text inside {prompt: ... }
+                explicit.update(re.findall(r'\{prompt:(.*?)\}', text))
 
-        # 2. Declarative Engine Injections
+        # 3. Engine Injections (What the runner adds automatically)
         if getattr(step, 'step_type', '') == 'LLM_QUERY':
-            if getattr(step, 'output_schema', None):
+            opts = getattr(step, 'llm_options', {})
+            # Catch JSON formats triggered by schemas or explicit toggles
+            if getattr(step, 'output_schema', None) or opts.get("json_mode"):
                 implicit.add("JSON Schema Enforcer")
                 
             ui_fmt = getattr(step, 'ui_format', '')
@@ -308,7 +308,6 @@ class PromptEditorDialog(QDialog):
             elif ui_fmt == "data_table": implicit.add("Format Enforcer - Data Table")
             elif ui_fmt == "card_grid": implicit.add("Format Enforcer - Card Grid")
                 
-            # Read explicitly requested context injections
             req_context = getattr(step, 'required_context', [])
             if "manifest" in req_context:
                 implicit.add("Manifest Update Directive")
@@ -320,14 +319,24 @@ class PromptEditorDialog(QDialog):
             if "analyses" in req_context:
                 implicit.add("Context Inject - Analyses")
 
-        # 3. Handle sub-blueprints recursively
+        # 4. RECURSIVE DEEP DIVE: Walk branches, conditions, and loops
         sub_steps_data = []
+        
+        # Foreach loops
         if getattr(step, 'step_type', '') == 'FOREACH':
             sub_bp = getattr(step, 'inputs', {}).get('sub_blueprint')
             if sub_bp and hasattr(sub_bp, 'steps'):
                 for sub_step in sub_bp.steps:
                     sub_steps_data.extend(self._extract_step_prompts(sub_step))
+                    
+        # Branches (if_true / if_false)
+        for branch_attr in ['if_true', 'if_false']:
+            branch_steps = getattr(step, branch_attr, [])
+            if branch_steps:
+                for b_step in branch_steps:
+                    sub_steps_data.extend(self._extract_step_prompts(b_step))
 
+        # 5. Compile Results
         result = []
         if explicit or implicit:
             result.append({

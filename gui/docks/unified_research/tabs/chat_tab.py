@@ -3,14 +3,32 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QPus
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QCursor, QAction
 from gui.docks.unified_research.components.chat_streamer import ChatMessageWidget
+from gui.docks.unified_research.components.dynamic_inputs import DynamicInputWidget
 import json
 import os 
 from gui.docks.unified_research.tabs.base_tab import BaseTab
 
 class ChatTab(BaseTab):
     def __init__(self, main_window, parent=None):
-        super().__init__(main_window, parent)
+        super().__init__(main_window, target_id="chat_dock", parent=parent)
+        self.active_blueprint = None
         self._build_ui()
+        self._load_blueprint()
+        QTimer.singleShot(100, self.safe_load_history) # Inherited from BaseTab
+
+    def _load_blueprint(self):
+        from core.engine.default_blueprints import DefaultBlueprints
+        self.active_blueprint = self.blueprint_manager.get_blueprint(
+            "Chat - Universal Agent", 
+            lambda: DefaultBlueprints.get_universal_chat_blueprint(self.prompt_manager)
+        )
+
+        while self.dynamic_options_layout.count():
+            item = self.dynamic_options_layout.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+
+        self.dynamic_inputs = DynamicInputWidget(self.active_blueprint.expected_inputs, self.theme, self.project_manager)
+        self.dynamic_options_layout.addWidget(self.dynamic_inputs)
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -38,16 +56,13 @@ class ChatTab(BaseTab):
         input_layout.addWidget(self.input_field)
 
         action_layout = QHBoxLayout()
-        
-        self.btn_advanced_rag = QPushButton("🔍 Advanced RAG")
-        self.btn_advanced_rag.setCheckable(True)
-        self.btn_advanced_rag.setToolTip("Performs a multi-pass RAG search for deep context extraction.")
+        self.dynamic_options_layout = QHBoxLayout()
+        action_layout.addLayout(self.dynamic_options_layout)
         
         self.btn_settings = QPushButton("⚙️")
         self.btn_settings.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_settings.clicked.connect(self._show_settings_menu)
         
-        action_layout.addWidget(self.btn_advanced_rag)
         action_layout.addWidget(self.btn_settings)
         action_layout.addStretch()
         
@@ -61,19 +76,15 @@ class ChatTab(BaseTab):
 
     def _show_settings_menu(self):
         menu = QMenu(self)
-        if self.theme:
-            menu.setStyleSheet(f"background-color: {self.theme.get('bg_panel', '#333')}; color: {self.theme.get('text_main', '#fff')};")
+        if self.theme: menu.setStyleSheet(f"background-color: {self.theme.get('bg_panel', '#333')}; color: {self.theme.get('text_main', '#fff')};")
             
-        filter_action = QAction("🎯 Context & Auto-Pilot Settings...", self)
+        filter_action = QAction("🎯 Context & Document Filters...", self)
         filter_action.triggered.connect(self._open_context_filter)
         menu.addAction(filter_action)
-        
         menu.addSeparator()
-            
         clear_action = QAction("🗑️ Clear Chat History", self)
-        clear_action.triggered.connect(lambda: self.main_window.unified_dock.clear_tab_history(self, "chat_dock"))
+        clear_action.triggered.connect(lambda: self.main_window.unified_dock.clear_tab_history(self, self.target_id))
         menu.addAction(clear_action)
-        
         menu.exec(self.btn_settings.mapToGlobal(self.btn_settings.rect().bottomLeft()))
 
     def _open_context_filter(self):
@@ -87,60 +98,40 @@ class ChatTab(BaseTab):
             docs, tags, logic = dlg.get_results()
             pm.set_metadata("active_rag_docs", docs)
             pm.set_metadata("active_rag_tags", tags)
-            
             sys_msg = ChatMessageWidget("System", theme=self.theme, is_user=False)
             sys_msg.append_chunk(f"Context updated. Now targeting **{len(docs)}** documents.")
-            self.add_message_widget(sys_msg)
-
-    def add_message_widget(self, widget):
-        count = self.chat_layout.count()
-        if count > 0:
-            self.chat_layout.insertWidget(count - 1, widget)
-        else:
-            self.chat_layout.addWidget(widget)
+            self.receive_ai_widget(sys_msg)
 
     def _send_message(self):
         text = self.input_field.toPlainText().strip()
-        if not text: return
+        if not text or not self.active_blueprint: return
         self.input_field.clear()
 
         pm = self.project_manager
-        if pm:
-            pm.save_chat_message("chat_dock", "user", text, "text")
+        if pm: pm.save_chat_message(self.target_id, "user", text, "text")
 
         user_msg = ChatMessageWidget("You", theme=self.theme, is_user=True)
         user_msg.append_chunk(text)
-        self.add_message_widget(user_msg)
+        self.receive_ai_widget(user_msg)
 
-        global_settings = {}
+        dynamic_state = self.dynamic_inputs.get_values()
+        history_str = ""
+        
         if pm:
-            try:
-                global_settings = json.loads(pm.get_metadata("global_ai_settings", "{}"))
-            except: pass
-
-        output_workspace = global_settings.get("output_workspace", False)
-
-        selected_model = "llama3"
-        if hasattr(self.main_window, 'unified_dock') and hasattr(self.main_window.unified_dock, 'model_combo'):
-            selected_model = self.main_window.unified_dock.model_combo.currentText()
-        
-        from core.engine.default_blueprints import DefaultBlueprints
-        
-        if self.btn_advanced_rag.isChecked():
-            bp_key = "Chat - Advanced RAG Agent"
-            default_func = lambda: DefaultBlueprints.get_chat_blueprint(self.prompt_manager, "Advanced RAG Agent Mode")
-        else:
-            bp_key = "Chat - RAG Assistant"
-            default_func = lambda: DefaultBlueprints.get_chat_blueprint(self.prompt_manager, "RAG Assistant Mode")
-
-        blueprint = self.blueprint_manager.get_blueprint(bp_key, default_func)
+            history_data = pm.get_chat_history(self.target_id)
+            for msg in history_data[-6:]:
+                role = "User" if msg["role"] == "user" else "AI"
+                if msg["ui_format"] in ["live_stream", "text"]:
+                    history_str += f"{role}: {msg['content']}\n\n"
 
         initial_state = {
             "user_query": text,
-            "selected_model": selected_model
+            "chat_history": history_str.strip(),
+            "chat_persona": "RAG Agent Mode" if dynamic_state.get("use_advanced_rag") else "General Assistant",
+            **dynamic_state 
         }
 
-        self.send_to_pipeline(blueprint, initial_state, output_workspace=output_workspace)
+        self.send_to_pipeline(self.active_blueprint, initial_state)
 
     def update_theme(self, theme):
         super().update_theme(theme)
@@ -148,7 +139,3 @@ class ChatTab(BaseTab):
         self.input_field.setStyleSheet(f"background-color: transparent; color: {theme.get('text_main', '#fff')}; border: none;")
         self.btn_send.setStyleSheet(f"background-color: {theme.get('accent', '#b366ff')}; font-weight: bold; color: white; border: none; border-radius: 6px;")
         self.btn_settings.setStyleSheet("background: transparent; border: none;")
-        self.btn_advanced_rag.setStyleSheet(f"""
-            QPushButton {{ background-color: {theme.get('bg_panel', '#333')}; border: 1px solid {theme.get('border', '#444')}; padding: 4px 8px; border-radius: 6px; font-weight: bold; color: {theme.get('text_main', '#fff')}; }}
-            QPushButton:checked {{ background-color: {theme.get('accent', '#b366ff')}; color: white; border: none; }}
-        """)

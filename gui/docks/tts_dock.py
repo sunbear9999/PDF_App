@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QTextEdit, QPushButton, QLa
 from PySide6.QtCore import Signal
 
 from core.pdf_utils import extract_filtered_blocks
-from core.text_utils import sanitize_extracted_text
+from core.utils.text_utils import sanitize_extracted_text
 from core.tts_engine import generate_audio
 
 class TTSTab(QWidget):

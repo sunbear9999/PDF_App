@@ -1,399 +1,270 @@
-import json
+# gui/docks/anaylsis_tab.py
 import os
-import fitz
+import json
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, 
-                             QComboBox, QFrame, QScrollArea, QSizePolicy, QTabWidget, QSplitter, QTextEdit)
+                             QComboBox, QFrame, QScrollArea, QTabWidget, QButtonGroup, QStackedWidget, QMessageBox)
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QCursor
 
-from core.engine.action_model import AIActionBlueprint, ActionStep
-from core.engine.master_runner import MasterActionRunner
-from gui.docks.unified_research.components.template_editor import TemplateEditorDialog
-from gui.docks.unified_research.components.chat_streamer import ChatMessageWidget
-from gui.docks.unified_research.components.dynamic_outlines import UniversalOutlineWidget, InteractiveListButton
+from core.utils.doc_parser import DocumentParser
 from gui.docks.unified_research.tabs.base_tab import BaseTab
+from gui.docks.unified_research.components.template_editor import TemplateEditorDialog
 
 class AnalysisTab(BaseTab):
     def __init__(self, main_window, parent=None):
-        super().__init__(main_window, parent)
+        super().__init__(main_window, target_id="analysis_tab", parent=parent)
         self.pm = self.project_manager
-        self.templates = self.pm.get_analysis_templates()
+        self._save_counter = 0  # Strict counter for DB saves
         self._build_ui()
+        QTimer.singleShot(100, self._refresh_selectors)
+
+    # --- BULLETPROOF DB EXTRACTORS ---
+    def _parse_db_row(self, row):
+        """Guarantees extraction of chunk_index and json_data regardless of SQLite row format."""
+        c_idx, j_data = 0, "{}"
+        if hasattr(row, 'keys'): 
+            c_idx = row['chunk_index']
+            j_data = row['json_data']
+        elif isinstance(row, dict):
+            c_idx = row.get('chunk_index', 0)
+            j_data = row.get('json_data', '{}')
+        else: # Ultimate Tuple Fallback
+            for val in row:
+                if isinstance(val, int) and val < 1000: c_idx = val
+            for val in reversed(row):
+                if isinstance(val, str) and (val.strip().startswith('{') or val.strip().startswith('[')):
+                    j_data = val
+                    break
+        return c_idx, j_data
+
+    def _get_safe_template_id(self, template):
+        """Prevents crash if the template dropdown returns a raw string/tuple instead of a dict."""
+        if not template: return None
+        if hasattr(template, 'keys'): return template.get('id')
+        if isinstance(template, dict): return template.get('id')
+        if isinstance(template, tuple) and len(template) > 0: return template[0]
+        return str(template)
+
+    def _mathematical_merge(self, analyses):
+        """Deterministically merges JSON chunks, mathematically stripping identical data."""
+        if not analyses: return "{}"
+        master_dict = {}
+        
+        for row in analyses:
+            c_idx, j_data = self._parse_db_row(row)
+            try:
+                from core.utils.json_utils import extract_and_heal_json
+                success, parsed = extract_and_heal_json(j_data)
+                if not success: continue
+                
+                items_to_process = parsed if isinstance(parsed, list) else [parsed]
+                
+                for obj in items_to_process:
+                    if not isinstance(obj, dict): continue
+                    
+                    for key, val in obj.items():
+                        if key not in master_dict:
+                            master_dict[key] = []
+                            
+                        # Flatten logic: if val is a list, extend. If scalar, append.
+                        vals_to_add = val if isinstance(val, list) else [val]
+                        
+                        for v in vals_to_add:
+                            # Deduplication Check
+                            if isinstance(v, dict):
+                                v_str = json.dumps(v, sort_keys=True)
+                                if not any(isinstance(existing, dict) and json.dumps(existing, sort_keys=True) == v_str for existing in master_dict[key]):
+                                    master_dict[key].append(v)
+                            else:
+                                if v not in master_dict[key]:
+                                    master_dict[key].append(v)
+            except Exception as e:
+                print(f"[Merge Error] {e}")
+                
+        return json.dumps(master_dict)
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         
         self.tabs = QTabWidget()
-        self.tabs.setStyleSheet(f"QTabWidget::pane {{ border: 1px solid {self.theme.get('border', '#444')}; background-color: transparent; }} QTabBar::tab {{ background: {self.theme.get('bg_panel', '#333')}; color: white; padding: 8px 16px; border-top-left-radius: 4px; border-top-right-radius: 4px; margin-right: 2px; }} QTabBar::tab:selected {{ background: {self.theme.get('accent', '#b366ff')}; }}")
-        
-        self.doc_tab = QWidget()
-        self._build_doc_tab(self.doc_tab)
-        self.tabs.addTab(self.doc_tab, "📄 Document Analysis")
-        
-        self.compare_tab = QWidget()
-        self._build_compare_tab(self.compare_tab)
-        self.tabs.addTab(self.compare_tab, "⚖️ Compare Outlines")
-        
         layout.addWidget(self.tabs)
-        
-        self._populate_docs()
-        self._populate_templates()
-        
-        self.update_theme(self.theme)
 
-    def _build_doc_tab(self, parent_widget):
-        layout = QVBoxLayout(parent_widget)
-        
-        ctrl_layout = QHBoxLayout()
+        # TAB 1: RUN ANALYSIS
+        tab_run = QWidget()
+        run_layout = QVBoxLayout(tab_run)
+        run_layout.setContentsMargins(8, 8, 8, 8)
+
+        opts_layout = QHBoxLayout()
+        opts_layout.addWidget(QLabel("<b>Document:</b>"))
         self.doc_selector = QComboBox()
-        self.doc_selector.currentIndexChanged.connect(self._load_existing_analysis)
-        ctrl_layout.addWidget(QLabel("<b>Doc:</b>"))
-        ctrl_layout.addWidget(self.doc_selector, 1)
+        opts_layout.addWidget(self.doc_selector, 1)
 
+        opts_layout.addWidget(QLabel("<b>Template:</b>"))
         self.combo_templates = QComboBox()
-        self.combo_templates.currentIndexChanged.connect(self._load_existing_analysis)
-        ctrl_layout.addWidget(QLabel("<b>Mode:</b>"))
-        ctrl_layout.addWidget(self.combo_templates, 1)
+        opts_layout.addWidget(self.combo_templates, 1)
 
-        self.btn_edit = QPushButton("⚙️ Edit Templates")
-        self.btn_edit.clicked.connect(self._open_editor)
-        ctrl_layout.addWidget(self.btn_edit)
-        layout.addLayout(ctrl_layout)
+        self.btn_edit = QPushButton("✏️ Edit")
+        self.btn_edit.clicked.connect(self._open_template_editor)
+        opts_layout.addWidget(self.btn_edit)
 
-        act_layout = QHBoxLayout()
-        self.btn_run = QPushButton("🚀 Run Document Analysis")
-        self.btn_run.setFixedHeight(35)
+        self.btn_run = QPushButton("▶ Run Analysis")
         self.btn_run.clicked.connect(self._trigger_analysis)
-        
-        self.btn_view_sections = QPushButton("📑 Section-by-Section")
-        self.btn_view_sections.setCheckable(True)
-        self.btn_view_sections.setChecked(True)
-        
-        self.btn_view_master = QPushButton("👑 Master Outline")
-        self.btn_view_master.setCheckable(True)
-        
-        self.view_group = [self.btn_view_sections, self.btn_view_master]
-        for btn in self.view_group: btn.clicked.connect(lambda _, b=btn: self._sync_view_toggle(b))
-        
-        act_layout.addWidget(self.btn_run)
-        act_layout.addStretch()
-        act_layout.addWidget(self.btn_view_sections)
-        act_layout.addWidget(self.btn_view_master)
-        layout.addLayout(act_layout)
+        opts_layout.addWidget(self.btn_run)
+        run_layout.addLayout(opts_layout)
 
         self.status_lbl = QLabel("")
-        layout.addWidget(self.status_lbl)
+        run_layout.addWidget(self.status_lbl)
 
-        self.scroll_area = QScrollArea()
-        self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        self.results_container = QWidget()
-        self.results_layout = QVBoxLayout(self.results_container)
-        self.results_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.scroll_area.setWidget(self.results_container)
-        layout.addWidget(self.scroll_area, 1)
+        self.run_scroll, self.results_layout = self._create_scroll_area()
+        run_layout.addWidget(self.run_scroll, 1)
 
-    def _sync_view_toggle(self, active_btn):
-        for btn in self.view_group: btn.setChecked(btn == active_btn)
-        self._load_existing_analysis() 
+        self.tabs.addTab(tab_run, "🔬 Run Analysis")
 
-    def _build_compare_tab(self, parent_widget):
-        layout = QVBoxLayout(parent_widget)
+        # TAB 2: ADVANCED SYNTHESIS & REVIEW
+        tab_adv = QWidget()
+        adv_layout = QVBoxLayout(tab_adv)
+        adv_layout.setContentsMargins(8, 8, 8, 8)
+
+        mode_layout = QHBoxLayout()
+        self.btn_view_sections = QPushButton("📑 Sections")
+        self.btn_view_master = QPushButton("📚 Master Outline")
+        self.btn_compare = QPushButton("⚖️ Compare Outlines")
         
-        sel_layout = QHBoxLayout()
-        self.cmp_doc_a = QComboBox()
-        self.cmp_doc_b = QComboBox()
+        self.mode_group = QButtonGroup(self)
+        for i, btn in enumerate([self.btn_view_sections, self.btn_view_master, self.btn_compare]):
+            btn.setCheckable(True)
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            self.mode_group.addButton(btn, i)
+            mode_layout.addWidget(btn)
+        
+        self.btn_view_sections.setChecked(True)
+        self.mode_group.idClicked.connect(lambda idx: self.mode_stack.setCurrentIndex(idx))
+        adv_layout.addLayout(mode_layout)
+
+        self.mode_stack = QStackedWidget()
+        
+        # Stack 0: Section Viewer
+        view_sec = QWidget()
+        sec_layout = QVBoxLayout(view_sec)
+        sec_layout.setContentsMargins(0, 8, 0, 0)
+        
+        sec_opts = QHBoxLayout()
+        self.cmp_doc = QComboBox()
         self.cmp_template = QComboBox()
-        
-        sel_layout.addWidget(QLabel("<b>Doc A:</b>"))
-        sel_layout.addWidget(self.cmp_doc_a, 1)
-        sel_layout.addWidget(QLabel("<b>Doc B:</b>"))
-        sel_layout.addWidget(self.cmp_doc_b, 1)
-        sel_layout.addWidget(QLabel("<b>Template:</b>"))
-        sel_layout.addWidget(self.cmp_template, 1)
-        
-        btn_load_cmp = QPushButton("Load Outlines")
-        btn_load_cmp.clicked.connect(self._load_comparison)
-        sel_layout.addWidget(btn_load_cmp)
-        layout.addLayout(sel_layout)
-        
-        self.cmp_splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.cmp_view_a = QScrollArea()
-        self.cmp_view_a.setWidgetResizable(True)
-        self.cmp_view_a.setMinimumWidth(50) 
-        
-        self.cmp_view_b = QScrollArea()
-        self.cmp_view_b.setWidgetResizable(True)
-        self.cmp_view_b.setMinimumWidth(50) 
-        
-        self.cont_a = QWidget(); self.lyt_a = QVBoxLayout(self.cont_a); self.cont_a.setLayout(self.lyt_a); self.lyt_a.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.cont_b = QWidget(); self.lyt_b = QVBoxLayout(self.cont_b); self.cont_b.setLayout(self.lyt_b); self.lyt_b.setAlignment(Qt.AlignmentFlag.AlignTop)
-        
-        self.cmp_view_a.setWidget(self.cont_a)
-        self.cmp_view_b.setWidget(self.cont_b)
-        self.cmp_splitter.addWidget(self.cmp_view_a)
-        self.cmp_splitter.addWidget(self.cmp_view_b)
-        layout.addWidget(self.cmp_splitter, 1)
-        
-        chat_frame = QFrame()
-        chat_frame.setMinimumWidth(50) 
-        chat_lyt = QVBoxLayout(chat_frame)
-        self.cmp_chat_output = QScrollArea()
-        self.cmp_chat_output.setWidgetResizable(True)
-        self.cmp_chat_cont = QWidget()
-        self.cmp_chat_lyt = QVBoxLayout(self.cmp_chat_cont)
-        self.cmp_chat_lyt.setAlignment(Qt.AlignmentFlag.AlignBottom)
-        self.cmp_chat_output.setWidget(self.cmp_chat_cont)
-        
-        input_lyt = QHBoxLayout()
-        self.cmp_input = QTextEdit()
-        self.cmp_input.setMaximumHeight(50)
-        self.cmp_input.setPlaceholderText("Ask the AI to compare these two outlines...")
-        btn_send_cmp = QPushButton("Ask AI")
-        btn_send_cmp.clicked.connect(self._send_compare_chat)
-        
-        input_lyt.addWidget(self.cmp_input)
-        input_lyt.addWidget(btn_send_cmp)
-        
-        chat_lyt.addWidget(self.cmp_chat_output)
-        chat_lyt.addLayout(input_lyt)
-        self.cmp_splitter.addWidget(chat_frame)
-        
-        self.cmp_splitter.setSizes([100, 100, 100])
+        self.cmp_doc.currentIndexChanged.connect(self._load_existing_analysis)
+        self.cmp_template.currentIndexChanged.connect(self._load_existing_analysis)
+        sec_opts.addWidget(self.cmp_doc, 1)
+        sec_opts.addWidget(self.cmp_template, 1)
+        sec_layout.addLayout(sec_opts)
 
-    def _populate_docs(self):
-        self.doc_selector.clear()
-        self.cmp_doc_a.clear()
-        self.cmp_doc_b.clear()
-        for pdf in self.pm.pdfs:
-            base = os.path.basename(pdf)
-            self.doc_selector.addItem(base, pdf)
-            self.cmp_doc_a.addItem(base, pdf)
-            self.cmp_doc_b.addItem(base, pdf)
+        self.saved_scroll, self.saved_layout = self._create_scroll_area()
+        sec_layout.addWidget(self.saved_scroll, 1)
+        self.mode_stack.addWidget(view_sec)
 
-    def _populate_templates(self):
-        self.combo_templates.clear()
-        self.cmp_template.clear()
-        self.templates = self.pm.get_analysis_templates()
-        for t in self.templates:
-            self.combo_templates.addItem(t.get("title", "Unnamed Mode"), t)
-            self.cmp_template.addItem(t.get("title", "Unnamed Mode"), t)
-            
-    def refresh_project_ui(self):
-        curr_doc = self.doc_selector.currentData()
-        curr_a = self.cmp_doc_a.currentData()
-        curr_b = self.cmp_doc_b.currentData()
+        # Stack 1: Master Outline
+        view_master = QWidget()
+        master_layout = QVBoxLayout(view_master)
+        master_layout.setContentsMargins(0, 8, 0, 0)
         
-        self.doc_selector.blockSignals(True)
-        self.cmp_doc_a.blockSignals(True)
-        self.cmp_doc_b.blockSignals(True)
+        master_opts = QHBoxLayout()
+        master_opts.addWidget(QLabel("<i>Uses the document selected in 'Sections' tab.</i>"))
+        master_opts.addStretch()
+        self.btn_gen_master = QPushButton("✨ Generate Master Outline")
+        self.btn_gen_master.clicked.connect(self._trigger_master_outline)
+        master_opts.addWidget(self.btn_gen_master)
+        master_layout.addLayout(master_opts)
         
-        self._populate_docs()
-        
-        if curr_doc: self.doc_selector.setCurrentIndex(max(0, self.doc_selector.findData(curr_doc)))
-        if curr_a: self.cmp_doc_a.setCurrentIndex(max(0, self.cmp_doc_a.findData(curr_a)))
-        if curr_b: self.cmp_doc_b.setCurrentIndex(max(0, self.cmp_doc_b.findData(curr_b)))
-        
-        self.doc_selector.blockSignals(False)
-        self.cmp_doc_a.blockSignals(False)
-        self.cmp_doc_b.blockSignals(False)
+        self.master_scroll, self.master_layout = self._create_scroll_area()
+        master_layout.addWidget(self.master_scroll, 1)
+        self.mode_stack.addWidget(view_master)
 
-    def _open_editor(self):
-        dlg = TemplateEditorDialog(self.pm, self.theme, self)
-        if dlg.exec(): self._populate_templates()
+        # Stack 2: Compare Outlines
+        view_comp = QWidget()
+        comp_layout = QVBoxLayout(view_comp)
+        comp_layout.setContentsMargins(0, 8, 0, 0)
+        
+        comp_opts = QHBoxLayout()
+        self.comp_doc1 = QComboBox()
+        self.comp_doc2 = QComboBox()
+        comp_opts.addWidget(self.comp_doc1, 1)
+        comp_opts.addWidget(QLabel("<b>vs</b>"))
+        comp_opts.addWidget(self.comp_doc2, 1)
+        
+        self.btn_gen_comp = QPushButton("⚖️ AI Comparison")
+        self.btn_gen_comp.clicked.connect(self._trigger_comparison)
+        comp_opts.addWidget(self.btn_gen_comp)
+        comp_layout.addLayout(comp_opts)
+        
+        self.comp_scroll, self.compare_layout = self._create_scroll_area()
+        comp_layout.addWidget(self.comp_scroll, 1)
+        self.mode_stack.addWidget(view_comp)
 
-    def _clear_results(self, layout):
-        while layout.count():
+        adv_layout.addWidget(self.mode_stack, 1)
+        self.tabs.addTab(tab_adv, "📂 Review & Synthesize")
+
+    def _create_scroll_area(self):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addStretch()
+        scroll.setWidget(container)
+        return scroll, layout
+
+    def _clear_layout(self, layout):
+        while layout.count() > 1:
             item = layout.takeAt(0)
             if item.widget(): item.widget().deleteLater()
 
-    def _build_master_outline_dict(self, records):
-        master_data = {}
-        import re
-        for rec in records:
-            try:
-                clean_str = rec["json_data"]
-                clean_str = re.sub(r'^```json', '', clean_str, flags=re.MULTILINE)
-                clean_str = re.sub(r'^```', '', clean_str, flags=re.MULTILINE).strip()
-                
-                try: 
-                    data = json.loads(clean_str, strict=False)
-                except:
-                    clean_str = re.sub(r',\s*\}', '}', clean_str)
-                    clean_str = re.sub(r',\s*\]', ']', clean_str)
-                    try: 
-                        data = json.loads(clean_str, strict=False)
-                    except:
-                        try: data = json.loads(clean_str + "}", strict=False)
-                        except: data = json.loads(clean_str + "]}", strict=False)
+    def _refresh_selectors(self):
+        if not self.pm: return
+        for cb in [self.doc_selector, self.cmp_doc, self.comp_doc1, self.comp_doc2, self.combo_templates, self.cmp_template]:
+            cb.blockSignals(True)
+            cb.clear()
 
-                page_ref = rec.get("page_range", f"Part {rec.get('chunk_index', 0) + 1}")
-                
-                if not isinstance(data, dict): continue
-                
-                for key, val in data.items():
-                    if not val: continue
-                    if key not in master_data:
-                        master_data[key] = [] if isinstance(val, list) else ""
-                    
-                    if isinstance(val, list):
-                        for item in val:
-                            if isinstance(item, dict):
-                                sig = json.dumps(item, sort_keys=True)
-                                if not any(json.dumps(existing, sort_keys=True) == sig for existing in master_data[key]):
-                                    master_data[key].append(item)
-                            elif isinstance(item, str):
-                                if item not in master_data[key]:
-                                    master_data[key].append(item)
-                    elif isinstance(val, str):
-                        master_data[key] += f"<b>[{page_ref}]</b> {val}<br><br>"
-            except Exception as e: 
-                print(f"Master Outline Error: {e}")
-            
-        return master_data
+        for pdf in self.pm.pdfs:
+            name = os.path.basename(pdf)
+            for cb in [self.doc_selector, self.cmp_doc, self.comp_doc1, self.comp_doc2]:
+                cb.addItem(name, pdf)
 
-    def _load_existing_analysis(self):
-        if self.doc_selector.count() == 0 or self.combo_templates.count() == 0: return
-        self._clear_results(self.results_layout)
-        
-        doc_path = self.doc_selector.currentData()
-        template = self.combo_templates.currentData()
-        records = self.pm.get_document_analyses(doc_path, template['id'])
-        
-        if not records:
-            self.status_lbl.setText("No analysis found. Click 'Run' to generate.")
-            return
-            
-        is_master_mode = self.btn_view_master.isChecked()
-        self.status_lbl.setText(f"Loaded {'Master Outline' if is_master_mode else 'Section View'} ({len(records)} sections found).")
-        
-        from gui.docks.unified_research.components.dynamic_outlines import UniversalOutlineWidget
-        
-        if is_master_mode:
-            master_data = self._build_master_outline_dict(records)
-            viewer = UniversalOutlineWidget("Master Outline", master_data, self.theme, self.main_window.viewer.annot_manager)
-            self.results_layout.addWidget(viewer)
-        else:
-            for rec in records:
-                try:
-                    chunk_idx = rec.get('chunk_index', 0)
-                    page_ref = rec.get('page_range', f"Part {chunk_idx + 1}")
-                    title = f"Section: {page_ref}"
-                    
-                    viewer = UniversalOutlineWidget(title, rec["json_data"], self.theme, self.main_window.viewer.annot_manager, is_expanded=False)
-                    self.results_layout.addWidget(viewer)
-                except Exception as e:
-                    print(f"Error loading section {rec.get('chunk_index', 'Unknown')}: {e}")
+        for t in self.pm.get_analysis_templates():
+            if isinstance(t, tuple) or not hasattr(t, 'get'): continue
+            t_name = t.get('name', t.get('title', 'Unnamed Template'))
+            t_id = t.get('id', 'unknown')
+            self.combo_templates.addItem(t_name, t)
+            self.cmp_template.addItem(t_name, t_id)
 
-    def _load_comparison(self):
-        self._clear_results(self.lyt_a)
-        self._clear_results(self.lyt_b)
-        
-        path_a = self.cmp_doc_a.currentData()
-        path_b = self.cmp_doc_b.currentData()
-        tmpl = self.cmp_template.currentData()
-        
-        if not path_a or not path_b or not tmpl: return
-        
-        recs_a = self.pm.get_document_analyses(path_a, tmpl['id'])
-        recs_b = self.pm.get_document_analyses(path_b, tmpl['id'])
-        
-        master_a = self._build_master_outline_dict(recs_a)
-        master_b = self._build_master_outline_dict(recs_b)
-        
-        # Note: InteractiveAnalysisViewer would need to be imported or refactored into UniversalOutlineWidget based on your previous component code!
-        self.lyt_a.addWidget(UniversalOutlineWidget("Outline A", master_a, self.theme, self.main_window.viewer.annot_manager))
-        self.lyt_b.addWidget(UniversalOutlineWidget("Outline B", master_b, self.theme, self.main_window.viewer.annot_manager))
-        
-        self.current_cmp_data_a = json.dumps(master_a, indent=2)
-        self.current_cmp_data_b = json.dumps(master_b, indent=2)
+        for cb in [self.doc_selector, self.cmp_doc, self.comp_doc1, self.comp_doc2, self.combo_templates, self.cmp_template]:
+            cb.blockSignals(False)
 
-    def _send_compare_chat(self):
-        text = self.cmp_input.toPlainText().strip()
-        if not text or not hasattr(self, 'current_cmp_data_a'): return
-        self.cmp_input.clear()
-        
-        user_msg = ChatMessageWidget("You", theme=self.theme, is_user=True)
-        user_msg.append_chunk(text)
-        self.cmp_chat_lyt.addWidget(user_msg)
-        
-        ai_msg = ChatMessageWidget("Comparison Agent", theme=self.theme)
-        self.cmp_chat_lyt.addWidget(ai_msg)
-        QTimer.singleShot(50, lambda: self.cmp_chat_output.verticalScrollBar().setValue(self.cmp_chat_output.verticalScrollBar().maximum()))
-        
-        # --- FIXED: Route through Default Blueprints ---
-        from core.engine.default_blueprints import DefaultBlueprints
-        bp = DefaultBlueprints.get_compare_outlines_blueprint(self.pm)
-        
-        state = {
-            "user_query": text, 
-            "doc_a": self.current_cmp_data_a, 
-            "doc_b": self.current_cmp_data_b
-        }
-        
-        self.cmp_runner = MasterActionRunner(self.main_window, bp, state)
-        self.cmp_runner.progress_update.connect(ai_msg.append_chunk)
-        self.cmp_runner.start()
+        self._load_existing_analysis()
 
-    def save_chunk_to_db(self, state, json_str):
-        item = state.get('item')
-        if not item and hasattr(self, '_active_chunks'):
-            if getattr(self, '_chunk_save_idx', 0) < len(self._active_chunks):
-                item = self._active_chunks[self._chunk_save_idx]
-                
-        if not item: 
-            return
-            
-        try:
-            self.pm.save_document_analysis(
-                item.get('doc_path'), 
-                item.get('template_id'), 
-                item.get('chunk_index'), 
-                json_str
-            )
-            self.status_lbl.setText(f"✅ Analyzed Section: {item.get('page_range')}")
-            
-            if hasattr(self, '_chunk_save_idx'):
-                self._chunk_save_idx += 1
-                
-            is_final_chunk = hasattr(self, '_active_chunks') and self._chunk_save_idx >= len(self._active_chunks)
-            
-            if self.btn_view_master.isChecked() or is_final_chunk:
-                QTimer.singleShot(200, self._load_existing_analysis)
-                
-        except Exception as e:
-            print(f"Failed to save chunk to DB: {e}")
+    def _open_template_editor(self):
+        dlg = TemplateEditorDialog(self.pm, self.theme, self)
+        if dlg.exec():
+            self._refresh_selectors()
 
     def _trigger_analysis(self):
         doc_path = self.doc_selector.currentData()
         template = self.combo_templates.currentData()
-        
         if not doc_path or not template: return
         
-        doc = fitz.open(doc_path)
-        chunks = []
-        
-        for i in range(0, doc.page_count, 4):
-            chunk_text = ""
-            for j in range(i, min(i+4, doc.page_count)):
-                chunk_text += f"\n--- Page {j+1} ---\n" + doc.load_page(j).get_text()
-            
-            chunks.append({
-                "doc_path": doc_path,
-                "template_id": template['id'],
-                "template_instructions": template.get('instructions', ''),
-                "template_schema": template.get('schema', '{}'),
-                "chunk_index": i // 4,
-                "page_range": f"{i+1}-{min(i+4, doc.page_count)}",
-                "text": chunk_text
-            })
-            
-        self.pm.clear_document_analyses(doc_path, template['id'])
+        template_id = self._get_safe_template_id(template)
+        self._clear_layout(self.results_layout)
         self.status_lbl.setText("⏳ Processing Document...")
+        self.btn_run.setEnabled(False)
+        self._save_counter = 0  # FIX: Reset the strict save index
 
-        self._active_chunks = chunks.copy()
-        self._chunk_save_idx = 0
+        chunks = DocumentParser.chunk_document_for_analysis(doc_path, template_id, template.get('instructions', ''), template.get('schema', '{}'))
+        if not chunks:
+            self.status_lbl.setText("❌ Failed to parse document.")
+            self.btn_run.setEnabled(True)
+            return
+
+        self.pm.clear_document_analyses(doc_path, template_id)
 
         from core.engine.default_blueprints import DefaultBlueprints
         blueprint = DefaultBlueprints.get_analysis_blueprint(self.prompt_manager, chunks)
@@ -402,36 +273,132 @@ class AnalysisTab(BaseTab):
         dock = self.main_window.findChild(QDockWidget, "UnifiedResearchDock")
         selected_model = dock.model_combo.currentText() if dock and hasattr(dock, 'model_combo') else ""
         
-        state_dict = {"selected_model": selected_model}
+        self.send_to_pipeline(blueprint, {"selected_model": selected_model})
+        self.btn_run.setEnabled(True)
+
+    def _trigger_master_outline(self):
+        doc_path = self.cmp_doc.currentData()
+        template_id = self._get_safe_template_id(self.cmp_template.currentData())
+        analyses = self.pm.get_document_analyses(doc_path, template_id)
         
-        self.send_to_pipeline(blueprint, state_dict)
+        if not analyses: 
+            QMessageBox.warning(self, "No Data", "Run an analysis on this document first.")
+            return
+            
+        self._clear_layout(self.master_layout)
+        
+        # INSTANT MATHEMATICAL MERGE
+        merged_json = self._mathematical_merge(analyses)
+        
+        from gui.docks.unified_research.components.dynamic_outlines import UniversalOutlineWidget
+        annot_manager = self.main_window.viewer.annot_manager if hasattr(self.main_window, 'viewer') else None
+        
+        widget = UniversalOutlineWidget("📚 Master Deduplicated Outline", merged_json, self.theme, annot_manager)
+        
+        count = self.master_layout.count()
+        if count > 0: self.master_layout.insertWidget(count - 1, widget)
+        else: self.master_layout.addWidget(widget)
+
+    def _trigger_comparison(self):
+        doc1 = self.comp_doc1.currentData()
+        doc2 = self.comp_doc2.currentData()
+        temp_id = self._get_safe_template_id(self.cmp_template.currentData())
+        
+        an1 = self.pm.get_document_analyses(doc1, temp_id)
+        an2 = self.pm.get_document_analyses(doc2, temp_id)
+        
+        if not an1 or not an2: 
+            QMessageBox.warning(self, "Missing Data", "Both documents must be analyzed with the selected template first.")
+            return
+            
+        ctx1 = json.dumps([self._parse_db_row(r)[1] for r in an1])
+        ctx2 = json.dumps([self._parse_db_row(r)[1] for r in an2])
+        
+        self._clear_layout(self.compare_layout)
+        
+        from core.engine.default_blueprints import DefaultBlueprints
+        bp = DefaultBlueprints.get_compare_outlines_blueprint(self.prompt_manager)
+        for step in bp.steps: step.ui_target = "analysis_tab"
+            
+        self.send_to_pipeline(bp, {"outline_1": ctx1, "outline_2": ctx2})
+
+    def receive_ai_widget(self, widget):
+        is_run_tab = self.tabs.currentIndex() == 0
+        if is_run_tab: target_layout = self.results_layout
+        else:
+            mode = self.mode_group.checkedId()
+            if mode == 0: target_layout = self.saved_layout
+            elif mode == 1: target_layout = self.master_layout
+            else: target_layout = self.compare_layout
+
+        count = target_layout.count()
+        if count > 0: target_layout.insertWidget(count - 1, widget)
+        else: target_layout.addWidget(widget)
+
+        if is_run_tab:
+            from gui.docks.unified_research.components.dynamic_outlines import UniversalOutlineWidget
+            if isinstance(widget, UniversalOutlineWidget):
+                doc_path = self.doc_selector.currentData()
+                template_id = self._get_safe_template_id(self.combo_templates.currentData())
+                
+                if doc_path and template_id:
+                    chunk_idx = self._save_counter
+                    self._save_counter += 1
+                    
+                    try:
+                        # THE FIX: Prefer the exact JSON string injected by the UI router
+                        data_to_save = getattr(widget, '_raw_ai_data', getattr(widget, 'raw_json', '{}'))
+                        self.pm.save_document_analysis(doc_path, template_id, chunk_idx, data_to_save)
+                    except Exception as e:
+                        print(f"[AnalysisTab] Background save failed: {e}")
+
+    def _load_existing_analysis(self):
+        doc_path = self.cmp_doc.currentData()
+        template_id = self._get_safe_template_id(self.cmp_template.currentData())
+        if not doc_path or not template_id: return
+        
+        self._clear_layout(self.saved_layout)
+        analyses = self.pm.get_document_analyses(doc_path, template_id)
+        
+        if not analyses:
+            lbl = QLabel("<i>No saved analysis found for this document and template.</i>")
+            lbl.setStyleSheet(f"color: {self.theme.get('text_muted', '#aaa')};")
+            self.saved_layout.insertWidget(0, lbl)
+            return
+
+        from gui.docks.unified_research.components.dynamic_outlines import UniversalOutlineWidget
+        annot_manager = self.main_window.viewer.annot_manager if hasattr(self.main_window, 'viewer') else None
+        from core.utils.json_utils import extract_and_heal_json
+        
+        for row in analyses:
+            try:
+                c_idx, j_data = self._parse_db_row(row)
+                
+                success, parsed = extract_and_heal_json(j_data)
+                if success and isinstance(parsed, list):
+                    for i, item in enumerate(parsed):
+                        start_page = ((c_idx + i) * 4) + 1
+                        title = f"Section {c_idx + i + 1}: Pages {start_page}-{start_page + 3}"
+                        widget = UniversalOutlineWidget(title, json.dumps(item), self.theme, annot_manager)
+                        self.saved_layout.insertWidget(self.saved_layout.count() - 1, widget)
+                else:
+                    start_page = (c_idx * 4) + 1
+                    title = f"Section {c_idx + 1}: Pages {start_page}-{start_page + 3}"
+                    widget = UniversalOutlineWidget(title, j_data, self.theme, annot_manager)
+                    self.saved_layout.insertWidget(self.saved_layout.count() - 1, widget)
+                    
+            except Exception as e:
+                print(f"[AnalysisTab] Failed to load chunk: {e}")
 
     def update_theme(self, theme):
         super().update_theme(theme)
-        
-        style = f"background-color: {theme.get('bg_input', '#2b2b2b')}; border: 1px solid {theme.get('border', '#444')}; padding: 4px; border-radius: 4px;"
-        self.doc_selector.setStyleSheet(style)
-        self.combo_templates.setStyleSheet(style)
-        self.cmp_doc_a.setStyleSheet(style)
-        self.cmp_doc_b.setStyleSheet(style)
-        self.cmp_template.setStyleSheet(style)
-        self.cmp_input.setStyleSheet(style)
-        
-        self.btn_run.setStyleSheet(f"background-color: {theme.get('accent', '#b366ff')}; font-weight: bold; color: white; border: none; border-radius: 4px;")
-        
-        btn_style = f"background-color: {theme.get('bg_panel', '#333')}; color: {theme.get('text_main', '#fff')}; border: 1px solid {theme.get('border', '#444')}; padding: 4px; border-radius: 4px;"
-        self.btn_edit.setStyleSheet(btn_style)
-        
-        toggle_style = f"""
-            QPushButton {{ background-color: {theme.get('bg_panel', '#333')}; color: {theme.get('text_main', '#fff')}; border: 1px solid {theme.get('border', '#444')}; padding: 8px; font-weight: bold; }}
-            QPushButton:checked {{ background-color: {theme.get('accent', '#b366ff')}; color: white; border: none; }}
-        """
-        self.btn_view_sections.setStyleSheet(toggle_style)
-        self.btn_view_master.setStyleSheet(toggle_style)
-        
-        self.status_lbl.setStyleSheet(f"color: {theme.get('accent', '#b366ff')}; font-weight: bold;")
-        self.scroll_area.setStyleSheet("background: transparent; border: none;")
-        self.cmp_view_a.setStyleSheet("background: transparent; border: none;")
-        self.cmp_view_b.setStyleSheet("background: transparent; border: none;")
-        self.cmp_chat_output.setStyleSheet("background: transparent; border: none;")
-        self.results_container.setStyleSheet("background: transparent;")
+        self.tabs.setStyleSheet(f"QTabWidget::pane {{ border: 1px solid {theme.get('border', '#444')}; background-color: transparent; }} QTabBar::tab {{ background: {theme.get('bg_panel', '#333')}; color: {theme.get('text_muted', '#aaa')}; padding: 8px 16px; border: 1px solid {theme.get('border', '#444')}; border-bottom: none; border-top-left-radius: 4px; border-top-right-radius: 4px; }} QTabBar::tab:selected {{ background: {theme.get('bg_input', '#2b2b2b')}; color: {theme.get('text_main', '#fff')}; font-weight: bold; border-top: 2px solid {theme.get('accent', '#b366ff')}; }}")
+        style = f"background-color: {theme.get('bg_input', '#2b2b2b')}; color: {theme.get('text_main', '#fff')}; border: 1px solid {theme.get('border', '#444')}; border-radius: 4px; padding: 4px;"
+        for cb in [self.doc_selector, self.combo_templates, self.cmp_doc, self.cmp_template, self.comp_doc1, self.comp_doc2]: cb.setStyleSheet(style)
+        self.btn_run.setStyleSheet(f"background-color: {theme.get('accent', '#b366ff')}; font-weight: bold; color: white; border: none; border-radius: 4px; padding: 6px 12px;")
+        btn_style = f"background-color: {theme.get('bg_panel', '#333')}; color: {theme.get('text_main', '#fff')}; border: 1px solid {theme.get('border', '#444')}; padding: 4px 8px; border-radius: 4px;"
+        for btn in [self.btn_edit, self.btn_gen_master, self.btn_gen_comp]: btn.setStyleSheet(btn_style)
+        toggle_style = f"QPushButton {{ background-color: {theme.get('bg_panel', '#333')}; color: {theme.get('text_main', '#fff')}; border: 1px solid {theme.get('border', '#444')}; padding: 6px; font-weight: bold; border-radius: 4px; }} QPushButton:checked {{ background-color: {theme.get('accent', '#b366ff')}; color: white; border: none; }}"
+        for btn in [self.btn_view_sections, self.btn_view_master, self.btn_compare]: btn.setStyleSheet(toggle_style)
+        if hasattr(self, 'status_lbl'): self.status_lbl.setStyleSheet(f"color: {theme.get('accent', '#b366ff')}; font-weight: bold;")
+        for scroll in [self.run_scroll, self.saved_scroll, self.master_scroll, self.comp_scroll]: scroll.setStyleSheet("background: transparent; border: none;")
