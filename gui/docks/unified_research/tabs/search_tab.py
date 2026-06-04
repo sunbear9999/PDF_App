@@ -3,14 +3,14 @@ import os
 import json
 import math
 import re
-import webbrowser
+import urllib.parse
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QTextEdit,
                              QPushButton, QLabel, QCheckBox, QScrollArea, QFrame, QInputDialog, QComboBox)
 from PySide6.QtCore import Qt, QThread, Signal, QUrl
 from PySide6.QtGui import QCursor, QDesktopServices
 
 from core.engine.action_model import AIActionBlueprint, ActionStep
-
+from gui.docks.unified_research.tabs.base_tab import BaseTab
 
 class CitationWidget(QFrame):
     jump_requested = Signal(str, str)
@@ -35,37 +35,49 @@ class CitationWidget(QFrame):
         layout.addWidget(self.btn_jump)
 
 class TermWidget(QFrame):
-    open_jstor = Signal(str)
-    open_scholar = Signal(str)
-    open_custom = Signal(str)
+    open_url = Signal(str, str) 
     def __init__(self, term, reason, theme, parent=None):
         super().__init__(parent)
         self.term = term
         bg_color = theme.get('bg_input', '#2b2b2b')
         border_color = theme.get('border', '#444')
         self.setStyleSheet(f"TermWidget {{ background-color: {bg_color}; border: 1px solid {border_color}; border-radius: 6px; margin-bottom: 8px; }}")
+        
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
+        
         lbl_term = QLabel(f"<b>{term}</b>")
         lbl_term.setStyleSheet("font-size: 14px;")
         lbl_term.setWordWrap(True)
         layout.addWidget(lbl_term)
+        
         lbl_reason = QLabel(f"<i>{reason}</i>")
         lbl_reason.setStyleSheet(f"color: {theme.get('text_muted', '#aaa')};")
         lbl_reason.setWordWrap(True)
         layout.addWidget(lbl_reason)
+        
         btn_layout = QHBoxLayout()
         self.btn_jstor = QPushButton("🏛️ JSTOR")
         self.btn_scholar = QPushButton("🎓 Scholar")
+        self.btn_reddit = QPushButton("👾 Reddit")
+        self.btn_news = QPushButton("📰 News")
         self.btn_custom = QPushButton("🔗 Custom")
-        for btn in [self.btn_jstor, self.btn_scholar, self.btn_custom]:
+        
+        buttons = [
+            (self.btn_jstor, "jstor"),
+            (self.btn_scholar, "scholar"),
+            (self.btn_reddit, "reddit"),
+            (self.btn_news, "news"),
+            (self.btn_custom, "custom")
+        ]
+        
+        for btn, engine in buttons:
             btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             btn.setStyleSheet(f"background-color: {theme.get('bg_panel', '#333')}; border: 1px solid {border_color}; padding: 4px; border-radius: 4px;")
             btn_layout.addWidget(btn)
+            btn.clicked.connect(lambda checked=False, e=engine: self.open_url.emit(e, self.term))
+            
         layout.addLayout(btn_layout)
-        self.btn_jstor.clicked.connect(lambda: self.open_jstor.emit(self.term))
-        self.btn_scholar.clicked.connect(lambda: self.open_scholar.emit(self.term))
-        self.btn_custom.clicked.connect(lambda: self.open_custom.emit(self.term))
 
 class MathCitationWorker(QThread):
     citation_received = Signal(str, str, float)
@@ -131,11 +143,9 @@ class MathCitationWorker(QThread):
         except Exception: pass
         self.finished_extraction.emit()
 
-class SearchTab(QWidget):
+class SearchTab(BaseTab):
     def __init__(self, main_window, parent=None):
-        super().__init__(parent)
-        self.main_window = main_window
-        self.theme = self.main_window.theme_manager.get_theme()
+        super().__init__(main_window, parent)
         self._build_ui()
 
     def _build_ui(self):
@@ -154,23 +164,31 @@ class SearchTab(QWidget):
         manual_btn_layout = QHBoxLayout()
         self.btn_man_jstor = QPushButton("🏛️ JSTOR")
         self.btn_man_scholar = QPushButton("🎓 Scholar")
+        self.btn_man_reddit = QPushButton("👾 Reddit")
+        self.btn_man_news = QPushButton("📰 News")
         self.btn_man_custom = QPushButton("🔗 Custom")
-        self.btn_man_google = QPushButton("🌐 Google")
         self.btn_man_rag = QPushButton("📄 RAG Search")
         
-        for btn in [self.btn_man_jstor, self.btn_man_scholar, self.btn_man_custom, self.btn_man_google, self.btn_man_rag]:
+        buttons = [
+            (self.btn_man_jstor, "jstor"),
+            (self.btn_man_scholar, "scholar"),
+            (self.btn_man_reddit, "reddit"),
+            (self.btn_man_news, "news"),
+            (self.btn_man_custom, "custom")
+        ]
+        
+        for btn, engine in buttons:
             btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             manual_btn_layout.addWidget(btn)
+            btn.clicked.connect(lambda checked=False, e=engine: self._execute_external_search(e, self.input_manual.text().strip()))
+
+        self.btn_man_rag.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_man_rag.clicked.connect(lambda: self.main_window.viewer.annot_manager.trigger_similar_context(self.input_manual.text().strip()))
+        manual_btn_layout.addWidget(self.btn_man_rag)
 
         manual_layout.addLayout(manual_btn_layout)
         layout.addLayout(manual_layout)
         
-        self.btn_man_jstor.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(self.model.get_jstor_url(self.input_manual.text().strip()))))
-        self.btn_man_scholar.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(self.model.get_scholar_url(self.input_manual.text().strip()))))
-        self.btn_man_custom.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(self.model.get_custom_url(self.input_manual.text().strip()))))
-        self.btn_man_google.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(self.model.get_google_url(self.input_manual.text().strip()))))
-        self.btn_man_rag.clicked.connect(lambda: self.main_window.viewer.annot_manager.trigger_similar_context(self.input_manual.text().strip()))
-
         self.sep = QFrame()
         self.sep.setFrameShape(QFrame.Shape.HLine)
         self.sep.setFixedHeight(1)
@@ -222,11 +240,32 @@ class SearchTab(QWidget):
         self.status_lbl.setStyleSheet(f"font-weight: bold; color: {self.theme.get('accent', '#b366ff')};")
         layout.addWidget(self.status_lbl)
 
+    def _execute_external_search(self, engine, text):
+        if not text: return
+        
+        encoded = urllib.parse.quote_plus(text)
+        url = ""
+        
+        if engine == "jstor":
+            url = f"https://www.jstor.org/action/doBasicSearch?Query={encoded}"
+        elif engine == "scholar":
+            url = f"https://scholar.google.com/scholar?q={encoded}"
+        elif engine == "reddit":
+            url = f"https://www.reddit.com/search/?q={encoded}"
+        elif engine == "news":
+            url = f"https://news.google.com/search?q={encoded}"
+        elif engine == "custom":
+            template = self.project_manager.get_metadata("custom_search_url", "https://en.wikipedia.org/w/index.php?search={term}")
+            url = template.replace("{term}", encoded)
+            
+        if url:
+            QDesktopServices.openUrl(QUrl(url))
+
     def _edit_custom_url(self):
-        current = self.model.get_custom_url_template()
+        current = self.project_manager.get_metadata("custom_search_url", "https://en.wikipedia.org/w/index.php?search={term}")
         new_url, ok = QInputDialog.getText(self, "Edit Custom Database URL", "Use {term} where the search query should go:", text=current)
         if ok and new_url:
-            self.model.set_custom_url_template(new_url)
+            self.project_manager.set_metadata("custom_search_url", new_url)
 
     def _clear_results(self):
         while self.results_layout.count() > 1:
@@ -234,7 +273,6 @@ class SearchTab(QWidget):
             if item.widget(): item.widget().deleteLater()
 
     def render_search_terms(self, terms_list):
-        """Called by ui_router.py to populate the cards safely on the main thread."""
         if isinstance(terms_list, dict):
             for v in terms_list.values():
                 if isinstance(v, list): terms_list = v; break
@@ -251,9 +289,7 @@ class SearchTab(QWidget):
             if not clean_term: continue
                 
             card = TermWidget(clean_term, reason, self.theme)
-            card.open_jstor.connect(lambda text: QDesktopServices.openUrl(QUrl(self.model.get_jstor_url(text))))
-            card.open_scholar.connect(lambda text: QDesktopServices.openUrl(QUrl(self.model.get_scholar_url(text))))
-            card.open_custom.connect(lambda text: QDesktopServices.openUrl(QUrl(self.model.get_custom_url(text))))
+            card.open_url.connect(self._execute_external_search)
             self.results_layout.insertWidget(self.results_layout.count() - 1, card)
             
         self.status_lbl.setText("✅ Generation Complete")
@@ -274,29 +310,26 @@ class SearchTab(QWidget):
         self.status_lbl.setText("⏳ Initializing AI Engine...")
 
         if self.chk_advanced.isChecked():
-            allowed_docs = [os.path.basename(p) for p in self.main_window.project_manager.pdfs]
+            allowed_docs = [os.path.basename(p) for p in self.project_manager.pdfs]
             self.math_worker = MathCitationWorker(self.main_window, goal, allowed_docs, parent=self)
             self.math_worker.citation_received.connect(self._add_citation_card)
             self.math_worker.start()
 
         from core.engine.default_blueprints import DefaultBlueprints
-        blueprint = self.main_window.blueprint_manager.get_blueprint(
+        blueprint = self.blueprint_manager.get_blueprint(
             "Search Terms", 
-            DefaultBlueprints.get_search_terms_blueprint, 
-            model=model
+            lambda: DefaultBlueprints.get_search_terms_blueprint(self.prompt_manager, model=model)
         )
         
-        # FIX 1: Provide all variables needed for custom tools
         state_dict = {
             "goal": goal,
             "selected_model": model 
         }
         
-        self.main_window.execute_ai_blueprint(blueprint, state_dict)
-        # FIX 2: Removed the rogue duplicate self.main_window.execute_ai_blueprint(blueprint, {}) call
+        self.send_to_pipeline(blueprint, state_dict)
 
     def _jump_to_source(self, doc_name, text):
-        pm = self.main_window.project_manager
+        pm = self.project_manager
         target_path = next((p for p in pm.pdfs if doc_name in os.path.basename(p)), None)
         if target_path:
             self.main_window.switch_to_pdf(target_path)
@@ -307,8 +340,7 @@ class SearchTab(QWidget):
             viewer.execute_search(text, "Current Document", False)
 
     def update_theme(self, theme):
-        self.theme = theme
-        self.setStyleSheet(f"background-color: {theme['bg_main']}; color: {theme['text_main']};")
+        super().update_theme(theme)
         
         input_style = f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']}; padding: 4px; border-radius: 4px;"
         self.input_goal.setStyleSheet(input_style)
@@ -321,7 +353,7 @@ class SearchTab(QWidget):
         self.chk_advanced.setStyleSheet("background: transparent; font-weight: bold;")
         
         btn_style = f"background-color: {theme['bg_panel']}; color: {theme['text_main']}; border: 1px solid {theme['border']}; padding: 4px; border-radius: 4px;"
-        for btn in [self.btn_man_jstor, self.btn_man_scholar, self.btn_man_custom, self.btn_man_google, self.btn_man_rag]:
+        for btn in [self.btn_man_jstor, self.btn_man_scholar, self.btn_man_reddit, self.btn_man_news, self.btn_man_custom, self.btn_man_rag]:
             btn.setStyleSheet(btn_style)
             
         self.scroll_area.setStyleSheet("background: transparent; border: none;")

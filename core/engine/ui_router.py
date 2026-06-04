@@ -234,9 +234,19 @@ class BlueprintUIRouter(QObject):
             from gui.docks.unified_research.components.dynamic_data_table import DynamicDataTableWidget
             target_widget = DynamicDataTableWidget(cleaned_str, self.theme)
 
-        elif ui_format == "card_grid" or ui_format == "search_terms":
+        elif ui_format == "card_grid":
             from gui.docks.unified_research.components.dynamic_card_grid import DynamicCardGridWidget
             target_widget = DynamicCardGridWidget(cleaned_str, self.theme)
+
+        elif ui_format == "search_terms":
+            # Route directly to the native Search Tab renderer so it uses your custom buttons
+            tab = next((c for c in self.main_window.findChildren(QWidget) if c.__class__.__name__ == "SearchTab"), None)
+            if tab and hasattr(tab, 'render_search_terms'):
+                try:
+                    tab.render_search_terms(json.loads(cleaned_str))
+                except Exception as e:
+                    print(f"[UI Router] Failed to render search terms: {e}")
+            target_widget = None # Prevent standard dynamic injection
 
         elif ui_format == "chat_widgets":
             try:

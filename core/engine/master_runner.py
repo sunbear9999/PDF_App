@@ -2,7 +2,7 @@
 import traceback
 import json
 import re
-from PySide6.QtCore import QMutex, QThread, QWaitCondition, Signal
+from PySide6.QtCore import QMutex, QThread, QWaitCondition, Signal, Qt
 from core.engine.action_model import AIActionBlueprint, ActionStep
 
 def safe_format(template_str, state_dict):
@@ -48,6 +48,7 @@ class MasterActionRunner(QThread):
     step_started = Signal(str)
     state_snapshot = Signal(str, str)
     user_input_requested = Signal(str, dict) # step_id, input_schema
+    force_db_save = Signal(dict, str)
     def __init__(self, main_window, blueprint: AIActionBlueprint, initial_state: dict):
         super().__init__()
         self.main_window = main_window
@@ -75,21 +76,39 @@ class MasterActionRunner(QThread):
                 global_settings = json.loads(pm.get_metadata("global_ai_settings", "{}"))
                 if global_settings.get("autopilot_enabled", False):
                     self._inject_autopilot()
+                
+                # --- NEW: Inject Analysis Search ---
+                if global_settings.get("search_analyses", False):
+                    self._inject_analysis_search()
+                    
+                # --- NEW: Inject Universal Context & Workspace (Works for ALL tools) ---
+                self._inject_universal_context(global_settings)
+                    
             except Exception as e:
-                print(f"[Master Runner] Failed to inject Auto-Pilot: {e}")
+                print(f"[Master Runner] Failed to inject global settings: {e}")
+        # --- THE FIX PART 2: Connect Signal to the Main Thread Tab ---
+        try:
+            from PySide6.QtWidgets import QDockWidget
+            dock = self.main_window.findChild(QDockWidget, "UnifiedResearchDock")
+            if dock and hasattr(dock, "tab_analysis"):
+                # Use a BlockingQueuedConnection to freeze the background thread 
+                # until the Main Thread fully finishes the SQLite write.
+                self.force_db_save.connect(
+                    dock.tab_analysis.save_chunk_to_db,
+                    Qt.ConnectionType.BlockingQueuedConnection
+                )
+        except Exception as e:
+            print(f"Failed to connect DB save signal: {e}")
     def _inject_autopilot(self):
-        """Dynamically prepends a context planner and router to ANY blueprint."""
-        # Find the primary intent to send to the planner (Chat uses user_query, Search uses goal, Brainstorm uses query)
         intent = self.state.get("user_query") or self.state.get("query") or self.state.get("goal") or "Execute tool"
         self.state["__autopilot_intent__"] = intent
-        
         target = self.blueprint.steps[-1].ui_target if self.blueprint.steps else "floating"
 
         planner_step = ActionStep(
             step_id="sys_autopilot_planner",
             step_type="LLM_QUERY",
-            inputs={"query": "USER INTENT: {__autopilot_intent__}\n\nAnalyze this goal. Decide if answering it requires: 1) Searching document text (RAG). 2) Reading the Project Manifest. 3) Reading the Workspace Map."},
-            system_prompt="You are an autonomous routing agent. Output ONLY a JSON object evaluating context needs.",
+            inputs={"query": self.prompt_manager.get_prompt("Autopilot Planner Query")},
+            system_prompt=self.prompt_manager.get_prompt("Autopilot Planner System"),
             output_schema={"needs_document_search": True, "needs_project_manifest": True, "needs_workspace_graph": False},
             output_key="sys_autopilot_plan",
             ui_format="silent",
@@ -119,11 +138,181 @@ result = "Auto-Pilot Routing Complete"
 
         # Prepend the routing steps
         self.blueprint.steps = [planner_step, router_step] + self.blueprint.steps
+    def _inject_analysis_search(self):
+        intent = self.state.get("user_query") or self.state.get("query") or self.state.get("goal") or "Execute tool"
+        self.state["__analysis_intent__"] = intent
+        pm = getattr(self.main_window, 'project_manager', None)
+        self.state["__db_path__"] = pm.project_filepath if pm else ""
 
+        # Step 1: Raw Python extraction of the SQLite analyses table
+        fetch_script = """
+import sqlite3
+db_path = state.get('__db_path__')
+analyses_text = ""
+if db_path:
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT doc_path, json_data FROM document_analyses")
+        for r in cursor.fetchall():
+            analyses_text += f"Doc: {r[0]}\\n{r[1]}\\n\\n"
+        conn.close()
+    except Exception:
+        pass
+result = analyses_text[:25000] # Cap length to avoid context overflow
+"""
+        fetch_step = ActionStep(
+            step_id="sys_fetch_analyses",
+            step_type="PYTHON_SCRIPT",
+            inputs={"script": fetch_script},
+            output_key="raw_analyses",
+            ui_format="silent",
+            ui_target="floating"
+        )
+
+        # Step 2: Agent summarizes the analyses based on the user intent
+        analyze_step = ActionStep(
+            step_id="sys_search_analyses",
+            step_type="LLM_QUERY",
+            inputs={"query": self.prompt_manager.get_prompt("Analysis Search Query")},
+            system_prompt=self.prompt_manager.get_prompt("Analysis Search System"),
+            output_key="analysis_context",
+            ui_format="silent",
+            ui_target="floating"
+        )
+
+        # Step 3: Enhance the user intent for the embedding RAG search 
+        enhance_script = """
+analysis = state.get('analysis_context', '')
+intent = state.get('__analysis_intent__', '')
+if analysis.strip().lower() in ['none', 'none.', '']:
+    enhanced = intent
+else:
+    # Append a short snippet of the analysis to the raw query to improve vector matches
+    enhanced = f"{intent}. Context: {analysis[:300]}"
+result = enhanced
+"""
+        enhance_step = ActionStep(
+            step_id="sys_enhance_intent",
+            step_type="PYTHON_SCRIPT",
+            inputs={"script": enhance_script},
+            output_key="enhanced_intent",
+            ui_format="silent",
+            ui_target="floating"
+        )
+
+        # Step 4: Dynamically rewrite all Original Blueprint Steps to utilize the new context
+        for step in self.blueprint.steps:
+            if step.step_type == 'LLM_QUERY' and 'query' in step.inputs and isinstance(step.inputs['query'], str):
+                step.inputs['query'] += self.prompt_manager.get_prompt("Context Inject - Analyses")
+            elif step.step_type == 'RAG_SEARCH':
+                if 'queries' in step.inputs:
+                    queries_input = step.inputs['queries']
+                    
+                    # Handle if queries are generated dynamically via string key vs direct list
+                    if isinstance(queries_input, str):
+                        queries_input = queries_input.replace('{user_query}', '{enhanced_intent}')
+                        queries_input = queries_input.replace('{query}', '{enhanced_intent}')
+                        queries_input = queries_input.replace('{goal}', '{enhanced_intent}')
+                        step.inputs['queries'] = queries_input
+                        
+                    elif isinstance(queries_input, list):
+                        new_queries = []
+                        for q in queries_input:
+                            if isinstance(q, str):
+                                q = q.replace('{user_query}', '{enhanced_intent}')
+                                q = q.replace('{query}', '{enhanced_intent}')
+                                q = q.replace('{goal}', '{enhanced_intent}')
+                            new_queries.append(q)
+                        step.inputs['queries'] = new_queries
+
+        # Step 5: Prepend our new setup steps to the execution pipeline
+        self.blueprint.steps = [fetch_step, analyze_step, enhance_step] + self.blueprint.steps
+    def _inject_universal_context(self, global_settings):
+        """Dynamically injects universal context into the pipeline for ANY tool."""
+        pm = getattr(self.main_window, 'project_manager', None)
+        if not pm: return
+        
+        # 1. State First: Check if a custom tool manually passed data
+        manifest_data = self.state.get("project_manifest", "")
+        workspace_data = self.state.get("workspace_data", "")
+        selected_nodes_data = self.state.get("selected_nodes", "")
+
+        # 2. Fallbacks: Fetch dynamically if empty
+        if manifest_data in ["", "{}"] and global_settings.get("include_manifest", True):
+            manifest_data = pm.get_metadata("project_manifest", "{}")
+            
+        if hasattr(self.main_window, 'workspace_view'):
+            # Fetch full workspace ONLY if toggled
+            if workspace_data in ["", "{}"] and (global_settings.get("output_workspace", False) or global_settings.get("autopilot_enabled", False)):
+                try: workspace_data = self.main_window.workspace_view.get_workspace_state_as_json(only_selected=False)
+                except: pass
+                
+            # AUTO-FETCH SELECTED NODES: If you highlighted notes, it grabs them immediately.
+            if selected_nodes_data in ["", "{}", "[]"]:
+                try: 
+                    # Only fetch if there's an actual selection to prevent pulling an empty grid
+                    if self.main_window.workspace_view.scene_obj.selectedItems():
+                        selected_nodes_data = self.main_window.workspace_view.get_workspace_state_as_json(only_selected=True)
+                except: pass
+
+        # 3. Save finalized data back to state
+        self.state["project_manifest"] = manifest_data if manifest_data else "{}"
+        self.state["workspace_data"] = workspace_data if workspace_data else "{}"
+        self.state["selected_nodes"] = selected_nodes_data if selected_nodes_data else "{}"
+        self.state["allow_manifest_updates"] = global_settings.get("allow_manifest_updates", True)
+        
+        def has_nodes(data_str):
+            if not data_str or data_str in ["", "{}", "[]"]: return False
+            if '"nodes":[]' in data_str.replace(" ", "").replace("\n", ""): return False
+            return True
+
+        # 4. Dynamically append context to LLM queries
+        for step in self.blueprint.steps:
+            if step.step_type == 'LLM_QUERY' and 'query' in step.inputs and isinstance(step.inputs['query'], str):
+                query_str = step.inputs['query']
+                appended_context = ""
+                
+                if self.state["project_manifest"] not in ["", "{}"] and "{project_manifest}" not in query_str:
+                    appended_context += f"\n\n--- PROJECT MANIFEST ---\n{self.state['project_manifest']}"
+                    
+                if has_nodes(self.state["workspace_data"]) and "{workspace_data}" not in query_str:
+                    appended_context += f"\n\n--- WORKSPACE GRAPH DATA ---\n{self.state['workspace_data']}"
+                    
+                if has_nodes(self.state["selected_nodes"]) and "{selected_nodes}" not in query_str:
+                    appended_context += f"\n\n--- SELECTED WORKSPACE NODES ---\n{self.state['selected_nodes']}"
+                    
+                step.inputs['query'] = query_str + appended_context
+                
+        # 5. Dynamically append the Graph Builder step if output_workspace is toggled
+        if global_settings.get("output_workspace", False):
+            has_workspace_step = any(getattr(s, 'ui_format', '') == "workspace_graph" for s in self.blueprint.steps)
+            if not has_workspace_step and self.blueprint.steps:
+                from core.engine.default_blueprints import DefaultBlueprints
+                last_llm_step = next((s for s in reversed(self.blueprint.steps) if s.step_type == "LLM_QUERY"), None)
+                if last_llm_step:
+                    graph_step = DefaultBlueprints.get_auto_build_graph_step(source_key=last_llm_step.output_key)
+                    self.blueprint.steps.append(graph_step)
     def run(self):
-        if self.registry:
-            self.job = self.registry.register_job(self.blueprint.name, "Pipeline")
         try:
+            # --- THE FIX: Universal Dynamic Workspace Appending ---
+            if self.state.get("output_workspace") and self.blueprint.steps:
+                # Find the last step that produces an LLM output to use as the source key
+                last_llm_step = next(
+                    (step for step in reversed(self.blueprint.steps) if step.step_type == "LLM_QUERY"), 
+                    None
+                )
+                source_key = last_llm_step.output_key if last_llm_step else "final_answer"
+                
+                # Check if a graph step is already appended to prevent duplicates
+                has_graph_step = any(step.step_id == "auto_build_graph" for step in self.blueprint.steps)
+                
+                if not has_graph_step:
+                    from core.engine.default_blueprints import DefaultBlueprints
+                    graph_step = DefaultBlueprints.get_auto_build_graph_step(source_key=source_key)
+                    # Force a unique step ID for execution tracking
+                    graph_step.step_id = "auto_build_graph" 
+                    self.blueprint.steps.append(graph_step)
             for step in self.blueprint.steps:
                 if self.job and self.job.abort_event.is_set():
                     self.registry.update_job_status(self.job.id, "Aborted by User")
@@ -168,13 +357,24 @@ result = "Auto-Pilot Routing Complete"
         self._pause_mutex.unlock()
     def _resolve_val(self, val, state_dict):
         if isinstance(val, str): 
+            # --- THE FIX: Dynamic Prompt Fetching ---
+            # Resolves {prompt:Prompt Name} exactly when the step runs!
+            if hasattr(self, 'prompt_manager') and self.prompt_manager:
+                import re
+                for match in re.findall(r'\{prompt:(.*?)\}', val):
+                    live_prompt = self.prompt_manager.get_prompt(match)
+                    # Swap the tag for the live prompt (or leave blank if not found)
+                    val = val.replace(f"{{prompt:{match}}}", live_prompt if live_prompt else "")
+
             res = safe_format(val, state_dict)
+            
             # Auto-parse JSON strings safely
             if (res.strip().startswith('[') and res.strip().endswith(']')) or \
                (res.strip().startswith('{') and res.strip().endswith('}')):
                 try: return json.loads(res)
                 except: pass
             return res
+            
         elif isinstance(val, list): 
             return [self._resolve_val(i, state_dict) for i in val]
         elif isinstance(val, dict): 
@@ -317,10 +517,14 @@ result = "Auto-Pilot Routing Complete"
                      
                  sub_state[sub_step.output_key] = output
                  
-                 # --- THE FIX: Emit step complete for the INNER step so it triggers the UI injection ---
                  if not self.job or not self.job.abort_event.is_set():
                      self.step_complete.emit(sub_step.step_id, str(output), sub_state.copy())
-            
+                     
+                     # --- THE FIX: Engine-Level Auto-Save ---
+                     # Bypasses the UI widget's async debounce delay by saving directly to SQLite 
+                     # the exact millisecond the LLM finishes streaming.
+                     if sub_step.ui_target == "analysis_tab" and "item" in sub_state:
+                         self.force_db_save.emit(sub_state.copy(), str(output))
             if self.job and self.job.abort_event.is_set(): break
             final_result = sub_state.get(sub_blueprint.steps[-1].output_key)
             
@@ -336,6 +540,18 @@ result = "Auto-Pilot Routing Complete"
         # Restore the parent step context
         self.current_executing_step = step 
         
+        # --- THE FIX: Engine-Level UI Refresh ---
+        # Force the UI to repaint from the DB safely once the entire loop is done
+        if step.step_id == "process_all_chunks":
+            try:
+                from PySide6.QtCore import QMetaObject, Qt
+                from PySide6.QtWidgets import QDockWidget
+                dock = self.main_window.findChild(QDockWidget, "UnifiedResearchDock")
+                if dock and hasattr(dock, "tab_analysis"):
+                    # Use QueuedConnection to safely jump from the background thread to the Main GUI thread
+                    QMetaObject.invokeMethod(dock.tab_analysis, "_load_existing_analysis", Qt.ConnectionType.QueuedConnection)
+            except Exception: pass
+
         # Bulletproof Deduplication
         deduped_results = []
         seen_quotes = set()
@@ -351,65 +567,60 @@ result = "Auto-Pilot Routing Complete"
         return json.dumps(deduped_results)
 
     def _run_llm(self, step, inputs, resolved_model):
-        # --- UNIVERSAL PROMPT COMPILATION ---
         system_prompt = getattr(step, 'system_prompt', None) or inputs.get('system_prompt', '')
-        if step.prompt_key:
+        
+        # --- 1. CORE PERSONA PROMPT ---
+        if getattr(step, 'prompt_key', None):
             raw_prompt = self.prompt_manager.get_prompt(step.prompt_key)
             if raw_prompt: 
-                # THE FIX: Combine prompts safely so the base persona isn't lost
-                if system_prompt and system_prompt != raw_prompt:
-                    system_prompt = f"{system_prompt}\n\n{safe_format(raw_prompt, inputs)}"
-                else:
-                    system_prompt = safe_format(raw_prompt, inputs)
+                system_prompt = raw_prompt + "\n\n" + system_prompt
 
-        # --- NEW: UNIVERSAL MANIFEST DIRECTIVE INJECTION ---
-        allow_updates = self.state.get("allow_manifest_updates", False)
-        if allow_updates:
-            system_prompt += (
-                "\n\n--- SECONDARY BACKGROUND TASK & TONE ---\n"
-                "TONE DIRECTIVE: Be highly direct, factual, and strictly professional. No conversational filler, greetings, or forced follow-up questions.\n"
-                "MANIFEST UPDATE: You are the active manager of the Project Manifest. If the user proposes a research topic, dynamically organize it into a structured hierarchy.\n"
-                "CRITICAL RULES FOR MANIFEST:\n"
-                "1. AVOID REDUNDANCY: Do NOT create overlapping keys (e.g., having both 'main_goal' and 'current_goal'). Merge them.\n"
-                "2. HIERARCHY: Organize research into clear, actionable keys. Prefer using 'Core Thesis', 'Major Topics' (use nested dictionaries for subtopics), and 'Open Questions'.\n"
-                "3. CONSOLIDATION: If asked to clean up or consolidate, aggressively DELETE redundant keys by setting their values to `null`, and merge their contents into the remaining keys.\n"
-                "To ADD or EDIT a category, provide the key and its new value.\n"
-                "To DELETE a category, set its value exactly to `null`.\n"
-                "To save, append at the VERY END of your text as a raw JSON object wrapped EXACTLY in these tags (No markdown ticks):\n"
-                "<UPDATE_MANIFEST>{\"Core Thesis\": \"...\", \"Major Topics\": {\"Topic A\": [\"Sub 1\"]}, \"obsolete_key\": null}</UPDATE_MANIFEST>"
-            )
-        # --- NEW: UI FORMAT ENFORCER ---
-        format_instructions = {
-            "chat_widgets": "CRITICAL: You are extracting exact citations. Your output must strictly represent verbatim quotes from the source text. Provide the exact 'quote', the 'doc_name', and a brief 'note' explaining its relevance.",
-            "data_table": "CRITICAL: Your output must be a uniform array of flat JSON objects suitable for a spreadsheet. Do not nest arrays or objects within the rows. Keep keys consistent across all objects.",
-            "card_grid": "CRITICAL: Your output must be an array of objects. Make the first key a concise 'title' for the card, followed by relevant summary keys."
-        }
+        # --- 2. DECLARATIVE CONTEXT INJECTION ---
+        # Only inject the global system state if the blueprint explicitly asked for it
+        req_context = getattr(step, 'required_context', [])
         
-        if getattr(step, 'ui_format', '') in format_instructions:
-            system_prompt += f"\n\n{format_instructions[step.ui_format]}"
+        if "manifest" in req_context:
+            if self.state.get("allow_manifest_updates", False):
+                system_prompt += "\n\n" + self.prompt_manager.get_prompt("Manifest Update Directive")
+            system_prompt += "\n\n" + self.prompt_manager.get_prompt("Context Inject - Manifest")
+            
+        if "workspace" in req_context:
+            system_prompt += "\n\n" + self.prompt_manager.get_prompt("Context Inject - Workspace")
+            
+        if "selected_nodes" in req_context:
+            system_prompt += "\n\n" + self.prompt_manager.get_prompt("Context Inject - Selected")
+            
+        if "analyses" in req_context:
+            system_prompt += "\n\n" + self.prompt_manager.get_prompt("Context Inject - Analyses")
 
+        # --- 3. UI FORMAT ENFORCERS ---
+        ui_format = getattr(step, 'ui_format', '')
+        if ui_format == "chat_widgets":
+            system_prompt += "\n\n" + self.prompt_manager.get_prompt("Format Enforcer - Chat Widgets")
+        elif ui_format == "data_table":
+            system_prompt += "\n\n" + self.prompt_manager.get_prompt("Format Enforcer - Data Table")
+        elif ui_format == "card_grid":
+            system_prompt += "\n\n" + self.prompt_manager.get_prompt("Format Enforcer - Card Grid")
+
+        # --- 4. RESOLVE VARIABLES IN SYSTEM PROMPT ---
+        # Because we just dynamically stacked the templates, we must resolve any tags (like {project_manifest}) now.
+        system_prompt = self._resolve_val(system_prompt, self.state)
+
+        # --- 5. JSON CONFIGURATION ---
         options = {"temperature": 0.7, "num_predict": 2048, "json_mode": False}
-        options.update(step.llm_options)
+        options.update(getattr(step, 'llm_options', {}))
         if options["num_predict"] <= 0: options["num_predict"] = 2048
         
-        if step.output_schema:
+        import json
+        if getattr(step, 'output_schema', None):
             options["json_mode"] = True
-            import json
             schema_str = json.dumps(step.output_schema, indent=2)
-            system_prompt += f"""\n\nCRITICAL SYSTEM INSTRUCTION:
-You MUST output your response in valid JSON matching the exact schema below. 
-First, use the 'thoughts' key to reason through the problem. 
-Then, provide your final answer in the 'final_output' key matching the requested schema.
-
-EXPECTED JSON SCHEMA:
-{{
-  "thoughts": "Your step-by-step reasoning process here.",
-  "final_output": {schema_str}
-}}"""
+            json_enforcer = self.prompt_manager.get_prompt("JSON Schema Enforcer")
+            system_prompt += "\n\n" + json_enforcer.replace("{schema_str}", schema_str)
         elif options.get("json_mode") and "JSON" not in system_prompt:
              system_prompt += "\n\nCRITICAL: Output ONLY valid JSON. No markdown blocks, no explanations."
 
-        # --- RESTORED: The actual LLM query logic ---
+        # --- 6. EXECUTE QUERY ---
         raw_result = self.llm_manager.query(
             question=inputs.get('query', ''), 
             selected_model=resolved_model,
@@ -423,17 +634,12 @@ EXPECTED JSON SCHEMA:
             stop=options.get("stop_sequences")
         )
 
-        # --- THE FIX: Universal Engine Error Intercept ---
-        # This MUST run before any JSON parsing is attempted
         if raw_result.strip().startswith("[Generation Error"):
             raise ConnectionError(f"Engine Failed: {raw_result.strip()}")
         
-    
-        # --- THE UPGRADE: Auto-Unwrap the Schema (Bulletproofed) ---
-        if step.output_schema:
+        # --- 7. AUTO-UNWRAP SCHEMA ---
+        if getattr(step, 'output_schema', None):
             try:
-                import json
-                
                 first_brace = raw_result.find('{')
                 last_brace = raw_result.rfind('}')
                 first_bracket = raw_result.find('[')
@@ -447,13 +653,11 @@ EXPECTED JSON SCHEMA:
                 else: clean_str = raw_result
                 
                 parsed = json.loads(clean_str)
-                
-                # Strip the "thoughts" away so the next step only gets the pure data it expects
                 return json.dumps(parsed.get("final_output", parsed))
             except Exception as e:
                 print(f"[Master Runner] Failed to unwrap schema: {e}")
-                # Fallback: if it fails, try returning the clean string so the UI router has a fighting chance
                 return clean_str if 'clean_str' in locals() else raw_result
+                
         return raw_result
 
     def _run_rag(self, step, inputs):

@@ -5,12 +5,11 @@ from PySide6.QtGui import QCursor, QAction
 from gui.docks.unified_research.components.chat_streamer import ChatMessageWidget
 import json
 import os 
+from gui.docks.unified_research.tabs.base_tab import BaseTab
 
-class ChatTab(QWidget):
+class ChatTab(BaseTab):
     def __init__(self, main_window, parent=None):
-        super().__init__(parent)
-        self.main_window = main_window
-        self.theme = None
+        super().__init__(main_window, parent)
         self._build_ui()
 
     def _build_ui(self):
@@ -40,7 +39,6 @@ class ChatTab(QWidget):
 
         action_layout = QHBoxLayout()
         
-        # --- NEW: Advanced RAG Button ---
         self.btn_advanced_rag = QPushButton("🔍 Advanced RAG")
         self.btn_advanced_rag.setCheckable(True)
         self.btn_advanced_rag.setToolTip("Performs a multi-pass RAG search for deep context extraction.")
@@ -80,7 +78,7 @@ class ChatTab(QWidget):
 
     def _open_context_filter(self):
         from gui.docks.unified_research.components.context_filter_dialog import ContextFilterDialog
-        pm = self.main_window.project_manager
+        pm = self.project_manager
         current_docs = pm.get_metadata("active_rag_docs", [os.path.basename(p) for p in pm.pdfs])
         current_tags = pm.get_metadata("active_rag_tags", [])
         
@@ -106,7 +104,7 @@ class ChatTab(QWidget):
         if not text: return
         self.input_field.clear()
 
-        pm = getattr(self.main_window, 'project_manager', None)
+        pm = self.project_manager
         if pm:
             pm.save_chat_message("chat_dock", "user", text, "text")
 
@@ -114,61 +112,38 @@ class ChatTab(QWidget):
         user_msg.append_chunk(text)
         self.add_message_widget(user_msg)
 
-        # 1. Fetch Global Settings & Ensure Variables Exist
         global_settings = {}
         if pm:
             try:
                 global_settings = json.loads(pm.get_metadata("global_ai_settings", "{}"))
-            except:
-                pass
+            except: pass
 
-        include_manifest = global_settings.get("include_manifest", True)
-        allow_updates = global_settings.get("allow_manifest_updates", True)
-        include_nodes = global_settings.get("include_selected_nodes", False)
-        output_workspace = global_settings.get("output_workspace", False) # <--- Variable defined here
-
-        manifest_data = pm.get_metadata("project_manifest", "{}") if pm and include_manifest else "{}"
-        if not manifest_data.strip(): manifest_data = "{}"
-        
-        selected_nodes = "[]"
-        if include_nodes and hasattr(self.main_window, 'workspace_view'):
-            try:
-                selected_nodes = self.main_window.workspace_view.get_selected_nodes_json()
-            except Exception:
-                selected_nodes = "[]"
+        output_workspace = global_settings.get("output_workspace", False)
 
         selected_model = "llama3"
         if hasattr(self.main_window, 'unified_dock') and hasattr(self.main_window.unified_dock, 'model_combo'):
             selected_model = self.main_window.unified_dock.model_combo.currentText()
         
-        # 2. Get Blueprint using correct cache key
         from core.engine.default_blueprints import DefaultBlueprints
         
-        if self.btn_autopilot.isChecked():
-            bp_key = "Chat - Advanced Agent"
-            default_func = lambda: DefaultBlueprints.get_chat_blueprint("RAG Agent Mode", output_workspace=output_workspace)
+        if self.btn_advanced_rag.isChecked():
+            bp_key = "Chat - Advanced RAG Agent"
+            default_func = lambda: DefaultBlueprints.get_chat_blueprint(self.prompt_manager, "Advanced RAG Agent Mode")
         else:
             bp_key = "Chat - RAG Assistant"
-            default_func = lambda: DefaultBlueprints.get_chat_blueprint("RAG Assistant Mode", output_workspace=output_workspace)
+            default_func = lambda: DefaultBlueprints.get_chat_blueprint(self.prompt_manager, "RAG Assistant Mode")
 
-        bp_cache_key = f"{bp_key} - Workspace" if output_workspace else bp_key
-        blueprint = self.main_window.blueprint_manager.get_blueprint(bp_cache_key, default_func)
+        blueprint = self.blueprint_manager.get_blueprint(bp_key, default_func)
 
-        # 3. Execute
         initial_state = {
             "user_query": text,
-            "selected_model": selected_model, 
-            "project_manifest": manifest_data,
-            "allow_manifest_updates": allow_updates,
-            "selected_nodes": selected_nodes,
-            "workspace_data": self.main_window.workspace_view.get_workspace_state_as_json() if output_workspace and hasattr(self.main_window, 'workspace_view') else "{}"
+            "selected_model": selected_model
         }
 
-        self.main_window.execute_ai_blueprint(blueprint, initial_state)
+        self.send_to_pipeline(blueprint, initial_state, output_workspace=output_workspace)
 
     def update_theme(self, theme):
-        self.theme = theme
-        self.setStyleSheet(f"background-color: {theme.get('bg_main', '#1e1e1e')};")
+        super().update_theme(theme)
         self.input_wrapper.setStyleSheet(f"background-color: {theme.get('bg_input', '#2b2b2b')}; border: 1px solid {theme.get('border', '#444')}; border-radius: 8px;")
         self.input_field.setStyleSheet(f"background-color: transparent; color: {theme.get('text_main', '#fff')}; border: none;")
         self.btn_send.setStyleSheet(f"background-color: {theme.get('accent', '#b366ff')}; font-weight: bold; color: white; border: none; border-radius: 6px;")

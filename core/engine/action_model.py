@@ -21,11 +21,12 @@ class ActionStep:
     ui_target: str = "floating" 
     ui_title: str = "AI Result"
     
-    # NEW: For Custom HTML Dashboard Rendering
     html_template: Optional[str] = None
-    
     output_schema: Optional[Dict[str, Any]] = None
     workspace_filters: List[str] = field(default_factory=lambda: ["text", "color", "edges", "layout"])
+
+    # --- NEW: Explicit Context Request List ---
+    required_context: List[str] = field(default_factory=list)
 
 @dataclass
 class AIActionBlueprint:

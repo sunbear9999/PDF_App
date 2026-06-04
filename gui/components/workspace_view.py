@@ -1662,12 +1662,12 @@ class WorkspaceView(QGraphicsView):
         self.loading_dialog.canceled.connect(self.opposing_worker.terminate)
         self.opposing_worker.start()
 
-    def _organize_selection_ai(self): self._run_workspace_ai_tool(DefaultBlueprints.get_workspace_organize_blueprint(), require_selection=True)
-    def _find_connections_ai(self): self._run_workspace_ai_tool(DefaultBlueprints.get_workspace_connections_blueprint(), require_selection=True)
-    def _generate_outline_ai(self): self._run_workspace_ai_tool(DefaultBlueprints.get_workspace_outline_blueprint(), require_selection=True)
-    def _weakpoints_ai(self): self._run_workspace_ai_tool(DefaultBlueprints.get_workspace_weakpoints_blueprint(), require_selection=True)
-    def _fill_graph_ai(self): self._run_workspace_ai_tool(DefaultBlueprints.get_workspace_fill_blueprint(), require_selection=True)
-    def _consolidate_nodes_ai(self): self._run_workspace_ai_tool(DefaultBlueprints.get_workspace_consolidate_blueprint(), require_selection=True)
+    def _organize_selection_ai(self): self._run_workspace_ai_tool(DefaultBlueprints.get_workspace_organize_blueprint(self.main_window.prompt_manager), require_selection=True)
+    def _find_connections_ai(self): self._run_workspace_ai_tool(DefaultBlueprints.get_workspace_connections_blueprint(self.main_window.prompt_manager), require_selection=True)
+    def _generate_outline_ai(self): self._run_workspace_ai_tool(DefaultBlueprints.get_workspace_outline_blueprint(self.main_window.prompt_manager), require_selection=True)
+    def _weakpoints_ai(self): self._run_workspace_ai_tool(DefaultBlueprints.get_workspace_weakpoints_blueprint(self.main_window.prompt_manager), require_selection=True)
+    def _fill_graph_ai(self): self._run_workspace_ai_tool(DefaultBlueprints.get_workspace_fill_blueprint(self.main_window.prompt_manager), require_selection=True)
+    def _consolidate_nodes_ai(self): self._run_workspace_ai_tool(DefaultBlueprints.get_workspace_consolidate_blueprint(self.main_window.prompt_manager), require_selection=True)
 
     def _manage_tags_for_nodes(self, selected_nodes):
         if not selected_nodes: return

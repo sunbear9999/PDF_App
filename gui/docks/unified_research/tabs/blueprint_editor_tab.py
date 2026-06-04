@@ -435,7 +435,7 @@ class BlueprintEditorTab(QWidget):
         else:
             current_json = "{}"
 
-        architect_bp = DefaultBlueprints.get_blueprint_architect()
+        architect_bp = DefaultBlueprints.get_blueprint_architect(self.main_window.prompt_manager)
         state = {"user_text": user_text, "current_json": current_json}
         
         self.ast_runner = MasterActionRunner(self.main_window, architect_bp, state)
@@ -538,12 +538,12 @@ class BlueprintEditorTab(QWidget):
             self.bpm.blueprints[self.current_blueprint.name] = self.current_blueprint
             
         if key in self.core_tools:
-            if key == "Chat - RAG Assistant": default_bp = DefaultBlueprints.get_chat_blueprint("RAG Assistant Mode")
-            elif key == "Chat - Advanced Agent": default_bp = DefaultBlueprints.get_chat_blueprint("RAG Agent Mode")
-            elif key == "Brainstorm - Default": default_bp = DefaultBlueprints.get_brainstorm_blueprint("Brainstorm - Default")
-            elif key == "Search Terms": default_bp = DefaultBlueprints.get_search_terms_blueprint()
-            elif key == "Keyword Density Analyzer (Python)": default_bp = DefaultBlueprints.get_python_example_blueprint()
-            else: default_bp = DefaultBlueprints.get_master_outline_blueprint("Project")
+            if key == "Chat - RAG Assistant": default_bp = DefaultBlueprints.get_chat_blueprint(self.main_window.prompt_manager, "RAG Assistant Mode")
+            elif key == "Chat - Advanced Agent": default_bp = DefaultBlueprints.get_chat_blueprint(self.main_window.prompt_manager, "RAG Agent Mode")
+            elif key == "Brainstorm - Default": default_bp = DefaultBlueprints.get_brainstorm_blueprint(self.main_window.prompt_manager, "Brainstorm - Default")
+            elif key == "Search Terms": default_bp = DefaultBlueprints.get_search_terms_blueprint(self.main_window.prompt_manager)
+            elif key == "Keyword Density Analyzer (Python)": default_bp = DefaultBlueprints.get_python_example_blueprint(self.main_window.prompt_manager)
+            else: default_bp = DefaultBlueprints.get_master_outline_blueprint(self.main_window.prompt_manager, "Project")
             self.current_blueprint = self.bpm.get_blueprint(key, lambda: default_bp)
         else:
             self.current_blueprint = self.bpm.get_blueprint(key, lambda: AIActionBlueprint(name=key, description=""))

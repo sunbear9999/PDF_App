@@ -185,6 +185,12 @@ class UnifiedResearchDock(QDockWidget):
             while tab_widget.chat_layout.count() > 1:
                 item = tab_widget.chat_layout.takeAt(0)
                 if item.widget(): item.widget().deleteLater()
+    def refresh_project_ui(self):
+        """Initializes or reloads the UI state from the active project database."""
+        self.check_index_status()
+        self.load_tab_history(self.tab_chat, "chat_dock")
+        self.load_tab_history(self.tab_plan, "brainstorm_dock")
+        self.load_tab_history(self.tab_custom, "custom_tools_tab")
     # --- THE UNIVERSAL "SEND TO" MENU ATTACHER ---
     def attach_send_to_menu(self, text_browser_widget):
         """Attaches a custom context menu to any text widget to send text between tabs."""
@@ -233,17 +239,25 @@ class UnifiedResearchDock(QDockWidget):
         self.btn_filter.setStyleSheet(widget_style)
         self.btn_index.setStyleSheet(widget_style) 
         
-        # (Removed chk_analysis, combo_analysis, and chk_rag styling since they are gone!)
+        # Pass theme safely to child tabs
+        if hasattr(self, 'tab_chat'): self.tab_chat.update_theme(theme)
+        if hasattr(self, 'tab_plan'): self.tab_plan.update_theme(theme)
+        if hasattr(self, 'tab_search'): self.tab_search.update_theme(theme)
+        if hasattr(self, 'tab_analysis'): self.tab_analysis.update_theme(theme)
+        if hasattr(self, 'tab_editor'): self.tab_editor.update_theme(theme)
+        if hasattr(self, 'tab_custom'): self.tab_custom.update_theme(theme) # <-- FIX: Was missing!
         
-        self.tab_chat.update_theme(theme)
-        self.tab_plan.update_theme(theme)
-        self.tab_search.update_theme(theme)
-        self.tab_analysis.update_theme(theme)
-        self.tab_editor.update_theme(theme)
         self.check_index_status()
-        self.load_tab_history(self.tab_chat, "chat_dock")
-        self.load_tab_history(self.tab_plan, "brainstorm_dock")
-        self.load_tab_history(self.tab_custom, "custom_tools_tab") # Works immediately for custom tools too! 
+        
+        # --- THE FIX: Stop wiping/rebuilding the SQLite history UI! ---
+        # Instead of calling load_tab_history(), we just loop over the existing 
+        # chat widgets currently visible in the layout and update their colors.
+        for tab in [self.tab_chat, self.tab_plan, self.tab_custom]:
+            if hasattr(tab, 'chat_layout'):
+                for i in range(tab.chat_layout.count()):
+                    widget = tab.chat_layout.itemAt(i).widget()
+                    if hasattr(widget, 'update_theme'):
+                        widget.update_theme(theme)
     
     def _open_filter_dialog(self):
         if not self.active_docs and self.project_manager.pdfs:

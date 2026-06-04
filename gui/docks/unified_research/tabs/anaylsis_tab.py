@@ -11,13 +11,12 @@ from core.engine.master_runner import MasterActionRunner
 from gui.docks.unified_research.components.template_editor import TemplateEditorDialog
 from gui.docks.unified_research.components.chat_streamer import ChatMessageWidget
 from gui.docks.unified_research.components.dynamic_outlines import UniversalOutlineWidget, InteractiveListButton
+from gui.docks.unified_research.tabs.base_tab import BaseTab
 
-class AnalysisTab(QWidget):
+class AnalysisTab(BaseTab):
     def __init__(self, main_window, parent=None):
-        super().__init__(parent)
-        self.main_window = main_window
-        self.theme = self.main_window.theme_manager.get_theme() if hasattr(main_window, 'theme_manager') else {}
-        self.pm = main_window.project_manager
+        super().__init__(main_window, parent)
+        self.pm = self.project_manager
         self.templates = self.pm.get_analysis_templates()
         self._build_ui()
 
@@ -28,19 +27,16 @@ class AnalysisTab(QWidget):
         self.tabs = QTabWidget()
         self.tabs.setStyleSheet(f"QTabWidget::pane {{ border: 1px solid {self.theme.get('border', '#444')}; background-color: transparent; }} QTabBar::tab {{ background: {self.theme.get('bg_panel', '#333')}; color: white; padding: 8px 16px; border-top-left-radius: 4px; border-top-right-radius: 4px; margin-right: 2px; }} QTabBar::tab:selected {{ background: {self.theme.get('accent', '#b366ff')}; }}")
         
-        # --- TAB 1: Document Analysis ---
         self.doc_tab = QWidget()
         self._build_doc_tab(self.doc_tab)
         self.tabs.addTab(self.doc_tab, "📄 Document Analysis")
         
-        # --- TAB 2: Compare Outlines ---
         self.compare_tab = QWidget()
         self._build_compare_tab(self.compare_tab)
         self.tabs.addTab(self.compare_tab, "⚖️ Compare Outlines")
         
         layout.addWidget(self.tabs)
         
-        # --- THE FIX: Populate data ONLY AFTER both tabs are fully built ---
         self._populate_docs()
         self._populate_templates()
         
@@ -51,13 +47,11 @@ class AnalysisTab(QWidget):
         
         ctrl_layout = QHBoxLayout()
         self.doc_selector = QComboBox()
-        # [REMOVED _populate_docs() FROM HERE]
         self.doc_selector.currentIndexChanged.connect(self._load_existing_analysis)
         ctrl_layout.addWidget(QLabel("<b>Doc:</b>"))
         ctrl_layout.addWidget(self.doc_selector, 1)
 
         self.combo_templates = QComboBox()
-        # [REMOVED _populate_templates() FROM HERE]
         self.combo_templates.currentIndexChanged.connect(self._load_existing_analysis)
         ctrl_layout.addWidget(QLabel("<b>Mode:</b>"))
         ctrl_layout.addWidget(self.combo_templates, 1)
@@ -72,15 +66,12 @@ class AnalysisTab(QWidget):
         self.btn_run.setFixedHeight(35)
         self.btn_run.clicked.connect(self._trigger_analysis)
         
-        # Segmented Control for View Mode
         self.btn_view_sections = QPushButton("📑 Section-by-Section")
         self.btn_view_sections.setCheckable(True)
         self.btn_view_sections.setChecked(True)
-        self.btn_view_sections.clicked.connect(self._load_existing_analysis)
         
         self.btn_view_master = QPushButton("👑 Master Outline")
         self.btn_view_master.setCheckable(True)
-        self.btn_view_master.clicked.connect(self._load_existing_analysis)
         
         self.view_group = [self.btn_view_sections, self.btn_view_master]
         for btn in self.view_group: btn.clicked.connect(lambda _, b=btn: self._sync_view_toggle(b))
@@ -105,6 +96,7 @@ class AnalysisTab(QWidget):
 
     def _sync_view_toggle(self, active_btn):
         for btn in self.view_group: btn.setChecked(btn == active_btn)
+        self._load_existing_analysis() 
 
     def _build_compare_tab(self, parent_widget):
         layout = QVBoxLayout(parent_widget)
@@ -129,11 +121,11 @@ class AnalysisTab(QWidget):
         self.cmp_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.cmp_view_a = QScrollArea()
         self.cmp_view_a.setWidgetResizable(True)
-        self.cmp_view_a.setMinimumWidth(50) # THE FIX: Allow squishing
+        self.cmp_view_a.setMinimumWidth(50) 
         
         self.cmp_view_b = QScrollArea()
         self.cmp_view_b.setWidgetResizable(True)
-        self.cmp_view_b.setMinimumWidth(50) # THE FIX: Allow squishing
+        self.cmp_view_b.setMinimumWidth(50) 
         
         self.cont_a = QWidget(); self.lyt_a = QVBoxLayout(self.cont_a); self.cont_a.setLayout(self.lyt_a); self.lyt_a.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.cont_b = QWidget(); self.lyt_b = QVBoxLayout(self.cont_b); self.cont_b.setLayout(self.lyt_b); self.lyt_b.setAlignment(Qt.AlignmentFlag.AlignTop)
@@ -144,9 +136,8 @@ class AnalysisTab(QWidget):
         self.cmp_splitter.addWidget(self.cmp_view_b)
         layout.addWidget(self.cmp_splitter, 1)
         
-        # Compare Chat Bar
         chat_frame = QFrame()
-        chat_frame.setMinimumWidth(50) # THE FIX: Allow squishing
+        chat_frame.setMinimumWidth(50) 
         chat_lyt = QVBoxLayout(chat_frame)
         self.cmp_chat_output = QScrollArea()
         self.cmp_chat_output.setWidgetResizable(True)
@@ -169,7 +160,6 @@ class AnalysisTab(QWidget):
         chat_lyt.addLayout(input_lyt)
         self.cmp_splitter.addWidget(chat_frame)
         
-        # THE FIX: Use equal relative proportions rather than absolute pixel minimums
         self.cmp_splitter.setSizes([100, 100, 100])
 
     def _populate_docs(self):
@@ -189,27 +179,22 @@ class AnalysisTab(QWidget):
         for t in self.templates:
             self.combo_templates.addItem(t.get("title", "Unnamed Mode"), t)
             self.cmp_template.addItem(t.get("title", "Unnamed Mode"), t)
+            
     def refresh_project_ui(self):
-        """Called automatically by the Main Window when PDFs are added, removed, or renamed."""
-        # 1. Save current selections
         curr_doc = self.doc_selector.currentData()
         curr_a = self.cmp_doc_a.currentData()
         curr_b = self.cmp_doc_b.currentData()
         
-        # 2. Block signals so we don't trigger unwanted UI refreshes/clears
         self.doc_selector.blockSignals(True)
         self.cmp_doc_a.blockSignals(True)
         self.cmp_doc_b.blockSignals(True)
         
-        # 3. Repopulate with fresh data
         self._populate_docs()
         
-        # 4. Restore previous selections if they still exist
         if curr_doc: self.doc_selector.setCurrentIndex(max(0, self.doc_selector.findData(curr_doc)))
         if curr_a: self.cmp_doc_a.setCurrentIndex(max(0, self.cmp_doc_a.findData(curr_a)))
         if curr_b: self.cmp_doc_b.setCurrentIndex(max(0, self.cmp_doc_b.findData(curr_b)))
         
-        # 5. Unblock signals
         self.doc_selector.blockSignals(False)
         self.cmp_doc_a.blockSignals(False)
         self.cmp_doc_b.blockSignals(False)
@@ -223,14 +208,11 @@ class AnalysisTab(QWidget):
             item = layout.takeAt(0)
             if item.widget(): item.widget().deleteLater()
 
-    # --- THE LOGIC-BASED MASTER OUTLINE ---
     def _build_master_outline_dict(self, records):
-        """Aggregates and deduplicates data across all chunks purely using Python logic."""
         master_data = {}
         import re
         for rec in records:
             try:
-                # --- BULLETPROOF REPAIR ---
                 clean_str = rec["json_data"]
                 clean_str = re.sub(r'^```json', '', clean_str, flags=re.MULTILINE)
                 clean_str = re.sub(r'^```', '', clean_str, flags=re.MULTILINE).strip()
@@ -286,7 +268,6 @@ class AnalysisTab(QWidget):
         is_master_mode = self.btn_view_master.isChecked()
         self.status_lbl.setText(f"Loaded {'Master Outline' if is_master_mode else 'Section View'} ({len(records)} sections found).")
         
-        # Import the robust component
         from gui.docks.unified_research.components.dynamic_outlines import UniversalOutlineWidget
         
         if is_master_mode:
@@ -296,16 +277,13 @@ class AnalysisTab(QWidget):
         else:
             for rec in records:
                 try:
-                    # THE FIX: Safely fall back to the chunk_index since the DB doesn't store page_range
                     chunk_idx = rec.get('chunk_index', 0)
                     page_ref = rec.get('page_range', f"Part {chunk_idx + 1}")
                     title = f"Section: {page_ref}"
                     
-                    # Use the universal component directly - it auto-parses JSON strings safely
                     viewer = UniversalOutlineWidget(title, rec["json_data"], self.theme, self.main_window.viewer.annot_manager, is_expanded=False)
                     self.results_layout.addWidget(viewer)
                 except Exception as e:
-                    # Expose errors to the terminal instead of swallowing them
                     print(f"Error loading section {rec.get('chunk_index', 'Unknown')}: {e}")
 
     def _load_comparison(self):
@@ -324,10 +302,10 @@ class AnalysisTab(QWidget):
         master_a = self._build_master_outline_dict(recs_a)
         master_b = self._build_master_outline_dict(recs_b)
         
-        self.lyt_a.addWidget(InteractiveAnalysisViewer(master_a, None, self.theme))
-        self.lyt_b.addWidget(InteractiveAnalysisViewer(master_b, None, self.theme))
+        # Note: InteractiveAnalysisViewer would need to be imported or refactored into UniversalOutlineWidget based on your previous component code!
+        self.lyt_a.addWidget(UniversalOutlineWidget("Outline A", master_a, self.theme, self.main_window.viewer.annot_manager))
+        self.lyt_b.addWidget(UniversalOutlineWidget("Outline B", master_b, self.theme, self.main_window.viewer.annot_manager))
         
-        # Save to class state so the chat can use it
         self.current_cmp_data_a = json.dumps(master_a, indent=2)
         self.current_cmp_data_b = json.dumps(master_b, indent=2)
 
@@ -349,7 +327,7 @@ class AnalysisTab(QWidget):
                 step_id="compare", step_type="LLM_QUERY",
                 system_prompt="You are an expert analyst. Compare the two provided document outlines to answer the user's question.",
                 inputs={"query": f"USER QUESTION: {text}\n\n--- DOCUMENT A OUTLINE ---\n{{doc_a}}\n\n--- DOCUMENT B OUTLINE ---\n{{doc_b}}"},
-                ui_format="silent" # We route it manually via signals below
+                ui_format="silent" 
             )
         ])
         
@@ -359,8 +337,14 @@ class AnalysisTab(QWidget):
         self.cmp_runner.start()
 
     def save_chunk_to_db(self, state, json_str):
-        """Silently saves the chunk data to the project database."""
-        item = state.get('item', {})
+        item = state.get('item')
+        if not item and hasattr(self, '_active_chunks'):
+            if getattr(self, '_chunk_save_idx', 0) < len(self._active_chunks):
+                item = self._active_chunks[self._chunk_save_idx]
+                
+        if not item: 
+            return
+            
         try:
             self.pm.save_document_analysis(
                 item.get('doc_path'), 
@@ -370,9 +354,14 @@ class AnalysisTab(QWidget):
             )
             self.status_lbl.setText(f"✅ Analyzed Section: {item.get('page_range')}")
             
-            # Auto-refresh if we are in Master Outline mode
-            if self.btn_view_master.isChecked():
-                self._load_existing_analysis()
+            if hasattr(self, '_chunk_save_idx'):
+                self._chunk_save_idx += 1
+                
+            is_final_chunk = hasattr(self, '_active_chunks') and self._chunk_save_idx >= len(self._active_chunks)
+            
+            if self.btn_view_master.isChecked() or is_final_chunk:
+                QTimer.singleShot(200, self._load_existing_analysis)
+                
         except Exception as e:
             print(f"Failed to save chunk to DB: {e}")
 
@@ -393,11 +382,8 @@ class AnalysisTab(QWidget):
             chunks.append({
                 "doc_path": doc_path,
                 "template_id": template['id'],
-                
-                # --- THE FIX: Inject the missing instructions and schema! ---
                 "template_instructions": template.get('instructions', ''),
                 "template_schema": template.get('schema', '{}'),
-                
                 "chunk_index": i // 4,
                 "page_range": f"{i+1}-{min(i+4, doc.page_count)}",
                 "text": chunk_text
@@ -406,8 +392,11 @@ class AnalysisTab(QWidget):
         self.pm.clear_document_analyses(doc_path, template['id'])
         self.status_lbl.setText("⏳ Processing Document...")
 
+        self._active_chunks = chunks.copy()
+        self._chunk_save_idx = 0
+
         from core.engine.default_blueprints import DefaultBlueprints
-        blueprint = DefaultBlueprints.get_analysis_blueprint(chunks)
+        blueprint = DefaultBlueprints.get_analysis_blueprint(self.prompt_manager, chunks)
         
         from PySide6.QtWidgets import QDockWidget
         dock = self.main_window.findChild(QDockWidget, "UnifiedResearchDock")
@@ -415,11 +404,10 @@ class AnalysisTab(QWidget):
         
         state_dict = {"selected_model": selected_model}
         
-        self.main_window.execute_ai_blueprint(blueprint, state_dict)
+        self.send_to_pipeline(blueprint, state_dict)
 
     def update_theme(self, theme):
-        self.theme = theme
-        self.setStyleSheet(f"background-color: {theme.get('bg_main', '#1e1e1e')}; color: {theme.get('text_main', '#fff')};")
+        super().update_theme(theme)
         
         style = f"background-color: {theme.get('bg_input', '#2b2b2b')}; border: 1px solid {theme.get('border', '#444')}; padding: 4px; border-radius: 4px;"
         self.doc_selector.setStyleSheet(style)

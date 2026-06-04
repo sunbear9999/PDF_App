@@ -4,13 +4,11 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, Q
                              QComboBox, QFrame, QTextEdit, QScrollArea, QSizePolicy)
 from PySide6.QtCore import Qt, QTimer
 from gui.docks.unified_research.components.chat_streamer import ChatMessageWidget
+from gui.docks.unified_research.tabs.base_tab import BaseTab
 
-class CustomToolsTab(QWidget):
+class CustomToolsTab(BaseTab):
     def __init__(self, main_window, parent=None):
-        super().__init__(parent)
-        self.main_window = main_window
-        self.theme = self.main_window.theme_manager.get_theme() if hasattr(main_window, 'theme_manager') else {}
-        self.bpm = getattr(self.main_window, 'blueprint_manager', None)
+        super().__init__(main_window, parent)
         self.dynamic_widgets = {}
         self._build_ui()
 
@@ -59,9 +57,9 @@ class CustomToolsTab(QWidget):
         self.refresh_tools()
 
     def _update_description(self):
-        if not self.bpm: return
+        if not self.blueprint_manager: return
         tool_name = self.combo_tools.currentText()
-        bp = self.bpm.blueprints.get(tool_name)
+        bp = self.blueprint_manager.blueprints.get(tool_name)
         if bp:
             self.lbl_desc.setText(f"<i>{bp.description}</i>" if bp.description else "<i>No description provided.</i>")
             self._build_dynamic_form(bp)
@@ -76,7 +74,6 @@ class CustomToolsTab(QWidget):
 
         inputs_to_render = blueprint.expected_inputs.copy() if blueprint.expected_inputs else []
 
-        # If user didn't explicitly define expected_inputs, auto-discover variables in the blueprint
         if not inputs_to_render:
             discovered_vars = set()
             for step in blueprint.steps:
@@ -101,7 +98,6 @@ class CustomToolsTab(QWidget):
             return
 
         for inp in inputs_to_render:
-            # Safely grab the key whether the LLM architect generated 'key', 'name', or 'id'
             inp_key = inp.get('key') or inp.get('name') or inp.get('id') or "unknown_input"
             inp_label = inp.get('label') or inp.get('description') or inp_key.replace('_', ' ').title()
             
@@ -111,7 +107,7 @@ class CustomToolsTab(QWidget):
             if inp.get('type') == 'doc_selector':
                 cb = QComboBox()
                 cb.setStyleSheet(style)
-                pm = getattr(self.main_window, 'project_manager', None)
+                pm = self.project_manager
                 if pm:
                     for pdf in pm.pdfs: cb.addItem(os.path.basename(pdf), pdf)
                 self.param_layout.addWidget(cb)
@@ -134,9 +130,9 @@ class CustomToolsTab(QWidget):
 
     def refresh_tools(self):
         self.combo_tools.clear()
-        if not self.bpm: return
+        if not self.blueprint_manager: return
         core_tools = ["Chat - RAG Assistant", "Chat - Advanced Agent", "Brainstorm - Default", "Search Terms", "Master Outline", "Keyword Density Analyzer (Python)"]
-        custom_tools = [k for k in self.bpm.blueprints.keys() if k not in core_tools]
+        custom_tools = [k for k in self.blueprint_manager.blueprints.keys() if k not in core_tools]
         if custom_tools:
             self.combo_tools.addItems(custom_tools)
         else:
@@ -148,15 +144,14 @@ class CustomToolsTab(QWidget):
 
     def _execute_tool(self):
         tool_name = self.combo_tools.currentText()
-        if not self.bpm or tool_name not in self.bpm.blueprints: return
-        blueprint = self.bpm.get_blueprint(tool_name, lambda: None)
+        if not self.blueprint_manager or tool_name not in self.blueprint_manager.blueprints: return
+        blueprint = self.blueprint_manager.get_blueprint(tool_name, lambda: None)
         if not blueprint: return
 
         state_dict = {}
         for key, widget in self.dynamic_widgets.items():
             if isinstance(widget, QComboBox):
                 state_dict[key] = widget.currentData() or widget.currentText()
-                # Crucial for RAG searches: populate both the path and the readable basename
                 if "doc" in key.lower(): 
                     state_dict[f"{key}_name"] = os.path.basename(widget.currentData() or widget.currentText())
             elif isinstance(widget, QTextEdit):
@@ -167,15 +162,13 @@ class CustomToolsTab(QWidget):
         msg = ChatMessageWidget(f"Running Tool: {tool_name}", theme=self.theme, is_user=True)
         msg.append_chunk("Data dispatched to pipeline...")
         
-        # Only inject the starting notification here if the tool outputs to this tab
         if ui_target == "custom_tools_tab":
             self.add_message_widget(msg)
             
-        self.main_window.execute_ai_blueprint(blueprint, state_dict)
+        self.send_to_pipeline(blueprint, state_dict, output_workspace=state_dict.get("output_workspace", False))
 
     def update_theme(self, theme):
-        self.theme = theme
-        self.setStyleSheet(f"background-color: {theme.get('bg_main', '#1e1e1e')}; color: {theme.get('text_main', '#fff')};")
+        super().update_theme(theme)
         self.scroll_area.setStyleSheet("background: transparent;")
         
         style = f"background-color: {theme.get('bg_input', '#2b2b2b')}; border: 1px solid {theme.get('border', '#444')}; border-radius: 4px; padding: 4px;"

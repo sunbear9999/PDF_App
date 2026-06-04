@@ -103,7 +103,7 @@ class ChatMessageWidget(QWidget):
         if hasattr(self.window(), 'viewer'): 
             bubble.jump_requested.connect(self.window().viewer.jump_to_source)
             bubble.save_requested.connect(lambda: self.window().add_ai_annotation(quote, note, doc_name))
-            bubble.search_requested.connect(lambda: self.window().viewer.trigger_find_similar(quote))
+            bubble.search_requested.connect(lambda: self.window().viewer.annot_manager.trigger_similar_context(quote))
         self.bubbles_layout.addWidget(bubble)
         return bubble
     

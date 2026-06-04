@@ -534,7 +534,6 @@ class MainWindow(QMainWindow):
         # STRICT SINGLETON: We only need one of these
         if self.research_docks:
             dock = self.research_docks[0]
-            # THE FIX: The UnifiedResearchDock IS the dock itself now, no parentWidget() needed
             dock.show()
             dock.raise_()
             return
@@ -549,6 +548,10 @@ class MainWindow(QMainWindow):
         
         if hasattr(self, 'theme_manager'): 
             dock.update_theme(self.theme_manager.get_theme())
+            
+        # --- THE FIX: Load chat history explicitly after theme is set ---
+        if hasattr(dock, 'refresh_project_ui'):
+            dock.refresh_project_ui()
             
         dock.show()
 
@@ -818,8 +821,8 @@ class MainWindow(QMainWindow):
             self._refresh_doc_list()
             
             # 4. Update the LLM Chat Docks & ChromaDB
-            for c_dock in getattr(self, 'chat_docks', []):
-                c_dock.refresh_project_ui()
+            for r in getattr(self, 'research_docks', []):
+                if hasattr(r, 'refresh_project_ui'): r.refresh_project_ui()
                 
             try:
                 if hasattr(self, 'shared_llm_manager'):
@@ -857,8 +860,8 @@ class MainWindow(QMainWindow):
             self.doc_list.takeItem(row)
             
             # 3. Update LLM Chat & ChromaDB
-            for c_dock in getattr(self, 'chat_docks', []):
-                c_dock.refresh_project_ui()
+            for r in getattr(self, 'research_docks', []):
+                if hasattr(r, 'refresh_project_ui'): r.refresh_project_ui()
                 
             try:
                 if hasattr(self, 'shared_llm_manager'):
@@ -899,40 +902,64 @@ class MainWindow(QMainWindow):
         self.ocr_banner.setStyleSheet(f"background-color: {theme['warning']}; border-bottom: 1px solid {theme['border']};")
         self.lbl_ocr_banner.setStyleSheet(f"font-weight: bold; color: #1e1e1e; border: none;") 
 
-        # 1. BROADCAST TO ALL LIVE DOCKS (Added the missing ones!)
-        for ws in self.workspace_docks: ws.update_theme(theme)
-        for n in self.notes_docks: n.update_theme(theme)
-        for c in getattr(self, 'chat_docks', []): c.update_theme(theme)
-        for b in getattr(self, 'brainstorm_docks', []): b.update_theme(theme)
-        for r in getattr(self, 'research_docks', []): r.update_theme(theme)
-        for d in getattr(self, 'dict_docks', []): d.update_theme(theme)
-        for e in getattr(self, 'essay_docks', []): e.update_theme(theme)
-        for o in getattr(self, 'ocr_docks', []): o.update_theme(theme)
-        for a in getattr(self, 'audio_docks', []): a.update_theme(theme)
-        for c in getattr(self, 'citation_docks', []): c.update_theme(theme)
-        for s in getattr(self, 'slideshow_docks', []): s.update_theme(theme)
-        # 2. Fix Scratchpads explicitly since they are raw QTextEdits
-        for s in getattr(self, 'scratchpad_docks', []):
-            s.setStyleSheet(f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: none;")
+        # --- THE FIX: ZOMBIE POINTER PURGER ---
+        # Safely checks if the C++ object survived before painting it to prevent RuntimeErrors
+        def safe_update_list(dock_list, is_scratchpad=False):
+            alive_docks = []
+            for dock in list(dock_list):
+                try:
+                    _ = dock.objectName() # Touch a base method to test if C++ object is alive
+                    
+                    if is_scratchpad:
+                        dock.setStyleSheet(f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: none;")
+                    elif hasattr(dock, 'update_theme'):
+                        dock.update_theme(theme)
+                        
+                    alive_docks.append(dock)
+                except RuntimeError:
+                    pass # The dock was closed/deleted by the user. Let it go.
+            return alive_docks
+
+        # Safely update all docks
+        self.workspace_docks = safe_update_list(self.workspace_docks)
+        self.notes_docks = safe_update_list(self.notes_docks)
+        
+        if hasattr(self, 'chat_docks'): self.chat_docks = safe_update_list(self.chat_docks)
+        if hasattr(self, 'brainstorm_docks'): self.brainstorm_docks = safe_update_list(self.brainstorm_docks)
+        if hasattr(self, 'research_docks'): self.research_docks = safe_update_list(self.research_docks)
+        if hasattr(self, 'dict_docks'): self.dict_docks = safe_update_list(self.dict_docks)
+        if hasattr(self, 'essay_docks'): self.essay_docks = safe_update_list(self.essay_docks)
+        if hasattr(self, 'ocr_docks'): self.ocr_docks = safe_update_list(self.ocr_docks)
+        if hasattr(self, 'audio_docks'): self.audio_docks = safe_update_list(self.audio_docks)
+        if hasattr(self, 'citation_docks'): self.citation_docks = safe_update_list(self.citation_docks)
+        if hasattr(self, 'slideshow_docks'): self.slideshow_docks = safe_update_list(self.slideshow_docks)
+        
+        # Scratchpads use a unique styling approach
+        if hasattr(self, 'scratchpad_docks'): 
+            self.scratchpad_docks = safe_update_list(self.scratchpad_docks, is_scratchpad=True)
 
         if hasattr(self.viewer, "update_theme"):
-            self.viewer.update_theme(theme)
+            try:
+                self.viewer.update_theme(theme)
+            except RuntimeError:
+                pass
 
+        # ... (Keep the rest of your global_style SVG/Scrollbar CSS code exactly the same below here) ...
         svg_color = theme['text_main'].replace('#', '%23')
 
         global_style = f"""
         /* --- 1. Fix the Separator Hitbox & Double Borders --- */
         QMainWindow::separator {{
             background: {theme['border']};
-            width: 5px;  /* Wider hitbox for vertical resizing */
-            height: 5px; /* Taller hitbox for horizontal resizing */
+            width: 5px;  
+            height: 5px; 
         }}
         QMainWindow::separator:hover {{
-            background: #b366ff; /* Purple highlight when grabbed */
+            background: #b366ff; 
         }}
         
         QDockWidget {{
-            border: none; /* Kill the double-border gaps */
+            border: none; 
             color: {theme['text_main']};
         }}
 
@@ -940,7 +967,7 @@ class MainWindow(QMainWindow):
         QDockWidget::title {{
             background: {theme['bg_panel']};
             padding: 6px 8px;
-            min-height: 18px; /* Force consistent title bar height */
+            min-height: 18px; 
         }}
 
         QDockWidget::close-button, QDockWidget::float-button {{
@@ -948,25 +975,18 @@ class MainWindow(QMainWindow):
             border: none;
             width: 22px; 
             height: 22px;
-            /* Lock buttons to the vertical center */
             subcontrol-origin: padding;
             subcontrol-position: center right; 
         }}
 
-        QDockWidget::close-button {{
-            right: 4px; /* Space from the far right edge */
-        }}
-
-        QDockWidget::float-button {{
-            right: 30px; /* Push it left, past the close button */
-        }}
+        QDockWidget::close-button {{ right: 4px; }}
+        QDockWidget::float-button {{ right: 30px; }}
 
         QDockWidget::close-button:hover, QDockWidget::float-button:hover {{
             background: rgba(128, 128, 128, 0.2);
             border-radius: 4px;
         }}
 
-        /* Scale the SVGs to fit perfectly */
         QDockWidget::close-button {{
             image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='{svg_color}' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><line x1='18' y1='6' x2='6' y2='18'></line><line x1='6' y1='6' x2='18' y2='18'></line></svg>");
         }}
@@ -978,29 +998,21 @@ class MainWindow(QMainWindow):
         QScrollBar:vertical {{
             border: none;
             background: {theme['bg_panel']};
-            width: 14px; /* Slightly thicker for usability */
+            width: 14px; 
             margin: 0px;
         }}
         QScrollBar::handle:vertical {{
             background: {theme['border']};
             min-height: 30px;
             border-radius: 6px;
-            margin: 2px; /* Creates a floating pill effect */
+            margin: 2px; 
         }}
         QScrollBar::handle:vertical:hover {{
             background: {theme.get('text_dim', '#888888')};
         }}
-        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-            height: 0px; 
-            border: none;
-            background: none;
-        }}
-        /* THIS FIXES THE WHITE ARTIFACTS */
-        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
-            background: none; 
-        }}
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; border: none; background: none; }}
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none; }}
 
-        /* Horizontal Scrollbars */
         QScrollBar:horizontal {{
             border: none;
             background: {theme['bg_panel']};
@@ -1016,14 +1028,8 @@ class MainWindow(QMainWindow):
         QScrollBar::handle:horizontal:hover {{
             background: {theme.get('text_dim', '#888888')};
         }}
-        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
-            width: 0px;
-            border: none;
-            background: none;
-        }}
-        QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
-            background: none;
-        }}
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0px; border: none; background: none; }}
+        QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{ background: none; }}
 
         /* --- 4. Smooth out the Dock Tabs --- */
         QTabBar::tab {{
@@ -1144,7 +1150,8 @@ class MainWindow(QMainWindow):
                     for dock in self.findChildren(QDockWidget):
                         dock.show()
                     
-                    for c in self.chat_docks: c.refresh_project_ui()
+                
+                    for r in self.research_docks: r.refresh_project_ui()
                     
                     if self.project_manager.pdfs:
                         self.switch_to_pdf(self.project_manager.pdfs[0])
@@ -1414,7 +1421,7 @@ class MainWindow(QMainWindow):
                            ("project_name", self.project_manager.project_name))
             self.project_manager._conn.commit()
             
-            for c in self.chat_docks: c.refresh_project_ui()
+            for r in self.research_docks: r.refresh_project_ui()
                 
             self.settings.setValue("last_project", path)
             self.setWindowTitle(f"Papyrus - {self.project_manager.project_name}")
@@ -2096,7 +2103,7 @@ class MainWindow(QMainWindow):
 
     def _sync_tools_with_file(self, file_path):
         for n in self.notes_docks: n.refresh_notes()
-        for c in self.chat_docks: c.refresh_project_ui()
+        for r in self.research_docks: r.refresh_project_ui()
         if hasattr(self, 'workspace_view'):
             if hasattr(self.workspace_view, 'refresh_unused_highlights'):
                 self.workspace_view.refresh_unused_highlights()

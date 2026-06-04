@@ -189,7 +189,12 @@ class LocalLLMManager:
             print(f"[System] Warning: Could not verify/pull embedding model: {e}")
 
     def get_embedding(self, text):
-        payload = {"model": self.embedding_model, "prompt": text, "keep_alive": "60m"}
+        payload = {
+            "model": self.embedding_model, 
+            "prompt": text, 
+            "keep_alive": "60m",
+            "options": {"num_ctx": 8192} # Force max context window
+        }
         try:
             response = requests.post(f"{self.api_base}/embeddings", json=payload, timeout=(10, 300))
             if response.status_code == 200:
@@ -199,8 +204,12 @@ class LocalLLMManager:
             raise Exception(f"Embedding failed. Error: {str(e)}")
 
     def get_batch_embeddings(self, texts):
-        """Uses Ollama's newer /api/embed endpoint to process multiple chunks at lightning speed."""
-        payload = {"model": self.embedding_model, "input": texts, "keep_alive": "60m"}
+        payload = {
+            "model": self.embedding_model, 
+            "input": texts, 
+            "keep_alive": "60m",
+            "options": {"num_ctx": 8192} # Force max context window
+        }
         try:
             response = requests.post(f"{self.api_base}/embed", json=payload, timeout=(15, 600))
             if response.status_code == 200:
@@ -208,7 +217,6 @@ class LocalLLMManager:
         except Exception as e:
             print(f"[System] Batch embedding failed, falling back to sequential: {e}")
             
-        # Fallback sequentially if the user has an older version of Ollama without /api/embed
         return [self.get_embedding(t) for t in texts]
     
     def remove_document_from_index(self, pdf_path):
@@ -265,17 +273,19 @@ class LocalLLMManager:
                 chunk_counter = 0
                 for page_num in range(total_pages):
                     page = doc.load_page(page_num)
+                    # Clean the text but don't rely on spaces for chunking
                     text = page.get_text("text").replace('\n', ' ').strip()
                     text = re.sub(r'\s+', ' ', text) 
                     
-                    words = text.split(' ')
+                    # Hard character limits (1500 chars is roughly 300 tokens, 100% safe)
+                    char_limit = 1500
+                    overlap = 250
                     
-                    for i in range(0, len(words), chunk_word_size - overlap_words):
+                    for i in range(0, len(text), char_limit - overlap):
                         chunk_id = f"{doc_name}_p{page_num}_c{chunk_counter}"
                         
-                        # DELTA FIX: Only process if the chunk isn't already in ChromaDB
                         if chunk_id not in existing_ids:
-                            chunk_text = ' '.join(words[i:i + chunk_word_size])
+                            chunk_text = text[i:i + char_limit].strip()
                             if len(chunk_text) > 50: 
                                 chunks.append(chunk_text)
                                 metadatas.append({"doc_name": doc_name, "doc_id": pdf_path, "page": page_num})
@@ -290,7 +300,7 @@ class LocalLLMManager:
             if progress_callback: progress_callback("Search index is already up to date!")
             return
 
-        batch_size = 100 
+        batch_size = 50 # Dropped from 100 to prevent cumulative batch overflows
         total_batches = (total_chunks // batch_size) + (1 if total_chunks % batch_size != 0 else 0)
         
         for i in range(0, total_chunks, batch_size):
