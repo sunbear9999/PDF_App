@@ -15,6 +15,7 @@ from core.db.annotation_db import AnnotationDB
 from core.db.tag_db import TagDB
 from core.db.ai_db import AIDB
 from core.db.document_db import DocumentDB
+from core.events.event_bus import EventBus
 
 class ProjectManager:
     def __init__(self, max_cache_size=5):
@@ -45,9 +46,24 @@ class ProjectManager:
         
         self.db_docs.ensure_default_templates()
 
+        # --- NEW: Subscribe to Global Events ---
+        self.bus = EventBus.get_instance()
+        self.bus.highlight_created.connect(self._on_highlight_created)
+
     # ---------------------------------------------------------
     # Core Project & File System Logic (Maintains its state here)
     # ---------------------------------------------------------
+    def _on_highlight_created(self, highlight_data):
+        """Automatically saves new highlights to the database when announced on the bus."""
+        self.upsert_highlight({
+            "id": highlight_data.get("id"),
+            "doc_id": highlight_data.get("pdf_path"),
+            "page_num": highlight_data.get("page_num"),
+            "rect_coords": highlight_data.get("rect_coords"),
+            "text_content": highlight_data.get("subject", ""),
+            "color": highlight_data.get("color"),
+        })
+        self.mark_dirty(highlight_data.get("pdf_path"))
     def create_project(self, filepath):
         try:
             filepath = filepath.strip()

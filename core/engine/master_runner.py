@@ -378,10 +378,20 @@ class MasterActionRunner(QThread):
             if not q.strip(): continue
             try:
                 emb = self.llm_manager.get_embedding(q)
-                where_clause = {"doc_name": {"$in": allowed_docs}} if allowed_docs else None
+                
+                # --- FIX 1: Prevent ChromaDB crash on single documents ---
+                where_clause = None
+                if allowed_docs:
+                    if len(allowed_docs) == 1:
+                        where_clause = {"doc_name": allowed_docs[0]}
+                    elif len(allowed_docs) > 1:
+                        where_clause = {"doc_name": {"$in": allowed_docs}}
+                
+                # --- FIX 2: Allow the blueprint to ask for more results ---
+                n_res = inputs.get("n_results", 3)
                 
                 results = self.llm_manager.collection.query(
-                    query_embeddings=[emb], n_results=3, 
+                    query_embeddings=[emb], n_results=n_res, 
                     where=where_clause, include=["documents", "metadatas", "distances"]
                 )
                 
@@ -399,13 +409,21 @@ class MasterActionRunner(QThread):
             except Exception: continue
 
         if not aggregated_docs:
-            return "[]" if step.ui_format == "chat_widgets" else "No relevant documents found."
+            return "[]" if step.ui_format in ["chat_widgets", "results_dialog"] else "No relevant documents found."
 
         best_chunks = sorted(aggregated_docs.values(), key=lambda x: x['distance'])
         max_bubbles = min(20, len(queries_input) * 3) 
         top_chunks = best_chunks[:max_bubbles] 
         reading_order = sorted(top_chunks, key=lambda x: (x['doc_name'], x['page']))
-        
+        if step.ui_format == "results_dialog":
+            matches = []
+            for d in reading_order:
+                matches.append({
+                    "doc_name": d['doc_name'],
+                    "page": d['page'],
+                    "text": d['text'][:450] + "..." if len(d['text']) > 450 else d['text']
+                })
+            return json.dumps(matches)
         if step.ui_format == "chat_widgets":
             bubbles = []
             

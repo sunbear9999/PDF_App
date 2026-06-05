@@ -5,6 +5,7 @@ from PySide6.QtWidgets import QGraphicsRectItem, QInputDialog, QWidget, QMenu, Q
 from PySide6.QtGui import QColor, QBrush, QPen, QAction, QTextCursor, QDesktopServices
 from PySide6.QtCore import Qt, QRectF, QObject, Signal, QThread, QUrl
 import re 
+from core.events.event_bus import EventBus
 
 
 class AnnotationManager(QObject):
@@ -14,7 +15,7 @@ class AnnotationManager(QObject):
     def __init__(self, viewer):
         super().__init__()
         self.viewer = viewer
-        
+        self.bus = EventBus.get_instance()
         self.is_selecting = False
         self.start_word_idx = None
         self.current_page_idx = -1
@@ -240,172 +241,54 @@ class AnnotationManager(QObject):
             main_window.statusBar().showMessage(f"Copied citation: {citation_text}", 3000)
             
         self.clear_selection()
+    def reword_selection(self):
+        if not self.selected_words: return
+        extracted_text = " ".join(w[4] for w in self.selected_words)
+        self._dispatch_ai_blueprint("reword", extracted_text)
+        self.clear_selection()
+
     def trigger_similar_context(self, selected_text):
         if not selected_text.strip(): return
-        
-        main_window = self.viewer.window() 
-        llm_manager = main_window.shared_llm_manager
-        
-        if not llm_manager.collection:
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.warning(self.viewer, "Error", "Search index not loaded.")
-            return
-
-        import os
-        from PySide6.QtWidgets import QApplication, QMessageBox
-        try:
-            self.viewer.page_hud.setVisible(True)
-            self.viewer.page_hud.label_page.setText("Finding Similar Context...")
-            QApplication.processEvents() 
-            
-            emb = llm_manager.get_embedding(selected_text)
-            
-            allowed_docs = main_window.project_manager.pdfs
-            where_clause = None
-            if allowed_docs:
-                base_names = [os.path.basename(d) for d in allowed_docs]
-                if len(base_names) == 1:
-                    where_clause = {"doc_name": base_names[0]}
-                else:
-                    where_clause = {"doc_name": {"$in": base_names}}
-                    
-            results = llm_manager.collection.query(
-                query_embeddings=[emb],
-                n_results=10, # Pull top 10 closest matches
-                where=where_clause
-            )
-            
-            self.viewer.page_hud.label_page.setText("Page:") # Reset HUD
-            
-            if not results or not results.get('documents') or not results['documents'][0]:
-                QMessageBox.information(main_window, "No Results", "No related context found in the database.")
-                return
-                
-            documents = results['documents'][0]
-            metadatas = results['metadatas'][0]
-            
-            matches = []
-            for doc_text, meta in zip(documents, metadatas):
-                matches.append({
-                    "text": doc_text.strip(),
-                    "doc_name": meta.get('doc_name', 'Unknown Document'),
-                    "page": meta.get('page', 0)
-                })
-                
-            # Reuse the AI Results Dialog to cleanly present the findings
-            from gui.components.dialogs.tag_relatives_dialog import AIResultsDialog
-            dlg = AIResultsDialog("🔗 Similar Context Found", matches, main_window, main_window)
-            dlg.exec()
-            
-        except Exception as e:
-            self.viewer.page_hud.label_page.setText("Page:")
-            QMessageBox.critical(main_window, "Database Error", str(e))
-        
+        self._dispatch_ai_blueprint("similar", selected_text)
+        self.clear_selection()
 
     def trigger_opposing_views(self, selected_text):
         if not selected_text.strip(): return
+        self._dispatch_ai_blueprint("opposing", selected_text)
+        self.clear_selection()
+
+    def _dispatch_ai_blueprint(self, action_type: str, text: str):
+        """Universal dispatcher that routes context menu actions to the Master Runner."""
+        main_window = self.viewer.window()
+        from core.engine.default_blueprints import DefaultBlueprints
+        from core.engine.master_runner import MasterActionRunner
         
-        main_window = self.viewer.window() 
-        llm_manager = main_window.shared_llm_manager
-        
-        # --- PHASE 1: DATABASE SEARCH (MAIN THREAD) ---
-        # Do this BEFORE spawning the thread to prevent SQLite crashes!
-        if not llm_manager.collection:
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.warning(self.viewer, "Error", "Search index not loaded.")
+        allowed_docs = []
+        if hasattr(main_window, 'project_manager') and main_window.project_manager:
+            import os
+            allowed_docs = [os.path.basename(p) for p in main_window.project_manager.pdfs]
+
+        if action_type == "reword":
+            blueprint = DefaultBlueprints.get_reword_blueprint(text)
+        elif action_type == "similar":
+            blueprint = DefaultBlueprints.get_similar_context_blueprint(text, allowed_docs)
+        elif action_type == "opposing":
+            blueprint = DefaultBlueprints.get_opposing_views_blueprint(text, allowed_docs)
+        else:
             return
 
-        import os
-        from PySide6.QtWidgets import QApplication
-        try:
-            # Show a brief HUD update
-            self.viewer.page_hud.setVisible(True)
-            self.viewer.page_hud.label_page.setText("Querying Database...")
-            QApplication.processEvents() # Force UI to paint the text
-            
-            emb = llm_manager.get_embedding(selected_text)
-            
-            allowed_docs = main_window.project_manager.pdfs
-            where_clause = None
-            if allowed_docs:
-                base_names = [os.path.basename(d) for d in allowed_docs]
-                if len(base_names) == 1:
-                    where_clause = {"doc_name": base_names[0]}
-                else:
-                    where_clause = {"doc_name": {"$in": base_names}}
-                    
-            results = llm_manager.collection.query(
-                query_embeddings=[emb],
-                n_results=30,
-                where=where_clause
-            )
-            
-            self.viewer.page_hud.label_page.setText("Page:") # Reset HUD
-            
-            if not results or not results.get('documents') or not results['documents'][0]:
-                from PySide6.QtWidgets import QMessageBox
-                QMessageBox.information(main_window, "No Opposing Views", "No relevant documents found in the database.")
-                return
-                
-            documents = results['documents'][0]
-            metadatas = results['metadatas'][0]
-            
-        except Exception as db_e:
-            self.viewer.page_hud.label_page.setText("Page:")
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.critical(main_window, "Database Error", str(db_e))
-            return
+        active_model = "gemma4:e2b"
+        
+        # --- NEW REGISTRY CALL ---
+        if hasattr(main_window, 'dock_manager'):
+            research_docks = main_window.dock_manager.get_inner_widgets("research")
+            if research_docks and hasattr(research_docks[0], 'model_combo'):
+                active_model = research_docks[0].model_combo.currentText()
+        # -------------------------
 
-        # --- PHASE 2: LLM SCORING (BACKGROUND THREAD) ---
-        active_model = None
-        if hasattr(main_window, 'chat_docks') and main_window.chat_docks:
-            active_model = main_window.chat_docks[0].model_combo.currentText()
-            
-        from PySide6.QtWidgets import QProgressDialog, QMessageBox
-        self.loading_dialog = QProgressDialog("Initializing AI...", "Cancel", 0, 0, main_window)
-        self.loading_dialog.setWindowTitle("Finding Opposing Views")
-        self.loading_dialog.setWindowModality(Qt.WindowModality.WindowModal)
-        self.loading_dialog.setStyleSheet("QProgressDialog { background-color: #2b2b2b; color: white; }")
-        self.loading_dialog.show()
-        
-        from core.ai_opposing_views_worker import AIOpposingViewsWorker
-        # Pass the PRE-FETCHED arrays (documents and metadatas) to the worker
-        self.opposing_worker = AIOpposingViewsWorker(
-            llm_manager.api_base, 
-            llm_manager.embedding_model,
-            active_model, 
-            selected_text, 
-            documents,  
-            metadatas,  
-            search_mode="opposing",
-            audit_logger=llm_manager.audit_logger, # <-- Added
-            parent=main_window
-        )
-        
-        self.opposing_worker.progress.connect(self.loading_dialog.setLabelText)
-        
-        def on_finished(matches, error):
-            self.loading_dialog.close() 
-            self.loading_dialog.deleteLater() 
-            
-            try:
-                if error:
-                    QMessageBox.warning(main_window, "Error", error)
-                    return
-                if not matches:
-                    QMessageBox.information(main_window, "No Opposing Views", "The AI could not find any strongly opposing arguments.")
-                    return
-                    
-                from gui.components.dialogs.tag_relatives_dialog import AIResultsDialog
-                dlg = AIResultsDialog("⚖️ Opposing Views Found", matches, main_window, main_window)
-                dlg.exec()
-            except Exception as e:
-                print(f"[UI Error] Failed to load results dialog: {e}")
-                QMessageBox.critical(main_window, "UI Error", f"Failed to open results: {str(e)}")
-
-        self.opposing_worker.finished.connect(on_finished)
-        self.loading_dialog.canceled.connect(self.opposing_worker.terminate)
-        self.opposing_worker.start()
+        runner = MasterActionRunner(main_window, blueprint, {"selected_model": active_model})
+        main_window.ui_router.attach_runner(runner)
+        main_window.process_registry.enqueue_runner(runner, blueprint.name)
         
 
     def define_selection(self):
@@ -456,21 +339,24 @@ class AnnotationManager(QObject):
                 }
                 annot.set_info(info=annot_info)
                 annot.update()
+                
                 main_window = self.viewer.window()
-                if hasattr(main_window, 'project_manager'):
-                    main_window.project_manager.mark_dirty(main_window.current_file_path)
-                self.highlight_created.emit({
-                    "id": annot_info["title"],
-                    "subject": annot_info["subject"],
-                    "content": annot_info["content"],
-                    "pdf_path": self.viewer.window().current_file_path,
-                    "page_num": self.current_page_idx,
-                    "rect_coords": repr(list(annot.rect)),
-                    "color": QColor(int(color_tuple[0] * 255), int(color_tuple[1] * 255), int(color_tuple[2] * 255)).name(),
-                })
+                hex_color = QColor(int(color_tuple[0] * 255), int(color_tuple[1] * 255), int(color_tuple[2] * 255)).name()
+                
+                # --- Correctly Emit to the Event Bus ---
+                if hasattr(self, 'bus'):
+                    self.bus.highlight_created.emit({
+                        "id": annot_info["title"],
+                        "subject": annot_info["subject"],
+                        "content": annot_info["content"],
+                        "pdf_path": main_window.current_file_path,
+                        "page_num": self.current_page_idx,
+                        "rect_coords": repr(list(annot.rect)),
+                        "color": hex_color
+                    })
                 
                 self.viewer.reload_page(self.current_page_idx)
-                self.note_added.emit()
+                
             except Exception as e:
                 print(f"Error saving highlight: {e}")
                 
@@ -494,90 +380,5 @@ class AnnotationManager(QObject):
         
         self.clear_selection()
 
-    def reword_selection(self):
-        if not self.selected_words: return
-        extracted_text = " ".join(w[4] for w in self.selected_words)
-        
-        main_window = self.viewer.window()
-        
-        # NEW: Access the Chat Dock instead of the old Tabs dictionary
-        if hasattr(main_window, 'chat_docks') and main_window.chat_docks:
-            llm_dock = main_window.chat_docks[0]
-            llm_manager = llm_dock.llm_manager
-            model = llm_dock.model_combo.currentText()
-            
-            # Keep a reference to the dialog so it isn't garbage collected
-            self.reword_dialog = RewordDialog(extracted_text, llm_manager, model, self.viewer)
-            self.reword_dialog.show()
-        else:
-            # Failsafe: Ensure the dock is open first
-            if hasattr(main_window, 'spawn_chat_dock'):
-                main_window.spawn_chat_dock()
-                self.reword_selection() # Try again once spawned
-                return
-        
-        self.clear_selection()
+    
 
-class RewordWorker(QThread):
-    token_received = Signal(str)
-    finished = Signal()
-
-    def __init__(self, llm_manager, model, text, parent=None):
-        super().__init__(parent)
-        self.llm_manager = llm_manager
-        self.model = model
-        self.text = text
-
-    def run(self):
-        system_prompt = (
-            "You are an expert editor. Rewrite the following text to make it easier "
-            "to understand and follow, while keeping all crucial information intact. "
-            "Respond ONLY with the reworded text. Do not include introductory phrases."
-        )
-        try:
-            def handle_chunk(chunk):
-                self.token_received.emit(chunk)
-
-            self.llm_manager.query(
-                question=f"\"{self.text}\"",
-                selected_model=self.model,
-                allowed_docs=[],
-                callback=handle_chunk,
-                rag_enabled=False,
-                use_agents=False,
-                custom_system_prompt=system_prompt
-            )
-        except Exception as e:
-            self.token_received.emit(f"\n[Error: {str(e)}]")
-        finally:
-            self.finished.emit()
-
-class RewordDialog(QDialog):
-    def __init__(self, original_text, llm_manager, model, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("AI Reword")
-        self.resize(450, 300)
-        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
-
-        layout = QVBoxLayout(self)
-
-        self.text_edit = QTextEdit()
-        self.text_edit.setReadOnly(True)
-        self.text_edit.setStyleSheet("background-color: #1e1e1e; color: #ddd; font-size: 14px; padding: 10px; border: 1px solid #444;")
-        layout.addWidget(self.text_edit)
-
-        self.close_btn = QPushButton("Close")
-        self.close_btn.setStyleSheet("background-color: #444; padding: 5px;")
-        self.close_btn.clicked.connect(self.accept)
-        layout.addWidget(self.close_btn)
-
-        # Start the worker thread
-        self.worker = RewordWorker(llm_manager, model, original_text, self)
-        self.worker.token_received.connect(self.append_text)
-        self.worker.start()
-
-    def append_text(self, token):
-        cursor = self.text_edit.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.End)
-        cursor.insertText(token)
-        self.text_edit.setTextCursor(cursor)

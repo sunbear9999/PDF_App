@@ -414,3 +414,51 @@ result = enhanced
             step_id=step_id, step_type="LLM_QUERY", 
             llm_options={"num_predict": 2048, "temperature": 0.7}
         )
+    @staticmethod
+    def get_reword_blueprint(text_to_reword: str) -> AIActionBlueprint:
+        return AIActionBlueprint(name="Reword Text", description="Rewrites text for clarity.", steps=[
+            ActionStep(
+                step_id="reword", step_type="LLM_QUERY",
+                inputs={"query": f"\"{text_to_reword}\""},
+                system_prompt="You are an expert editor. Rewrite the following text to make it easier to understand and follow, while keeping all crucial information intact. Respond ONLY with the reworded text. Do not include introductory phrases.",
+                ui_format="nested_outline", 
+                ui_target="floating",
+                ui_title="📝 Reworded Text"
+            )
+        ])
+
+    @staticmethod
+    def get_similar_context_blueprint(text: str, allowed_docs: list) -> AIActionBlueprint:
+        return AIActionBlueprint(name="Similar Context", description="Finds related chunks.", steps=[
+            ActionStep(
+                step_id="search", step_type="RAG_SEARCH",
+                inputs={"queries": [text], "allowed_docs": allowed_docs, "n_results": 10}, # <--- ADDED N_RESULTS
+                ui_format="results_dialog",
+                ui_title="🔗 Similar Context Found",
+                ui_target="floating"
+            )
+        ])
+
+    @staticmethod
+    def get_opposing_views_blueprint(text: str, allowed_docs: list) -> AIActionBlueprint:
+        return AIActionBlueprint(name="Opposing Views", description="Finds counter-arguments.", steps=[
+            ActionStep(
+                step_id="fetch_context", step_type="RAG_SEARCH",
+                inputs={"queries": [text], "allowed_docs": allowed_docs, "n_results": 30}, # <--- ADDED N_RESULTS
+                output_key="rag_context", ui_format="silent"
+            ),
+            ActionStep(
+                step_id="analyze_opposition", step_type="LLM_QUERY",
+                inputs={"query": f"Original Text: '{text}'\n\nContext:\n{{rag_context}}"},
+                system_prompt="Analyze the Context to find strong opposing views, counter-arguments, or contradictions to the Original Text. Extract the exact verbatim text that opposes it, along with its doc_name and page. ONLY output valid JSON.",
+                output_schema=[{
+                    "doc_name": "filename.pdf",
+                    "page": 0,
+                    "text": "exact verbatim opposing quote from the context"
+                }],
+                llm_options={"json_mode": True, "temperature": 0.3},
+                ui_format="results_dialog",
+                ui_title="⚖️ Opposing Views Found",
+                ui_target="floating"
+            )
+        ])

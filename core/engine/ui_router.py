@@ -206,7 +206,25 @@ class BlueprintUIRouter(QObject):
                     workspace_view.review_and_apply_ai_graph_update(result_str)
                 elif hasattr(workspace_view, 'apply_ai_graph_update'):
                     workspace_view.apply_ai_graph_update(result_str)
-
+        elif ui_format == "results_dialog":
+            success, items = extract_and_heal_json(result_str)
+            if success and items:
+                # Handle if LLM wraps the list in a dictionary
+                if isinstance(items, dict):
+                    for val in items.values():
+                        if isinstance(val, list): items = val; break
+                        
+                if isinstance(items, list) and len(items) > 0:
+                    # Spawn the beautiful custom dialog!
+                    from gui.components.dialogs.tag_relatives_dialog import AIResultsDialog
+                    title = getattr(step, 'ui_title', 'AI Results')
+                    dlg = AIResultsDialog(title, items, self.main_window, self.main_window)
+                    dlg.show() 
+                    return
+            
+            # Fallback if empty
+            if target_ui and hasattr(target_ui, 'status_lbl'):
+                target_ui.status_lbl.setText("❌ No relevant context found.")
         # Inject the widget
         if target_widget and target_ui:
             target_ui.receive_ai_widget(target_widget)

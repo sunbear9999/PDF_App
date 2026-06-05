@@ -9,6 +9,7 @@ from PySide6.QtGui import QColor
 from gui.components.workspace_view import WorkspaceView
 from gui.components.help_dialog import HelpDialog
 from gui.components.dialogs.tag_manager_dialog import TagAssignmentDialog
+from core.events.event_bus import EventBus
 
 class NoteBubble(QFrame):
     def __init__(self, tab, pdf_path, page_num, annot_id, subject, content, color, is_ai=False):
@@ -84,6 +85,15 @@ class NoteBubble(QFrame):
 
         if hasattr(self.tab, 'main_window') and hasattr(self.tab.main_window, 'theme_manager'):
             self.apply_theme(self.tab.main_window.theme_manager.get_theme())
+        # --- NEW: Subscribe to Global Events ---
+        self.bus = EventBus.get_instance()
+        self.bus.highlight_created.connect(self._on_highlight_event)
+        self.bus.pdf_switched.connect(self._on_pdf_switched)
+    def _on_highlight_event(self, payload=None):
+        self.refresh_notes()
+
+    def _on_pdf_switched(self, pdf_path=None):
+        self.refresh_notes()
     def apply_theme(self, theme):
         if self.is_ai:
             self.setStyleSheet(f"""

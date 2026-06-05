@@ -5,7 +5,7 @@ import traceback
 from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import QSettings, QTimer, Qt
-from gui.theme import ThemeManager
+from gui.theme.theme import ThemeManager
 from gui.main_window import MainWindow
 
 if getattr(sys, 'frozen', False):

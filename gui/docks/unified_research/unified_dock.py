@@ -16,7 +16,7 @@ from gui.components.process_monitor import ProcessMonitorWidget
 import json
 from gui.docks.unified_research.components.manifest_bubble import ProjectBriefDialog
 from gui.docks.unified_research.components.chat_streamer import ChatMessageWidget
-
+from core.events.event_bus import EventBus
 class IndexWorker(QThread):
     progress = Signal(str)
     finished_indexing = Signal(bool, str)
@@ -63,7 +63,13 @@ class UnifiedResearchDock(QDockWidget):
         
         self._build_sidebar()
         self._build_core_area()
-        
+
+        # --- NEW: Subscribe to Global Events ---
+        self.bus = EventBus.get_instance()
+        self.bus.pdf_switched.connect(self._on_pdf_switched)
+    def _on_pdf_switched(self, pdf_path=None):
+        """Safe wrapper to handle global event signals."""
+        self.refresh_project_ui()
     def _build_sidebar(self):
         self.sidebar = QFrame()
         self.sidebar.setFixedWidth(50)

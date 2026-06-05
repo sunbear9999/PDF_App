@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (QGraphicsRectItem, QGraphicsTextItem, QGraphicsLi
 from PySide6.QtCore import Qt, QLineF, QPointF, QTimer, QRectF
 from PySide6.QtGui import QColor, QPen, QBrush, QFont, QTextDocument, QPainter, QTextCursor
 
-from gui.theme import ThemeManager
+from gui.theme.theme import ThemeManager
 
 def get_text_color_for_bg(bg_color):
     try:

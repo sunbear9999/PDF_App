@@ -3,7 +3,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QTabWidget,
                              QWidget, QLabel, QPushButton, QCheckBox, QScrollArea, QFrame)
 from PySide6.QtCore import Qt, QSettings
 from PySide6.QtGui import QPixmap, QFont, QMovie
-from gui.theme import ThemeManager
+from gui.theme.theme import ThemeManager
 import sys
 import os
 
