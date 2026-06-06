@@ -65,13 +65,23 @@ class DefaultBlueprints:
 
     @staticmethod
     def _build_modular_workspace_step(step_id: str, prompt_key: str, permissions: list, output_mode: str = "workspace_update", additional_context: str = "") -> ActionStep:
-        node_schema = {"id": "n1"}
-        if "layout" in permissions or "all" in permissions: node_schema["group"] = "Cluster Name"
+        is_create_only = (
+            ("create_nodes" in permissions or "all" in permissions)
+            and not any(p in permissions for p in ("layout", "edit_color", "edit_text", "all"))
+        )
+        node_schema = {"id": "g1" if is_create_only else "n1"}
+        if "layout" in permissions or "all" in permissions:
+            node_schema["x"] = 120
+            node_schema["y"] = 240
+        if "create_nodes" in permissions or "all" in permissions:
+            node_schema["text"] = "New group or concept label"
+            node_schema["color"] = "#hexcolor"
         if "edit_color" in permissions or "all" in permissions: node_schema["color"] = "#hexcolor"
         if "edit_text" in permissions or "all" in permissions: node_schema["text"] = "New or updated text"
             
         schema = {"nodes": [node_schema]}
-        if "create_edges" in permissions or "all" in permissions: schema["edges"] = [{"source": "n1", "target": "n2", "label": "relates to"}]
+        if "create_edges" in permissions or "all" in permissions:
+            schema["edges"] = [{"source": node_schema["id"], "target": "n1", "label": "relates to"}]
         if "delete_nodes" in permissions or "all" in permissions: schema["delete_nodes"] = ["n3"]
 
         schema_str = json.dumps(schema, indent=2)
@@ -97,6 +107,63 @@ class DefaultBlueprints:
         ])
 
     @staticmethod
+    def get_workspace_group_blueprint(pm=None) -> AIActionBlueprint:
+        return AIActionBlueprint(name="Group Selected Nodes", description="Create group nodes and connect selected evidence nodes to them", steps=[
+            DefaultBlueprints._build_modular_workspace_step(
+                "group_nodes",
+                "AI Group Worker",
+                permissions=["create_nodes", "create_edges"],
+                additional_context=(
+                    "Create only new group/hub nodes in the nodes array. Reference existing selected nodes only "
+                    "inside edges using their provided ids such as n1, n2. Do not include existing node ids in "
+                    "the nodes array unless you are explicitly changing allowed fields."
+                ),
+            )
+        ])
+
+    @staticmethod
+    def get_workspace_connections_blueprint(pm=None) -> AIActionBlueprint:
+        return AIActionBlueprint(name="Find Workspace Connections", description="Find new relationships between workspace nodes", steps=[
+            DefaultBlueprints._build_modular_workspace_step("find_connections", "AI Connections Worker", permissions=["create_edges"])
+        ])
+
+    @staticmethod
+    def get_workspace_outline_blueprint(pm=None) -> AIActionBlueprint:
+        return AIActionBlueprint(name="Generate Workspace Outline", description="Generate an outline from workspace nodes", steps=[
+            ActionStep(
+                step_id="generate_outline",
+                step_type="LLM_QUERY",
+                prompt_key="Master Outline Generator",
+                output_mode="dialog",
+                inputs={"query": "{prompt:Workspace Outline Query}"},
+                llm_options={"json_mode": False, "temperature": 0.3},
+                output_key="outline_text",
+                required_context=["workspace"],
+            )
+        ])
+
+    @staticmethod
+    def get_workspace_weakpoints_blueprint(pm=None) -> AIActionBlueprint:
+        return AIActionBlueprint(name="Identify Workspace Weakpoints", description="Identify weak arguments or missing support", steps=[
+            ActionStep(
+                step_id="identify_weakpoints",
+                step_type="LLM_QUERY",
+                prompt_key="General Assistant",
+                output_mode="dialog",
+                inputs={"query": "{prompt:Workspace Weakpoints Query}"},
+                llm_options={"json_mode": False, "temperature": 0.2},
+                output_key="weakpoints_text",
+                required_context=["workspace"],
+            )
+        ])
+
+    @staticmethod
+    def get_workspace_fill_blueprint(pm=None) -> AIActionBlueprint:
+        return AIActionBlueprint(name="Fill Workspace Graph", description="Suggest and create missing nodes and connections", steps=[
+            DefaultBlueprints._build_modular_workspace_step("fill_graph", "AI Organize Worker", permissions=["all"])
+        ])
+
+    @staticmethod
     def get_workspace_consolidate_blueprint(pm=None) -> AIActionBlueprint:
         perms = ["layout", "edit_color", "edit_text", "create_edges", "delete_nodes"]
         return AIActionBlueprint(name="Consolidate Nodes", description="Restructure the workspace", steps=[
@@ -118,11 +185,23 @@ class DefaultBlueprints:
     def get_universal_chat_blueprint(pm, model: str = "{selected_model}") -> AIActionBlueprint:
         advanced_steps = [
             ActionStep(step_id="opt_q", step_type="LLM_QUERY", inputs={"query": "{prompt:Advanced RAG Optimize Query}"}, output_key="deep_q", ui_format="silent"),
-            ActionStep(step_id="deep_rag", step_type="RAG_SEARCH", inputs={"queries": "{deep_q}"}, output_key="rag_context", ui_format="silent")
+            ActionStep(
+                step_id="deep_rag",
+                step_type="RAG_SEARCH",
+                inputs={"queries": "{deep_q}", "allowed_docs": "{active_rag_docs}", "tag_filters": "{active_rag_tags}", "tag_logic": "{active_rag_tag_logic}"},
+                output_key="rag_context",
+                ui_format="silent"
+            )
         ]
         
         standard_steps = [
-            ActionStep(step_id="fast_rag", step_type="RAG_SEARCH", inputs={"queries": ["{user_query}"]}, output_key="rag_context", ui_format="silent")
+            ActionStep(
+                step_id="fast_rag",
+                step_type="RAG_SEARCH",
+                inputs={"queries": ["{user_query}"], "allowed_docs": "{active_rag_docs}", "tag_filters": "{active_rag_tags}", "tag_logic": "{active_rag_tag_logic}"},
+                output_key="rag_context",
+                ui_format="silent"
+            )
         ]
 
         return AIActionBlueprint(
@@ -152,9 +231,10 @@ class DefaultBlueprints:
                     required_context=["manifest"], 
                     ui_format="live_stream", 
                     ui_target="chat_dock", 
-                    output_key="final_answer"
+                    output_key="final_answer",
+                    inline_citations=True,
+                    citation_source_key="rag_context"
                 ),
-                ActionStep(step_id="cite", step_ref="core_extract_citations", ui_target="chat_dock"),
                 ActionStep(
                     step_id="graph_router",
                     step_type="BRANCH",
@@ -171,7 +251,8 @@ class DefaultBlueprints:
         if "RAG" in prompt_key:
             steps.append(ActionStep(
                 step_id="gather_context", step_type="RAG_SEARCH", 
-                inputs={"queries": ["{query}"]}, output_key="context", 
+                inputs={"queries": ["{query}"], "allowed_docs": "{active_rag_docs}", "tag_filters": "{active_rag_tags}", "tag_logic": "{active_rag_tag_logic}"},
+                output_key="context",
                 ui_format="silent", ui_target="brainstorm_dock"
             ))
             
@@ -179,17 +260,23 @@ class DefaultBlueprints:
         if "RAG" in prompt_key: 
             query_text += "\n\nDOCUMENT CONTEXT:\n{context}"
 
+        required_context = ["manifest"]
+        if "Workspace" in prompt_key:
+            required_context.extend(["workspace", "selected_nodes"])
+        if "Analysis" in prompt_key:
+            required_context.append("analyses")
+
         steps.append(
             ActionStep(
                 step_id="brainstorm_reply", step_type="LLM_QUERY",
                 inputs={"query": query_text},
                 model=model, prompt_key=prompt_key,
-                required_context=["manifest", "workspace", "selected_nodes", "analyses"], 
-                ui_format="live_stream", ui_target="brainstorm_dock", output_key="final_answer"
+                required_context=required_context,
+                ui_format="live_stream", ui_target="brainstorm_dock", output_key="final_answer",
+                inline_citations=("RAG" in prompt_key),
+                citation_source_key="context" if "RAG" in prompt_key else None,
             )
         )
-        if "RAG" in prompt_key: 
-            steps.append(DefaultBlueprints.get_universal_citation_step("final_answer", "context", "brainstorm_dock"))
         if output_workspace: 
             steps.append(DefaultBlueprints.get_auto_build_graph_step("final_answer"))
             
@@ -208,6 +295,44 @@ class DefaultBlueprints:
                 required_context=["manifest"] 
             )
         ])
+
+    @staticmethod
+    def get_research_agent_planner_blueprint(pm, model: str = "{selected_model}") -> AIActionBlueprint:
+        return AIActionBlueprint(
+            name="Research Agent Planner",
+            description="Chooses the next human-in-the-loop research action from the registered blueprint catalog.",
+            steps=[
+                ActionStep(
+                    step_id="plan_next_action",
+                    step_type="LLM_QUERY",
+                    inputs={"query": "{prompt:Research Agent Planner Query}"},
+                    system_prompt="{prompt:Research Agent Planner System}",
+                    model=model,
+                    output_key="agent_plan",
+                    output_schema={
+                        "status": "planning|waiting_for_user|run_blueprint|complete",
+                        "summary": "Short explanation for the user.",
+                        "next_action": {
+                            "type": "checkpoint|run_blueprint|complete",
+                            "blueprint_id": "Registry blueprint id when type is run_blueprint.",
+                            "reason": "Why this action is useful now.",
+                            "inputs": {"key": "value"},
+                            "checkpoint": {
+                                "kind": "choose_direction|confirm_sources_indexed|select_evidence|approve_plan|custom",
+                                "prompt": "Question or instruction for the user.",
+                                "options": ["optional choices"]
+                            }
+                        },
+                        "memory_update": "Compact durable update for the agent session memory.",
+                        "manifest_suggestions": {"optional_key": "optional project manifest additions"}
+                    },
+                    llm_options={"temperature": 0.2, "num_predict": 700},
+                    ui_format="silent",
+                    ui_target="research_agent",
+                    required_context=[]
+                )
+            ]
+        )
 
     @staticmethod
     def get_python_example_blueprint(pm=None) -> AIActionBlueprint:

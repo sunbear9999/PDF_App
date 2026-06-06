@@ -11,6 +11,7 @@ from PySide6.QtGui import QCursor
 from core.engine.action_model import AIActionBlueprint, ActionStep
 from core.engine.default_blueprints import DefaultBlueprints
 from core.engine.master_runner import MasterActionRunner
+from gui.docks.unified_research.components.workflow_editor_canvas import VisualWorkflowEditor
 
 TYPES = {
     "AI Text Generation": "LLM_QUERY", 
@@ -326,15 +327,10 @@ class BlueprintEditorTab(QWidget):
         self.main_window = main_window
         self.theme = self.main_window.theme_manager.get_theme() if hasattr(main_window, 'theme_manager') else {}
         self.bpm = getattr(self.main_window, 'blueprint_manager', None)
+        self.blueprint_registry = getattr(self.main_window, 'blueprint_registry', None)
+        self.step_manager = getattr(self.main_window, 'step_manager', None)
         self.current_blueprint = None
         self.step_widgets = []
-        self.core_tools = [
-            "Chat - Universal Agent", 
-            "Brainstorm - Default", 
-            "Search Terms", 
-            "Master Outline", 
-            "Keyword Density Analyzer (Python)"
-        ]
         self._build_ui()
 
     def _build_ui(self):
@@ -376,14 +372,12 @@ class BlueprintEditorTab(QWidget):
 
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
         
-        self.scroll_area = QScrollArea()
-        self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        self.steps_container = QWidget()
-        self.steps_layout = QVBoxLayout(self.steps_container)
-        self.steps_layout.setContentsMargins(10, 10, 10, 10) 
-        self.steps_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.scroll_area.setWidget(self.steps_container)
+        self.visual_editor = VisualWorkflowEditor(
+            self.theme,
+            node_type_registry=getattr(self.main_window, "workflow_node_type_registry", None),
+            step_manager=self.step_manager,
+            parent=self,
+        )
         
         self.right_tabs = QTabWidget()
         self.right_tabs.setStyleSheet(f"QTabWidget::pane {{ border: 1px solid {self.theme.get('border', '#444')}; background-color: #111; }} QTabBar::tab {{ background: {self.theme.get('bg_panel', '#333')}; color: white; padding: 8px; }} QTabBar::tab:selected {{ background: {self.theme.get('accent', '#b366ff')}; }}")
@@ -419,18 +413,21 @@ class BlueprintEditorTab(QWidget):
         dbg_lyt.addWidget(self.txt_debugger)
         self.right_tabs.addTab(self.debugger_tab, "⚡ Debugger")
 
-        self.main_splitter.addWidget(self.scroll_area)
+        self.main_splitter.addWidget(self.visual_editor)
         self.main_splitter.addWidget(self.right_tabs)
         self.main_splitter.setSizes([700, 400]) 
         
         layout.addWidget(self.main_splitter, 1)
 
         bottom_bar = QHBoxLayout()
-        self.btn_add_step = QPushButton("➕ Add Step")
+        self.btn_add_step = QPushButton("➕ Add LLM Step")
         self.btn_add_step.clicked.connect(self._add_new_step)
+        self.btn_connect = QPushButton("🔗 Connect Selected")
+        self.btn_connect.clicked.connect(lambda: self.visual_editor.connect_selected())
         self.btn_save = QPushButton("💾 Save Blueprint")
         self.btn_save.clicked.connect(self._save_blueprints)
         bottom_bar.addWidget(self.btn_add_step)
+        bottom_bar.addWidget(self.btn_connect)
         bottom_bar.addStretch()
         bottom_bar.addWidget(self.btn_save)
         layout.addLayout(bottom_bar)
@@ -439,8 +436,9 @@ class BlueprintEditorTab(QWidget):
         if self.bpm: self._populate_combo_box()
 
     def _delete_tool(self):
-        key = self.combo_blueprints.currentText()
-        if not self.bpm or key == "--- Custom Tools ---" or key in self.core_tools: return
+        key = self._current_blueprint_key()
+        if not self.bpm or not key or key not in self.bpm.blueprints:
+            return
         
         reply = QMessageBox.question(self, 'Delete Tool', f"Are you sure you want to permanently delete the custom tool '{key}'?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
         if reply == QMessageBox.StandardButton.Yes:
@@ -456,8 +454,9 @@ class BlueprintEditorTab(QWidget):
             self._load_selected_blueprint()
 
     def _restore_default(self):
-        key = self.combo_blueprints.currentText()
-        if not self.bpm or key not in self.core_tools: return
+        key = self._current_blueprint_key()
+        if not self.bpm or not key or key not in self.bpm.blueprints or not self._registry_definition(key):
+            return
         
         reply = QMessageBox.question(self, 'Restore Default', f"Are you sure you want to restore '{key}' to its default factory settings?\n\nThis will permanently overwrite any changes you made.", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
         if reply == QMessageBox.StandardButton.Yes:
@@ -468,7 +467,7 @@ class BlueprintEditorTab(QWidget):
             self.current_blueprint = None 
             self._save_blueprints()
             self._populate_combo_box()
-            self.combo_blueprints.setCurrentText(key)
+            self._set_current_blueprint_key(key)
             self.combo_blueprints.blockSignals(False)
             self._load_selected_blueprint()
 
@@ -480,7 +479,10 @@ class BlueprintEditorTab(QWidget):
         self.txt_ast_chat.append(f"<br><b>You:</b> {user_text}<br><b>Architect:</b> ")
         
         if self.current_blueprint:
-            for widget in self.step_widgets: widget.update_step_from_ui()
+            self.current_blueprint = self.visual_editor.to_blueprint(
+                self.input_bp_name.text().strip() or self.current_blueprint.name,
+                self.input_bp_desc.text().strip(),
+            )
             current_json = json.dumps(dataclasses.asdict(self.current_blueprint), indent=2)
         else:
             current_json = "{}"
@@ -525,22 +527,34 @@ class BlueprintEditorTab(QWidget):
                 self.txt_ast_chat.append(f"<br><br><b style='color:#ff4444;'>❌ Failed to parse JSON blueprint: {e}</b>")
 
     def _get_all_tool_names(self):
-        if not self.bpm: return []
-        return self.core_tools + [k for k in self.bpm.blueprints.keys() if k not in self.core_tools]
+        keys = []
+        if self.blueprint_registry:
+            keys.extend(definition.id for definition in self.blueprint_registry.all())
+        if self.bpm:
+            keys.extend(key for key in self.bpm.blueprints.keys() if key not in keys)
+        return keys
 
     def _populate_combo_box(self):
-        current_text = self.combo_blueprints.currentText()
+        current_key = self._current_blueprint_key()
         self.combo_blueprints.blockSignals(True)
         self.combo_blueprints.clear()
-        
-        custom_tools = [k for k in self.bpm.blueprints.keys() if k not in self.core_tools]
-        if custom_tools: self.combo_blueprints.addItems(self.core_tools + ["--- Custom Tools ---"] + custom_tools)
-        else: self.combo_blueprints.addItems(self.core_tools)
-        
+
+        seen = set()
+        if self.blueprint_registry:
+            for definition in self.blueprint_registry.all():
+                self.combo_blueprints.addItem(definition.label or definition.id, definition.id)
+                seen.add(definition.id)
+        if self.bpm:
+            for key, blueprint in self.bpm.blueprints.items():
+                if key in seen:
+                    continue
+                self.combo_blueprints.addItem(blueprint.name or key, key)
+                seen.add(key)
+
         self.combo_blueprints.blockSignals(False)
-        
-        if current_text in [self.combo_blueprints.itemText(i) for i in range(self.combo_blueprints.count())]:
-            self.combo_blueprints.setCurrentText(current_text)
+
+        if current_key and current_key in [self.combo_blueprints.itemData(i) for i in range(self.combo_blueprints.count())]:
+            self._set_current_blueprint_key(current_key)
         else:
             self._load_selected_blueprint()
 
@@ -553,100 +567,61 @@ class BlueprintEditorTab(QWidget):
             
             self.bpm.blueprints[name] = new_bp
             self._populate_combo_box()
-            self.combo_blueprints.setCurrentText(name)
+            self._set_current_blueprint_key(name)
 
     def _render_pipeline(self):
-        while self.steps_layout.count():
-            item = self.steps_layout.takeAt(0)
-            if item.widget() and not isinstance(item.widget(), StepCardWidget): item.widget().deleteLater() 
-                
-        current_vars = [] 
-        for i, card in enumerate(self.step_widgets):
-            card.available_vars = list(current_vars)
-            self.steps_layout.addWidget(card)
-            out_key = card.input_output_key.text().strip()
-            if out_key and out_key not in current_vars: current_vars.append(out_key)
-            if i < len(self.step_widgets) - 1:
-                arrow = QLabel(f"⬇ Passes <b style='color: {self.theme.get('accent', '#b366ff')};'>{{{out_key}}}</b> down the pipeline ⬇")
-                arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.steps_layout.addWidget(arrow)
+        if self.current_blueprint:
+            self.visual_editor.load_blueprint(self.current_blueprint)
 
     def _load_selected_blueprint(self):
         if not self.bpm: return
-        key = self.combo_blueprints.currentText()
-        if key == "--- Custom Tools ---" or not key: return
+        key = self._current_blueprint_key()
+        if not key: return
         
         # Toggle Toolbar Actions
-        if key in self.core_tools:
-            self.btn_restore.setVisible(True)
-            self.btn_delete.setVisible(False)
-        else:
-            self.btn_restore.setVisible(False)
-            self.btn_delete.setVisible(True)
+        is_custom_override = key in self.bpm.blueprints
+        is_registered_default = self._registry_definition(key) is not None
+        self.btn_restore.setVisible(is_custom_override and is_registered_default)
+        self.btn_delete.setVisible(is_custom_override and not is_registered_default)
         
         if self.current_blueprint:
-            for widget in self.step_widgets: widget.update_step_from_ui()
+            self.current_blueprint = self.visual_editor.to_blueprint(
+                self.input_bp_name.text().strip() or self.current_blueprint.name,
+                self.input_bp_desc.text().strip(),
+            )
             self.bpm.blueprints[self.current_blueprint.name] = self.current_blueprint
             
-        if key in self.core_tools:
-            if key == "Chat - Universal Agent": 
-                # Ensure you added get_universal_chat_blueprint to default_blueprints.py in Phase 3!
-                default_bp = DefaultBlueprints.get_universal_chat_blueprint(self.main_window.prompt_manager)
-            elif key == "Brainstorm - Default": 
-                default_bp = DefaultBlueprints.get_brainstorm_blueprint(self.main_window.prompt_manager, "Brainstorm - Default")
-            elif key == "Search Terms": 
-                default_bp = DefaultBlueprints.get_search_terms_blueprint(self.main_window.prompt_manager)
-            elif key == "Keyword Density Analyzer (Python)": 
-                default_bp = DefaultBlueprints.get_python_example_blueprint(self.main_window.prompt_manager)
-            else: 
-                default_bp = DefaultBlueprints.get_master_outline_blueprint(self.main_window.prompt_manager, "Project")
-            
-            self.current_blueprint = self.bpm.get_blueprint(key, lambda: default_bp)
-        else:
-            self.current_blueprint = self.bpm.get_blueprint(key, lambda: AIActionBlueprint(name=key, description=""))
+        self.current_blueprint = self.bpm.get_blueprint(key, lambda: self._create_registered_blueprint(key))
+        if not self.current_blueprint:
+            self.current_blueprint = AIActionBlueprint(name=key, description="")
             
         self.current_blueprint.name = key 
         self.input_bp_name.setText(self.current_blueprint.name)
         self.input_bp_desc.setText(self.current_blueprint.description)
         
-        for w in self.step_widgets: w.setParent(None); w.deleteLater()
         self.step_widgets.clear()
-        
-        tool_names = self._get_all_tool_names()
-        universal_vars = [
-            "user_query", 
-            "selected_model", 
-            "project_manifest", 
-            "manifest_permissions", 
-            "selected_nodes", 
-            "workspace_data"
-        ]
-        
-        for step in self.current_blueprint.steps:
-            card = StepCardWidget(step, universal_vars, tool_names, self.theme)
-            card.delete_requested.connect(self._remove_step)
-            card.move_up_requested.connect(self._move_step_up)
-            card.move_down_requested.connect(self._move_step_down)
-            card.step_updated.connect(self._render_pipeline)
-            self.step_widgets.append(card)
-        self._render_pipeline()
+        self.visual_editor.load_blueprint(self.current_blueprint)
+
+    def _current_blueprint_key(self):
+        return self.combo_blueprints.currentData() or self.combo_blueprints.currentText()
+
+    def _set_current_blueprint_key(self, key):
+        for index in range(self.combo_blueprints.count()):
+            if self.combo_blueprints.itemData(index) == key or self.combo_blueprints.itemText(index) == key:
+                self.combo_blueprints.setCurrentIndex(index)
+                return
+
+    def _registry_definition(self, key):
+        return self.blueprint_registry.get(key) if self.blueprint_registry else None
+
+    def _create_registered_blueprint(self, key):
+        if not self.blueprint_registry:
+            return None
+        return self.blueprint_registry.create(key, pm=getattr(self.main_window, "prompt_manager", None))
 
     def _add_new_step(self):
         if not self.current_blueprint: return
-        step_id = f"step_{len(self.current_blueprint.steps)+1}"
-        
-        # --- FIXED: Route through Default Blueprints ---
-        from core.engine.default_blueprints import DefaultBlueprints
-        new_step = DefaultBlueprints.get_blank_step(step_id)
-        
-        self.current_blueprint.steps.append(new_step)
-        card = StepCardWidget(new_step, [], self._get_all_tool_names(), self.theme)
-        card.delete_requested.connect(self._remove_step)
-        card.move_up_requested.connect(self._move_step_up)
-        card.move_down_requested.connect(self._move_step_down)
-        card.step_updated.connect(self._render_pipeline)
-        self.step_widgets.append(card)
-        self._render_pipeline()
+        self.visual_editor.add_step("LLM_QUERY")
 
     def _remove_step(self, card_widget):
         if card_widget.step in self.current_blueprint.steps: self.current_blueprint.steps.remove(card_widget.step)
@@ -671,14 +646,17 @@ class BlueprintEditorTab(QWidget):
     def _save_blueprints(self):
         if not self.bpm: return
         if self.current_blueprint:
-            self.current_blueprint.name = self.input_bp_name.text().strip()
-            self.current_blueprint.description = self.input_bp_desc.text().strip()
-            for widget in self.step_widgets: widget.update_step_from_ui()
+            self.current_blueprint = self.visual_editor.to_blueprint(
+                self.input_bp_name.text().strip(),
+                self.input_bp_desc.text().strip(),
+            )
             self.bpm.blueprints[self.current_blueprint.name] = self.current_blueprint
 
         out_data = {k: dataclasses.asdict(v) for k, v in self.bpm.blueprints.items()}
         with open(self.bpm.blueprint_file, 'w', encoding='utf-8') as f:
             json.dump(out_data, f, indent=4)
+        if hasattr(self.bpm, "_register_custom_blueprints"):
+            self.bpm._register_custom_blueprints()
             
         custom_tab = next((c for c in self.main_window.findChildren(QWidget) if c.__class__.__name__ == "CustomToolsTab"), None)
         if custom_tab and hasattr(custom_tab, 'refresh_tools'): custom_tab.refresh_tools()
@@ -688,7 +666,10 @@ class BlueprintEditorTab(QWidget):
         self.txt_debugger.clear()
         self.txt_debugger.append("<i>Initializing Test Run...</i>\n")
         
-        for widget in self.step_widgets: widget.update_step_from_ui()
+        self.current_blueprint = self.visual_editor.to_blueprint(
+            self.input_bp_name.text().strip() or self.current_blueprint.name,
+            self.input_bp_desc.text().strip(),
+        )
             
         mock_state = {"user_input": "Test Input Data", "doc_path": "sample.pdf"}
         
@@ -717,6 +698,10 @@ class BlueprintEditorTab(QWidget):
         
         self.btn_save.setStyleSheet(f"background-color: {theme.get('accent', '#b366ff')}; font-weight: bold; color: white; border: none; border-radius: 4px; padding: 6px;")
         self.btn_add_step.setStyleSheet(style)
+        if hasattr(self, "btn_connect"):
+            self.btn_connect.setStyleSheet(style)
+        if hasattr(self, "visual_editor"):
+            self.visual_editor.update_theme(theme)
         self.input_ast.setStyleSheet(style)
         self.btn_ast_send.setStyleSheet(f"background-color: {theme.get('accent', '#b366ff')}; color: white; padding: 4px;")
         

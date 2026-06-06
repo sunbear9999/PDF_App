@@ -10,6 +10,9 @@ from PySide6.QtCore import QEvent
 
 from gui.components.annotation_manager import AnnotationManager
 from gui.components.search_bar_widget import SearchBarWidget
+from core.events.event_bus import EventBus
+from core.events.domains.document_events import AnnotationIntent, AnnotationPayload, DocumentEvent, DocumentEventPayload, DocumentIntent, DocumentPayload
+from core.events.domains.project_events import ProjectEvent, ProjectEventPayload
 
 class PageHUD(QFrame):
     def __init__(self, parent=None):
@@ -72,6 +75,7 @@ class PDFViewer(QGraphicsView):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.bus = EventBus.get_instance()
         self.scene = QGraphicsScene(self)
         self.setScene(self.scene)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -81,7 +85,7 @@ class PDFViewer(QGraphicsView):
         self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
-        
+
         self.doc = None
         self.base_zoom = 1.5
         self.dark_mode_enabled = False
@@ -89,8 +93,8 @@ class PDFViewer(QGraphicsView):
         self.page_pixmaps = [None] * 0  # QGraphicsPixmapItem for each page, or None
         self.worker = None
         self.annot_manager = AnnotationManager(self)
-        
-        self.pending_jump = None 
+
+        self.pending_jump = None
 
         self.search_bar = SearchBarWidget(self)
         self.search_bar.hide()
@@ -100,7 +104,7 @@ class PDFViewer(QGraphicsView):
         self.pending_search_jump = None
         self.current_links = []
         self.page_links = {}
-        
+
         self.current_search_text = ""
         self.current_search_scope = ""
         self.current_match_case = False
@@ -108,7 +112,7 @@ class PDFViewer(QGraphicsView):
         self.search_debounce_timer = QTimer(self)
         self.search_debounce_timer.setSingleShot(True)
         self.search_debounce_timer.timeout.connect(self.trigger_search)
-        
+
         self.search_bar.search_input.textChanged.connect(self._on_search_text_changed)
         self.search_bar.search_input.returnPressed.connect(self._on_search_return_pressed)
         self.search_bar.btn_next.clicked.connect(self.next_search_hit)
@@ -145,8 +149,8 @@ class PDFViewer(QGraphicsView):
         """)
         self.dark_mode_btn.clicked.connect(self.toggle_dark_mode)
         toolbar_layout.addWidget(self.dark_mode_btn)
-        
-      
+
+
         self.viewer_toolbar.setLayout(toolbar_layout)
         self.viewer_toolbar.setVisible(True)
         self._zoom_in_sc = QShortcut(QKeySequence("Ctrl+="), self)
@@ -160,6 +164,45 @@ class PDFViewer(QGraphicsView):
 
         self.copy_shortcut = QShortcut(QKeySequence("Ctrl+C"), self)
         self.copy_shortcut.activated.connect(self.copy_to_clipboard)
+
+        self.bus.document_opened.connect(self._on_document_opened_event)
+        self.bus.project_clearing_started.connect(self._on_project_clearing_started)
+        self.bus.document_action_requested.connect(self._handle_doc_action)
+
+    def _handle_doc_action(self, intent: DocumentIntent, payload: DocumentPayload):
+        if intent == DocumentIntent.RELOAD_PAGE:
+            if payload.page_num is not None:
+                self.reload_page(payload.page_num)
+
+    def _on_document_opened_event(self, event: DocumentEvent, payload: DocumentEventPayload):
+        if event == DocumentEvent.DOCUMENT_OPENED:
+            self._on_document_opened(payload.path, payload.doc, payload.needs_ocr)
+
+    def _on_document_opened(self, path: str, doc: object, needs_ocr: bool):
+        """Catches the document from the background service and renders it."""
+        # --- FIX: Give the Viewer the string path so the RenderWorker thread can open it! ---
+        self.pdf_path = path
+        main_window = self.window()
+        if main_window and hasattr(main_window, "current_file_path"):
+            main_window.current_file_path = path
+
+        self.load_document(doc)
+
+        if needs_ocr:
+            self.bus.document_action_requested.emit(
+                DocumentIntent.SHOW_OCR_BANNER,
+                DocumentPayload(path=path)
+            )
+
+    def _on_project_clearing_started(self, event: ProjectEvent, payload: ProjectEventPayload):
+        if event == ProjectEvent.CLEARING_STARTED:
+            self._clear_viewer()
+
+    def _clear_viewer(self):
+        """Wipes the viewer cleanly when a new project loads."""
+        if hasattr(self, 'scene') and self.scene:
+            self.scene.clear()
+        self.doc = None
 
     def _doc_valid(self):
         """Return True only when self.doc exists and is not closed."""
@@ -181,7 +224,7 @@ class PDFViewer(QGraphicsView):
         # Position HUD in bottom left
         if hasattr(self, 'page_hud') and self.page_hud.isVisible():
             self.page_hud.move(20, self.viewport().height() - self.page_hud.height() - 20)
-    
+
     def toggle_search_bar(self):
         if self.search_bar.isVisible():
             self.search_bar.hide()
@@ -193,7 +236,7 @@ class PDFViewer(QGraphicsView):
             self.search_bar.adjustSize()
             x_pos = self.viewport().width() - self.search_bar.width() - 20
             self.search_bar.move(x_pos, 20)
-            
+
             self.search_bar.search_input.setFocus()
             self.search_bar.search_input.selectAll()
 
@@ -211,12 +254,12 @@ class PDFViewer(QGraphicsView):
         text = self.search_bar.search_input.text().strip()
         scope = self.search_bar.scope_combo.currentText()
         match_case = self.search_bar.chk_match_case.isChecked()
-        
-        if (text == self.current_search_text and 
-            scope == self.current_search_scope and 
+
+        if (text == self.current_search_text and
+            scope == self.current_search_scope and
             match_case == self.current_match_case):
-            return 
-            
+            return
+
         self.current_search_scope = scope
         self.current_match_case = match_case
         self.execute_search(text, scope, match_case)
@@ -225,7 +268,7 @@ class PDFViewer(QGraphicsView):
         self.search_hits = []
         self.current_hit_index = -1
         self.current_search_text = text
-        
+
         if not text:
             self.clear_search_highlights()
             self.search_bar.update_hits(0, 0)
@@ -238,11 +281,11 @@ class PDFViewer(QGraphicsView):
         else:
             if main_window.current_file_path:
                 pdfs_to_search = [main_window.current_file_path]
-                
+
         flags = fitz.TEXT_PRESERVE_LIGATURES | fitz.TEXT_PRESERVE_WHITESPACE
         if match_case:
             flags |= getattr(fitz, "TEXT_MATCH_CASE", 4)
-                
+
         for pdf_path in pdfs_to_search:
             doc = main_window.project_manager.get_doc(pdf_path)
             if not doc:
@@ -261,7 +304,7 @@ class PDFViewer(QGraphicsView):
                         'page': page_num,
                         'rect': q.rect
                     })
-                    
+
         if self.search_hits:
             self.current_hit_index = 0
             self.search_bar.update_hits(1, len(self.search_hits))
@@ -284,10 +327,10 @@ class PDFViewer(QGraphicsView):
 
     def navigate_to_current_hit(self):
         if not self.search_hits or self.current_hit_index < 0: return
-        
+
         hit = self.search_hits[self.current_hit_index]
         main_window = self.window()
-        
+
         if hit['pdf'] != main_window.current_file_path:
             self.pending_search_jump = hit
             main_window.switch_to_pdf(hit['pdf'])
@@ -316,7 +359,7 @@ class PDFViewer(QGraphicsView):
 
     def _apply_search_highlights_to_page(self, page_num, page_item):
         current_pdf = self.window().current_file_path
-        
+
         for i, hit in enumerate(self.search_hits):
             if hit['pdf'] == current_pdf and hit['page'] == page_num:
                 r = hit['rect']
@@ -324,16 +367,16 @@ class PDFViewer(QGraphicsView):
                 qt_rect = QRectF(r.x0 * z, r.y0 * z, (r.x1 - r.x0) * z, (r.y1 - r.y0) * z)
                 h_item = QGraphicsRectItem(qt_rect, page_item)
                 if i == self.current_hit_index:
-                    h_item.setBrush(QBrush(QColor(255, 165, 0, 150))) 
+                    h_item.setBrush(QBrush(QColor(255, 165, 0, 150)))
                     h_item.setPen(QPen(QColor(255, 140, 0), 2))
                     h_item.setZValue(10)
                 else:
-                    h_item.setBrush(QBrush(QColor(255, 255, 0, 100))) 
+                    h_item.setBrush(QBrush(QColor(255, 255, 0, 100)))
                     h_item.setPen(QPen(Qt.PenStyle.NoPen))
                     h_item.setZValue(5)
                 self.search_highlight_items.append(h_item)
 
-    
+
 
     def load_document(self, doc):
         if self.worker and self.worker.isRunning():
@@ -383,8 +426,8 @@ class PDFViewer(QGraphicsView):
         self.rendered_pages = set()
         self.pages_in_flight = set()
         self.render_queue = Queue()
-        pdf_path = getattr(self.window(), 'current_file_path', None)
-        self.worker = RenderWorker(pdf_path, self.base_zoom, self.render_queue, pixel_ratio=self._get_dpi_scale())
+        # Use the viewer's locally stored path!
+        self.worker = RenderWorker(getattr(self, 'pdf_path', None), self.base_zoom, self.render_queue, pixel_ratio=self._get_dpi_scale())
         self.worker.page_ready.connect(self._on_page_ready)
         self.worker.start()
 
@@ -407,24 +450,23 @@ class PDFViewer(QGraphicsView):
         if self.worker and self.worker.isRunning():
             self.worker.stop()
             self.worker.wait()
-            
+
         self.doc = new_doc
-        
+
         # 2. Clear out the old render queue to prevent stale requests
         while not self.render_queue.empty():
             try:
                 self.render_queue.get_nowait()
             except:
                 break
-                
+
         # 3. Restart the background worker with the fresh document handle
-        pdf_path = getattr(self.window(), 'current_file_path', None)
-        self.worker = RenderWorker(pdf_path, self.base_zoom, self.render_queue, pixel_ratio=self._get_dpi_scale())
+        self.worker = RenderWorker(getattr(self, 'pdf_path', None), self.base_zoom, self.render_queue, pixel_ratio=self._get_dpi_scale())
         self.worker.page_ready.connect(self._on_page_ready)
         self.worker.start()
-        
+
         # 4. Force re-render of currently visible pages (so the deleted highlight disappears)
-        self.rendered_pages.clear() 
+        self.rendered_pages.clear()
         self._on_scroll()
     def rotate_view(self):
         """Rotates the native view by 90 degrees cleanly."""
@@ -433,7 +475,7 @@ class PDFViewer(QGraphicsView):
         """Callback for when the background RenderWorker finishes a page."""
         if not self._doc_valid() or not (0 <= page_num < len(self.page_pixmaps)):
             return
-            
+
         try:
             from PySide6.QtGui import QPixmap
             from PySide6.QtCore import QTimer
@@ -444,7 +486,7 @@ class PDFViewer(QGraphicsView):
             self.page_pixmaps[page_num].setVisible(True)
             self.page_pixmaps[page_num].setZValue(1)
             self.page_placeholders[page_num].setVisible(False)
-            
+
             if hasattr(self, 'rendered_pages'):
                 self.rendered_pages.add(page_num)
             if hasattr(self, 'pages_in_flight'):
@@ -464,7 +506,7 @@ class PDFViewer(QGraphicsView):
                 s_hit = self.pending_search_jump
                 self.pending_search_jump = None
                 QTimer.singleShot(100, lambda: self._execute_search_jump(s_hit))
-                
+
         except Exception as e:
             print(f"Error handling ready page {page_num}: {e}")
 
@@ -595,7 +637,7 @@ class PDFViewer(QGraphicsView):
             if link:
                 if self._open_link_target(link):
                     return
-        
+
         if is_right and self.annot_manager.has_selection():
             scene_pos = self._event_scene_pos(event)
             if self.annot_manager.is_pos_in_selection(scene_pos):
@@ -607,16 +649,16 @@ class PDFViewer(QGraphicsView):
             self.viewport().setCursor(Qt.CursorShape.IBeamCursor)
             self.annot_manager.start_selection(event)
             return
-        
+
         if is_left:
             scene_pos = self._event_scene_pos(event)
-            
+
             if self.annot_manager.has_selection() and not self.annot_manager.is_pos_in_selection(scene_pos):
                 self.annot_manager.clear_selection()
-                
+
             self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
             page_idx, page_item = self.annot_manager._get_page_at_pos(scene_pos)
-            
+
             if page_idx != -1 and self._doc_valid():
                 local_pos = page_item.mapFromScene(scene_pos)
                 pdf_x, pdf_y = local_pos.x() / self.base_zoom, local_pos.y() / self.base_zoom
@@ -626,15 +668,23 @@ class PDFViewer(QGraphicsView):
                     for annot in page.annots():
                         # 🔥 Expand the hitbox slightly to make thin lines easier to click
                         hitbox = annot.rect + (-2, -2, 2, 2)
-                        
+
                         if hitbox.contains(point) and annot.info:
-                            title = annot.info.get("title", "")
-                            if title.startswith("UserNote") or title.startswith("AINote"):
-                                self.annotation_clicked.emit(title, page_idx)
-                                return 
+                                title = annot.info.get("title", "")
+                                if title.startswith("UserNote") or title.startswith("AINote"):
+                                    self.bus.annotation_action_requested.emit(
+                                        AnnotationIntent.EDIT_POPUP,
+                                        AnnotationPayload(
+                                            target_annot=annot,
+                                            annot_id=title,
+                                            page_num=page_idx,
+                                            pdf_path=getattr(self, 'pdf_path', None),
+                                        ),
+                                    )
+                                    return
                 except Exception as e:
                     print(f"Ignoring PyMuPDF annot error: {e}")
-                    
+
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -666,27 +716,27 @@ class PDFViewer(QGraphicsView):
         highlight, and perfectly frame the AI's quote.
         """
         if not quote: return
-        
+
         # 1. Clean the string (LLMs love wrapping citations in quotes)
         clean_quote = quote.strip('"\'').strip()
-        
+
         # 2. Open the search bar so the user has visual UI feedback
         if not self.search_bar.isVisible():
             self.toggle_search_bar()
-            
+
         # 3. Inject the quote and force a global search to handle doc switching
         self.search_bar.search_input.setText(clean_quote)
         self.search_bar.scope_combo.setCurrentText("Entire Project")
         self.trigger_search()
-        
-        # 4. Anti-Hallucination Fallback: If PyMuPDF chokes on a weird line-break 
+
+        # 4. Anti-Hallucination Fallback: If PyMuPDF chokes on a weird line-break
         # or hyphen, search for the first 6 words to guarantee we still find the context.
         if not self.search_hits:
             words = clean_quote.split()
             if len(words) > 6:
                 partial_quote = " ".join(words[:6])
                 self.search_bar.search_input.setText(partial_quote)
-                self.trigger_search()    
+                self.trigger_search()
     def jump_to_page(self, page_num):
         if 0 <= page_num < len(self.page_rects):
             self._scroll_to_scene_y(self.page_rects[page_num].top())
@@ -702,33 +752,33 @@ class PDFViewer(QGraphicsView):
         """Synchronously renders a page immediately on the main thread to prevent ghost-jumping."""
         if not self._doc_valid() or not (0 <= page_num < len(self.page_pixmaps)):
             return
-            
+
         try:
             import fitz
             from PySide6.QtGui import QImage, QPixmap
-            
+
             page = self.doc.load_page(page_num)
             dpi_scale = getattr(self, '_get_dpi_scale', lambda: 1.0)()
             mat = fitz.Matrix(self.base_zoom * dpi_scale, self.base_zoom * dpi_scale)
             pix = page.get_pixmap(matrix=mat)
             img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888).copy()
-            
+
             if getattr(self, 'dark_mode_enabled', False):
                 img.invertPixels(QImage.InvertMode.InvertRgb)
-                
+
             img.setDevicePixelRatio(dpi_scale)
-            
+
             pixmap = QPixmap.fromImage(img)
             self.page_pixmaps[page_num].setPixmap(pixmap)
             self.page_pixmaps[page_num].setVisible(True)
             self.page_pixmaps[page_num].setZValue(1)
             self.page_placeholders[page_num].setVisible(False)
-            
+
             if hasattr(self, 'rendered_pages'):
                 self.rendered_pages.add(page_num)
             if hasattr(self, 'pages_in_flight'):
                 self.pages_in_flight.discard(page_num)
-            
+
             # 🔥 Cleanly render highlights using the new memory manager
             self._draw_standard_highlights(page_num, self.page_pixmaps[page_num])
 
@@ -737,10 +787,10 @@ class PDFViewer(QGraphicsView):
     def _draw_standard_highlights(self, page_num, page_item):
         """Safely renders permanent highlights while cleaning up old ones to prevent memory leaks."""
         if not self._doc_valid(): return
-        
+
         if not hasattr(self, 'pdf_highlight_items'):
             self.pdf_highlight_items = {}
-            
+
         # Clean up old standard highlights for this page to prevent infinite stacking on scroll
         if page_num in self.pdf_highlight_items:
             for old_h in self.pdf_highlight_items[page_num]:
@@ -749,7 +799,7 @@ class PDFViewer(QGraphicsView):
             self.pdf_highlight_items[page_num].clear()
         else:
             self.pdf_highlight_items[page_num] = []
-            
+
         try:
             page = self.doc.load_page(page_num)
             self.current_links = page.get_links()
@@ -779,7 +829,7 @@ class PDFViewer(QGraphicsView):
         if 0 <= page_num < len(self.page_placeholders) and self.doc:
             if page_num not in getattr(self, 'rendered_pages', set()):
                 self._render_page_sync(page_num)
-                
+
             from PySide6.QtWidgets import QApplication
             QApplication.processEvents()
 
@@ -791,10 +841,10 @@ class PDFViewer(QGraphicsView):
                     z = self.base_zoom
                     qt_rect = QRectF(r.x0 * z, r.y0 * z, (r.x1 - r.x0) * z, (r.y1 - r.y0) * z)
                     scene_rect = target_item.mapToScene(qt_rect).boundingRect()
-                    
+
                     # 🔥 FIX: Pan both X and Y axes to perfectly frame the highlight
                     self.ensureVisible(scene_rect, 50, 150)
-                    
+
                     if hasattr(self, 'page_hud'):
                         self.page_hud.update_hud(page_num + 1, len(self.doc))
                     return
@@ -805,19 +855,19 @@ class PDFViewer(QGraphicsView):
         if 0 <= page_num < len(self.page_pixmaps):
             if page_num not in getattr(self, 'rendered_pages', set()):
                 self._render_page_sync(page_num)
-                
+
             from PySide6.QtWidgets import QApplication
             QApplication.processEvents()
-            
+
             page_item = self.page_pixmaps[page_num]
             r = hit['rect']
             z = self.base_zoom
             qt_rect = QRectF(r.x0 * z, r.y0 * z, (r.x1 - r.x0) * z, (r.y1 - r.y0) * z)
             scene_rect = page_item.mapToScene(qt_rect).boundingRect()
-            
+
             # 🔥 FIX: Pan both X and Y axes to perfectly frame the search hit
             self.ensureVisible(scene_rect, 50, 150)
-            
+
             if hasattr(self, 'page_hud') and self.doc:
                 self.page_hud.update_hud(page_num + 1, len(self.doc))
 
@@ -848,27 +898,27 @@ class PDFViewer(QGraphicsView):
         This completely eliminates blurriness when zoomed very far out or in!
         """
         if not self.doc: return
-        
+
         # 1. Calculate how much Qt is currently scaling the image visually
         current_scale = self.transform().m11()
-        
+
         # If we are already at 100% native scale, there's no blur to fix
         if abs(current_scale - 1.0) < 0.01:
             return
-            
+
         # 2. Save current scroll position so we don't lose our place
         vbar = self.verticalScrollBar()
         scroll_ratio = vbar.value() / vbar.maximum() if vbar.maximum() > 0 else 0
-        
+
         # 3. Permanently bake the visual scale into the PDF engine's rendering resolution
         self.base_zoom = self.base_zoom * current_scale
-        
+
         # 4. Reset Qt's visual scale back to 1.0 (no stretching/squishing)
         self.resetTransform()
-        
+
         # 5. Force the engine to re-render the document natively at the new resolution
         self.load_document(self.doc)
-        
+
         # 6. Restore our scroll position (using a tiny delay to let the UI update first)
         QTimer.singleShot(50, lambda: vbar.setValue(int(scroll_ratio * vbar.maximum())))
     def _get_dpi_scale(self):
@@ -906,7 +956,7 @@ class PDFViewer(QGraphicsView):
                 print(f"Ignoring PyMuPDF link error: {e}")
                 links = []
             self.page_links[page_idx] = links
-            
+
         self.current_links = links
 
         for link in self.current_links:

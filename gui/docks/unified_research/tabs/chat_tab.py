@@ -90,17 +90,29 @@ class ChatTab(BaseTab):
     def _open_context_filter(self):
         from gui.docks.unified_research.components.context_filter_dialog import ContextFilterDialog
         pm = self.project_manager
-        current_docs = pm.get_metadata("active_rag_docs", [os.path.basename(p) for p in pm.pdfs])
-        current_tags = pm.get_metadata("active_rag_tags", [])
+        current_docs = self._metadata_json("active_rag_docs", [os.path.basename(p) for p in pm.pdfs])
+        current_tags = self._metadata_json("active_rag_tags", [])
+        current_logic = pm.get_metadata("active_rag_tag_logic", "OR")
         
-        dlg = ContextFilterDialog(pm, current_docs, current_tags, "OR", self.theme, self)
+        dlg = ContextFilterDialog(pm, current_docs, current_tags, current_logic, self.theme, self)
         if dlg.exec():
             docs, tags, logic = dlg.get_results()
-            pm.set_metadata("active_rag_docs", docs)
-            pm.set_metadata("active_rag_tags", tags)
+            pm.set_metadata("active_rag_docs", json.dumps(docs))
+            pm.set_metadata("active_rag_tags", json.dumps(tags))
+            pm.set_metadata("active_rag_tag_logic", logic)
             sys_msg = ChatMessageWidget("System", theme=self.theme, is_user=False)
             sys_msg.append_chunk(f"Context updated. Now targeting **{len(docs)}** documents.")
             self.receive_ai_widget(sys_msg)
+
+    def _metadata_json(self, key, default):
+        raw = self.project_manager.get_metadata(key, json.dumps(default))
+        if isinstance(raw, list):
+            return raw
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, list) else default
+        except Exception:
+            return default
 
     def _send_message(self):
         text = self.input_field.toPlainText().strip()

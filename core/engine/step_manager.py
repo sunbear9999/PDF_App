@@ -2,6 +2,8 @@
 import json
 import os
 import sys
+import copy
+import dataclasses
 from core.engine.action_model import ActionStep
 
 class StepManager:
@@ -48,14 +50,32 @@ class StepManager:
         self.save_library()
 
     def save_library(self):
-        import dataclasses
         out_data = {k: dataclasses.asdict(v) for k, v in self.library.items()}
         os.makedirs(os.path.dirname(self.library_path), exist_ok=True)
         with open(self.library_path, 'w', encoding='utf-8') as f:
             json.dump(out_data, f, indent=4)
 
+    def save_step(self, step_ref: str, step: ActionStep):
+        """Persist a reusable workflow step definition."""
+        clean_ref = self._safe_ref(step_ref)
+        saved_step = copy.deepcopy(step)
+        saved_step.step_id = clean_ref
+        saved_step.step_ref = None
+        if not saved_step.node_type_id:
+            from core.engine.workflow_graph_service import STEP_TYPE_TO_NODE_TYPE
+            saved_step.node_type_id = STEP_TYPE_TO_NODE_TYPE.get(saved_step.step_type, "workflow.llm_query")
+        self.library[clean_ref] = saved_step
+        self.save_library()
+        return clean_ref
+
     def get_step(self, step_ref: str) -> ActionStep:
         """Returns a copy of the requested step to prevent reference mutation."""
-        import copy
         step = self.library.get(step_ref)
         return copy.deepcopy(step) if step else None
+
+    def list_steps(self):
+        return [(key, copy.deepcopy(step)) for key, step in sorted(self.library.items())]
+
+    def _safe_ref(self, text: str) -> str:
+        value = "".join(ch.lower() if ch.isalnum() else "_" for ch in (text or "").strip()).strip("_")
+        return value or "custom_step"

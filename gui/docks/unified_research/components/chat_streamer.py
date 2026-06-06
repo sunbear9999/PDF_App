@@ -98,6 +98,15 @@ class ChatMessageWidget(QWidget):
             self.main_browser.setMarkdown(self.raw_buffer.strip())
             self._resize_browser(self.main_browser)
 
+    def set_final_text(self, text):
+        self.raw_buffer = text or ""
+        if self.is_user:
+            self.user_text.setText(self.raw_buffer)
+            return
+        self.hide_status()
+        self.main_browser.setMarkdown(self.raw_buffer.strip())
+        self._resize_browser(self.main_browser)
+
     def add_bubble(self, doc_name, quote, note):
         bubble = NoteBubbleWidget(doc_name, quote, note, self.theme, parent=self)
         if hasattr(self.window(), 'viewer'): 

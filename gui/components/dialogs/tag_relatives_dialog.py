@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                              QPushButton, QScrollArea, QWidget, QFrame, QInputDialog, QMessageBox, QSizePolicy) 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
+from core.events.domains.document_events import DocumentEvent, DocumentEventPayload
 
 class AIResultsDialog(QDialog):
     # Added 'window_title' to handle both Tags and Opposing Views dynamically
@@ -168,9 +169,12 @@ class AIResultsDialog(QDialog):
         if pdf_path == self.main_window.current_file_path:
             self.main_window.viewer.reload_page(match['page'])
             
-        self.main_window.viewer.annot_manager.highlight_created.emit({
-            "id": new_annot_id, "subject": match['text'], "content": note,
-            "pdf_path": pdf_path, "page_num": match['page'],
-            "rect_coords": repr(list(annot.rect)), "color": QColor(179, 102, 255).name(),
-        })
+        self.main_window.viewer.annot_manager.highlight_created.emit(
+            DocumentEvent.HIGHLIGHT_CREATED,
+            DocumentEventPayload(highlight_data={
+                "id": new_annot_id, "subject": match['text'], "content": note,
+                "pdf_path": pdf_path, "page_num": match['page'],
+                "rect_coords": repr(list(annot.rect)), "color": QColor(179, 102, 255).name(),
+            }),
+        )
         self.main_window.viewer.annot_manager.note_added.emit()

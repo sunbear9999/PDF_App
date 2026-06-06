@@ -1,45 +1,22 @@
-# gui/tabs/ocr_tab.py
 import os
-import shutil
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QRadioButton, QButtonGroup, QTextEdit, QPushButton,
                              QScrollArea, QFrame)
-from PySide6.QtCore import Qt, Signal, QThread
-
-class OCRWorker(QThread):
-    progress_updated = Signal(int, int)
-    ocr_completed = Signal(str, str, str)
-
-    def __init__(self, file_path, ui_mode, parent=None):
-        super().__init__(parent)
-        self.file_path = file_path
-        self.ui_mode = ui_mode
-
-    def run(self):
-        save_path = None
-        engine_mode = "text"
-
-        if self.ui_mode == "save_new":
-            engine_mode = "pdf"
-            base, ext = os.path.splitext(self.file_path)
-            save_path = f"{base}_ocr{ext}"
-        elif self.ui_mode == "replace":
-            engine_mode = "pdf"
-            # NEW: Save to a temporary file so Windows doesn't block the write
-            save_path = self.file_path + ".tmp" 
-
-        def cb(cur, tot):
-            self.progress_updated.emit(cur, tot)
-
-        from core.ocr_engine import run_ocr_on_pdf
-        result_text = run_ocr_on_pdf(self.file_path, mode=engine_mode, save_path=save_path, progress_callback=cb)
-        self.ocr_completed.emit(result_text, self.ui_mode, save_path if save_path else "")
-
+from core.events.event_bus import EventBus
+from core.events.domains.tool_events import OCRIntent, OCRPayload, OCRStatus, OCRStatusPayload
 class OCRTab(QWidget):
     def __init__(self, parent=None, main_window=None):
         super().__init__(parent)
         self.main_window = main_window
+        self.bus = EventBus.get_instance()
         self.theme = None
+
+        self._build_ui()
+
+        # --- Event Listeners ---
+        self.bus.ocr_status_updated.connect(self._handle_status_update)
+
+    def _build_ui(self):
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
 
@@ -57,7 +34,7 @@ class OCRTab(QWidget):
         mode_row_1 = QHBoxLayout()
         mode_row_2 = QHBoxLayout()
         self.mode_group = QButtonGroup(self)
-        
+
         self.rb_text = QRadioButton("Extract Text")
         self.rb_new = QRadioButton("Save New PDF")
         self.rb_replace = QRadioButton("Replace Original")
@@ -84,7 +61,7 @@ class OCRTab(QWidget):
 
         control_layout = QHBoxLayout()
         self.run_ocr_btn = QPushButton("Run OCR")
-        self.run_ocr_btn.clicked.connect(self.start_ocr_thread)
+        self.run_ocr_btn.clicked.connect(self.request_ocr)
         control_layout.addWidget(self.run_ocr_btn)
 
         self.status_label = QLabel("Ready")
@@ -97,19 +74,14 @@ class OCRTab(QWidget):
 
     def update_theme(self, theme):
         self.theme = theme
-        
         self.setStyleSheet(f"OCRTab {{ background-color: {theme['bg_main']}; color: {theme['text_main']}; }}")
-        
-        # Explicitly theme the Scroll Area components
         self.tab_scroll_area.setStyleSheet("QScrollArea { background: transparent; border: none; }")
         self.tab_scroll_area.viewport().setStyleSheet("background: transparent;")
         self.content_widget.setStyleSheet(f"QWidget {{ background-color: {theme['bg_main']}; color: {theme['text_main']}; }}")
-        
-        # Theme Inputs & Layout
+
         self.text_area.setStyleSheet(f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']}; border-radius: 4px; padding: 4px;")
         self.header.setStyleSheet(f"font-size: 18px; margin-bottom: 10px; color: {theme['text_main']}; background: transparent;")
-        
-        # Radio Buttons
+
         radio_style = f"""
             QRadioButton {{ background: transparent; spacing: 8px; color: {theme['text_main']}; font-weight: bold; }}
             QRadioButton::indicator {{ width: 14px; height: 14px; border-radius: 7px; border: 2px solid {theme['border']}; background: {theme['bg_input']}; }}
@@ -119,99 +91,60 @@ class OCRTab(QWidget):
         self.rb_text.setStyleSheet(radio_style)
         self.rb_new.setStyleSheet(radio_style)
         self.rb_replace.setStyleSheet(radio_style)
-        
-        # Action Button
+
         self.run_ocr_btn.setStyleSheet(f"""
             QPushButton {{ background-color: {theme['success']}; color: #ffffff; padding: 8px 16px; font-weight: bold; border-radius: 4px; border: none; }}
             QPushButton:hover {{ background-color: {theme['accent_hover']}; }}
             QPushButton:disabled {{ background-color: {theme['bg_input']}; color: {theme['text_muted']}; }}
         """)
-        
+
         if self.status_label.text() in ["Ready", ""] or self.status_label.text().startswith("Target:"):
             self.status_label.setStyleSheet(f"color: {theme['text_muted']}; font-size: 13px; font-weight: bold; margin-left: 10px; background: transparent;")
-    def get_output_mode(self):
-        if self.rb_text.isChecked(): return "text"
-        if self.rb_new.isChecked(): return "save_new"
-        if self.rb_replace.isChecked(): return "replace"
+
     def sync_file(self, file_path):
         self.text_area.clear()
         self.status_label.setText(f"Target: {os.path.basename(file_path)}")
         color = self.theme['text_muted'] if self.theme else "gray"
         self.status_label.setStyleSheet(f"color: {color}; font-size: 14px; margin-left: 10px;")
 
-    def _update_progress_ui(self, current_page, total_pages):
-        self.status_label.setText(f"Processing Page {current_page}/{total_pages}...")
-        color = self.theme['warning'] if self.theme else "#ffaa00"
-        self.status_label.setStyleSheet(f"color: {color}; font-size: 14px; margin-left: 10px;")
+    def get_output_mode(self):
+        if self.rb_text.isChecked(): return "text"
+        if self.rb_new.isChecked(): return "save_new"
+        if self.rb_replace.isChecked(): return "replace"
 
-    def start_ocr_thread(self):
+    def request_ocr(self):
+        """Emits an intent to the background service to process the OCR."""
         current_file = self.main_window.current_file_path
         if not current_file:
             self.status_label.setText("No document loaded in viewer.")
             color = self.theme['error'] if self.theme else "#ff4444"
             self.status_label.setStyleSheet(f"color: {color}; font-size: 14px; margin-left: 10px;")
             return
-            
+
         self.run_ocr_btn.setEnabled(False)
         self.text_area.clear()
-        
-        mode = self.get_output_mode()
-        
-        self.ocr_worker = OCRWorker(current_file, mode, parent=self)
-        self.ocr_worker.progress_updated.connect(self._update_progress_ui)
-        self.ocr_worker.ocr_completed.connect(self._finalize_ocr)
-        self.ocr_worker.start()
 
-    def _finalize_ocr(self, text, ui_mode, save_path):
-        if text.startswith("OCR Engine Error"):
-            self.text_area.setPlainText(text)
-            self.status_label.setText("Failed")
-            color = self.theme['error'] if self.theme else "#ff4444"
+        self.bus.ocr_action_requested.emit(
+            OCRIntent.RUN,
+            OCRPayload(file_path=current_file, mode=self.get_output_mode())
+        )
+
+    def _handle_status_update(self, event: OCRStatus, payload: OCRStatusPayload):
+        """Reacts to state changes from the OCR service."""
+        status = event
+        msg = payload.get("msg", "")
+        text_content = payload.get("text")
+
+        self.status_label.setText(msg)
+
+        if status == OCRStatus.RUNNING:
+            color = self.theme['warning'] if self.theme else "#ffaa00"
             self.status_label.setStyleSheet(f"color: {color}; font-size: 14px; margin-left: 10px;")
-            
-            # Cleanup temp file if the engine crashed mid-way
-            if ui_mode == "replace" and save_path and os.path.exists(save_path):
-                try: os.remove(save_path)
-                except: pass
-        else:
-            self.text_area.setPlainText(text)
-            msg = "OCR Complete!"
-            
-            if ui_mode != "text":
-                if ui_mode == "replace":
-                    # The save_path is our .tmp file, we need to swap it with the original
-                    original_path = self.ocr_worker.file_path
-                    pm = self.main_window.project_manager
-                    
-                    # 1. Close the document in the main app FIRST to release the Windows lock
-                    if original_path in pm.open_docs:
-                        if not pm.open_docs[original_path].is_closed:
-                            pm.open_docs[original_path].close()
-                        del pm.open_docs[original_path]
-                    
-                    # 2. Now that the lock is released, safely replace the original file
-                    try:
-                        os.replace(save_path, original_path)
-                    except OSError:
-                        # Fallback for cross-drive links if os.replace fails
-                        shutil.copy2(save_path, original_path)
-                        os.remove(save_path)
-                    
-                    msg += f" Replaced {os.path.basename(original_path)}"
-                    
-                    # 3. Re-open the newly OCR'd document
-                    new_doc = pm.get_doc(original_path)
-                    if new_doc:
-                        self.main_window.viewer.load_document(new_doc)
-                        
-                elif ui_mode == "save_new":
-                    msg += f" Saved to {os.path.basename(save_path)}"
-                    self.main_window.project_manager.add_pdf(save_path)
-                    self.main_window._refresh_pdf_dropdown()
-                    self.main_window.switch_to_pdf(save_path)
-                    
-            self.status_label.setText(msg)
-            color = self.theme['success'] if self.theme else "#00cc66"
+
+        elif status in {OCRStatus.COMPLETE, OCRStatus.ERROR}:
+            self.run_ocr_btn.setEnabled(True)
+            if text_content is not None:
+                self.text_area.setPlainText(text_content)
+
+            color = self.theme['success'] if status == OCRStatus.COMPLETE else (self.theme['error'] if self.theme else "#ff4444")
             self.status_label.setStyleSheet(f"color: {color}; font-size: 14px; margin-left: 10px;")
-            
-        self.run_ocr_btn.setEnabled(True)

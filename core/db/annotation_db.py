@@ -8,17 +8,20 @@ class AnnotationDB(BaseDB):
         try:
             self._conn.execute(
                 """
-                INSERT INTO highlights (id, doc_id, page_num, rect_coords, text_content, color)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO highlights (id, doc_id, page_num, rect_coords, text_content, note_content, color)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     doc_id = excluded.doc_id, page_num = excluded.page_num,
                     rect_coords = excluded.rect_coords, text_content = excluded.text_content,
+                    note_content = excluded.note_content,
                     color = excluded.color
                 """,
                 (
                     highlight_data.get("id"), highlight_data.get("doc_id"),
                     highlight_data.get("page_num"), highlight_data.get("rect_coords"),
-                    highlight_data.get("text_content", ""), highlight_data.get("color"),
+                    highlight_data.get("text_content", ""),
+                    highlight_data.get("note_content", highlight_data.get("content", "")),
+                    highlight_data.get("color"),
                 ),
             )
             self._conn.commit()
@@ -29,11 +32,13 @@ class AnnotationDB(BaseDB):
         if not self._conn: return {}
         try:
             cursor = self._conn.cursor()
-            cursor.execute("SELECT id, doc_id, page_num, rect_coords, text_content, color FROM highlights")
+            cursor.execute("SELECT id, doc_id, page_num, rect_coords, text_content, note_content, color FROM highlights")
             return {
                 row[0]: {
                     "id": row[0], "doc_id": row[1], "page_num": row[2],
-                    "rect_coords": row[3], "text_content": row[4], "color": row[5],
+                    "rect_coords": row[3], "text_content": row[4],
+                    "content": row[5] or "", "note_content": row[5] or "",
+                    "color": row[6],
                 }
                 for row in cursor.fetchall()
             }
@@ -50,7 +55,7 @@ class AnnotationDB(BaseDB):
             cursor = self._conn.cursor()
             cursor.execute(
                 """
-                SELECT h.id, h.doc_id, h.page_num, h.rect_coords, h.text_content, h.color
+                SELECT h.id, h.doc_id, h.page_num, h.rect_coords, h.text_content, h.note_content, h.color
                 FROM highlights h
                 WHERE NOT EXISTS (
                     SELECT 1 FROM nodes n
@@ -61,7 +66,9 @@ class AnnotationDB(BaseDB):
             )
             return [
                 {"id": row[0], "doc_id": row[1], "page_num": row[2],
-                 "rect_coords": row[3], "text_content": row[4], "color": row[5]}
+                 "rect_coords": row[3], "text_content": row[4],
+                 "content": row[5] or "", "note_content": row[5] or "",
+                 "color": row[6]}
                 for row in cursor.fetchall()
             ]
         except sqlite3.Error as e:
@@ -76,9 +83,14 @@ class AnnotationDB(BaseDB):
         except sqlite3.Error as e:
             print(f"Error deleting highlight {highlight_id}: {e}")
     def update_highlight_text(self, highlight_id, new_text):
-        self._conn.execute("UPDATE highlights SET text_content = ? WHERE id = ?", (new_text, highlight_id))
+        self.update_highlight_note(highlight_id, new_text)
+
+    def update_highlight_note(self, highlight_id, new_text):
+        if not self._conn: return
+        self._conn.execute("UPDATE highlights SET note_content = ? WHERE id = ?", (new_text, highlight_id))
         self._conn.commit()
 
     def update_highlight_color(self, highlight_id, hex_color):
+        if not self._conn: return
         self._conn.execute("UPDATE highlights SET color = ? WHERE id = ?", (hex_color, highlight_id))
         self._conn.commit()

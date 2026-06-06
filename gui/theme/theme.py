@@ -238,6 +238,14 @@ class _ThemeManager(QObject):
             QTabWidget::pane {{ border: 1px solid {t['border']}; background: {t['bg_main']}; }}
         """
         app.setStyleSheet(style)
+    def get_available_themes(self) -> list:
+        """Returns a list of all registered theme names for the UI menus."""
+        # If your themes are stored in a dictionary called self.themes:
+        if hasattr(self, 'themes') and isinstance(self.themes, dict):
+            return list(self.themes.keys())
+        
+        # Fallback if your themes are hardcoded
+        return ["Dark", "Light", "Custom"]
 
 
 # -------------------------------------------------------------

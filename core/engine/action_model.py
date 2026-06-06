@@ -7,6 +7,7 @@ from typing import List, Dict, Any, Optional
 class ActionStep:
     step_id: str
     step_type: str = "LIBRARY_REF" 
+    node_type_id: Optional[str] = None
     
     step_ref: Optional[str] = None
     
@@ -24,6 +25,8 @@ class ActionStep:
     ui_format: str = "silent"  
     ui_target: str = "floating" 
     ui_title: str = "AI Result"
+    inline_citations: bool = False
+    citation_source_key: Optional[str] = None
     
     html_template: Optional[str] = None
     output_schema: Optional[Dict[str, Any]] = None
@@ -34,7 +37,7 @@ class ActionStep:
     if_false: List[ActionStep] = field(default_factory=list)
 
 @dataclass
-class AIActionBlueprint:
+class WorkflowBlueprint:
     name: str
     description: str
     mount_points: List[str] = field(default_factory=lambda: ["custom_tools_tab"])
@@ -65,3 +68,6 @@ class AIActionBlueprint:
             expected_inputs=data.get('expected_inputs', []),
             steps=steps
         )
+
+
+AIActionBlueprint = WorkflowBlueprint

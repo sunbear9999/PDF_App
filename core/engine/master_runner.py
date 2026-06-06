@@ -5,6 +5,7 @@ import sqlite3
 import re
 from PySide6.QtCore import QMutex, QThread, QWaitCondition, Signal, Qt
 from core.engine.action_model import AIActionBlueprint, ActionStep
+from core.events.domains.workspace_events import WorkflowIntent, WorkflowPayload
 from core.utils.state_resolver import StateResolver
 from core.utils.json_utils import extract_and_heal_json
 
@@ -30,9 +31,28 @@ class MasterActionRunner(QThread):
         self.state = initial_state.copy() 
         self.job = None
         self.current_executing_step = None
+        self.resolved_step_specs = {}
         self._pause_mutex = QMutex()
         self._wait_condition = QWaitCondition()
         self._user_response = None
+        self.step_handlers = self._build_step_handlers()
+        self.step_handlers.update(getattr(main_window, "workflow_step_handlers", {}) or {})
+
+    def _build_step_handlers(self):
+        return {
+            "LLM_QUERY": lambda step, inputs, model: self._run_llm(step, inputs, model),
+            "RAG_SEARCH": lambda step, inputs, model: self._run_rag(step, inputs),
+            "FOREACH": lambda step, inputs, model: self._run_foreach(step, inputs),
+            "PYTHON_SCRIPT": lambda step, inputs, model: self._run_python(step, inputs),
+            "USER_INPUT": lambda step, inputs, model: self._run_user_input(step, inputs),
+            "BRANCH": lambda step, inputs, model: self._run_branch(step, inputs),
+            "DATABASE_WRITE": lambda step, inputs, model: self._run_db_write(step, inputs),
+        }
+
+    def register_step_handler(self, step_type: str, handler):
+        """Allow future workflow/plugin step types to attach execution without editing the runner dispatch ladder."""
+        if step_type and handler:
+            self.step_handlers[step_type] = handler
 
     def run(self):
         try:
@@ -82,6 +102,7 @@ class MasterActionRunner(QThread):
             self.registry.update_job_status(self.job.id, f"Running: {step.step_id}...")
             
         self.current_executing_step = step
+        self.resolved_step_specs[step.step_id] = step
         self.step_started.emit(step.step_id)
         
         resolved_inputs = StateResolver.resolve_val(step.inputs, self.state, self.prompt_manager)
@@ -91,14 +112,7 @@ class MasterActionRunner(QThread):
             resolved_model = self.state.get("selected_model")
         if step.step_type == 'LIBRARY_REF':
             raise ValueError(f"Missing Tool: Could not find '{step.step_ref}' in the Step Library.")
-        if step.step_type == 'LLM_QUERY': result = self._run_llm(step, resolved_inputs, resolved_model)
-        elif step.step_type == 'RAG_SEARCH': result = self._run_rag(step, resolved_inputs)
-        elif step.step_type == 'FOREACH': result = self._run_foreach(step, resolved_inputs)
-        elif step.step_type == 'PYTHON_SCRIPT': result = self._run_python(step, resolved_inputs)
-        elif step.step_type == 'USER_INPUT': result = self._run_user_input(step, resolved_inputs)
-        elif step.step_type == 'BRANCH': result = self._run_branch(step, resolved_inputs)
-        elif step.step_type == 'DATABASE_WRITE': result = self._run_db_write(step, resolved_inputs)
-        else: raise ValueError(f"Unknown step type: {step.step_type}")
+        result = self._dispatch_step(step, resolved_inputs, resolved_model)
         print(f"Step Id: {step.step_id}, Result: {result}")
         self.state[step.output_key] = result
         
@@ -109,6 +123,12 @@ class MasterActionRunner(QThread):
 
         if not self.job or not self.job.abort_event.is_set():
             self.step_complete.emit(step.step_id, str(result), self.state.copy())
+
+    def _dispatch_step(self, step: ActionStep, resolved_inputs: dict, resolved_model=None):
+        handler = self.step_handlers.get(step.step_type)
+        if not handler:
+            raise ValueError(f"Unknown step type: {step.step_type}")
+        return handler(step, resolved_inputs, resolved_model)
 
     def _run_user_input(self, step, inputs):
         schema = step.expected_inputs if hasattr(step, 'expected_inputs') else inputs
@@ -219,19 +239,19 @@ class MasterActionRunner(QThread):
                  if self.job and self.job.abort_event.is_set(): break
                  
                  self.current_executing_step = sub_step 
+                 self.resolved_step_specs[sub_step.step_id] = sub_step
                  self.step_started.emit(sub_step.step_id)
                  
                  # THE FIX: Use StateResolver cleanly here
                  res_inputs = {k: StateResolver.resolve_val(v, sub_state, self.prompt_manager) for k, v in sub_step.inputs.items()}
                  res_model = StateResolver.resolve_val(sub_step.model, sub_state, self.prompt_manager)
                  
-                 if sub_step.step_type == 'LLM_QUERY': output = self._run_llm(sub_step, res_inputs, res_model)
-                 elif sub_step.step_type == 'RAG_SEARCH': output = self._run_rag(sub_step, res_inputs)
-                 elif sub_step.step_type == 'FOREACH': output = self._run_foreach(sub_step, res_inputs)
-                 elif sub_step.step_type == 'PYTHON_SCRIPT': output = self._run_python(sub_step, res_inputs)
-                 elif sub_step.step_type == 'BRANCH': output = self._run_branch(sub_step, res_inputs)
-                 elif sub_step.step_type == 'DATABASE_WRITE': output = self._run_db_write(sub_step, res_inputs)
-                 else: output = ""
+                 parent_state = self.state
+                 self.state = sub_state
+                 try:
+                     output = self._dispatch_step(sub_step, res_inputs, res_model)
+                 finally:
+                     self.state = parent_state
                      
                  sub_state[sub_step.output_key] = output
                  
@@ -251,14 +271,14 @@ class MasterActionRunner(QThread):
             self.step_complete.emit(f"{step.step_id}_item_{idx}", str(final_result), sub_state.copy())
             
         self.current_executing_step = step 
-        
+
         if step.step_id == "process_all_chunks":
             try:
-                from PySide6.QtCore import QMetaObject, Qt
-                from PySide6.QtWidgets import QDockWidget
-                dock = self.main_window.findChild(QDockWidget, "UnifiedResearchDock")
-                if dock and hasattr(dock, "tab_analysis"):
-                    QMetaObject.invokeMethod(dock.tab_analysis, "_load_existing_analysis", Qt.ConnectionType.QueuedConnection)
+                from core.events.event_bus import EventBus
+                EventBus.get_instance().workflow_action_requested.emit(
+                    WorkflowIntent.ANALYSIS_REFRESH_REQUESTED,
+                    WorkflowPayload(),
+                )
             except Exception: pass
 
         deduped_results = []
@@ -278,7 +298,8 @@ class MasterActionRunner(QThread):
         system_prompt = getattr(step, 'system_prompt', None) or inputs.get('system_prompt', '')
         
         if getattr(step, 'prompt_key', None):
-            raw_prompt = self.prompt_manager.get_prompt(step.prompt_key)
+            resolved_prompt_key = StateResolver.resolve_val(step.prompt_key, self.state, self.prompt_manager)
+            raw_prompt = self.prompt_manager.get_prompt(resolved_prompt_key)
             if raw_prompt: 
                 system_prompt = raw_prompt + "\n\n" + system_prompt
 
@@ -305,6 +326,9 @@ class MasterActionRunner(QThread):
             system_prompt += "\n\n" + self.prompt_manager.get_prompt("Format Enforcer - Data Table")
         elif ui_format == "card_grid":
             system_prompt += "\n\n" + self.prompt_manager.get_prompt("Format Enforcer - Card Grid")
+
+        if getattr(step, "inline_citations", False) and self._has_citation_source(step):
+            system_prompt += "\n\n" + self.prompt_manager.get_prompt("Inline Citation Directive")
 
         # THE FIX: Ensure we cleanly resolve variables in the composed system prompt
         system_prompt = StateResolver.resolve_val(system_prompt, self.state, self.prompt_manager)
@@ -351,6 +375,16 @@ class MasterActionRunner(QThread):
                 
         return raw_result
 
+    def _has_citation_source(self, step) -> bool:
+        source_key = getattr(step, "citation_source_key", None)
+        if not source_key:
+            return False
+        value = self.state.get(source_key)
+        if value is None:
+            return False
+        text = str(value).strip()
+        return bool(text and text not in {"[]", "{}", "No relevant documents found.", "RAG is offline or collection is empty."})
+
     def _run_rag(self, step, inputs):
         if self.state.get('autopilot_disable_rag', False):
             return "[]" if step.ui_format == "chat_widgets" else "Context skipped by Auto-Pilot. Rely on internal knowledge."
@@ -371,7 +405,9 @@ class MasterActionRunner(QThread):
                 lines = [re.sub(r'^\d+\.\s*|^- \s*', '', line).strip() for line in queries_input.split('\n')]
                 queries_input = [l for l in lines if len(l) > 5]
                 
-        allowed_docs = inputs.get("allowed_docs", None)
+        allowed_docs = self._normalize_filter_list(inputs.get("allowed_docs", None))
+        tag_filters = self._normalize_filter_list(inputs.get("tag_filters", None))
+        tag_logic = inputs.get("tag_logic", "AND")
         aggregated_docs = {}
 
         for q in queries_input:
@@ -380,12 +416,7 @@ class MasterActionRunner(QThread):
                 emb = self.llm_manager.get_embedding(q)
                 
                 # --- FIX 1: Prevent ChromaDB crash on single documents ---
-                where_clause = None
-                if allowed_docs:
-                    if len(allowed_docs) == 1:
-                        where_clause = {"doc_name": allowed_docs[0]}
-                    elif len(allowed_docs) > 1:
-                        where_clause = {"doc_name": {"$in": allowed_docs}}
+                where_clause = self._build_rag_where_clause(allowed_docs, tag_filters, tag_logic)
                 
                 # --- FIX 2: Allow the blueprint to ask for more results ---
                 n_res = inputs.get("n_results", 3)
@@ -443,3 +474,40 @@ class MasterActionRunner(QThread):
             
         context_pieces = [f"--- DOCUMENT: {d['doc_name']} | PAGE {d['page'] + 1} ---\n{d['text']}" for d in reading_order]
         return "\n\n".join(context_pieces)
+
+    def _normalize_filter_list(self, value):
+        if not value:
+            return []
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                value = parsed
+            except Exception:
+                value = [value]
+        if not isinstance(value, list):
+            value = [value]
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    def _build_rag_where_clause(self, allowed_docs, tag_filters, tag_logic):
+        conditions = []
+        if allowed_docs:
+            if len(allowed_docs) == 1:
+                conditions.append({"doc_name": allowed_docs[0]})
+            else:
+                conditions.append({"doc_name": {"$in": allowed_docs}})
+
+        if tag_filters:
+            tag_conditions = [{f"tag_{tag}": True} for tag in tag_filters]
+            if str(tag_logic).upper() == "OR" and len(tag_conditions) > 1:
+                conditions.append({"$or": tag_conditions})
+            else:
+                conditions.extend(tag_conditions)
+
+        if not conditions:
+            return None
+        if len(conditions) == 1:
+            return conditions[0]
+        return {"$and": conditions}
+
+
+MasterWorkflowRunner = MasterActionRunner

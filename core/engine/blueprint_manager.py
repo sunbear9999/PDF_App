@@ -4,9 +4,11 @@ import json
 import copy
 import sys
 from core.engine.action_model import AIActionBlueprint
+from core.engine.registries import BlueprintDefinition
 
 class BlueprintManager:
-    def __init__(self):
+    def __init__(self, registry=None):
+        self.registry = registry
         app_name = "Papyrus Research"
         
         # Keep config in the same OS-specific hidden folder as prompts
@@ -22,6 +24,8 @@ class BlueprintManager:
         os.makedirs(config_dir, exist_ok=True)
         self.blueprint_file = os.path.join(config_dir, "custom_blueprints.json")
         self.blueprints = self._load()
+        self._registered_custom_ids = set()
+        self._register_custom_blueprints()
 
     def _load(self):
         if os.path.exists(self.blueprint_file):
@@ -33,14 +37,41 @@ class BlueprintManager:
                 print(f"Error loading custom blueprints: {e}")
         return {}
 
+    def _register_custom_blueprints(self):
+        if not self.registry:
+            return
+        for key in list(self._registered_custom_ids):
+            if key not in self.blueprints and hasattr(self.registry, "unregister"):
+                self.registry.unregister(key)
+                self._registered_custom_ids.discard(key)
+        for key, blueprint in self.blueprints.items():
+            self.registry.register(BlueprintDefinition(
+                id=key,
+                label=blueprint.name or key,
+                description=blueprint.description,
+                factory=lambda bp=blueprint: copy.deepcopy(bp),
+                mount_points=blueprint.mount_points,
+                capabilities=["custom_workflow"],
+                required_inputs=copy.deepcopy(blueprint.expected_inputs),
+                produced_outputs=["workflow_result"],
+                human_checkpoints=["review_custom_tool_output"],
+            ))
+            self._registered_custom_ids.add(key)
+
     def get_blueprint(self, key_name, fallback_func, *args, **kwargs):
         """Fetches the user-edited blueprint. If none exists, runs the fallback."""
         if key_name in self.blueprints:
             # Deep copy ensures the engine state doesn't mutate saved persistent templates!
             return copy.deepcopy(self.blueprints[key_name])
-            
+
         # Call factory fallback initialization
         fallback_blueprint = fallback_func(*args, **kwargs)
         if fallback_blueprint:
             fallback_blueprint.name = key_name
-        return copy.deepcopy(fallback_blueprint)
+            return copy.deepcopy(fallback_blueprint)
+
+        if self.registry:
+            registered = self.registry.create(key_name, *args, **kwargs)
+            if registered:
+                return registered
+        return None

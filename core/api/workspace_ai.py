@@ -51,15 +51,19 @@ class WorkspaceAIApi:
         import json
         return json.dumps(data, indent=2)
 
-    def process_ai_response(self, raw_ai_text: str, current_workspace_id: int) -> tuple[bool, WorkspaceModel | str]:
+    def process_ai_response(self, raw_ai_text: str, current_workspace_id: int, current_workspace: WorkspaceModel | None = None) -> tuple[bool, WorkspaceModel | str]:
         """
         Parses LLM output, maps short IDs back to real IDs, and generates a Delta WorkspaceModel.
         """
-        success, parsed_data = extract_and_heal_json(raw_ai_text)
-        if not success:
-            return False, parsed_data # Returns the error message
+        if isinstance(raw_ai_text, dict):
+            parsed_data = raw_ai_text
+        else:
+            success, parsed_data = extract_and_heal_json(raw_ai_text)
+            if not success:
+                return False, parsed_data # Returns the error message
 
         delta = WorkspaceModel(workspace_id=current_workspace_id)
+        current_nodes = {n.id: n for n in (current_workspace.nodes if current_workspace else [])}
         
         # 1. Process Nodes
         for n_data in parsed_data.get("nodes", []):
@@ -67,24 +71,57 @@ class WorkspaceAIApi:
             
             # --- THE FIX: Map the AI's short ID to the new real UUID ---
             real_id = self.ai_to_real_id.get(short_id)
+            is_existing_node = bool(real_id and real_id in current_nodes)
             if not real_id:
                 real_id = str(uuid.uuid4())
                 if short_id: 
                     self.ai_to_real_id[short_id] = real_id  # Save it so edges can find it!
 
-            node = NodeModel(
-                id=real_id,
-                quote=n_data.get("quote", ""),
-                note=n_data.get("note", n_data.get("text", "")),
-                color=n_data.get("color", "#4a148c"),
-                is_custom=not bool(n_data.get("doc_name")),
-                x=n_data.get("x", 0.0), 
-                y=n_data.get("y", 0.0),
-                width=220, height=100,
-                node_origin="ai",
-                pdf_path=n_data.get("doc_name"),
-                is_verified=0
+            recognized_update = any(
+                key in n_data
+                for key in ("quote", "note", "text", "color", "x", "y", "width", "height", "doc_name", "page")
             )
+            if is_existing_node and not recognized_update:
+                continue
+
+            existing = current_nodes.get(real_id)
+            if existing:
+                node = NodeModel(
+                    id=real_id,
+                    quote=n_data.get("quote", existing.quote),
+                    note=n_data.get("note", n_data.get("text", existing.note)),
+                    color=n_data.get("color", existing.color),
+                    is_custom=existing.is_custom if "doc_name" not in n_data else not bool(n_data.get("doc_name")),
+                    x=n_data.get("x", existing.x),
+                    y=n_data.get("y", existing.y),
+                    width=n_data.get("width", existing.width),
+                    height=n_data.get("height", existing.height),
+                    highlight_id=existing.highlight_id,
+                    workspace_id=current_workspace_id,
+                    pdf_path=n_data.get("doc_name", existing.pdf_path),
+                    page_num=n_data.get("page", existing.page_num),
+                    manual_font_size=existing.manual_font_size,
+                    node_origin=existing.node_origin,
+                    is_verified=existing.is_verified,
+                    original_text=existing.original_text,
+                )
+            else:
+                node = NodeModel(
+                    id=real_id,
+                    quote=n_data.get("quote", ""),
+                    note=n_data.get("note", n_data.get("text", "")),
+                    color=n_data.get("color", "#4a148c"),
+                    is_custom=not bool(n_data.get("doc_name")),
+                    x=n_data.get("x", 0.0),
+                    y=n_data.get("y", 0.0),
+                    width=n_data.get("width", 220),
+                    height=n_data.get("height", 100),
+                    workspace_id=current_workspace_id,
+                    pdf_path=n_data.get("doc_name"),
+                    page_num=n_data.get("page"),
+                    node_origin="ai",
+                    is_verified=0,
+                )
             delta.nodes.append(node)
 
         # 2. Process Edges

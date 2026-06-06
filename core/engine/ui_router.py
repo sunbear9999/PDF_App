@@ -1,32 +1,32 @@
-# gui/components/ui_router.py
 from PySide6.QtCore import QObject
-from PySide6.QtWidgets import QWidget
-from gui.docks.unified_research.components.chat_streamer import ChatMessageWidget
-from gui.docks.unified_research.components.note_bubble import NoteBubbleWidget
-from gui.docks.unified_research.components.user_input_form import UserInputFormWidget
+from core.utils.citation_utils import extract_inline_citations, strip_inline_citation_block
 from core.utils.json_utils import extract_and_heal_json, extract_json_from_tags
 from core.utils.state_resolver import StateResolver
 import json
 import shiboken6
 
 class BlueprintUIRouter(QObject):
+    """Routes workflow presentation data without constructing GUI widgets."""
+
     def __init__(self, main_window):
         super().__init__()
         self.main_window = main_window
-        self.theme = main_window.theme_manager.get_theme() if hasattr(main_window, 'theme_manager') else {}
-        self.active_chat_widget = None
         self.registered_targets = {}
 
-    def register_target(self, target_id: str, widget_instance: QWidget):
+    def register_target(self, target_id: str, widget_instance):
         """Allows any UI element to subscribe to AI pipeline outputs."""
         self.registered_targets[target_id] = widget_instance
 
     def get_target(self, target_id: str):
         """Safely fetches a target, cleaning up memory if it was destroyed."""
         target = self.registered_targets.get(target_id)
-        if target and not shiboken6.isValid(target):
-            del self.registered_targets[target_id]
-            return None
+        if target:
+            try:
+                if not shiboken6.isValid(target):
+                    del self.registered_targets[target_id]
+                    return None
+            except Exception:
+                pass
         return target
 
     def attach_runner(self, runner):
@@ -47,53 +47,29 @@ class BlueprintUIRouter(QObject):
     def _handle_user_input(self, step_id, expected_inputs):
         runner = self._get_runner()
         if not runner: return
-        
+
         current_step = getattr(runner, 'current_executing_step', None)
         target_id = getattr(current_step, 'ui_target', 'chat_dock') if current_step else 'chat_dock'
-        
-        form_widget = UserInputFormWidget(step_id, expected_inputs, theme=self.theme)
-        form_widget.form_submitted.connect(runner.submit_user_input)
-        
-        target_ui = self.get_target(target_id)
-        if target_ui:
-            target_ui.receive_ai_widget(form_widget)
+        self._dispatch(target_id, {
+            "type": "user_input",
+            "step_id": step_id,
+            "expected_inputs": expected_inputs,
+            "runner": runner,
+        })
 
     def _handle_step_started(self, step_id):
         runner = self._get_runner()
         if not runner: return
-        
-        if runner.blueprint.steps and runner.blueprint.steps[0].step_id == step_id:
-            self.active_chat_widget = None
 
-        current_step = getattr(runner, 'current_executing_step', None)
-        
+        current_step = self._resolve_step(runner, step_id)
+
         # Read the dynamic status directly from the blueprint model
         text = getattr(current_step, 'status_text', f"Processing {step_id}...")
         target_id = getattr(current_step, 'ui_target', 'chat_dock') if current_step else 'chat_dock'
-        
-        if target_id in ["floating", "search_tab", "analysis_tab"]: return
-            
-        widget = self._get_or_create_chat_widget(target_id)
-        if widget and hasattr(widget, 'update_status'):
-            widget.update_status(text)
-    
-    def _get_or_create_chat_widget(self, target_id):
-        if self.active_chat_widget and not shiboken6.isValid(self.active_chat_widget):
-            self.active_chat_widget = None
+        ui_format = getattr(current_step, "ui_format", "silent") if current_step else "silent"
 
-        if not self.active_chat_widget:
-            self.active_chat_widget = ChatMessageWidget("AI Agent", theme=self.theme)
-            
-            target_ui = self.get_target(target_id)
-            if target_ui:
-                target_ui.receive_ai_widget(self.active_chat_widget)
-            elif target_id == "floating" and hasattr(self.main_window, 'universal_overlay'):
-                self.main_window.universal_overlay.clear_content()
-                self.main_window.universal_overlay.content_layout.addWidget(self.active_chat_widget)
-                self.main_window.universal_overlay.show()
-                self.main_window.universal_overlay.raise_()
-                
-        return self.active_chat_widget
+        if target_id in ["floating", "search_tab", "analysis_tab"] or ui_format in {"card_grid", "data_table", "search_terms", "results_dialog"}: return
+        self._dispatch(target_id, {"type": "status", "text": text})
 
     def _handle_stream(self, chunk):
         runner = self._get_runner()
@@ -101,23 +77,17 @@ class BlueprintUIRouter(QObject):
         current_step = runner.current_executing_step 
         if current_step and getattr(current_step, 'ui_format', 'silent') == "live_stream":
             target_id = getattr(current_step, 'ui_target', 'floating')
-            widget = self._get_or_create_chat_widget(target_id)
-            if widget: 
-                widget.append_chunk(chunk)
+            self._dispatch(target_id, {"type": "stream_chunk", "chunk": chunk})
 
     def _handle_step_complete(self, step_id, result_str, state_snapshot):
         runner = self._get_runner()
         if not runner: return
         
         # 1. Fetch the exact executing step, bypassing the unresolved blueprint defaults
-        step = getattr(runner, 'current_executing_step', None)
-        if not step or step.step_id != step_id:
-            step = next((s for s in runner.blueprint.steps if s.step_id == step_id), None)
+        step = self._resolve_step(runner, step_id)
 
         ui_format = getattr(step, 'ui_format', 'silent') if step else 'silent'
         target_id = getattr(step, 'ui_target', 'floating') if step else 'floating'
-        target_ui = self.get_target(target_id)
-
         # 2. Pure-Python Manifest Update (No raw pattern matching)
         success, manifest_data = extract_json_from_tags(result_str, "UPDATE_MANIFEST")
         if success and isinstance(manifest_data, dict):
@@ -133,79 +103,63 @@ class BlueprintUIRouter(QObject):
                 pm.set_metadata("project_manifest", json.dumps(current_manifest))
         
         if runner and runner.blueprint.steps[-1].step_id == step_id:
-            if self.active_chat_widget and hasattr(self.active_chat_widget, 'hide_status'):
-                self.active_chat_widget.hide_status()
-                
             if getattr(runner.blueprint, 'name', '') == "Document Analysis" and self.get_target("analysis_tab"):
-                tab = self.get_target("analysis_tab")
-                if hasattr(tab, 'status_lbl'):
-                    tab.status_lbl.setText("✅ Full Document Analysis Complete.")
-
-        target_widget = None
+                self._dispatch("analysis_tab", {"type": "status", "text": "✅ Full Document Analysis Complete."})
 
         if ui_format == "nested_outline":
-            from gui.docks.unified_research.components.dynamic_outlines import UniversalOutlineWidget
             title = getattr(step, 'ui_title', 'AI Analysis')
             if state_snapshot:
                 state_dict = json.loads(state_snapshot) if isinstance(state_snapshot, str) else state_snapshot
                 title = StateResolver.safe_format(title, state_dict)
-                
-            annot_manager = self.main_window.viewer.annot_manager if hasattr(self.main_window, 'viewer') else None
-            
-            # THE FIX: If the LLM returned a JSON array (from multiple chunks), split it into separate widgets!
+
             success, parsed_data = extract_and_heal_json(result_str)
             if success and isinstance(parsed_data, list):
                 for i, item in enumerate(parsed_data):
-                    sub_title = f"{title} (Part {i+1})"
                     item_str = json.dumps(item)
-                    tw = UniversalOutlineWidget(sub_title, item_str, self.theme, annot_manager)
-                    tw._raw_ai_data = item_str # Safely inject for DB storage
-                    if target_ui: target_ui.receive_ai_widget(tw)
+                    self._dispatch(target_id, {
+                        "type": "outline",
+                        "title": f"{title} (Part {i+1})",
+                        "content": item_str,
+                        "raw_ai_data": item_str,
+                    })
             else:
-                target_widget = UniversalOutlineWidget(title, result_str, self.theme, annot_manager)
-                target_widget._raw_ai_data = result_str # Safely inject for DB storage
+                self._dispatch(target_id, {
+                    "type": "outline",
+                    "title": title,
+                    "content": result_str,
+                    "raw_ai_data": result_str,
+                })
 
         elif ui_format == "data_table":
-            from gui.docks.unified_research.components.dynamic_data_table import DynamicDataTableWidget
-            target_widget = DynamicDataTableWidget(result_str, self.theme)
+            self._dispatch(target_id, {"type": "data_table", "content": result_str})
 
         elif ui_format == "card_grid":
-            from gui.docks.unified_research.components.dynamic_card_grid import DynamicCardGridWidget
-            target_widget = DynamicCardGridWidget(result_str, self.theme)
+            self._dispatch(target_id, {"type": "card_grid", "content": result_str})
 
         elif ui_format == "search_terms":
-            if target_ui and hasattr(target_ui, 'render_search_terms'):
-                success, items = extract_and_heal_json(result_str)
-                if success:
-                    target_ui.render_search_terms(items)
+            success, items = extract_and_heal_json(result_str)
+            self._dispatch(target_id, {
+                "type": "search_terms",
+                "items": items if success else result_str,
+                "success": success,
+            })
 
         elif ui_format == "chat_widgets":
-            # 3. Use the new JSON healing utility to isolate the data
             success, items = extract_and_heal_json(result_str)
             if success:
-                # Handle the dictionary wrap you saw in the debug logs {"citations": [...]}
                 if isinstance(items, dict):
                     for val in items.values():
                         if isinstance(val, list): items = val; break
                     if isinstance(items, dict): items = [items] 
-                
-                widget = self._get_or_create_chat_widget(target_id)
-                for item in items:
-                    if isinstance(item, dict):
-                        widget.add_bubble(
-                            doc_name=item.get("doc_name", "Unknown Document"),
-                            quote=item.get("quote", item.get("text", "")),
-                            note=item.get("note", item.get("reason", ""))
-                        )
+                self._dispatch(target_id, {"type": "citation_cards", "items": items})
 
         elif ui_format == "workspace_graph":
-            from PySide6.QtWidgets import QGraphicsView
-            workspace_view = next((c for c in self.main_window.findChildren(QGraphicsView) if c.__class__.__name__ == "WorkspaceView"), None)
-            if workspace_view:
-                if hasattr(workspace_view, 'review_and_apply_ai_graph_update'):
-                    workspace_view.review_and_apply_ai_graph_update(result_str)
-                elif hasattr(workspace_view, 'apply_ai_graph_update'):
-                    workspace_view.apply_ai_graph_update(result_str)
+            from core.events.event_bus import EventBus
+            from core.events.domains.workspace_events import WorkspaceEvent, WorkspaceEventPayload
+            EventBus.get_instance().ai_graph_generated.emit(
+                WorkspaceEvent.AI_GRAPH_GENERATED,
+                WorkspaceEventPayload(result_text=result_str),
+            )
         elif ui_format == "results_dialog":
             success, items = extract_and_heal_json(result_str)
             if success and items:
@@ -215,20 +169,23 @@ class BlueprintUIRouter(QObject):
                         if isinstance(val, list): items = val; break
                         
                 if isinstance(items, list) and len(items) > 0:
-                    # Spawn the beautiful custom dialog!
-                    from gui.components.dialogs.tag_relatives_dialog import AIResultsDialog
                     title = getattr(step, 'ui_title', 'AI Results')
-                    dlg = AIResultsDialog(title, items, self.main_window, self.main_window)
-                    dlg.show() 
+                    self._dispatch(target_id, {"type": "results_dialog", "title": title, "items": items})
                     return
-            
-            # Fallback if empty
-            if target_ui and hasattr(target_ui, 'status_lbl'):
-                target_ui.status_lbl.setText("❌ No relevant context found.")
-        # Inject the widget
-        if target_widget and target_ui:
-            target_ui.receive_ai_widget(target_widget)
-                
+
+            self._dispatch(target_id, {"type": "status", "text": "❌ No relevant context found."})
+
+        elif ui_format == "live_stream" and getattr(step, "inline_citations", False):
+            clean_text = strip_inline_citation_block(result_str)
+            if clean_text != result_str:
+                self._dispatch(target_id, {"type": "replace_stream_text", "text": clean_text})
+            success, citations = extract_inline_citations(result_str)
+            if success:
+                self._dispatch(target_id, {"type": "citation_cards", "items": citations})
+
+        if runner and runner.blueprint.steps[-1].step_id == step_id:
+            self._dispatch(target_id, {"type": "hide_status"})
+
         if target_id in ["chat_dock", "brainstorm_dock"] and ui_format in ["live_stream", "chat_widgets"]:
             pm = getattr(self.main_window, 'project_manager', None)
             if pm: pm.save_chat_message(target_id, "ai", result_str, ui_format)
@@ -239,16 +196,20 @@ class BlueprintUIRouter(QObject):
         
         current_step = getattr(runner, 'current_executing_step', None)
         target_id = getattr(current_step, 'ui_target', 'floating') if current_step else 'floating'
+
+        self._dispatch(target_id, {"type": "error", "message": err_msg})
+
+    def _dispatch(self, target_id: str, payload: dict):
         target_ui = self.get_target(target_id)
+        if target_ui and hasattr(target_ui, "receive_ai_payload"):
+            target_ui.receive_ai_payload(payload)
 
-        try:
-            if self.active_chat_widget and hasattr(self.active_chat_widget, 'update_status'):
-                self.active_chat_widget.update_status(f"❌ Error: {err_msg}")
-        except RuntimeError: pass
+    def _resolve_step(self, runner, step_id: str):
+        resolved_steps = getattr(runner, "resolved_step_specs", {})
+        if step_id in resolved_steps:
+            return resolved_steps[step_id]
 
-        if target_ui:
-            if hasattr(target_ui, 'status_lbl'):
-                target_ui.status_lbl.setText(f"❌ Pipeline Failed: {err_msg}")
-                target_ui.status_lbl.setStyleSheet("font-weight: bold; color: #ff4444;") 
-            if hasattr(target_ui, 'btn_generate'):
-                target_ui.btn_generate.setEnabled(True)
+        current_step = getattr(runner, 'current_executing_step', None)
+        if current_step and current_step.step_id == step_id:
+            return current_step
+        return next((s for s in runner.blueprint.steps if s.step_id == step_id), None)

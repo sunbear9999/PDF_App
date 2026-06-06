@@ -3,28 +3,20 @@ import os
 import uuid
 import json
 import dataclasses
-from PySide6.QtWidgets import (QGraphicsView, QGraphicsScene, QMenu, QMessageBox,
+from PySide6.QtWidgets import (QGraphicsView, QGraphicsScene, QMessageBox,
                              QInputDialog, QFrame, QLabel, QVBoxLayout,
                              QHBoxLayout, QComboBox, QPushButton, QDialog,
-                             QScrollArea, QWidget, QFormLayout, QDialogButtonBox,
-                             QColorDialog, QFileDialog, QTextEdit, QCheckBox, QSlider,
-                             QGraphicsLineItem, QGraphicsTextItem, QListWidget,
-                             QListWidgetItem,QSizePolicy,QApplication)
-from PySide6.QtCore import QPointF, Qt, QRectF, QRunnable, QThreadPool, Slot
-from PySide6.QtGui import QColor, QPen, QBrush, QFont, QPainter, QImage, QStandardItemModel, QStandardItem, QCursor, QPainterPath, QPainterPathStroker, QShortcut, QKeySequence
+                             QWidget,
+                             QColorDialog, QFileDialog, QCheckBox, QSlider,
+                             QSizePolicy,QApplication)
+from PySide6.QtCore import QPointF, Qt, QRectF, QRunnable, QThreadPool, Slot, QTimer
+from PySide6.QtGui import QColor, QPen, QBrush, QFont, QPainter, QImage, QShortcut, QKeySequence
 
-from core.engine.default_blueprints import DefaultBlueprints
 from gui.components.workspace_items import Node, Edge
-from core.engine.action_model import AIActionBlueprint, ActionStep
-from core.engine.master_runner import MasterActionRunner
 from core.layout_engine import calculate_force_directed_layout
 from core.utils.text_utils import get_semantic_similarity_matrix
 from core.utils.workspace_utils import (
-    normalize_annotation_text,
-    compute_node_dimensions,
-    build_pdf_display_name,
     edge_model_from_edge,
-    format_highlight_item_label,
     node_model_from_node,
 )
 from gui.components.dialogs.workspace_dialogs import ColorOrganizerDialog, DeclutterSettingsDialog, OutlineDialog, WeakpointsDialog, WorkspaceProcessOverlay
@@ -43,31 +35,27 @@ from gui.components.dialogs.tag_manager_dialog import TagAssignmentDialog
 from gui.components.dialogs.tag_relatives_dialog import AIResultsDialog
 
 # --- NEW IMPORTS ---
-from core.models.workspace_models import WorkspaceModel, NodeModel, EdgeModel
-from core.api.workspace_ai import WorkspaceAIApi
-from gui.components.workspace_widgets import GhostLineItem, CollapsingButton, CollapsingSection, CheckableComboBox, UnusedHighlightsDialog
+from core.models.workspace_models import WorkspaceModel
+from gui.components.workspace_widgets import GhostLineItem, CheckableComboBox, UnusedHighlightsDialog
 from core.events.event_bus import EventBus
+from core.events.domains.document_events import DocumentEvent, DocumentEventPayload
+from core.events.domains.project_events import ProjectEvent, ProjectEventPayload
+from core.events.domains.workspace_events import WorkspaceEvent, WorkspaceEventPayload, WorkspaceIntent, WorkspacePayload
+from core.services.workspace_registries import (
+    build_default_workspace_action_registry,
+    build_default_workspace_ai_tool_registry,
+    build_default_workspace_node_type_registry,
+)
+from core.services.workspace_services import (
+    WorkspaceAIService,
+    WorkspaceAnnotationService,
+    WorkspaceGraphService,
+    WorkspaceLayoutService,
+    WorkspaceService,
+    WorkspaceStateService,
+)
 
 
-class NodeEmbeddingTask(QRunnable):
-    def __init__(self, node_id, text, llm_manager, project_manager):
-        super().__init__()
-        self.node_id = node_id
-        self.text = text
-        self.llm_manager = llm_manager
-        self.project_manager = project_manager
-
-    @Slot()
-    def run(self):
-        if not self.text.strip() or not self.llm_manager or not self.llm_manager.ai_enabled:
-            return
-            
-        try:
-            vector = self.llm_manager.get_embedding(self.text)
-            if vector:
-                self.project_manager.save_node_embedding_threadsafe(self.node_id, vector)
-        except Exception:
-            pass
 
 
 class WorkspaceView(QGraphicsView):
@@ -80,10 +68,12 @@ class WorkspaceView(QGraphicsView):
         self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
-    
+
         self.current_workspace_id = 1
         self._switching_workspace = False
-        self.ai_api = WorkspaceAIApi(self._pm())
+        self.bus = EventBus.get_instance()
+        self.workspace_actions = build_default_workspace_action_registry()
+        self.workspace_node_types = getattr(self.main_window, "workspace_node_type_registry", None) or build_default_workspace_node_type_registry()
 
         self.nodes = {}
         self.edges = []
@@ -91,13 +81,11 @@ class WorkspaceView(QGraphicsView):
         self.similarity_matrix = {}
         self._similarity_signature = None
         self._updating_ghost_links = False
+        self._rendering_workspace = False
         self.connecting_node = None
         self.worker = None
         self.is_llm_busy = False
         self.is_dialog_open = False
-        self.undo_stack = []
-        self.redo_stack = []
-        self.is_restoring = False
 
         self.clipboard = {'nodes': [], 'edges': []}
         self.ai_overlay = WorkspaceProcessOverlay(self.main_window.process_registry, parent=self)
@@ -136,7 +124,7 @@ class WorkspaceView(QGraphicsView):
 
         self.loading_overlay = QFrame(self)
         self.loading_overlay.hide()
-        
+
         overlay_layout = QVBoxLayout(self.loading_overlay)
         self.loading_label = QLabel("✨ AI is analyzing and organizing your notes...\nThis may take a moment.")
         self.loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -148,7 +136,7 @@ class WorkspaceView(QGraphicsView):
 
         main_tb_layout = QVBoxLayout(self.toolbar_frame)
         main_tb_layout.setContentsMargins(4, 4, 4, 4)
-        main_tb_layout.setSpacing(2) 
+        main_tb_layout.setSpacing(2)
 
         compact_btn_style = """
             QPushButton {
@@ -162,11 +150,11 @@ class WorkspaceView(QGraphicsView):
         self.row1_widget = QWidget()
         row1_layout = QHBoxLayout(self.row1_widget)
         row1_layout.setContentsMargins(0, 0, 0, 0)
-        row1_layout.setSpacing(4) 
+        row1_layout.setSpacing(4)
 
         ws_label = QLabel("🗂️")
         row1_layout.addWidget(ws_label)
-        
+
         self.workspace_combo = QComboBox()
         self.workspace_combo.setFixedWidth(110)
         self.workspace_combo.addItem("Main Board", 1)
@@ -240,7 +228,7 @@ class WorkspaceView(QGraphicsView):
         self.filter_combo.setToolTip("Filter the workspace to only show nodes from specific PDFs.")
         self.filter_combo.model().dataChanged.connect(self._apply_filter)
         row2_layout.addWidget(self.filter_combo)
-        
+
         self.tag_filter_combo = CheckableComboBox()
         self.tag_filter_combo.setFixedWidth(105)
         self.tag_filter_combo.setToolTip("Filter the workspace to only show nodes with specific Tags.")
@@ -279,24 +267,24 @@ class WorkspaceView(QGraphicsView):
 
         ghost_inner = QHBoxLayout()
         ghost_inner.setSpacing(4)
-        
+
         self.chk_show_ghost_links = QCheckBox("👻")
         self.chk_show_ghost_links.setChecked(False)
         self.chk_show_ghost_links.setToolTip("Show semantic connections between notes with similar meanings.")
         ghost_inner.addWidget(self.chk_show_ghost_links)
-        
+
         self.slider_ghost_threshold = QSlider(Qt.Orientation.Horizontal)
         self.slider_ghost_threshold.setRange(60, 95)
         self.slider_ghost_threshold.setValue(75)
         self.slider_ghost_threshold.setFixedWidth(60)
         self.slider_ghost_threshold.setToolTip("Adjust how strict the AI is when suggesting links.")
         ghost_inner.addWidget(self.slider_ghost_threshold)
-        
+
         row2_layout.addLayout(ghost_inner)
         main_tb_layout.addWidget(self.row2_widget)
         self.row2_widget.hide()
         # --- Subscribe to Global Events ---
-        
+
         def toggle_secondary_tools():
             if self.row2_widget.isVisible():
                 self.row2_widget.hide()
@@ -315,14 +303,179 @@ class WorkspaceView(QGraphicsView):
         self.chk_show_ghost_links.toggled.connect(self.update_ghost_connections)
         self.slider_ghost_threshold.valueChanged.connect(self.update_ghost_connections)
         self.scene_obj.selectionChanged.connect(self.update_ghost_connections)
+        self.scene_obj.selectionChanged.connect(self._emit_selection_changed)
         self.scene_obj.changed.connect(self._on_scene_changed)
 
         self.update_scene_bounds()
-        self.bus = EventBus.get_instance()
-        self.bus.highlight_created.connect(self.handle_highlight_created)
-        self.bus.pdf_renamed.connect(self._on_pdf_renamed)
-        self.bus.pdf_removed.connect(self._on_pdf_removed)
+        self.bus.highlight_created.connect(self._handle_document_event)
+        self.bus.highlight_updated.connect(self._handle_document_event)
+        self.bus.highlight_deleted.connect(self._handle_document_event)
+        self.bus.pdf_renamed.connect(self._handle_document_event)
+        self.bus.pdf_removed.connect(self._handle_document_event)
+        self.bus.project_loaded.connect(self._handle_project_event)
+        QTimer.singleShot(0, self._sync_workspace)
+        self.workspace_actions = build_default_workspace_action_registry()
+        self.bus.workspace_action_requested.connect(self.handle_incoming_intent)
+        self.workspace_state_service = WorkspaceStateService(self.bus, self)
+        self.bus.workspace_state_restored.connect(self._handle_workspace_state_event)
+        self.workspace_service = self.main_window.workspace_service
+        self.workspace_graph_service = self.main_window.workspace_graph_service
+        self.workspace_annotation_service = self.main_window.workspace_annotation_service
+        self.workspace_ai_service = self.main_window.workspace_ai_service
         # --------------------------------
+    def _handle_project_event(self, event: ProjectEvent, payload: ProjectEventPayload):
+        if event == ProjectEvent.LOADED:
+            self._sync_workspace()
+
+    def _handle_document_event(self, event: DocumentEvent, payload: DocumentEventPayload):
+        if event == DocumentEvent.HIGHLIGHT_CREATED:
+            self.handle_highlight_created(payload.highlight_data)
+        elif event == DocumentEvent.HIGHLIGHT_UPDATED:
+            self.handle_highlight_updated(payload.annot_id, payload.changes)
+        elif event == DocumentEvent.HIGHLIGHT_DELETED:
+            self.handle_highlight_deleted(payload.annot_id)
+        elif event == DocumentEvent.PDF_RENAMED:
+            self._on_pdf_renamed(payload.old_path, payload.new_path)
+        elif event == DocumentEvent.PDF_REMOVED:
+            self._on_pdf_removed(payload.path)
+
+    def _handle_workspace_state_event(self, event: WorkspaceEvent, payload: WorkspaceEventPayload):
+        if event == WorkspaceEvent.STATE_RESTORED:
+            self._handle_state_restored(payload.model)
+
+    def _handle_state_restored(self, restored_model):
+        """Triggered entirely by the backend when an undo/redo completes."""
+        pm = self._pm()
+        all_annots = self.workspace_annotation_service.get_annotation_index() if pm else {}
+        self.sync_with_project(restored_model, all_annots)
+        self._mark_workspace_dirty(autosave=True)
+    def handle_incoming_intent(self, intent_name: WorkspaceIntent, payload: WorkspacePayload):
+        """Central event routing block for Phase 1 decoupling."""
+        if intent_name == WorkspaceIntent.NODE_PRESSED:
+            node_id = payload.get("node_id")
+            # Logic hooks safely check environment if connecting modes are enabled
+            if self.connecting_node and self.connecting_node.node_id != node_id:
+                target_node = self.nodes.get(node_id)
+                if target_node:
+                    self.finish_connection(target_node)
+            else:
+                self.save_state_for_undo()
+
+        elif intent_name == WorkspaceIntent.NODE_TEXT_COMMITTED:
+            node = self.nodes.get(payload.get("node_id"))
+            if node:
+                self._commit_node_text(node, payload.get("text", ""))
+
+        elif intent_name == WorkspaceIntent.NODE_COLOR_REQUEST:
+            node_items = [self.nodes[nid] for nid in payload.get("node_ids", []) if nid in self.nodes]
+            if node_items:
+                self._change_color_for_nodes(node_items)
+
+        elif intent_name == WorkspaceIntent.NODE_FONT_REQUEST:
+            node = self.nodes.get(payload.get("node_id"))
+            if node:
+                self._change_font_size_for_node(node)
+
+        elif intent_name == WorkspaceIntent.NODE_VERIFY_TOGGLE:
+            node = self.nodes.get(payload.get("node_id"))
+            if node:
+                self._toggle_node_verification(node)
+
+        elif intent_name == WorkspaceIntent.NODE_JUMP_REQUEST:
+            node = self.nodes.get(payload.get("node_id"))
+            if node:
+                self._jump_to_node_source(node)
+
+        elif intent_name == WorkspaceIntent.NODE_CITATION_COPY:
+            node = self.nodes.get(payload.get("node_id"))
+            if node:
+                self._copy_node_citation(node)
+
+        elif intent_name == WorkspaceIntent.NODE_CONNECT_START:
+            node = self.nodes.get(payload.get("node_id"))
+            if node:
+                self.start_connection(node)
+
+        elif intent_name == WorkspaceIntent.TAG_FILTER_APPLY:
+            self.apply_tag_filter(payload.get("tag_name"))
+
+        elif intent_name == WorkspaceIntent.UNDO_CHECKPOINT_REQUESTED:
+            self.save_state_for_undo()
+
+        elif intent_name == WorkspaceIntent.EDGE_TEXT_COMMITTED:
+            # Locates edge record by searching local item collections
+            edge_id = payload.get("edge_id")
+            edge = next((e for e in self.edges if e.edge_id == edge_id), None)
+            if edge:
+                self._commit_edge_text(edge, payload.get("text", ""))
+
+        elif intent_name == WorkspaceIntent.EDGE_COLOR_REQUEST:
+            edge_id = payload.get("edge_id")
+            edge = next((e for e in self.edges if e.edge_id == edge_id), None)
+            if edge:
+                self._change_edge_color(edge)
+
+        elif intent_name == WorkspaceIntent.EDGE_WEIGHT_REQUEST:
+            edge_id = payload.get("edge_id")
+            edge = next((e for e in self.edges if e.edge_id == edge_id), None)
+            if edge:
+                self._change_edge_weight(edge)
+        elif intent_name == WorkspaceIntent.UPDATE_HISTORY_BUTTONS:
+            if hasattr(self, 'btn_undo'): self.btn_undo.setEnabled(payload.get("can_undo", False))
+            if hasattr(self, 'btn_redo'): self.btn_redo.setEnabled(payload.get("can_redo", False))
+        elif intent_name == WorkspaceIntent.SYNC_TAGS_FROM_ANNOT:
+            annot_id = payload.get("annot_id")
+            for node in self.nodes.values():
+                if annot_id in {getattr(node, "highlight_id", None), getattr(node, "node_id", None)}:
+                    if hasattr(node, "refresh_tag_badges"):
+                        node.refresh_tag_badges()
+                    node.update()
+        elif intent_name == WorkspaceIntent.BOARD_ADD:
+            self._add_workspace()
+        elif intent_name == WorkspaceIntent.WORKSPACE_EXPORT:
+            self._export_workspace()
+        elif intent_name == WorkspaceIntent.FILTERS_RESET:
+            self.reset_filters()
+        elif intent_name == WorkspaceIntent.VIEW_RECENTER:
+            self.recenter_view()
+        elif intent_name == WorkspaceIntent.DECLUTTER_TRIGGERED:
+            self.trigger_declutter()
+        elif intent_name == WorkspaceIntent.NODE_EDIT_START:
+            node = self.nodes.get(payload.get("node_id"))
+            if node:
+                node.trigger_edit()
+        elif intent_name == WorkspaceIntent.NODE_TAGS_MANAGE:
+            self._manage_tags_for_node_ids(payload.get("node_ids", []))
+        elif intent_name == WorkspaceIntent.EDGE_EDIT_START:
+            edge_id = payload.get("edge_id")
+            edge = next((e for e in self.edges if e.edge_id == edge_id), None)
+            if edge:
+                edge.trigger_edit()
+        elif intent_name == WorkspaceIntent.EDGE_DELETE_REQUEST:
+            edge_id = payload.get("edge_id")
+            edge = next((e for e in self.edges if e.edge_id == edge_id), None)
+            if edge:
+                self.delete_edge(edge)
+                self._mark_workspace_dirty(autosave=True)
+        elif intent_name == WorkspaceIntent.SELECTION_DELETE:
+            self.delete_selected_nodes()
+        elif intent_name == WorkspaceIntent.SELECTION_COLOR_REQUEST:
+            node_items = self._selected_nodes()
+            if node_items:
+                self._change_color_for_nodes(node_items)
+        elif intent_name == WorkspaceIntent.SELECTION_TAGS_MANAGE:
+            self._manage_tags_for_node_ids([node.node_id for node in self._selected_nodes()])
+
+    def _manage_tags_for_node_ids(self, node_ids):
+        node_ids = [node_id for node_id in node_ids or [] if node_id in self.nodes]
+        if not node_ids:
+            return
+        dialog = TagAssignmentDialog(node_ids[0], "node", self)
+        if dialog.exec():
+            for node_id in node_ids:
+                node = self.nodes.get(node_id)
+                if node and hasattr(node, "refresh_tag_badges"):
+                    node.refresh_tag_badges()
     def _on_pdf_renamed(self, old_path, new_path):
         for node in self.nodes.values():
             if getattr(node, 'pdf_path', None) == old_path:
@@ -343,15 +496,193 @@ class WorkspaceView(QGraphicsView):
     def _theme(self):
         return getattr(self.main_window, 'theme_manager', None)
 
+    def _selected_nodes(self):
+        return [n for n in self.scene_obj.selectedItems() if isinstance(n, Node)]
+
+    def _emit_selection_changed(self):
+        selected_ids = [n.node_id for n in self._selected_nodes()]
+        self.bus.workspace_selection_changed.emit(
+            WorkspaceEvent.SELECTION_CHANGED,
+            WorkspaceEventPayload(selected_ids=selected_ids),
+        )
+
+    def _emit_node_updated(self, node_id, changes):
+        self.bus.workspace_node_updated.emit(
+            WorkspaceEvent.NODE_UPDATED,
+            WorkspaceEventPayload(node_id=node_id, changes=changes),
+        )
+
+    def _emit_edge_updated(self, edge_id, changes):
+        self.bus.workspace_edge_updated.emit(
+            WorkspaceEvent.EDGE_UPDATED,
+            WorkspaceEventPayload(edge_id=edge_id, changes=changes),
+        )
+
+    def _emit_node_deleted(self, node_id):
+        self.bus.workspace_node_deleted.emit(
+            WorkspaceEvent.NODE_DELETED,
+            WorkspaceEventPayload(node_id=node_id),
+        )
+
+    def _emit_edge_deleted(self, edge_id):
+        self.bus.workspace_edge_deleted.emit(
+            WorkspaceEvent.EDGE_DELETED,
+            WorkspaceEventPayload(edge_id=edge_id),
+        )
+
+    def _emit_node_added(self, node_model):
+        self.bus.workspace_node_added.emit(
+            WorkspaceEvent.NODE_ADDED,
+            WorkspaceEventPayload(node_model=node_model),
+        )
+
+    def _emit_edge_added(self, edge_model):
+        self.bus.workspace_edge_added.emit(
+            WorkspaceEvent.EDGE_ADDED,
+            WorkspaceEventPayload(edge_model=edge_model),
+        )
+
+    def get_node_tag_badges(self, node_id):
+        pm = self._pm()
+        if not pm:
+            return []
+        try:
+            return [
+                {"name": t.get("name") or "", "color": t.get("color") or "#808080"}
+                for t in pm.get_tags_for_node(node_id)
+            ]
+        except Exception:
+            return []
+
+    def handle_item_intent(self, intent, item, **payload):
+        if self._rendering_workspace and intent in {
+            "save_undo",
+            "node_resized",
+            "node_moved",
+            "node_text_committed",
+            "edge_text_committed",
+        }:
+            return
+        if intent == "save_undo":
+            self.save_state_for_undo()
+        elif intent == "tag_filter":
+            self.apply_tag_filter(payload.get("tag_name"))
+        elif intent == "finish_connection":
+            self.save_state_for_undo()
+            self.finish_connection(item)
+        elif intent == "node_connect":
+            self.start_connection(item)
+        elif intent == "node_edit_started":
+            self.save_state_for_undo()
+        elif intent == "node_text_committed":
+            self._commit_node_text(item, payload.get("text", ""))
+        elif intent == "node_color_requested":
+            self._change_color_for_nodes([item])
+        elif intent == "node_font_size_requested":
+            self._change_font_size_for_node(item)
+        elif intent == "node_verify_requested":
+            self._toggle_node_verification(item)
+        elif intent == "node_jump_requested":
+            self._jump_to_node_source(item)
+        elif intent == "node_resized":
+            self._mark_workspace_dirty(autosave=True)
+            self._emit_node_updated(item.node_id, {"width": item.base_width, "height": item.base_height})
+        elif intent == "node_moved":
+            self._mark_workspace_dirty(autosave=True)
+            self._emit_node_updated(item.node_id, {"x": item.pos().x(), "y": item.pos().y()})
+        elif intent == "edge_text_committed":
+            self._commit_edge_text(item, payload.get("text", ""))
+        elif intent == "edge_color_requested":
+            self._change_edge_color(item)
+        elif intent == "edge_weight_requested":
+            self._change_edge_weight(item)
+
+    def _commit_node_text(self, node, new_text):
+        if not node or new_text == node.note:
+            return
+        current_orig = getattr(node, "original_text", node.note)
+        if current_orig == node.note:
+            node.original_text = node.note
+        node.note = new_text
+        node.refresh_layout()
+        self._mark_workspace_dirty(autosave=True)
+        self._emit_node_updated(node.node_id, {"note": new_text})
+
+    def _commit_edge_text(self, edge, new_text):
+        if not edge or new_text == edge.label_text:
+            return
+        self.save_state_for_undo()
+        edge.label_text = new_text
+        edge.text_item.setPlainText(new_text)
+        edge.update_position()
+        self._mark_workspace_dirty(autosave=True)
+        self._emit_edge_updated(edge.edge_id, {"label": new_text})
+
+    def _toggle_node_verification(self, node):
+        if not node:
+            return
+        self.save_state_for_undo()
+        node.is_verified = not node.is_verified
+        if hasattr(node, "refresh_verify_button"):
+            node.refresh_verify_button()
+        pm = self._pm()
+        if pm:
+            pm.set_node_verification(node.node_id, node.is_verified)
+        self._mark_workspace_dirty(autosave=True)
+        self._emit_node_updated(node.node_id, {"is_verified": int(node.is_verified)})
+        node.update()
+
+    def _jump_to_node_source(self, node):
+        if not node:
+            return
+        self.save_workspace_state()
+        QTimer.singleShot(0, lambda: self.workspace_annotation_service.jump_to_node_source(node))
+
+    def _copy_node_citation(self, node):
+        if not node:
+            return
+        if node.pdf_path is not None:
+            citation_text = self.main_window.citation_manager.format_in_text(node.pdf_path, node.page_num)
+            QApplication.clipboard().setText(citation_text)
+            self.main_window.statusBar().showMessage(f"Copied citation: {citation_text}", 3000)
+        else:
+            QMessageBox.warning(self, "No Citation", "This is a custom node, not a PDF highlight.")
+
+    def _change_edge_color(self, edge):
+        if not edge:
+            return
+        color = QColorDialog.getColor(edge.base_color, self, "Select Line Color")
+        if color.isValid():
+            self.save_state_for_undo()
+            edge.base_color = color
+            edge.setPen(QPen(edge.base_color, edge.weight + 2 if edge.isSelected() else edge.weight, Qt.PenStyle.SolidLine))
+            self._mark_workspace_dirty(autosave=True)
+            self._emit_edge_updated(edge.edge_id, {"color": color.name()})
+
+    def _change_edge_weight(self, edge):
+        if not edge:
+            return
+        weight, ok = QInputDialog.getInt(self, "Line Weight", "Enter line weight (1-10):", edge.weight, 1, 10)
+        if ok:
+            self.save_state_for_undo()
+            edge.weight = weight
+            edge.setPen(QPen(edge.base_color, edge.weight + 2 if edge.isSelected() else edge.weight, Qt.PenStyle.SolidLine))
+            self._mark_workspace_dirty(autosave=True)
+            self._emit_edge_updated(edge.edge_id, {"weight": weight})
+
+    def _change_font_size_for_node(self, node):
+        if not node:
+            return
+        current = node.manual_font_size if node.manual_font_size else 12
+        val, ok = QInputDialog.getInt(self, "Font Size", "Enter static font size (8-72)\nCancel to Auto-Scale:", current, 8, 72)
+        self.save_state_for_undo()
+        node.manual_font_size = val if ok else None
+        node.refresh_layout()
+        self._mark_workspace_dirty(autosave=True)
+        self._emit_node_updated(node.node_id, {"manual_font_size": node.manual_font_size})
+
     def get_active_ai_model(self):
-        if hasattr(self.main_window, 'chat_docks') and self.main_window.chat_docks:
-            try:
-                selected = self.main_window.chat_docks[0].model_combo.currentText().strip()
-                if selected and "Error" not in selected and "Select" not in selected and "running" not in selected:
-                    return selected
-            except AttributeError:
-                pass 
-        return "gemma4:e2b"
+        return self.workspace_ai_service.resolve_active_model()
 
     def recenter_view(self):
         rect = self.scene().itemsBoundingRect()
@@ -360,14 +691,14 @@ class WorkspaceView(QGraphicsView):
             self.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
 
     def _queue_background_embedding(self, node):
-        try:
-            llm_manager = self._llm()
-            pm = self._pm()
-            text = f"{node.quote} {node.note}".strip()
-            task = NodeEmbeddingTask(node.node_id, text, llm_manager, pm)
-            QThreadPool.globalInstance().start(task)
-        except Exception:
-            pass
+        text = f"{node.quote} {node.note}".strip()
+        if not text:
+            return
+
+        self.bus.workspace_action_requested.emit(
+            WorkspaceIntent.EMBED_NODE_TEXT,
+            WorkspacePayload(node_id=node.node_id, text=text),
+        )
 
     # =========================================================================
     # UNIVERSAL AI WORKSPACE API & MODELS
@@ -385,121 +716,26 @@ class WorkspaceView(QGraphicsView):
     def save_workspace_state(self):
         """Standalone save method that pushes the Model to the DB."""
         model = self.serialize_workspace()
-        if self._pm():
-            self._pm().sync_workspace(model)
+        self.workspace_service.sync_workspace(model)
 
     def _mark_workspace_dirty(self, autosave=False):
-        pm = self._pm()
-        if not pm: return
-        pm.mark_dirty("workspace")
-        if autosave:
-            self.save_workspace_state()
+        if self._rendering_workspace:
+            return
+        self.workspace_service.mark_dirty(self.current_workspace_id, autosave=autosave, model=self.serialize_workspace() if autosave else None)
 
     def get_workspace_state_as_json(self, only_selected=False, filters=None):
         """Passes the model into the new API orchestrator."""
         model = self.serialize_workspace()
-        
+
         if only_selected:
             selected_ids = {n.node_id for n in self.scene_obj.selectedItems() if isinstance(n, Node)}
-            model.nodes = [n for n in model.nodes if n.id in selected_ids]
-            model.edges = [e for e in model.edges if e.source in selected_ids and e.target in selected_ids]
-            
-        return self.ai_api.build_ai_context(model, filters)
+            model = self.workspace_graph_service.selected_subset(model, selected_ids)
 
-    def apply_ai_graph_update(self, ai_output_string):
-        """Receives LLM JSON, pushes it through the API to get a Delta Model, and syncs."""
-        success, result = self.ai_api.process_ai_response(ai_output_string, self.current_workspace_id)
-        
-        if not success:
-            return False, result # Returns the error message
-            
-        delta_model = result
-        self.save_state_for_undo()
-        
-        # 1. Native Highlighting for newly generated PDF nodes
-        for node in delta_model.nodes:
-            if node.pdf_path and not node.highlight_id and hasattr(self.main_window, 'add_ai_annotation'):
-                new_annot_id = f"AINote|{uuid.uuid4()}"
-                ok = self.main_window.add_ai_annotation(
-                    node.quote, node.note, target_doc_name=node.pdf_path, 
-                    allowed_paths=self._pm().pdfs, 
-                    forced_annot_id=new_annot_id, emit_signal=False
-                )
-                if ok:
-                    hl_record = self._pm().get_highlight(new_annot_id)
-                    if hl_record:
-                        node.id = hl_record["id"]
-                        node.highlight_id = hl_record["id"]
-                        node.pdf_path = hl_record.get("doc_id")
-                        node.page_num = hl_record.get("page_num")
-                        node.color = hl_record.get("color", node.color)
-                        node.is_custom = False
-                        
-        # 2. Push Delta directly to the Smart DB
-        if self._pm():
-            self._pm().sync_workspace_delta(delta_model)
-        
-        # 3. Reload UI natively from the freshly updated DB
-        self._sync_workspace()
-        return True, "Universal graph applied."
+        return self.workspace_ai_service.build_context(model, filters)
 
-    def review_and_apply_ai_graph_update(self, json_str):
-        from gui.components.dialogs.workspace_review_dialog import WorkspaceReviewDialog
-        theme = self._theme().get_theme() if self._theme() else None
-        dialog = WorkspaceReviewDialog(json_str, theme, self)
-        
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.apply_ai_graph_update(json_str)
 
-    def _run_workspace_ai_tool(self, blueprint: AIActionBlueprint, require_selection=True):
-        if not self._llm() or not self._llm().ai_enabled:
-            QMessageBox.warning(self, "AI Disabled", "Local AI is not running.")
-            return
 
-        permissions = blueprint.steps[0].permissions if blueprint.steps else ["all"]
-        json_data = self.get_workspace_state_as_json(only_selected=require_selection, filters=permissions)
-        
-        if require_selection and not json_data:
-            QMessageBox.warning(self, "Selection Required", "Please select nodes to process.")
-            return
 
-        model_name = self.get_active_ai_model()
-        initial_state = {
-            "workspace_data": json_data,
-            "selected_model": model_name
-        }
-
-        import copy
-        runtime_blueprint = copy.copy(blueprint)
-        if not runtime_blueprint.name.startswith("Workspace:"):
-            runtime_blueprint.name = f"Workspace: {runtime_blueprint.name}"
-
-        self.ai_worker = MasterActionRunner(self.main_window, runtime_blueprint, initial_state)
-        
-        def _handle_completion(state):
-            ai_output = state.get(runtime_blueprint.steps[-1].output_key, "")
-            output_mode = runtime_blueprint.steps[-1].output_mode if runtime_blueprint.steps else "workspace_update"
-            
-            if output_mode == "dialog":
-                if "Outline" in runtime_blueprint.name:
-                    OutlineDialog(ai_output, self).exec()
-                elif "Weakpoints" in runtime_blueprint.name:
-                    WeakpointsDialog(ai_output, self).exec()
-                else:
-                    QMessageBox.information(self, runtime_blueprint.name.replace("Workspace: ", ""), ai_output)
-                return
-
-            success, msg = self.apply_ai_graph_update(ai_output)
-            if not success:
-                self.main_window.process_registry.update_job_status(self.ai_worker.job.id, "Error: Invalid AI Format")
-                QMessageBox.warning(self, "AI Formatting Error", f"The AI failed to generate a valid graph. Output:\n\n{ai_output[:250]}...")
-
-        def _handle_error(e):
-            self.main_window.statusBar().showMessage(f"⚠️ AI Error: {e}", 5000)
-
-        self.ai_worker.action_complete.connect(_handle_completion)
-        self.ai_worker.error.connect(_handle_error)
-        self.ai_worker.start()
 
     # =========================================================================
     # SCENE & COMPONENT MANAGEMENT
@@ -508,45 +744,35 @@ class WorkspaceView(QGraphicsView):
     def add_node_from_annotation(self, annot, persist=False, position=None, target_workspace_id=None):
         n_id = annot["id"]
         effective_ws_id = target_workspace_id if target_workspace_id is not None else self.current_workspace_id
-        origin = "ai" if n_id.startswith("AINote") else "human"
-        
+
         if persist and effective_ws_id != self.current_workspace_id:
-            pm = self._pm()
-            if pm and pm.project_filepath:
-                model = pm.get_workspace_data(effective_ws_id)
-                quote, note = normalize_annotation_text(annot)
-                color = annot.get("color") or "#2b2b2b"
-                w, h = compute_node_dimensions(quote, note)
-                
-                new_node = NodeModel(
-                    id=n_id, highlight_id=n_id, workspace_id=effective_ws_id, quote=quote, note=note,
-                    color=color, is_custom=False, pdf_path=annot.get("pdf_path") or annot.get("doc_id"),
-                    page_num=annot.get("page_num"), x=0.0, y=0.0, width=w, height=h, node_origin=origin
-                )
-                model.nodes.append(new_node)
-                pm.sync_workspace(model)
+            self.workspace_annotation_service.add_annotation_to_workspace(annot, effective_ws_id)
             return None
 
         if n_id in self.nodes:
             return self.nodes[n_id]
 
-        quote, note = normalize_annotation_text(annot)
-        color = annot.get("color") or ("#2d2238" if n_id.startswith("AINote") else "#2b2b2b")
-        w, h = compute_node_dimensions(quote, note)
-        
+        node_model = self.workspace_annotation_service.node_model_from_annotation(annot, effective_ws_id)
+
         node = Node(
-            n_id, quote, note, color=color, is_custom=False, width=w, height=h,
-            pdf_path=annot.get("pdf_path") or annot.get("doc_id"), page_num=annot.get("page_num"),
-            highlight_id=n_id, node_origin=origin, is_verified=0, original_text=note
+            node_model.id, node_model.quote, node_model.note, color=node_model.color, is_custom=node_model.is_custom,
+            width=node_model.width, height=node_model.height,
+            pdf_path=node_model.pdf_path, page_num=node_model.page_num,
+            highlight_id=node_model.highlight_id, node_origin=node_model.node_origin,
+            is_verified=node_model.is_verified, original_text=node_model.original_text,
+            node_type_id=node_model.node_type_id,
+            node_type_registry=self.workspace_node_types,
+            action_registry=self.workspace_actions,
         )
-        
+
         if position is None:
             position = self.mapToScene(self.viewport().rect().center())
         node.setPos(position)
         self.scene_obj.addItem(node)
         self.nodes[n_id] = node
         self._similarity_signature = None
-        
+        self._emit_node_added(node_model_from_node(node, effective_ws_id))
+
         if persist:
             self._mark_workspace_dirty(autosave=True)
             self.update_ghost_connections()
@@ -558,6 +784,7 @@ class WorkspaceView(QGraphicsView):
         node.setPos(position)
         self.nodes[node.node_id] = node
         self.update_scene_bounds()
+        self._emit_node_added(node_model_from_node(node, self.current_workspace_id))
         self._mark_workspace_dirty(autosave=True)
         self.update_ghost_connections()
         self._queue_background_embedding(node)
@@ -566,8 +793,7 @@ class WorkspaceView(QGraphicsView):
         edge = Edge(source_node, target_node, label)
         self.scene_obj.addItem(edge)
         self.edges.append(edge)
-        source_node.edges.append(edge)
-        target_node.edges.append(edge)
+        self._emit_edge_added(edge_model_from_edge(edge))
         self._mark_workspace_dirty(autosave=True)
 
     def update_scene_bounds(self):
@@ -597,7 +823,7 @@ class WorkspaceView(QGraphicsView):
         checked_data = self.filter_combo.get_checked_items()
         if not checked_data and self.filter_combo.count() == 0:
             checked_data = ["ALL"]
-            
+
         self.filter_combo.blockSignals(True)
         populate_pdf_filter_combo(self.filter_combo, self._pm().pdfs if self._pm() else [], checked_data)
         self.filter_combo.blockSignals(False)
@@ -639,22 +865,26 @@ class WorkspaceView(QGraphicsView):
     def _apply_filter(self):
         checked_pdfs = self.filter_combo.get_checked_items()
         show_all_pdfs = "ALL" in checked_pdfs or not checked_pdfs
-        
+
         checked_tags = self.tag_filter_combo.get_checked_items() if hasattr(self, "tag_filter_combo") else ["ALL_TAGS"]
         show_all_tags = "ALL_TAGS" in checked_tags or not checked_tags
-        
+
         is_filtered = not show_all_pdfs or not show_all_tags
         if hasattr(self, 'btn_clear_filter'):
             self.btn_clear_filter.setVisible(is_filtered)
-        
+
         for node in self.nodes.values():
             pdf_ok = True if show_all_pdfs else (node.pdf_path is None or node.pdf_path in checked_pdfs)
             tag_ok = True if show_all_tags else any(t in (node.get_tag_names() if hasattr(node, "get_tag_names") else []) for t in checked_tags)
             node.setVisible(pdf_ok and tag_ok)
-                    
+
         for edge in self.edges:
             edge.setVisible(edge.source_node.isVisible() and edge.dest_node.isVisible())
 
+        self.bus.workspace_filter_changed.emit(
+            WorkspaceEvent.FILTER_CHANGED,
+            WorkspaceEventPayload(filters={"pdfs": checked_pdfs, "tags": checked_tags}),
+        )
         self.update_ghost_connections()
 
     def _build_similarity_matrix_if_needed(self):
@@ -673,7 +903,7 @@ class WorkspaceView(QGraphicsView):
         node_ids = [n.node_id for n in node_items]
         texts_to_embed = [f"{n.quote} {n.note}".strip() for n in node_items]
         pm = self._pm()
-        
+
         self.similarity_matrix = get_semantic_similarity_matrix(node_ids, texts_to_embed, llm_manager, pm)
 
     def update_ghost_connections(self):
@@ -737,8 +967,9 @@ class WorkspaceView(QGraphicsView):
         pm = self._pm()
         if not pm or not pm.project_filepath: return
         try:
-            workspace_model = pm.get_workspace_data(self.current_workspace_id)
-            all_annots = pm.get_highlights()
+            # Call the global service from MainWindow
+            workspace_model = self.main_window.workspace_service.load_workspace(self.current_workspace_id)
+            all_annots = self.workspace_annotation_service.get_annotation_index()
             self._populate_workspace_tabs()
             self.sync_with_project(workspace_model, all_annots)
         except Exception as e:
@@ -755,13 +986,22 @@ class WorkspaceView(QGraphicsView):
         edge = Edge(src_node, tgt_node, f"~{int(sim_score * 100)}% similar")
         self.scene_obj.addItem(edge)
         self.edges.append(edge)
+        self._emit_edge_added(edge_model_from_edge(edge))
         self._mark_workspace_dirty(autosave=True)
         self.update_ghost_connections()
 
     def open_unused_highlights_dialog(self):
         pm = self._pm()
         if not pm: return
-        unused_highlights = pm.get_unused_highlights(self.current_workspace_id)
+        all_highlights = self.workspace_annotation_service.get_annotation_index()
+        workspace_node_ids = {
+            n.highlight_id or n.node_id
+            for n in self.workspace_service.load_workspace(self.current_workspace_id).nodes
+        }
+        unused_highlights = [
+            highlight for highlight_id, highlight in all_highlights.items()
+            if highlight_id not in workspace_node_ids
+        ]
 
         if not unused_highlights:
             QMessageBox.information(self, "Unused Highlights", "No unused highlights found.")
@@ -780,21 +1020,15 @@ class WorkspaceView(QGraphicsView):
         self.save_state_for_undo()
         view_center = self.mapToScene(self.viewport().rect().center())
         last_node, offset = None, 0
-        
+
         for highlight_id in highlight_ids:
-            highlight = pm.get_highlight(highlight_id)
+            highlight = all_highlights.get(highlight_id) or pm.get_highlight(highlight_id)
             if not highlight: continue
-                
-            actual_note, pdf_path, page_num = "", highlight.get("doc_id"), highlight.get("page_num")
+
+            actual_note, pdf_path, page_num = highlight.get("content", ""), highlight.get("doc_id"), highlight.get("page_num")
             if pdf_path and page_num is not None:
-                doc = pm.get_doc(pdf_path)
-                if doc:
-                    page = doc.load_page(page_num)
-                    for annot in page.annots():
-                        if annot.info and annot.info.get("title") == highlight["id"]:
-                            actual_note = annot.info.get("content", "")
-                            break
-                            
+                actual_note = self.workspace_annotation_service.get_pdf_annotation_note(highlight["id"], pdf_path, page_num) or actual_note
+
             node = self.add_node_from_annotation(
                 {
                     "id": highlight["id"], "subject": highlight.get("text_content", ""),
@@ -840,7 +1074,7 @@ class WorkspaceView(QGraphicsView):
         pm = self._pm()
         if not pm or not pm.project_filepath: return
 
-        self.sync_with_project(pm.get_workspace_data(self.current_workspace_id), pm.get_highlights())
+        self.sync_with_project(self.workspace_service.load_workspace(self.current_workspace_id), self.workspace_annotation_service.get_annotation_index())
 
     def _add_workspace(self):
         pm = self._pm()
@@ -851,7 +1085,7 @@ class WorkspaceView(QGraphicsView):
         name, ok = QInputDialog.getText(self, "New Workspace", "Enter workspace name:")
         if not ok or not name.strip(): return
 
-        new_id = pm.create_workspace(name.strip())
+        new_id = self.workspace_service.create_workspace(name.strip())
         if new_id is None:
             QMessageBox.warning(self, "Error", "Could not create workspace.")
             return
@@ -864,19 +1098,19 @@ class WorkspaceView(QGraphicsView):
     def _open_color_by_pdf_dialog(self):
         pm = self._pm()
         if not pm: return
-        
+
         pdfs, tags = pm.pdfs, pm.get_all_tags()
         if not pdfs and not tags:
             QMessageBox.information(self, "Nothing to Color", "There are no PDFs or Tags in this project.")
             return
-            
+
         current_pdf_colors = {pdf: "#2b2b2b" for pdf in pdfs}
         for node in self.nodes.values():
             if node.pdf_path: current_pdf_colors[node.pdf_path] = node.color
-                
+
         current_tag_colors = {t.get("name"): t.get("color", "#808080") for t in tags if t.get("name")}
         dialog = ColorOrganizerDialog(pdfs, tags, current_pdf_colors, current_tag_colors, self)
-        
+
         if self._theme():
             theme = self._theme().get_theme()
             style_dialog_with_theme(dialog, theme)
@@ -885,11 +1119,11 @@ class WorkspaceView(QGraphicsView):
                 QTabBar::tab {{ background: {theme['bg_panel']}; color: {theme['text_main']}; padding: 8px 16px; margin-right: 2px; border-top-left-radius: 4px; border-top-right-radius: 4px; }}
                 QTabBar::tab:selected {{ background: {theme['accent']}; color: #ffffff; font-weight: bold; }}
             """)
-            
+
         if dialog.exec():
             mode, new_colors = dialog.get_result()
             self.save_state_for_undo()
-            
+
             if mode == "pdf":
                 for node in self.nodes.values():
                     if node.pdf_path and node.pdf_path in new_colors:
@@ -903,8 +1137,8 @@ class WorkspaceView(QGraphicsView):
                             node.color = new_colors[tag_name]
                             node.setBrush(QBrush(QColor(node.color)))
                             node.refresh_layout()
-                            break 
-                            
+                            break
+
             self._mark_workspace_dirty(autosave=True)
 
     def trigger_declutter(self):
@@ -916,7 +1150,7 @@ class WorkspaceView(QGraphicsView):
             return
 
         dialog = DeclutterSettingsDialog(self)
-        if not dialog.exec(): return 
+        if not dialog.exec(): return
         use_ai, semantic_strength = dialog.get_settings()
 
         llm_manager = None
@@ -962,9 +1196,9 @@ class WorkspaceView(QGraphicsView):
 
         target_edges = [e for e in self.edges if e.source_node in target_nodes and e.dest_node in target_nodes]
         visibility_states = {}
-        
+
         for item in self.scene_obj.items():
-            if item.parentItem() is None: 
+            if item.parentItem() is None:
                 visibility_states[item] = item.isVisible()
                 if item not in target_nodes and item not in target_edges:
                     item.setVisible(False)
@@ -1003,72 +1237,33 @@ class WorkspaceView(QGraphicsView):
         for node in target_nodes: node.refresh_layout()
 
     # ------------------------------------------------------------------ undo / redo
-    
+
     def save_state_for_undo(self):
-        if self.is_restoring: return
-        state_model = self.serialize_workspace()
-        state_str = json.dumps(dataclasses.asdict(state_model), sort_keys=True)
-        
-        if not self.undo_stack or self.undo_stack[-1][0] != state_str:
-            self.undo_stack.append((state_str, state_model))
-            if len(self.undo_stack) > 50: self.undo_stack.pop(0)
-            self.redo_stack.clear()
-            self._update_buttons()
+        # We now package the model and throw it to the backend service
+        model = self.serialize_workspace()
+        self.bus.workspace_action_requested.emit(WorkspaceIntent.SAVE_UNDO_STATE, WorkspacePayload(model=model))
+
+    def undo(self):
+        # We must package current state for the redo stack before asking for the undo state
+        self.bus.workspace_action_requested.emit(WorkspaceIntent.SAVE_REDO_STATE, WorkspacePayload(model=self.serialize_workspace()))
+        self.bus.workspace_action_requested.emit(WorkspaceIntent.UNDO_TRIGGERED, WorkspacePayload())
+
+    def redo(self):
+        self.bus.workspace_action_requested.emit(WorkspaceIntent.SAVE_UNDO_STATE, WorkspacePayload(model=self.serialize_workspace()))
+        self.bus.workspace_action_requested.emit(WorkspaceIntent.REDO_TRIGGERED, WorkspacePayload())
 
     def _update_buttons(self):
         if hasattr(self, 'btn_undo'): self.btn_undo.setEnabled(len(self.undo_stack) > 0)
         if hasattr(self, 'btn_redo'): self.btn_redo.setEnabled(len(self.redo_stack) > 0)
 
-    def undo(self):
-        if not self.undo_stack: return
-        self.is_restoring = True
-        
-        current_state = self.serialize_workspace()
-        current_str = json.dumps(dataclasses.asdict(current_state), sort_keys=True)
-        self.redo_stack.append((current_str, current_state))
-        
-        _, prev_state = self.undo_stack.pop()
-        pm = self._pm()
-        self.sync_with_project(prev_state, pm.get_highlights() if pm and hasattr(pm, 'get_highlights') else {})
-        
-        self.is_restoring = False
-        self._update_buttons()
-        self._mark_workspace_dirty(autosave=True)
 
-    def redo(self):
-        if not self.redo_stack: return
-        self.is_restoring = True
-        
-        current_state = self.serialize_workspace()
-        current_str = json.dumps(dataclasses.asdict(current_state), sort_keys=True)
-        self.undo_stack.append((current_str, current_state))
-        
-        _, next_state = self.redo_stack.pop()
-        pm = self._pm()
-        self.sync_with_project(next_state, pm.get_highlights() if pm and hasattr(pm, 'get_highlights') else {})
-        
-        self.is_restoring = False
-        self._update_buttons()
-        self._mark_workspace_dirty(autosave=True)
 
     # ------------------------------------------------------------------ clipboard
 
     def copy_selection(self):
         selected_nodes = [n for n in self.scene_obj.selectedItems() if isinstance(n, Node)]
         if not selected_nodes: return
-        
-        selected_node_set = set(selected_nodes)
-        self.clipboard['nodes'] = [{
-            'old_id': n.node_id, 'highlight_id': n.highlight_id, 'quote': n.quote, 'note_text': n.note,
-            'color': n.color, 'is_custom': n.is_custom, 'pdf_path': n.pdf_path, 'page_num': n.page_num,
-            'manual_font_size': n.manual_font_size, 'width': n.base_width, 'height': n.base_height,
-            'x': n.pos().x(), 'y': n.pos().y(), "tags": n.get_tag_names() if hasattr(n, "get_tag_names") else [],
-        } for n in selected_nodes]
-        
-        self.clipboard['edges'] = [{
-            'source_old_id': e.source_node.node_id, 'dest_old_id': e.dest_node.node_id,
-            'label': e.label_text, 'color': e.base_color.name(), 'weight': e.weight,
-        } for e in self.edges if e.source_node in selected_node_set and e.dest_node in selected_node_set]
+        self.clipboard = self.workspace_graph_service.copy_selection_payload(selected_nodes, self.edges)
 
     def cut_selection(self):
         self.copy_selection()
@@ -1079,21 +1274,24 @@ class WorkspaceView(QGraphicsView):
         if "<workspace_graph>" in clipboard_text and "</workspace_graph>" in clipboard_text:
             # Removed parsing logic here since AI parsing is offloaded, but left hook if needed
             return
-            
+
         if not self.clipboard['nodes']: return
         self.save_state_for_undo()
-        
+
         offset = 20
         id_mapping = {}
         new_nodes = []
-        
+
         for data in self.clipboard['nodes']:
             new_id = f"custom_{uuid.uuid4()}"
             id_mapping[data['old_id']] = new_id
             node = Node(
                 new_id, data['quote'], data['note_text'], color=data['color'], is_custom=data['is_custom'],
                 width=data['width'], height=data['height'], pdf_path=data['pdf_path'],
-                page_num=data['page_num'], manual_font_size=data['manual_font_size'], highlight_id=data['highlight_id']
+                page_num=data['page_num'], manual_font_size=data['manual_font_size'], highlight_id=data['highlight_id'],
+                node_type_id=data.get("node_type_id"),
+                node_type_registry=self.workspace_node_types,
+                action_registry=self.workspace_actions,
             )
             node.setPos(data['x'] + offset, data['y'] + offset)
             self.scene_obj.addItem(node)
@@ -1134,7 +1332,7 @@ class WorkspaceView(QGraphicsView):
             self.delete_selected_nodes()
             event.accept()
             return
-            
+
         super().keyPressEvent(event)
 
     def wheelEvent(self, event):
@@ -1143,7 +1341,7 @@ class WorkspaceView(QGraphicsView):
             else: self.zoom_out()
         else:
             super().wheelEvent(event)
-            
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if hasattr(self, 'ai_overlay') and self.ai_overlay.isVisible(): self.ai_overlay._reposition()
@@ -1163,7 +1361,7 @@ class WorkspaceView(QGraphicsView):
                     is_node = True
                     break
                 current = current.parentItem()
-                
+
             if not is_node:
                 self.connecting_node.setPen(QPen(QColor("#ffffff" if self.connecting_node.isSelected() else "#555555"), 4 if self.connecting_node.isSelected() else 2))
                 self.connecting_node = None
@@ -1205,6 +1403,7 @@ class WorkspaceView(QGraphicsView):
             from PySide6.QtCore import QTimer
             QTimer.singleShot(0, lambda: edge.setParentItem(None))
         self._mark_workspace_dirty(autosave=True)
+        self._emit_edge_deleted(getattr(edge, "edge_id", ""))
 
     def delete_selected_nodes(self):
         nodes_to_delete = [item for item in list(self.scene_obj.selectedItems()) if isinstance(item, Node)]
@@ -1217,6 +1416,7 @@ class WorkspaceView(QGraphicsView):
             node.edges = []
             if node.node_id in self.nodes: del self.nodes[node.node_id]
             if hasattr(node, 'deleteLater'): node.deleteLater()
+            self._emit_node_deleted(node.node_id)
 
         self._similarity_signature = None
         self.update_ghost_connections()
@@ -1232,6 +1432,7 @@ class WorkspaceView(QGraphicsView):
         node.edges = []
         if node.node_id in self.nodes: del self.nodes[node.node_id]
         if hasattr(node, 'deleteLater'): node.deleteLater()
+        self._emit_node_deleted(node.node_id)
 
         self._similarity_signature = None
         self.update_ghost_connections()
@@ -1239,8 +1440,7 @@ class WorkspaceView(QGraphicsView):
 
     def _delete_highlight_permanently(self, highlight_id):
         nodes_to_remove = [node for node in list(self.nodes.values()) if node.highlight_id == highlight_id or node.node_id == highlight_id]
-        pm = self._pm()
-        highlight_record = pm.get_highlight(highlight_id) if pm else None
+        fallback_node = nodes_to_remove[0] if nodes_to_remove else None
 
         for node in nodes_to_remove:
             for edge in list(node.edges): self.delete_edge(edge)
@@ -1248,32 +1448,9 @@ class WorkspaceView(QGraphicsView):
             node.edges = []
             self.nodes.pop(node.node_id, None)
             if hasattr(node, 'deleteLater'): node.deleteLater()
+            self._emit_node_deleted(node.node_id)
 
-        pdf_path, page_num = None, None
-        if highlight_record:
-            pdf_path, page_num = highlight_record.get("doc_id"), highlight_record.get("page_num")
-        elif nodes_to_remove:
-            pdf_path, page_num = nodes_to_remove[0].pdf_path, nodes_to_remove[0].page_num
-
-        if pm and pdf_path is not None and page_num is not None:
-            try:
-                doc = pm.get_doc(pdf_path)
-                if doc:
-                    page = doc.load_page(page_num)
-                    for annot in page.annots():
-                        if annot.info and annot.info.get("title") == highlight_id:
-                            page.delete_annot(annot)
-                            break
-                    pm.mark_dirty(pdf_path)
-                    if pdf_path == self.main_window.current_file_path and hasattr(self.main_window, 'viewer'):
-                        self.main_window.viewer.reload_page(page_num)
-            except Exception as e:
-                print(f"Error removing physical annotation: {e}")
-
-            if hasattr(self.main_window, 'notes_docks'):
-                for n_dock in self.main_window.notes_docks: n_dock.refresh_notes()
-
-            pm.delete_highlight_record(highlight_id)
+        self.workspace_annotation_service.delete_highlight_permanently(highlight_id, fallback_node)
 
         self._similarity_signature = None
         self.update_ghost_connections()
@@ -1298,7 +1475,7 @@ class WorkspaceView(QGraphicsView):
             elif action == declutter_action:
                 self.trigger_declutter()
             return
-            
+
         if isinstance(item, Node):
             prior_selected = [n for n in selected_nodes]
             if item not in selected_nodes:
@@ -1329,14 +1506,9 @@ class WorkspaceView(QGraphicsView):
             elif action == declutter_action:
                 self.trigger_declutter()
             elif action == cite_action:
-                if item.pdf_path is not None:
-                    citation_text = self.main_window.citation_manager.format_in_text(item.pdf_path, item.page_num)
-                    QApplication.clipboard().setText(citation_text)
-                    self.main_window.statusBar().showMessage(f"Copied citation: {citation_text}", 3000)
-                else:
-                    QMessageBox.warning(self, "No Citation", "This is a custom node, not a PDF highlight.")
+                self._copy_node_citation(item)
             return
-            
+
         if isinstance(item, Edge):
             menu, edit_action, color_action, weight_action, del_action = build_edge_context_menu(self, self, item)
             action = menu.exec(event.globalPos())
@@ -1363,7 +1535,7 @@ class WorkspaceView(QGraphicsView):
         if not nodes: return
         initial_color = QColor(nodes[0].color)
         color = QColorDialog.getColor(initial_color, self, "Select Color for Selected Nodes")
-        
+
         if color.isValid():
             self.save_state_for_undo()
             color_name = color.name()
@@ -1371,17 +1543,14 @@ class WorkspaceView(QGraphicsView):
                 node.color = color_name
                 node.setBrush(QBrush(QColor(color_name)))
                 node.refresh_layout()
-                if not getattr(node, 'is_custom', False) and getattr(node, 'pdf_path', None) is not None:
-                    annot_id = getattr(node, 'highlight_id', None) or getattr(node, 'node_id', None)
-                    if hasattr(self.main_window, 'notes_docks'):
-                        for notes_dock in self.main_window.notes_docks:
-                            notes_dock._modify_note(node.pdf_path, node.page_num, annot_id, action="edit_content", content=getattr(node, 'note', ''), refresh=False)
+                self.workspace_annotation_service.mirror_note_edit_to_notes(node)
+                self._emit_node_updated(node.node_id, {"color": color_name})
             self._mark_workspace_dirty(autosave=True)
 
     def trigger_find_tag_relatives(self, tag_name):
         pm, llm = self._pm(), self._llm()
         if not pm or not llm: return
-        
+
         if not llm.collection and pm.project_filepath: llm.set_project_database(pm.project_filepath)
         if not llm.collection or llm.collection.count() == 0:
             QMessageBox.warning(self, "No Database", "Search index is empty. Please build it first.")
@@ -1397,7 +1566,7 @@ class WorkspaceView(QGraphicsView):
         if len(vectors) < len(target_nodes):
             try: vectors = llm.get_batch_embeddings([f"{n.quote} {n.note}".strip() for n in target_nodes])
             except Exception: pass
-                
+
         if not vectors:
             QMessageBox.warning(self, "Error", "Could not generate embeddings. Ensure AI is running.")
             return
@@ -1408,7 +1577,7 @@ class WorkspaceView(QGraphicsView):
         if not results or not results.get('documents') or not results['documents'][0]:
             QMessageBox.information(self, "No Results", "Could not find related chunks.")
             return
-            
+
         matches = [{"text": doc_text.strip(), "doc_name": meta.get('doc_name', 'Unknown Document'), "page": meta.get('page', 0)} for doc_text, meta in zip(results['documents'][0], results['metadatas'][0])]
         AIResultsDialog(f"Related to '{tag_name}'", matches, self.main_window, self).exec()
 
@@ -1446,8 +1615,8 @@ class WorkspaceView(QGraphicsView):
             QMessageBox.critical(self, "Database Error", str(e))
             return
 
-        active_model = self.main_window.chat_docks[0].model_combo.currentText() if hasattr(self.main_window, 'chat_docks') and self.main_window.chat_docks else None
-        
+        active_model = self.get_active_ai_model()
+
         from PySide6.QtWidgets import QProgressDialog
         self.loading_dialog = QProgressDialog("Initializing AI...", "Cancel", 0, 0, self.main_window)
         self.loading_dialog.setWindowTitle(f"Finding Opposing Views for '{tag_name}'")
@@ -1473,18 +1642,13 @@ class WorkspaceView(QGraphicsView):
         self.loading_dialog.canceled.connect(self.opposing_worker.terminate)
         self.opposing_worker.start()
 
-    def _organize_selection_ai(self): self._run_workspace_ai_tool(DefaultBlueprints.get_workspace_organize_blueprint(self.main_window.prompt_manager), require_selection=True)
-    def _find_connections_ai(self): self._run_workspace_ai_tool(DefaultBlueprints.get_workspace_connections_blueprint(self.main_window.prompt_manager), require_selection=True)
-    def _generate_outline_ai(self): self._run_workspace_ai_tool(DefaultBlueprints.get_workspace_outline_blueprint(self.main_window.prompt_manager), require_selection=True)
-    def _weakpoints_ai(self): self._run_workspace_ai_tool(DefaultBlueprints.get_workspace_weakpoints_blueprint(self.main_window.prompt_manager), require_selection=True)
-    def _fill_graph_ai(self): self._run_workspace_ai_tool(DefaultBlueprints.get_workspace_fill_blueprint(self.main_window.prompt_manager), require_selection=True)
-    def _consolidate_nodes_ai(self): self._run_workspace_ai_tool(DefaultBlueprints.get_workspace_consolidate_blueprint(self.main_window.prompt_manager), require_selection=True)
+
 
     def _manage_tags_for_nodes(self, selected_nodes):
         if not selected_nodes: return
         pm = self._pm()
         if not pm: return
-        
+
         if TagAssignmentDialog(pm, selected_nodes[0].node_id, "node", self).exec() != QDialog.DialogCode.Accepted: return
 
         template_tag_ids = {t.get("id") for t in pm.get_tags_for_node(selected_nodes[0].node_id)}
@@ -1510,15 +1674,21 @@ class WorkspaceView(QGraphicsView):
             edge = Edge(self.connecting_node, target_node, text)
             self.scene_obj.addItem(edge)
             self.edges.append(edge)
+            self._emit_edge_added(edge_model_from_edge(edge))
             self._mark_workspace_dirty(autosave=True)
-            
+
         self.connecting_node.setPen(QPen(QColor("#ffffff" if self.connecting_node.isSelected() else "#555555"), 4 if self.connecting_node.isSelected() else 2))
         self.connecting_node = None
 
     def add_custom_bubble(self):
         self.save_state_for_undo()
         node_id = f"custom_{uuid.uuid4()}"
-        node = Node(node_id, quote="", note="", color="#005577", is_custom=True, width=180, height=80)
+        node = Node(
+            node_id, quote="", note="", color="#005577", is_custom=True, width=180, height=80,
+            node_type_id="workspace.node.text",
+            node_type_registry=self.workspace_node_types,
+            action_registry=self.workspace_actions,
+        )
         node.setPos(self.mapToScene(self.viewport().rect().center()))
         self.scene_obj.addItem(node)
         self.nodes[node_id] = node
@@ -1535,55 +1705,71 @@ class WorkspaceView(QGraphicsView):
     def sync_with_project(self, workspace_model: WorkspaceModel, pdf_annotations, force_reload=False):
         selected_ids = [n_id for n_id, n in self.nodes.items() if n.isSelected()]
         h_scroll, v_scroll = self.horizontalScrollBar().value(), self.verticalScrollBar().value()
-        self.scene_obj.clear()
-        self.nodes.clear()
-        self.edges.clear()
+        self._rendering_workspace = True
+        should_initialize_nodes = False
+        try:
+            self.scene_obj.clear()
+            self.nodes.clear()
+            self.edges.clear()
 
-        annot_dict = pdf_annotations if isinstance(pdf_annotations, dict) else {a["id"]: a for a in pdf_annotations}
+            annot_dict = pdf_annotations if isinstance(pdf_annotations, dict) else {a["id"]: a for a in pdf_annotations}
 
-        for data in workspace_model.nodes:
-            quote, note, highlight_id = data.quote, data.note, data.highlight_id
-            if highlight_id and highlight_id in annot_dict: quote = annot_dict[highlight_id].get("text_content", quote) or quote
-            elif data.id in annot_dict: quote = annot_dict[data.id].get("text_content", quote) or quote
+            for data in workspace_model.nodes:
+                quote, note, highlight_id = data.quote, data.note, data.highlight_id
+                annot_record = annot_dict.get(highlight_id or data.id, {})
+                if annot_record:
+                    live_quote = annot_record.get("text_content") or annot_record.get("subject")
+                    if live_quote:
+                        quote = live_quote
+                    if "content" in annot_record:
+                        note = annot_record.get("content") or ""
+                color = (annot_record.get("color") or data.color) if annot_record else data.color
+                pdf_path = data.pdf_path or annot_record.get("pdf_path") or annot_record.get("doc_id")
+                page_num = data.page_num if data.page_num is not None else annot_record.get("page_num")
 
-            node = Node(
-                data.id, quote, note, data.color, data.is_custom, data.width, data.height, 
-                data.pdf_path or annot_dict.get(highlight_id or data.id, {}).get("doc_id"), 
-                data.page_num if data.page_num is not None else annot_dict.get(highlight_id or data.id, {}).get("page_num"), 
-                data.manual_font_size, highlight_id, data.node_origin, data.is_verified, data.original_text
-            )
-            node.setPos(data.x, data.y)
-            self.scene_obj.addItem(node)
-            self.nodes[data.id] = node
+                node = Node(
+                    data.id, quote, note, color, data.is_custom, data.width, data.height,
+                    pdf_path,
+                    page_num,
+                    data.manual_font_size, highlight_id, data.node_origin, data.is_verified, data.original_text,
+                    data.node_type_id,
+                    self.workspace_node_types,
+                    self.workspace_actions,
+                )
+                self.scene_obj.addItem(node)
+                self.nodes[data.id] = node
+                node.setPos(data.x, data.y)
 
-        pm = self._pm()
-        should_initialize_nodes = (self.current_workspace_id == 1 and pm and pm.get_metadata("workspace_nodes_initialized", "0") != "1")
-        if should_initialize_nodes:
-            y_offset = 50
-            for annot in annot_dict.values():
-                if annot["id"] not in self.nodes:
-                    actual_note, pdf_path, page_num = "", annot.get("doc_id"), annot.get("page_num")
-                    if pdf_path and page_num is not None and pm:
-                        doc = pm.get_doc(pdf_path)
-                        if doc:
-                            for pdf_annot in doc.load_page(page_num).annots():
-                                if pdf_annot.info and pdf_annot.info.get("title") == annot["id"]:
-                                    actual_note = pdf_annot.info.get("content", "")
-                                    break
-                    self.add_node_from_annotation({"id": annot["id"], "subject": annot.get("text_content", ""), "content": actual_note, "pdf_path": pdf_path, "page_num": page_num, "color": annot.get("color")}, persist=False, position=self.mapToScene(50, y_offset))
-                    y_offset += 100
-            pm.set_metadata("workspace_nodes_initialized", "1")
+            pm = self._pm()
+            should_initialize_nodes = (self.current_workspace_id == 1 and pm and pm.get_metadata("workspace_nodes_initialized", "0") != "1")
+            if should_initialize_nodes:
+                y_offset = 50
+                for annot in annot_dict.values():
+                    if annot["id"] not in self.nodes:
+                        actual_note, pdf_path, page_num = annot.get("content", ""), annot.get("doc_id"), annot.get("page_num")
+                        if pdf_path and page_num is not None and pm:
+                            doc = pm.get_doc(pdf_path)
+                            if doc:
+                                for pdf_annot in doc.load_page(page_num).annots():
+                                    if pdf_annot.info and pdf_annot.info.get("title") == annot["id"]:
+                                        actual_note = pdf_annot.info.get("content", "") or actual_note
+                                        break
+                        self.add_node_from_annotation({"id": annot["id"], "subject": annot.get("text_content", ""), "content": actual_note, "pdf_path": pdf_path, "page_num": page_num, "color": annot.get("color")}, persist=False, position=self.mapToScene(50, y_offset))
+                        y_offset += 100
+                pm.set_metadata("workspace_nodes_initialized", "1")
 
-        for edge_data in workspace_model.edges:
-            if edge_data.source in self.nodes and edge_data.target in self.nodes:
-                src, tgt = self.nodes[edge_data.source], self.nodes[edge_data.target]
-                edge = Edge(src, tgt, edge_data.label, edge_data.id, edge_data.color, edge_data.weight)
-                self.scene_obj.addItem(edge)
-                self.edges.append(edge)
+            for edge_data in workspace_model.edges:
+                if edge_data.source in self.nodes and edge_data.target in self.nodes:
+                    src, tgt = self.nodes[edge_data.source], self.nodes[edge_data.target]
+                    edge = Edge(src, tgt, edge_data.label, edge_data.id, edge_data.color, edge_data.weight)
+                    self.scene_obj.addItem(edge)
+                    self.edges.append(edge)
 
-        for n_id in selected_ids:
-            if n_id in self.nodes: self.nodes[n_id].setSelected(True)
-                
+            for n_id in selected_ids:
+                if n_id in self.nodes: self.nodes[n_id].setSelected(True)
+        finally:
+            self._rendering_workspace = False
+
         self._refresh_pdf_list()
         self._refresh_tag_list()
         self._apply_filter()
@@ -1598,21 +1784,46 @@ class WorkspaceView(QGraphicsView):
 
     def handle_highlight_created(self, highlight_data):
         if highlight_data.get("id") in self.nodes and self.current_workspace_id == 1: return
-            
+
         if self.current_workspace_id == 1:
             self.add_node_from_annotation(highlight_data, persist=True, target_workspace_id=1)
         else:
-            pm = self._pm()
-            if pm:
-                quote, note = normalize_annotation_text(highlight_data)
-                color = highlight_data.get("color") or "#2b2b2b"
-                w, h = compute_node_dimensions(quote, note)
-                
-                model = pm.get_workspace_data(1)
-                model.nodes.append(NodeModel(
-                    id=highlight_data["id"], highlight_id=highlight_data["id"], workspace_id=1,
-                    quote=quote, note=note, color=color, is_custom=False,
-                    pdf_path=highlight_data.get("pdf_path") or highlight_data.get("doc_id"),
-                    page_num=highlight_data.get("page_num"), x=0.0, y=0.0, width=w, height=h
-                ))
-                pm.sync_workspace(model)
+            self.workspace_annotation_service.add_annotation_to_workspace(highlight_data, 1)
+
+    def handle_highlight_updated(self, highlight_id, changes):
+        node = self.nodes.get(highlight_id)
+        if not node:
+            node = next((n for n in self.nodes.values() if n.highlight_id == highlight_id), None)
+        if not node:
+            return
+
+        source = self.workspace_annotation_service.find_source_for_node(node)
+        if source:
+            live_quote = source.get("text_content") or source.get("subject")
+            if live_quote:
+                node.quote = live_quote
+            node.pdf_path = source.get("pdf_path") or source.get("doc_id") or node.pdf_path
+            if source.get("page_num") is not None:
+                node.page_num = source.get("page_num")
+            if source.get("id") and not node.highlight_id:
+                node.highlight_id = source.get("id")
+
+        if "note" in changes or "content" in changes:
+            node.note = changes.get("note", changes.get("content", node.note))
+        if changes.get("color"):
+            node.color = changes["color"]
+            node.setBrush(QBrush(QColor(node.color)))
+        if changes.get("pdf_path"):
+            node.pdf_path = changes["pdf_path"]
+        if changes.get("page_num") is not None:
+            node.page_num = changes["page_num"]
+
+        node.refresh_layout()
+        self._mark_workspace_dirty(autosave=True)
+
+    def handle_highlight_deleted(self, highlight_id):
+        node = self.nodes.get(highlight_id)
+        if not node:
+            node = next((n for n in self.nodes.values() if n.highlight_id == highlight_id), None)
+        if node:
+            self.delete_node(node, delete_highlight=False)

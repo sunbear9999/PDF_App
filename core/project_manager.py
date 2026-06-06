@@ -16,24 +16,25 @@ from core.db.tag_db import TagDB
 from core.db.ai_db import AIDB
 from core.db.document_db import DocumentDB
 from core.events.event_bus import EventBus
+from core.events.domains.document_events import DocumentEvent, DocumentEventPayload
 
 class ProjectManager:
     def __init__(self, max_cache_size=5):
         self.project_filepath = None
         self.project_name = "Untitled Project"
         self.pdfs = []
-        
-        self.open_docs = {} 
+
+        self.open_docs = {}
         self.dirty_docs = set()
         self.max_cache_size = max_cache_size
         self.active_file = None
         self._conn = None
-        
+
         if getattr(sys, 'frozen', False):
             root_dir = sys._MEIPASS
         else:
             root_dir = os.path.abspath(os.path.dirname(__file__))
-            
+
         self.templates_path = os.path.join(root_dir, "analysis_templates.json")
 
         # Initialize the DB subsystems
@@ -43,27 +44,56 @@ class ProjectManager:
         self.db_tags = TagDB(self)
         self.db_ai = AIDB(self)
         self.db_docs = DocumentDB(self)
-        
+
         self.db_docs.ensure_default_templates()
 
         # --- NEW: Subscribe to Global Events ---
         self.bus = EventBus.get_instance()
         self.bus.highlight_created.connect(self._on_highlight_created)
+        self.bus.highlight_updated.connect(self._on_highlight_updated)
+        self.bus.highlight_deleted.connect(self._on_highlight_deleted)
 
     # ---------------------------------------------------------
     # Core Project & File System Logic (Maintains its state here)
     # ---------------------------------------------------------
-    def _on_highlight_created(self, highlight_data):
+    def _on_highlight_created(self, event: DocumentEvent, payload: DocumentEventPayload):
+        if event != DocumentEvent.HIGHLIGHT_CREATED:
+            return
+        highlight_data = payload.highlight_data
         """Automatically saves new highlights to the database when announced on the bus."""
+        pdf_path = highlight_data.get("pdf_path") or highlight_data.get("doc_id") or self.active_file
         self.upsert_highlight({
             "id": highlight_data.get("id"),
-            "doc_id": highlight_data.get("pdf_path"),
+            "doc_id": pdf_path,
             "page_num": highlight_data.get("page_num"),
             "rect_coords": highlight_data.get("rect_coords"),
-            "text_content": highlight_data.get("subject", ""),
+            "text_content": highlight_data.get("subject") or highlight_data.get("text_content", ""),
+            "note_content": highlight_data.get("content") or highlight_data.get("note_content", ""),
             "color": highlight_data.get("color"),
         })
-        self.mark_dirty(highlight_data.get("pdf_path"))
+        self.mark_dirty(pdf_path)
+
+    def _on_highlight_updated(self, event: DocumentEvent, payload: DocumentEventPayload):
+        if event != DocumentEvent.HIGHLIGHT_UPDATED:
+            return
+        highlight_id, changes = payload.annot_id, payload.changes
+        """Persist highlight metadata updates announced by UI or services."""
+        if not highlight_id:
+            return
+        if "note" in changes or "content" in changes:
+            self.update_highlight_note(highlight_id, changes.get("note", changes.get("content", "")))
+        if changes.get("color"):
+            self.update_highlight_color(highlight_id, changes["color"])
+        pdf_path = changes.get("pdf_path")
+        if pdf_path:
+            self.mark_dirty(pdf_path)
+
+    def _on_highlight_deleted(self, event: DocumentEvent, payload: DocumentEventPayload):
+        if event != DocumentEvent.HIGHLIGHT_DELETED:
+            return
+        highlight_id = payload.annot_id
+        if highlight_id:
+            self.delete_highlight_record(highlight_id)
     def create_project(self, filepath):
         try:
             filepath = filepath.strip()
@@ -71,15 +101,15 @@ class ProjectManager:
                 filepath = filepath.replace(".index.json", "")
             if not filepath.lower().endswith(".pdfproj"):
                 filepath += ".pdfproj"
-                
+
             self.project_filepath = filepath
             self.project_name = os.path.basename(filepath).replace(".pdfproj", "")
             self.pdfs = []
             self._clear_cache()
-            
+
             if os.path.exists(filepath):
                 os.remove(filepath)
-            
+
             self.db_schema.init_database()
             self.set_metadata("project_name", self.project_name)
         except Exception as e:
@@ -95,11 +125,11 @@ class ProjectManager:
 
             if not os.path.exists(filepath):
                 return False
-                
+
             self.project_filepath = filepath
             self.project_name = os.path.basename(filepath).replace(".pdfproj", "")
             self._clear_cache()
-            
+
             try:
                 self.db_schema.init_database()
                 cursor = self._conn.cursor()
@@ -109,18 +139,18 @@ class ProjectManager:
                 print("Legacy JSON project detected. Migrating to SQLite...")
                 with open(filepath, 'r') as f:
                     data = json.load(f)
-                
+
                 if self._conn:
                     self._conn.close()
                 os.remove(filepath)
-                
+
                 self.db_schema.init_database()
                 self.pdfs = data.get("pdfs", [])
-                
+
                 cursor = self._conn.cursor()
                 for p in self.pdfs:
                     cursor.execute("INSERT OR IGNORE INTO pdfs (path) VALUES (?)", (p,))
-                
+
                 # For migration bridging
                 dummy_ws = WorkspaceModel(workspace_id=1)
                 for node_data in data.get("workspace_data", {}).get("nodes", {}).values():
@@ -129,7 +159,7 @@ class ProjectManager:
                     dummy_ws.edges.append(EdgeModel(**edge_data))
                 self.sync_workspace(dummy_ws)
                 print("Migration complete!")
-                
+
             return True
         except Exception as e:
             print(f"Error loading project: {e}")
@@ -152,7 +182,7 @@ class ProjectManager:
             self._conn = None
             self._safe_swap_file(tmp_db, self.project_filepath)
             tmp_db = None
-            
+
             self.db_schema.init_database()
         except Exception as e:
             print(f"Error saving project safely: {e}")
@@ -199,10 +229,10 @@ class ProjectManager:
             if not doc.is_closed:
                 doc.close()
         self.dirty_docs.discard(pdf_path)
-        
+
         if pdf_path in self.pdfs:
             self.pdfs.remove(pdf_path)
-            
+
         if self._conn:
             try:
                 cursor = self._conn.cursor()
@@ -214,15 +244,15 @@ class ProjectManager:
             except sqlite3.Error as e:
                 self._conn.rollback()
                 print(f"Error removing PDF from DB: {e}")
-                
+
         if self.active_file == pdf_path:
             self.active_file = None
         return True
 
     def rename_pdf(self, old_path, new_path):
-        if old_path not in self.pdfs: 
+        if old_path not in self.pdfs:
             return False
-        
+
         if old_path in self.open_docs:
             doc = self.open_docs.pop(old_path)
             if old_path in self.dirty_docs:
@@ -230,16 +260,16 @@ class ProjectManager:
             if not doc.is_closed:
                 doc.close()
         self.dirty_docs.discard(old_path)
-        
+
         try:
             os.rename(old_path, new_path)
         except Exception as e:
             print(f"OS Rename failed: {e}")
             return False
-            
+
         idx = self.pdfs.index(old_path)
         self.pdfs[idx] = new_path
-        
+
         if self._conn:
             try:
                 cursor = self._conn.cursor()
@@ -253,7 +283,7 @@ class ProjectManager:
                 self._conn.rollback()
                 print(f"Error renaming PDF in DB: {e}")
                 return False
-                
+
         if self.active_file == old_path:
             self.active_file = new_path
         return True
@@ -275,7 +305,7 @@ class ProjectManager:
             self.open_docs.clear()
             self.dirty_docs.clear()
             self.active_file = None
-        except Exception as e: 
+        except Exception as e:
             print(f"Error clearing cache: {e}")
 
     def get_doc(self, filepath):
@@ -295,7 +325,7 @@ class ProjectManager:
         try:
             while len(self.open_docs) >= self.max_cache_size:
                 evict_candidate = next((p for p in self.open_docs if p != self.active_file), None)
-                if not evict_candidate: break 
+                if not evict_candidate: break
                 doc = self.open_docs.pop(evict_candidate)
                 if evict_candidate in self.dirty_docs:
                     self._save_single_doc(doc, evict_candidate)
@@ -321,21 +351,21 @@ class ProjectManager:
         try:
             temp_path = self._create_closed_temp_path(path, suffix=".tmp_save")
             doc.save(temp_path)
-            
+
             if viewer and viewer.doc:
                 viewer.doc = None
 
             self._safe_swap_file(temp_path, path)
             temp_path = None
             self.dirty_docs.discard(path)
-            doc.close() 
+            doc.close()
         except Exception as e:
             print(f"Primary save failed for {path}: {e}")
             if temp_path and os.path.exists(temp_path):
                 try: os.remove(temp_path)
                 except Exception: pass
         finally:
-            if path in self.open_docs or viewer: 
+            if path in self.open_docs or viewer:
                 try:
                     import fitz
                     new_doc = fitz.open(path)
@@ -347,13 +377,19 @@ class ProjectManager:
                     self.open_docs.pop(path, None)
 
     def save_all_docs(self):
-        try:
-            for path, doc in list(self.open_docs.items()):
-                if path in self.dirty_docs and path != "workspace":
-                    self._save_single_doc(doc, path)
-            self.dirty_docs.discard("workspace")
-        except Exception as e:
-            print(f"Error during save_all_docs: {e}")
+        """Flushes SQLite DB and writes physical PDF annotations to disk."""
+        if self._conn:
+            self._conn.commit()
+
+        if hasattr(self, 'open_docs'):
+            for file_path, doc in list(self.open_docs.items()):
+                if not doc.is_closed and file_path in self.dirty_docs:
+                    self._save_single_doc(doc, file_path)
+
+        open_paths = set(getattr(self, "open_docs", {}).keys())
+        for dirty_key in list(self.dirty_docs):
+            if dirty_key not in open_paths:
+                self.dirty_docs.discard(dirty_key)
 
     # ---------------------------------------------------------
     # Delegated Subsystem Methods (Keeps all references identical)
@@ -379,6 +415,7 @@ class ProjectManager:
     def get_unused_highlights(self, workspace_id): return self.db_annotations.get_unused_highlights(workspace_id)
     def delete_highlight_record(self, highlight_id): return self.db_annotations.delete_highlight_record(highlight_id)
     def update_highlight_text(self, highlight_id, new_text): return self.db_annotations.update_highlight_text(highlight_id, new_text)
+    def update_highlight_note(self, highlight_id, new_text): return self.db_annotations.update_highlight_note(highlight_id, new_text)
     def update_highlight_color(self, highlight_id, hex_color): return self.db_annotations.update_highlight_color(highlight_id, hex_color)
 
     # --- Tags ---

@@ -161,6 +161,17 @@ class SearchTab(BaseTab):
         self.status_lbl.setText("✅ Generation Complete")
         self.btn_generate.setEnabled(True)
 
+    def receive_ai_payload(self, payload: dict):
+        if payload.get("type") == "search_terms":
+            items = payload.get("items", [])
+            if not payload.get("success", True):
+                self.status_lbl.setText("❌ Could not parse generated search terms.")
+                self.btn_generate.setEnabled(True)
+                return
+            self.render_search_terms(items)
+            return
+        super().receive_ai_payload(payload)
+
     def _add_citation_card(self, doc_name, text, score):
         card = ReusableCitationCard(doc_name, text, score, theme=self.theme)
         card.action_requested.connect(lambda action, data: self._jump_to_source(data["doc_name"], data["text"]) if action == "jump" else None)

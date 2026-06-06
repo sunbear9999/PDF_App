@@ -42,6 +42,52 @@ class UniversalInternalOverlay(QFrame):
             item = self.content_layout.takeAt(0)
             if item.widget(): item.widget().deleteLater()
 
+    def receive_ai_widget(self, widget):
+        self.content_layout.addWidget(widget)
+        self.show()
+        self.raise_()
+
+    def receive_ai_payload(self, payload: dict):
+        payload_type = payload.get("type")
+        if payload_type in {"status", "hide_status"}:
+            return
+
+        if payload_type == "outline":
+            from gui.docks.unified_research.components.dynamic_outlines import UniversalOutlineWidget
+            self.lbl_title.setText(payload.get("title", "AI Result"))
+            annot_manager = self.main_window.viewer.annot_manager if hasattr(self.main_window, "viewer") else None
+            widget = UniversalOutlineWidget(payload.get("title", "AI Result"), payload.get("content", ""), self.theme, annot_manager)
+            widget._raw_ai_data = payload.get("raw_ai_data", payload.get("content", ""))
+        elif payload_type == "data_table":
+            from gui.docks.unified_research.components.dynamic_data_table import DynamicDataTableWidget
+            widget = DynamicDataTableWidget(payload.get("content", ""), self.theme)
+        elif payload_type == "card_grid":
+            from gui.docks.unified_research.components.dynamic_card_grid import DynamicCardGridWidget
+            widget = DynamicCardGridWidget(payload.get("content", ""), self.theme)
+        elif payload_type == "citation_cards":
+            from gui.docks.unified_research.components.chat_streamer import ChatMessageWidget
+            widget = ChatMessageWidget("AI Agent", theme=self.theme)
+            for item in payload.get("items", []):
+                if isinstance(item, dict):
+                    widget.add_bubble(
+                        doc_name=item.get("doc_name", "Unknown Document"),
+                        quote=item.get("quote", item.get("text", "")),
+                        note=item.get("note", item.get("reason", ""))
+                    )
+        elif payload_type == "results_dialog":
+            from gui.components.dialogs.tag_relatives_dialog import AIResultsDialog
+            dlg = AIResultsDialog(payload.get("title", "AI Results"), payload.get("items", []), self.main_window, self.main_window)
+            dlg.show()
+            return
+        elif payload_type == "error":
+            self.lbl_title.setText("Pipeline Error")
+            widget = QLabel(payload.get("message", "Unknown error"))
+        else:
+            return
+
+        self.clear_content()
+        self.receive_ai_widget(widget)
+
     def resizeEvent(self, event):
         # Always stretch to fill the main window exactly
         self.resize(self.main_window.size())

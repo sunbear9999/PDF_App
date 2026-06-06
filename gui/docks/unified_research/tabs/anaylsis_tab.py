@@ -7,6 +7,8 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QCursor
 
 from core.utils.doc_parser import DocumentParser
+from core.events.event_bus import EventBus
+from core.events.domains.workspace_events import WorkflowIntent, WorkflowPayload
 from gui.docks.unified_research.tabs.base_tab import BaseTab
 from gui.docks.unified_research.components.template_editor import TemplateEditorDialog
 
@@ -15,8 +17,14 @@ class AnalysisTab(BaseTab):
         super().__init__(main_window, target_id="analysis_tab", parent=parent)
         self.pm = self.project_manager
         self._save_counter = 0  # Strict counter for DB saves
+        self.bus = EventBus.get_instance()
+        self.bus.workflow_action_requested.connect(self._handle_workflow_action)
         self._build_ui()
         QTimer.singleShot(100, self._refresh_selectors)
+
+    def _handle_workflow_action(self, action: WorkflowIntent, payload: WorkflowPayload):
+        if action == WorkflowIntent.ANALYSIS_REFRESH_REQUESTED:
+            QTimer.singleShot(0, self._load_existing_analysis)
 
     # --- BULLETPROOF DB EXTRACTORS ---
     def _parse_db_row(self, row):

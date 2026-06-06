@@ -21,11 +21,14 @@ class NodeModel:
     node_origin: str = "human"
     is_verified: int = 0
     original_text: str = ""
+    node_type_id: str = ""
 
     def __post_init__(self):
         # Ensure original_text defaults to note if not provided
         if not self.original_text:
             self.original_text = self.note
+        if not self.node_type_id:
+            self.node_type_id = "workspace.node.quote" if (self.quote or self.highlight_id or self.pdf_path) and not self.is_custom else "workspace.node.text"
 
 @dataclass
 class EdgeModel:

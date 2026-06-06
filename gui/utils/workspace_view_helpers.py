@@ -1,13 +1,18 @@
+# gui/components/workspace_view_helpers.py
 from PySide6.QtWidgets import QMenu
 from core.utils.workspace_utils import build_pdf_display_name
-
+from core.events.event_bus import EventBus
+from core.events.domains.workspace_events import WorkspaceEvent, WorkspaceEventPayload
 
 def build_ai_menu(view, parent_widget):
     menu = QMenu("🤖 AI Tools", parent_widget)
     menu.setTitle("🤖 AI Tools")
+
+    # 1. Reliably check AI status using the view's explicitly passed main_window reference
     ai_enabled = False
     try:
-        ai_enabled = view._llm().ai_enabled if view._llm() else False
+        llm = view._llm()
+        ai_enabled = llm.ai_enabled if llm else False
     except Exception:
         pass
 
@@ -18,21 +23,34 @@ def build_ai_menu(view, parent_widget):
         menu.setToolTip("Run the installer to download local AI models.")
         return menu
 
-    actions = [
-        ("✨ Organize Selected Nodes", view._organize_selection_ai),
-        ("🔗 Find New Connections", view._find_connections_ai),
-        ("📝 Generate Outline", view._generate_outline_ai),
-        ("🔍 Identify Weakpoints", view._weakpoints_ai),
-        ("🕸️ Fill Out Graph", view._fill_graph_ai),
-        ("🏗️ Consolidate Notes", view._consolidate_nodes_ai),
-    ]
+    # 2. Fetch the newly centralized registry from MainWindow, not the View!
+    registry = getattr(view.main_window, "workspace_ai_tools_registry", None)
 
-    for label, handler in actions:
-        action = menu.addAction(label)
-        action.triggered.connect(handler)
+    if registry:
+        bus = EventBus.get_instance()
+        tools = list(registry.iter_mount("workspace_context_menu"))
+
+        for tool in tools:
+            action = menu.addAction(tool.label)
+            action.setToolTip(tool.description)
+
+            # 3. Fire the true Phase 4 intent, capturing the current selection!
+            action.triggered.connect(
+                lambda checked=False, t_id=tool.id: bus.run_ai_tool.emit(
+                    WorkspaceEvent.RUN_AI_TOOL,
+                    WorkspaceEventPayload(
+                        tool_id=t_id,
+                        workspace_id=view.current_workspace_id,
+                        selected_ids=[n.node_id for n in view._selected_nodes()],
+                    ),
+                )
+            )
+    else:
+        # Failsafe if the registry hasn't mounted yet
+        disabled_action = menu.addAction("⚠️ Tool Registry Missing")
+        disabled_action.setEnabled(False)
 
     return menu
-
 
 def workspace_toolbar_stylesheet(theme):
     return f"""

@@ -49,7 +49,13 @@ class LayoutManager:
             # REMOVED the for dock in findChildren loop entirely! Let Qt handle visibility.
         except Exception as e:
             print(f"Error applying layout state: {e}")
-
+    def reset_default_layout(self):
+        """Clears the saved session layout and restores the hardcoded startup layout."""
+        self.settings.remove("last_session_layout")
+        self.settings.remove("last_session_counts")
+        self.settings.sync()
+        if hasattr(self, 'apply_startup_layout'):
+            self.apply_startup_layout()
     def apply_factory_default(self):
         # We must pass BOTH the string and the counts so it knows what to spawn!
         self._apply_state(self.FACTORY_STATE, self.FACTORY_COUNTS)

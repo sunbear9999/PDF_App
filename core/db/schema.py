@@ -20,8 +20,13 @@ class DatabaseSchema(BaseDB):
             cursor.execute('''CREATE TABLE IF NOT EXISTS pdfs (path TEXT PRIMARY KEY)''')
             cursor.execute('''CREATE TABLE IF NOT EXISTS highlights (
                 id TEXT PRIMARY KEY, doc_id TEXT, page_num INTEGER,
-                rect_coords TEXT, text_content TEXT, color TEXT
+                rect_coords TEXT, text_content TEXT, note_content TEXT, color TEXT
             )''')
+            cursor.execute("PRAGMA table_info(highlights)")
+            highlight_columns = [col[1] for col in cursor.fetchall()]
+            if "note_content" not in highlight_columns:
+                try: cursor.execute("ALTER TABLE highlights ADD COLUMN note_content TEXT")
+                except sqlite3.OperationalError: pass
             
             self._ensure_nodes_table(cursor)
             
@@ -50,6 +55,9 @@ class DatabaseSchema(BaseDB):
             node_columns = [col[1] for col in cursor.fetchall()]
             if "embedding_vector" not in node_columns:
                 try: cursor.execute("ALTER TABLE nodes ADD COLUMN embedding_vector TEXT")
+                except sqlite3.OperationalError: pass
+            if "node_type_id" not in node_columns:
+                try: cursor.execute("ALTER TABLE nodes ADD COLUMN node_type_id TEXT")
                 except sqlite3.OperationalError: pass
 
             # Tags and Relations
@@ -160,7 +168,7 @@ class DatabaseSchema(BaseDB):
                     pdf_path, page_num, manual_font_size, x, y, width, height,
                 ))
                 if highlight_id:
-                    migrated_highlights.append((highlight_id, pdf_path, page_num, None, quote, color))
+                    migrated_highlights.append((highlight_id, pdf_path, page_num, None, quote, note, color))
 
             cursor.executemany(
                 """
@@ -172,8 +180,8 @@ class DatabaseSchema(BaseDB):
             )
             cursor.executemany(
                 """
-                INSERT OR IGNORE INTO highlights (id, doc_id, page_num, rect_coords, text_content, color)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT OR IGNORE INTO highlights (id, doc_id, page_num, rect_coords, text_content, note_content, color)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """, migrated_highlights
             )
 
@@ -190,16 +198,34 @@ class DatabaseSchema(BaseDB):
             id TEXT PRIMARY KEY, highlight_id TEXT, workspace_id INTEGER DEFAULT 1,
             quote TEXT, note_text TEXT, color TEXT, is_custom INTEGER,
             pdf_path TEXT, page_num INTEGER, manual_font_size INTEGER,
-            x REAL, y REAL, width REAL, height REAL
+            x REAL, y REAL, width REAL, height REAL,
+            node_origin TEXT DEFAULT 'human', is_verified INTEGER DEFAULT 0,
+            original_text TEXT, embedding_vector TEXT, node_type_id TEXT
         )''')
+        node_origin_expr = "node_origin" if "node_origin" in cols_info else "'human'"
+        is_verified_expr = "is_verified" if "is_verified" in cols_info else "0"
+        original_text_expr = "original_text" if "original_text" in cols_info else "note_text"
+        embedding_expr = "embedding_vector" if "embedding_vector" in cols_info else "NULL"
+        node_type_expr = "node_type_id" if "node_type_id" in cols_info else "CASE WHEN (quote IS NOT NULL AND quote != '') OR highlight_id IS NOT NULL OR pdf_path IS NOT NULL THEN 'workspace.node.quote' ELSE 'workspace.node.text' END"
         cursor.execute("""
-            INSERT OR IGNORE INTO nodes_wsid
+            INSERT OR IGNORE INTO nodes_wsid (
+                id, highlight_id, workspace_id, quote, note_text, color, is_custom,
+                pdf_path, page_num, manual_font_size, x, y, width, height,
+                node_origin, is_verified, original_text, embedding_vector, node_type_id
+            )
             SELECT id, highlight_id,
                    CASE WHEN workspace_id IS NULL OR workspace_id = 'default' THEN 1
                         ELSE CAST(workspace_id AS INTEGER) END,
                    quote, note_text, color, is_custom,
-                   pdf_path, page_num, manual_font_size, x, y, width, height
+                   pdf_path, page_num, manual_font_size, x, y, width, height,
+                   {node_origin_expr}, {is_verified_expr}, {original_text_expr}, {embedding_expr}, {node_type_expr}
             FROM nodes
-        """)
+        """.format(
+            node_origin_expr=node_origin_expr,
+            is_verified_expr=is_verified_expr,
+            original_text_expr=original_text_expr,
+            embedding_expr=embedding_expr,
+            node_type_expr=node_type_expr,
+        ))
         cursor.execute("DROP TABLE nodes")
         cursor.execute("ALTER TABLE nodes_wsid RENAME TO nodes")

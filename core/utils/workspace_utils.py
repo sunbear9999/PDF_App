@@ -58,6 +58,7 @@ def node_model_from_node(node, workspace_id: int) -> NodeModel:
         node_origin=getattr(node, 'node_origin', 'human'),
         is_verified=int(getattr(node, 'is_verified', 0)),
         original_text=getattr(node, 'original_text', getattr(node, 'note', '')),
+        node_type_id=getattr(node, 'node_type_id', ''),
     )
 
 

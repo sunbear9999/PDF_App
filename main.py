@@ -89,7 +89,13 @@ def main():
     theme_manager.set_theme(saved_theme)
     theme_manager.apply_global_style(app)
     
-    window = MainWindow()
+    # --- NEW: Boot the core before the window! ---
+    user_data_dir = os.path.join(os.path.expanduser("~"), ".papyrus_data")
+    from core.papyrus_core import PapyrusCore
+    core = PapyrusCore(user_data_dir)
+    
+    # Inject it into the window
+    window = MainWindow(core)
     window.show()
     sys.exit(app.exec())
 

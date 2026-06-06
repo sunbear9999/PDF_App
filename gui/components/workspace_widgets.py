@@ -1,5 +1,5 @@
 # gui/components/workspace_widgets.py
-from PySide6.QtWidgets import (QMenu, QPushButton, QFrame, QHBoxLayout, QLabel, 
+from PySide6.QtWidgets import (QMenu, QPushButton, QFrame, QHBoxLayout, QLabel,
                                QComboBox, QDialog, QVBoxLayout, QListWidget, QListWidgetItem)
 from PySide6.QtGui import QPainterPath, QPainterPathStroker, QStandardItemModel, QStandardItem, QCursor
 from PySide6.QtCore import Qt
@@ -132,6 +132,7 @@ class CheckableComboBox(QComboBox):
 
         self._changed = True
         self.model().blockSignals(False)
+        self._sync_current_index()
 
         top_left = self.model().index(0, 0)
         bottom_right = self.model().index(self.model().rowCount() - 1, 0)
@@ -145,12 +146,26 @@ class CheckableComboBox(QComboBox):
     def addItem(self, text, userData=None, checked=False):
         if not isinstance(self.model(), QStandardItemModel):
             self.setModel(QStandardItemModel(self))
-            
+
         item = QStandardItem(text)
         item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
         item.setData(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked, Qt.ItemDataRole.CheckStateRole)
         item.setData(userData, Qt.ItemDataRole.UserRole)
         self.model().appendRow(item)
+        if self.currentIndex() < 0:
+            self.setCurrentIndex(0)
+        self._sync_current_index()
+
+    def _sync_current_index(self):
+        model = self.model()
+        if isinstance(model, QStandardItemModel):
+            for i in range(model.rowCount()):
+                item = model.item(i)
+                if item and item.checkState() == Qt.CheckState.Checked:
+                    self.setCurrentIndex(i)
+                    return
+            if model.rowCount() > 0:
+                self.setCurrentIndex(0)
 
     def get_checked_items(self):
         checked = []
@@ -167,6 +182,7 @@ class CheckableComboBox(QComboBox):
         if isinstance(model, QStandardItemModel):
             model.clear()
             model.setColumnCount(1)
+            self.setCurrentIndex(-1)
         else:
             super().clear()
 
@@ -177,7 +193,7 @@ class UnusedHighlightsDialog(QDialog):
         self.resize(520, 380)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Highlights in the database that are not in this workspace:"))
+        layout.addWidget(QLabel("Highlights in project PDFs that are not in this workspace:"))
 
         self.list_widget = QListWidget()
         self.list_widget.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)

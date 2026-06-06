@@ -5,6 +5,9 @@ from core.models.workspace_models import NodeModel, EdgeModel, WorkspaceModel
 from core.db.base_db import BaseDB
 
 class WorkspaceDB(BaseDB):
+    def _workspace_filter_sql(self, column="workspace_id"):
+        return f"(CASE WHEN {column} IS NULL OR {column} = 'default' THEN 1 ELSE CAST({column} AS INTEGER) END) = ?"
+
     def get_workspaces(self):
         if not self._conn:
             return [{"id": 1, "name": "Main Board"}]
@@ -56,33 +59,34 @@ class WorkspaceDB(BaseDB):
             try:
                 cursor.execute(
                     "SELECT id, highlight_id, workspace_id, quote, note_text, color, is_custom, "
-                    "pdf_path, page_num, manual_font_size, x, y, width, height, node_origin, is_verified, original_text "
-                    "FROM nodes WHERE workspace_id = ?", (workspace_id,)
+                    "pdf_path, page_num, manual_font_size, x, y, width, height, node_origin, is_verified, original_text, node_type_id "
+                    f"FROM nodes WHERE {self._workspace_filter_sql()}", (int(workspace_id),)
                 )
                 for row in cursor.fetchall():
                     node = NodeModel(
-                        id=row[0], highlight_id=row[1], workspace_id=row[2] or 1, quote=row[3], note=row[4],
+                        id=row[0], highlight_id=row[1], workspace_id=int(workspace_id), quote=row[3], note=row[4],
                         color=row[5], is_custom=bool(row[6]), pdf_path=row[7], page_num=row[8], manual_font_size=row[9],
                         x=row[10], y=row[11], width=row[12], height=row[13], node_origin=row[14] or "human", 
-                        is_verified=int(row[15] or 0), original_text=row[16] if row[16] is not None else row[4]
+                        is_verified=int(row[15] or 0), original_text=row[16] if row[16] is not None else row[4],
+                        node_type_id=row[17] or ""
                     )
                     workspace.nodes.append(node)
             except sqlite3.OperationalError:
                 cursor.execute(
                     "SELECT id, highlight_id, workspace_id, quote, note_text, color, is_custom, "
                     "pdf_path, page_num, manual_font_size, x, y, width, height "
-                    "FROM nodes WHERE workspace_id = ?", (workspace_id,)
+                    f"FROM nodes WHERE {self._workspace_filter_sql()}", (int(workspace_id),)
                 )
                 for row in cursor.fetchall():
                     node = NodeModel(
-                        id=row[0], highlight_id=row[1], workspace_id=row[2] or 1, quote=row[3], note=row[4],
+                        id=row[0], highlight_id=row[1], workspace_id=int(workspace_id), quote=row[3], note=row[4],
                         color=row[5], is_custom=bool(row[6]), pdf_path=row[7], page_num=row[8], manual_font_size=row[9],
                         x=row[10], y=row[11], width=row[12], height=row[13], node_origin="human", 
                         is_verified=0, original_text=row[4]
                     )
                     workspace.nodes.append(node)
 
-            cursor.execute("SELECT edge_id, source_id, target_id, label, color, weight FROM edges WHERE workspace_id = ?", (workspace_id,))
+            cursor.execute(f"SELECT edge_id, source_id, target_id, label, color, weight FROM edges WHERE {self._workspace_filter_sql()}", (int(workspace_id),))
             for row in cursor.fetchall():
                 edge = EdgeModel(id=row[0], source=row[1], target=row[2], label=row[3], color=row[4], weight=row[5])
                 workspace.edges.append(edge)
@@ -100,15 +104,15 @@ class WorkspaceDB(BaseDB):
             node_insert_data = [
                 (n.id, n.highlight_id, workspace.workspace_id, n.quote, n.note,
                  n.color, int(n.is_custom), n.pdf_path, n.page_num, n.manual_font_size,
-                 n.x, n.y, n.width, n.height, n.node_origin, int(n.is_verified), n.original_text)
+                 n.x, n.y, n.width, n.height, n.node_origin, int(n.is_verified), n.original_text, n.node_type_id)
                 for n in workspace.nodes
             ]
             if node_insert_data:
                 cursor.executemany("""
                     INSERT OR REPLACE INTO nodes (
                         id, highlight_id, workspace_id, quote, note_text, color,
-                        is_custom, pdf_path, page_num, manual_font_size, x, y, width, height, node_origin, is_verified, original_text
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        is_custom, pdf_path, page_num, manual_font_size, x, y, width, height, node_origin, is_verified, original_text, node_type_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, node_insert_data)
 
             if incoming_node_ids:
@@ -145,15 +149,15 @@ class WorkspaceDB(BaseDB):
             node_data = [
                 (n.id, n.highlight_id, delta.workspace_id, n.quote, n.note,
                  n.color, int(n.is_custom), n.pdf_path, n.page_num, n.manual_font_size,
-                 n.x, n.y, n.width, n.height, n.node_origin, int(n.is_verified), n.original_text)
+                 n.x, n.y, n.width, n.height, n.node_origin, int(n.is_verified), n.original_text, n.node_type_id)
                 for n in delta.nodes
             ]
             if node_data:
                 cursor.executemany("""
                     INSERT OR REPLACE INTO nodes (
                         id, highlight_id, workspace_id, quote, note_text, color,
-                        is_custom, pdf_path, page_num, manual_font_size, x, y, width, height, node_origin, is_verified, original_text
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        is_custom, pdf_path, page_num, manual_font_size, x, y, width, height, node_origin, is_verified, original_text, node_type_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, node_data)
 
             if delta.deleted_node_ids:
