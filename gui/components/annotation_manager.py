@@ -1,12 +1,10 @@
 # gui/components/annotation_manager.py
-import fitz
-import uuid
 from PySide6.QtWidgets import QGraphicsRectItem, QInputDialog, QWidget, QMenu, QDialog, QVBoxLayout, QTextEdit, QPushButton
 from PySide6.QtGui import QColor, QBrush, QPen, QAction, QTextCursor, QDesktopServices
 from PySide6.QtCore import Qt, QRectF, QObject, Signal, QThread, QUrl
 import re
 from core.events.event_bus import EventBus
-from core.events.domains.document_events import DocumentEvent, DocumentEventPayload
+from core.events.domains.document_events import DocumentIntent, DocumentPayload
 from core.events.domains.tool_events import DictionaryIntent, DictionaryPayload
 
 class AnnotationManager(QObject):
@@ -49,11 +47,11 @@ class AnnotationManager(QObject):
         best_dist = float('inf')
 
         for i, w in enumerate(self.page_words):
-            rect = fitz.Rect(w[:4])
-            if rect.contains(fitz.Point(pdf_x, pdf_y)):
+            x0, y0, x1, y1 = w[:4]
+            if x0 <= pdf_x <= x1 and y0 <= pdf_y <= y1:
                 return i
 
-            cx, cy = (w[0] + w[2]) / 2, (w[1] + w[3]) / 2
+            cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
             dist = (pdf_x - cx)**2 + ((pdf_y - cy) * 4)**2
             if dist < best_dist:
                 best_dist = dist
@@ -259,10 +257,11 @@ class AnnotationManager(QObject):
         self.clear_selection()
 
     def _dispatch_ai_blueprint(self, action_type: str, text: str):
-        """Universal dispatcher that routes context menu actions to the Master Runner."""
+        """Universal dispatcher that routes context menu actions through workflow events."""
         main_window = self.viewer.window()
         from core.engine.default_blueprints import DefaultBlueprints
-        from core.engine.master_runner import MasterActionRunner
+        from core.events.event_bus import EventBus
+        from core.events.domains.workflow_events import WorkflowIntent, WorkflowPayload
 
         allowed_docs = []
         if hasattr(main_window, 'project_manager') and main_window.project_manager:
@@ -278,18 +277,16 @@ class AnnotationManager(QObject):
         else:
             return
 
-        active_model = "gemma4:e2b"
+        active_model = main_window._get_active_ai_model() if hasattr(main_window, "_get_active_ai_model") else "gemma4:e2b"
 
-        # --- NEW REGISTRY CALL ---
-        if hasattr(main_window, 'dock_manager'):
-            research_docks = main_window.dock_manager.get_inner_widgets("research")
-            if research_docks and hasattr(research_docks[0], 'model_combo'):
-                active_model = research_docks[0].model_combo.currentText()
-        # -------------------------
-
-        runner = MasterActionRunner(main_window, blueprint, {"selected_model": active_model})
-        main_window.ui_router.attach_runner(runner)
-        main_window.process_registry.enqueue_runner(runner, blueprint.name)
+        EventBus.get_instance().workflow_action_requested.emit(
+            WorkflowIntent.RUN_BLUEPRINT,
+            WorkflowPayload(
+                blueprint=blueprint,
+                initial_state={"selected_model": active_model},
+                job_name=blueprint.name,
+            ),
+        )
 
 
     def define_selection(self):
@@ -324,44 +321,19 @@ class AnnotationManager(QObject):
         text, ok = QInputDialog.getText(self.viewer, "Add Note", "Enter a note for this highlight (Optional):")
 
         if ok:
-            try:
-                page = self.viewer.doc.load_page(self.current_page_idx)
-                quads = [fitz.Rect(w[:4]).quad for w in self.selected_words]
-
-                annot = page.add_highlight_annot(quads)
-                annot.set_colors(stroke=color_tuple)
-
-                annot_info = {
-                    "title": f"UserNote|{uuid.uuid4()}",
-                    "content": text if text else "",
-                    "subject": extracted_text
-                }
-                annot.set_info(info=annot_info)
-                annot.update()
-
-                main_window = self.viewer.window()
-                pdf_path = getattr(self.viewer, "pdf_path", None) or getattr(main_window, "current_file_path", None)
-                hex_color = QColor(int(color_tuple[0] * 255), int(color_tuple[1] * 255), int(color_tuple[2] * 255)).name()
-
-                # --- Correctly Emit to the Event Bus ---
-                if hasattr(self, 'bus'):
-                    self.bus.highlight_created.emit(
-                        DocumentEvent.HIGHLIGHT_CREATED,
-                        DocumentEventPayload(highlight_data={
-                            "id": annot_info["title"],
-                            "subject": annot_info["subject"],
-                            "content": annot_info["content"],
-                            "pdf_path": pdf_path,
-                            "page_num": self.current_page_idx,
-                            "rect_coords": repr(list(annot.rect)),
-                            "color": hex_color,
-                        }),
-                    )
-
-                self.viewer.reload_page(self.current_page_idx)
-
-            except Exception as e:
-                print(f"Error saving highlight: {e}")
+            main_window = self.viewer.window()
+            pdf_path = getattr(self.viewer, "pdf_path", None) or getattr(main_window, "current_file_path", None)
+            self.bus.document_action_requested.emit(
+                DocumentIntent.CREATE_HIGHLIGHT,
+                DocumentPayload(
+                    path=pdf_path,
+                    page_num=self.current_page_idx,
+                    rects=[list(w[:4]) for w in self.selected_words],
+                    text=extracted_text,
+                    note=text if text else "",
+                    color=color_tuple,
+                ),
+            )
 
         self.clear_selection()
 

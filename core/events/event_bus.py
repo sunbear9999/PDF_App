@@ -16,9 +16,11 @@ class EventBus(QObject):
     pdf_renamed = Signal(object, object)
     pdf_removed = Signal(object, object)
     project_loaded = Signal(object, object)
+    document_added = Signal(object, object)
     # --- UI & Project Events ---
     theme_changed = Signal(object, object)
     project_saved = Signal(object, object)
+    status_message_requested = Signal(str, int)
 
     # --- Workspace Events ---
     workspace_loaded = Signal(object, object)
@@ -72,6 +74,23 @@ class EventBus(QObject):
 
     prompt_action_requested = Signal(object, object)
     prompt_data_updated = Signal(object, object)
+
+    # --- Global Ontology / Knowledge Graph Domain ---
+    entity_action_requested = Signal(object, object)
+    entity_changed = Signal(object, object)
+    relation_action_requested = Signal(object, object)
+    relation_changed = Signal(object, object)
+    view_action_requested = Signal(object, object)
+    view_changed = Signal(object, object)
+    discovery_items_changed = Signal(object, object)
+
+    # --- Graph-Aware Document Analysis Domain ---
+    analysis_action_requested = Signal(object, object)
+    analysis_result_changed = Signal(object, object)
+
+    # --- Workflow Runner Domain ---
+    workflow_state_changed = Signal(object, object)
+
     @classmethod
     def get_instance(cls):
         if cls._instance is None:

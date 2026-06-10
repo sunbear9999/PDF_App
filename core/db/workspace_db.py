@@ -2,13 +2,32 @@
 import sqlite3
 import json
 from core.models.workspace_models import NodeModel, EdgeModel, WorkspaceModel
+from core.models.ontology_model import ViewModel
 from core.db.base_db import BaseDB
 
 class WorkspaceDB(BaseDB):
+    def _graph(self):
+        return getattr(self.manager, "db_graph", None)
+
+    def _has_graph_tables(self):
+        if not self._conn:
+            return False
+        try:
+            cursor = self._conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='entities'")
+            return cursor.fetchone() is not None
+        except sqlite3.Error:
+            return False
+
     def _workspace_filter_sql(self, column="workspace_id"):
         return f"(CASE WHEN {column} IS NULL OR {column} = 'default' THEN 1 ELSE CAST({column} AS INTEGER) END) = ?"
 
     def get_workspaces(self):
+        graph = self._graph()
+        if graph and self._has_graph_tables():
+            views = graph.get_views()
+            if views:
+                return [{"id": int(v.id) if str(v.id).isdigit() else v.id, "name": v.name} for v in views]
         if not self._conn:
             return [{"id": 1, "name": "Main Board"}]
         try:
@@ -25,6 +44,9 @@ class WorkspaceDB(BaseDB):
             cursor = self._conn.cursor()
             cursor.execute("INSERT INTO workspaces (name) VALUES (?)", (name,))
             self._conn.commit()
+            graph = self._graph()
+            if graph and self._has_graph_tables():
+                graph.upsert_view(ViewModel(id=str(cursor.lastrowid), name=name))
             return cursor.lastrowid
         except sqlite3.Error as e:
             print(f"Error creating workspace '{name}': {e}")
@@ -35,6 +57,9 @@ class WorkspaceDB(BaseDB):
         try:
             self._conn.execute("UPDATE workspaces SET name = ? WHERE id = ?", (name, workspace_id))
             self._conn.commit()
+            graph = self._graph()
+            if graph and self._has_graph_tables():
+                graph.upsert_view(ViewModel(id=str(workspace_id), name=name))
         except sqlite3.Error as e:
             print(f"Error renaming workspace {workspace_id}: {e}")
 
@@ -47,11 +72,20 @@ class WorkspaceDB(BaseDB):
             cursor.execute("DELETE FROM edges WHERE workspace_id = ?", (workspace_id,))
             cursor.execute("DELETE FROM workspaces WHERE id = ?", (workspace_id,))
             self._conn.commit()
+            graph = self._graph()
+            if graph and self._has_graph_tables():
+                graph.delete_view(str(workspace_id))
         except sqlite3.Error as e:
             self._conn.rollback()
             print(f"Error deleting workspace {workspace_id}: {e}")
 
     def get_workspace_data(self, workspace_id=1) -> WorkspaceModel:
+        graph = self._graph()
+        if graph and self._has_graph_tables():
+            try:
+                return graph.get_workspace_data(workspace_id)
+            except sqlite3.Error as e:
+                print(f"Graph workspace adapter failed; falling back to legacy tables: {e}")
         workspace = WorkspaceModel(workspace_id=workspace_id)
         if not self._conn: return workspace
         try:
@@ -136,6 +170,9 @@ class WorkspaceDB(BaseDB):
                 cursor.execute("DELETE FROM edges WHERE workspace_id = ?", (workspace.workspace_id,))
 
             self._conn.commit()
+            graph = self._graph()
+            if graph and self._has_graph_tables():
+                graph.sync_workspace(workspace)
         except sqlite3.Error as e:
             self._conn.rollback()
             print(f"Error syncing workspace: {e}")
@@ -177,6 +214,9 @@ class WorkspaceDB(BaseDB):
                 cursor.execute(f"DELETE FROM edges WHERE edge_id IN ({placeholders})", delta.deleted_edge_ids)
 
             self._conn.commit()
+            graph = self._graph()
+            if graph and self._has_graph_tables():
+                graph.sync_workspace_delta(delta)
         except sqlite3.Error as e:
             self._conn.rollback()
             print(f"Error applying workspace delta: {e}")
@@ -187,6 +227,9 @@ class WorkspaceDB(BaseDB):
             status_int = 1 if is_verified else 0
             self._conn.execute("UPDATE nodes SET is_verified = ? WHERE id = ?", (status_int, node_id))
             self._conn.commit()
+            graph = self._graph()
+            if graph and self._has_graph_tables():
+                graph.set_entity_verification(node_id, is_verified)
         except sqlite3.Error as e:
             print(f"Failed to update verification status: {e}")
 

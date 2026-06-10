@@ -1,17 +1,16 @@
 # gui/components/dialogs/quick_note_dialog.py
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QTextEdit, QPushButton, QLabel
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QCursor
-from core.events.domains.document_events import DocumentEvent, DocumentEventPayload, DocumentIntent, DocumentPayload
+from core.events.event_bus import EventBus
+from core.events.domains.document_events import DocumentIntent, DocumentPayload
 
 class QuickNoteDialog(QDialog):
-    def __init__(self, target_annot, annot_id, page_num, pdf_path, project_manager, event_bus, theme=None, parent=None):
+    def __init__(self, target_annot, annot_id, page_num, pdf_path, theme=None, parent=None):
         super().__init__(parent, Qt.WindowType.Tool)
         self.annot_id = annot_id
         self.page_num = page_num
         self.pdf_path = pdf_path
-        self.pm = project_manager
-        self.bus = event_bus # Inject the global bus
+        self.bus = EventBus.get_instance()
         self.theme_dict = theme
         self.selected_hex_color = None
         
@@ -29,17 +28,6 @@ class QuickNoteDialog(QDialog):
             self._apply_theme() # Use self.theme_dict in your existing _apply_theme method
 
         self.finished.connect(self.save_note_text)
-
-    def _get_fresh_annot(self):
-        """Fetches the latest annotation object from the document to avoid stale pointer crashes."""
-        doc = self.pm.get_doc(self.pdf_path)
-        if not doc: return None, None
-        
-        page = doc.load_page(self.page_num)
-        for annot in page.annots() or []:
-            if annot.info and annot.info.get("title") == self.annot_id:
-                return page, annot
-        return page, None
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -106,51 +94,32 @@ class QuickNoteDialog(QDialog):
         new_text = self.note_editor.toPlainText().strip()
         
         if new_text != self.initial_note:
-            page, annot = self._get_fresh_annot()
-            if annot:
-                new_info = dict(annot.info)
-                new_info["content"] = new_text
-                annot.set_info(info=new_info)
-                annot.update()
-            self.pm.mark_dirty(self.pdf_path)
-            self.bus.highlight_updated.emit(
-                DocumentEvent.HIGHLIGHT_UPDATED,
-                DocumentEventPayload(
+            self.bus.document_action_requested.emit(
+                DocumentIntent.UPDATE_HIGHLIGHT_NOTE,
+                DocumentPayload(
+                    path=self.pdf_path,
+                    page_num=self.page_num,
                     annot_id=self.annot_id,
-                    changes={"note": new_text, "pdf_path": self.pdf_path, "page_num": self.page_num},
+                    note=new_text,
                 ),
             )
-            self.bus.document_action_requested.emit(DocumentIntent.RELOAD_PAGE, DocumentPayload(page_num=self.page_num))
 
     def delete_highlight(self):
         self.state["is_deleted"] = True
-        page, annot = self._get_fresh_annot()
-        if page and annot:
-            page.delete_annot(annot)
-            
-        self.pm.mark_dirty(self.pdf_path)
-        
-        # Shout to the EventBus!
-        self.bus.highlight_deleted.emit(
-            DocumentEvent.HIGHLIGHT_DELETED,
-            DocumentEventPayload(annot_id=self.annot_id),
+        self.bus.document_action_requested.emit(
+            DocumentIntent.DELETE_HIGHLIGHT,
+            DocumentPayload(path=self.pdf_path, page_num=self.page_num, annot_id=self.annot_id),
         )
-        self.bus.document_action_requested.emit(DocumentIntent.RELOAD_PAGE, DocumentPayload(page_num=self.page_num))
         self.close()
 
     def change_highlight_color(self, rgb_tuple, hex_col):
-        # Update PyMuPDF using a fresh annotation reference
-        page, annot = self._get_fresh_annot()
-        if annot:
-            annot.set_colors(stroke=rgb_tuple)
-            annot.update()
-        self.pm.mark_dirty(self.pdf_path)
         self.selected_hex_color = hex_col
-        self.bus.highlight_updated.emit(
-            DocumentEvent.HIGHLIGHT_UPDATED,
-            DocumentEventPayload(
+        self.bus.document_action_requested.emit(
+            DocumentIntent.UPDATE_HIGHLIGHT_COLOR,
+            DocumentPayload(
+                path=self.pdf_path,
+                page_num=self.page_num,
                 annot_id=self.annot_id,
-                changes={"color": hex_col, "pdf_path": self.pdf_path, "page_num": self.page_num},
+                color=rgb_tuple,
             ),
         )
-        self.bus.document_action_requested.emit(DocumentIntent.RELOAD_PAGE, DocumentPayload(page_num=self.page_num))

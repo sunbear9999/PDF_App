@@ -113,7 +113,11 @@ class UnifiedResearchDock(QDockWidget):
         header_layout.addWidget(self.lbl_status, 0, 0)
 
         self.model_combo = QComboBox()
-        self.model_combo.addItems(self.llm_manager.get_available_models() or ["llama3"])
+        available_models = self.llm_manager.get_available_models() or ["llama3"]
+        self.model_combo.addItems(available_models)
+        active_model = getattr(self.main_window, "_get_active_ai_model", lambda: "")()
+        if active_model in available_models:
+            self.model_combo.setCurrentText(active_model)
         header_layout.addWidget(self.model_combo, 0, 1)
 
         self.model_combo.currentTextChanged.connect(

@@ -331,9 +331,13 @@ class PDFViewer(QGraphicsView):
         hit = self.search_hits[self.current_hit_index]
         main_window = self.window()
 
-        if hit['pdf'] != main_window.current_file_path:
+        if hit['pdf'] != getattr(main_window, "current_file_path", None):
             self.pending_search_jump = hit
-            main_window.switch_to_pdf(hit['pdf'])
+            # 🔥 FIX: Use the Event Bus instead of the deprecated main_window method
+            self.bus.document_action_requested.emit(
+                DocumentIntent.OPEN, 
+                DocumentPayload(path=hit['pdf'])
+            )
         else:
             self.render_search_highlights()
             page_num = hit['page']

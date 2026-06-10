@@ -2,15 +2,88 @@
 import os
 import json
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, 
-                             QComboBox, QFrame, QScrollArea, QTabWidget, QButtonGroup, QStackedWidget, QMessageBox)
+                             QComboBox, QFrame, QScrollArea, QTabWidget, QButtonGroup, QStackedWidget, QMessageBox, QInputDialog)
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QCursor
 
-from core.utils.doc_parser import DocumentParser
 from core.events.event_bus import EventBus
-from core.events.domains.workspace_events import WorkflowIntent, WorkflowPayload
+from core.events.domains.analysis_events import AnalysisEvent, AnalysisIntent, AnalysisPayload
+from core.events.domains.workflow_events import WorkflowIntent, WorkflowPayload
 from gui.docks.unified_research.tabs.base_tab import BaseTab
 from gui.docks.unified_research.components.template_editor import TemplateEditorDialog
+
+
+class AnalysisResultCard(QFrame):
+    def __init__(self, result: dict, theme: dict, on_send, parent=None):
+        super().__init__(parent)
+        self.result = result
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setStyleSheet(f"""
+            QFrame {{
+                background-color: {theme.get('bg_panel', '#2b2b2b')};
+                border: 1px solid {theme.get('border', '#444')};
+                border-radius: 6px;
+            }}
+            QLabel {{ color: {theme.get('text_main', '#fff')}; border: none; }}
+            QPushButton {{
+                background-color: {theme.get('accent', '#b366ff')};
+                color: white; border: none; border-radius: 4px;
+                padding: 6px 10px; font-weight: bold;
+            }}
+            QPushButton:hover {{ background-color: {theme.get('accent_hover', '#8e44dd')}; }}
+        """)
+        layout = QVBoxLayout(self)
+        title = QLabel(f"<b>{result.get('template_title', 'Analysis')}</b>")
+        layout.addWidget(title)
+        counts = QHBoxLayout()
+        for label, value in [
+            ("Nodes", len(result.get("entities", []))),
+            ("Links", len(result.get("relations", []))),
+            ("Chunks", len(result.get("chunks", []))),
+        ]:
+            badge = QLabel(f"{label}: <b>{value}</b>")
+            badge.setStyleSheet(f"padding: 4px 8px; background: {theme.get('bg_input', '#333')}; border-radius: 4px;")
+            counts.addWidget(badge)
+        counts.addStretch()
+        layout.addLayout(counts)
+
+        preview = []
+        for entity in result.get("entities", [])[:8]:
+            label = entity.get("title") or entity.get("text") or entity.get("exact_text") or entity.get("type")
+            preview.append(f"{entity.get('type', 'entity')} - {str(label)[:120]}")
+        body = QLabel("<br>".join(preview) if preview else "<i>No graph artifacts extracted.</i>")
+        body.setWordWrap(True)
+        layout.addWidget(body)
+
+        actions = QHBoxLayout()
+        actions.addStretch()
+        btn_send = QPushButton("Send to Workspace")
+        btn_send.clicked.connect(lambda: on_send(result))
+        actions.addWidget(btn_send)
+        layout.addLayout(actions)
+
+
+class AnalysisChunkCard(QFrame):
+    def __init__(self, chunk_number: int, total_chunks: int, chunk: dict, theme: dict, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet(f"""
+            QFrame {{
+                background-color: {theme.get('bg_input', '#252525')};
+                border: 1px solid {theme.get('border', '#444')};
+                border-radius: 6px;
+            }}
+            QLabel {{ color: {theme.get('text_main', '#fff')}; border: none; }}
+        """)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 8, 10, 8)
+        title = QLabel(f"<b>Chunk {chunk_number}/{total_chunks}</b>")
+        layout.addWidget(title)
+        summary = chunk.get("summary") or ""
+        counts = f"{len(chunk.get('entities', []))} nodes, {len(chunk.get('relations', []))} links"
+        body = QLabel(f"{counts}" + (f" - {summary[:180]}" if summary else ""))
+        body.setWordWrap(True)
+        layout.addWidget(body)
+
 
 class AnalysisTab(BaseTab):
     def __init__(self, main_window, parent=None):
@@ -19,12 +92,39 @@ class AnalysisTab(BaseTab):
         self._save_counter = 0  # Strict counter for DB saves
         self.bus = EventBus.get_instance()
         self.bus.workflow_action_requested.connect(self._handle_workflow_action)
+        self.bus.analysis_result_changed.connect(self._handle_analysis_event)
         self._build_ui()
         QTimer.singleShot(100, self._refresh_selectors)
 
     def _handle_workflow_action(self, action: WorkflowIntent, payload: WorkflowPayload):
         if action == WorkflowIntent.ANALYSIS_REFRESH_REQUESTED:
             QTimer.singleShot(0, self._load_existing_analysis)
+
+    def _handle_analysis_event(self, event, payload):
+        if event == AnalysisEvent.RUN_STARTED:
+            self.status_lbl.setText("Processing document graph analysis...")
+            self.btn_run.setEnabled(False)
+            return
+        if event == AnalysisEvent.PROGRESS:
+            self.status_lbl.setText(payload.result.get("message", "Analysis is running..."))
+            return
+        if event == AnalysisEvent.CHUNK_RESULT:
+            self._render_chunk_result(payload.result)
+            return
+        if event == AnalysisEvent.RUN_FAILED:
+            self.status_lbl.setText(f"Analysis failed: {'; '.join(payload.errors or ['Unknown error'])}")
+            self.btn_run.setEnabled(True)
+            return
+        if event == AnalysisEvent.RESULT_READY:
+            self._render_analysis_result(payload.result)
+            return
+        if event == AnalysisEvent.RUN_COMPLETED:
+            self.status_lbl.setText("Analysis complete.")
+            self.btn_run.setEnabled(True)
+            self._load_existing_analysis()
+            return
+        if event == AnalysisEvent.SENT_TO_WORKSPACE:
+            self.status_lbl.setText(f"Sent {payload.result.get('entity_count', 0)} nodes to workspace {payload.workspace_id}.")
 
     # --- BULLETPROOF DB EXTRACTORS ---
     def _parse_db_row(self, row):
@@ -175,13 +275,7 @@ class AnalysisTab(BaseTab):
         master_layout = QVBoxLayout(view_master)
         master_layout.setContentsMargins(0, 8, 0, 0)
         
-        master_opts = QHBoxLayout()
-        master_opts.addWidget(QLabel("<i>Uses the document selected in 'Sections' tab.</i>"))
-        master_opts.addStretch()
-        self.btn_gen_master = QPushButton("✨ Generate Master Outline")
-        self.btn_gen_master.clicked.connect(self._trigger_master_outline)
-        master_opts.addWidget(self.btn_gen_master)
-        master_layout.addLayout(master_opts)
+        
         
         self.master_scroll, self.master_layout = self._create_scroll_area()
         master_layout.addWidget(self.master_scroll, 1)
@@ -221,7 +315,43 @@ class AnalysisTab(BaseTab):
         layout.addStretch()
         scroll.setWidget(container)
         return scroll, layout
+    def receive_ai_widget(self, widget):
+        is_run_tab = self.tabs.currentIndex() == 0
+        mode = self.mode_group.checkedId() if not is_run_tab else -1
+        
+        if is_run_tab: target_layout = self.results_layout
+        else:
+            if mode == 0: target_layout = self.saved_layout
+            elif mode == 1: target_layout = self.master_layout
+            else: target_layout = self.compare_layout
 
+        count = target_layout.count()
+        if count > 0: target_layout.insertWidget(count - 1, widget)
+        else: target_layout.addWidget(widget)
+
+        from gui.docks.unified_research.components.dynamic_outlines import UniversalOutlineWidget
+        if isinstance(widget, UniversalOutlineWidget):
+            doc_path = self.doc_selector.currentData() if is_run_tab else self.cmp_doc.currentData()
+            template_id = self._get_safe_template_id(self.combo_templates.currentData() if is_run_tab else self.cmp_template.currentData())
+            
+            if doc_path and template_id:
+                try:
+                    # Detect if this is the final Master Graph by its title
+                    title_text = getattr(widget, 'title_lbl', None)
+                    is_master = title_text and "Master Document Graph" in title_text.text()
+                    
+                    chunk_idx = 999999 if is_master else self._save_counter
+                    if not is_master:
+                        self._save_counter += 1
+                        
+                    data_to_save = getattr(widget, '_raw_ai_data', getattr(widget, 'raw_json', '{}'))
+                    
+                    if is_master:
+                        data_to_save = json.dumps({"master": json.loads(data_to_save)})
+                        
+                    self.pm.save_document_analysis(doc_path, template_id, chunk_idx, data_to_save)
+                except Exception as e:
+                    print(f"[AnalysisTab] Background save failed: {e}")
     def _clear_layout(self, layout):
         while layout.count() > 1:
             item = layout.takeAt(0)
@@ -260,52 +390,18 @@ class AnalysisTab(BaseTab):
         template = self.combo_templates.currentData()
         if not doc_path or not template: return
         
-        template_id = self._get_safe_template_id(template)
         self._clear_layout(self.results_layout)
-        self.status_lbl.setText("⏳ Processing Document...")
+        self.status_lbl.setText("Processing document graph analysis via Master Runner...")
         self.btn_run.setEnabled(False)
-        self._save_counter = 0  # FIX: Reset the strict save index
-
-        chunks = DocumentParser.chunk_document_for_analysis(doc_path, template_id, template.get('instructions', ''), template.get('schema', '{}'))
-        if not chunks:
-            self.status_lbl.setText("❌ Failed to parse document.")
-            self.btn_run.setEnabled(True)
-            return
-
-        self.pm.clear_document_analyses(doc_path, template_id)
-
-        from core.engine.default_blueprints import DefaultBlueprints
-        blueprint = DefaultBlueprints.get_analysis_blueprint(self.prompt_manager, chunks)
         
-        from PySide6.QtWidgets import QDockWidget
-        dock = self.main_window.findChild(QDockWidget, "UnifiedResearchDock")
-        selected_model = dock.model_combo.currentText() if dock and hasattr(dock, 'model_combo') else ""
-        
-        self.send_to_pipeline(blueprint, {"selected_model": selected_model})
-        self.btn_run.setEnabled(True)
-
-    def _trigger_master_outline(self):
-        doc_path = self.cmp_doc.currentData()
-        template_id = self._get_safe_template_id(self.cmp_template.currentData())
-        analyses = self.pm.get_document_analyses(doc_path, template_id)
-        
-        if not analyses: 
-            QMessageBox.warning(self, "No Data", "Run an analysis on this document first.")
-            return
-            
-        self._clear_layout(self.master_layout)
-        
-        # INSTANT MATHEMATICAL MERGE
-        merged_json = self._mathematical_merge(analyses)
-        
-        from gui.docks.unified_research.components.dynamic_outlines import UniversalOutlineWidget
-        annot_manager = self.main_window.viewer.annot_manager if hasattr(self.main_window, 'viewer') else None
-        
-        widget = UniversalOutlineWidget("📚 Master Deduplicated Outline", merged_json, self.theme, annot_manager)
-        
-        count = self.master_layout.count()
-        if count > 0: self.master_layout.insertWidget(count - 1, widget)
-        else: self.master_layout.addWidget(widget)
+        self.bus.analysis_action_requested.emit(
+            AnalysisIntent.RUN,
+            AnalysisPayload(
+                doc_path=doc_path,
+                template_id=self._get_safe_template_id(template),
+                template=template,
+            ),
+        )
 
     def _trigger_comparison(self):
         doc1 = self.comp_doc1.currentData()
@@ -360,6 +456,42 @@ class AnalysisTab(BaseTab):
                     except Exception as e:
                         print(f"[AnalysisTab] Background save failed: {e}")
 
+    def _render_analysis_result(self, result: dict):
+        # Keep completed chunk cards visible above the final master result.
+        card = AnalysisResultCard(result, self.theme, self._send_result_to_workspace, self)
+        self.results_layout.insertWidget(self.results_layout.count() - 1, card)
+
+    def _render_chunk_result(self, result: dict):
+        chunk = result.get("chunk") or {}
+        card = AnalysisChunkCard(
+            result.get("chunk_number", 0),
+            result.get("total_chunks", 0),
+            chunk,
+            self.theme,
+            self,
+        )
+        self.results_layout.insertWidget(self.results_layout.count() - 1, card)
+
+    def _send_result_to_workspace(self, result: dict):
+        workspaces = self.pm.get_workspaces() if self.pm else []
+        labels = []
+        ids = []
+        for ws in workspaces:
+            ws_id = ws.get("id") if isinstance(ws, dict) else ws[0]
+            name = ws.get("name") if isinstance(ws, dict) else ws[1]
+            labels.append(f"{ws_id}: {name}")
+            ids.append(int(ws_id))
+        if not labels:
+            labels, ids = ["1: Main Board"], [1]
+        label, ok = QInputDialog.getItem(self, "Send to Workspace", "Choose board:", labels, 0, False)
+        if not ok:
+            return
+        workspace_id = ids[labels.index(label)]
+        self.bus.analysis_action_requested.emit(
+            AnalysisIntent.SEND_TO_WORKSPACE,
+            AnalysisPayload(run_id=result.get("run_id"), workspace_id=workspace_id, result=result),
+        )
+
     def _load_existing_analysis(self):
         doc_path = self.cmp_doc.currentData()
         template_id = self._get_safe_template_id(self.cmp_template.currentData())
@@ -381,6 +513,18 @@ class AnalysisTab(BaseTab):
         for row in analyses:
             try:
                 c_idx, j_data = self._parse_db_row(row)
+                if c_idx == 999999:
+                    try:
+                        parsed_master = json.loads(j_data).get("master", {})
+                        self._clear_layout(self.master_layout) # Ensure clear
+                        self.master_layout.insertWidget(
+                            self.master_layout.count() - 1,
+                            AnalysisResultCard(parsed_master, self.theme, self._send_result_to_workspace, self),
+                        )
+                    except Exception as e:
+                        print(f"Master parse error: {e}")
+                    continue
+            
                 
                 success, parsed = extract_and_heal_json(j_data)
                 if success and isinstance(parsed, list):
@@ -405,7 +549,8 @@ class AnalysisTab(BaseTab):
         for cb in [self.doc_selector, self.combo_templates, self.cmp_doc, self.cmp_template, self.comp_doc1, self.comp_doc2]: cb.setStyleSheet(style)
         self.btn_run.setStyleSheet(f"background-color: {theme.get('accent', '#b366ff')}; font-weight: bold; color: white; border: none; border-radius: 4px; padding: 6px 12px;")
         btn_style = f"background-color: {theme.get('bg_panel', '#333')}; color: {theme.get('text_main', '#fff')}; border: 1px solid {theme.get('border', '#444')}; padding: 4px 8px; border-radius: 4px;"
-        for btn in [self.btn_edit, self.btn_gen_master, self.btn_gen_comp]: btn.setStyleSheet(btn_style)
+        for btn in [self.btn_edit, self.btn_gen_comp]:
+            btn.setStyleSheet(btn_style)
         toggle_style = f"QPushButton {{ background-color: {theme.get('bg_panel', '#333')}; color: {theme.get('text_main', '#fff')}; border: 1px solid {theme.get('border', '#444')}; padding: 6px; font-weight: bold; border-radius: 4px; }} QPushButton:checked {{ background-color: {theme.get('accent', '#b366ff')}; color: white; border: none; }}"
         for btn in [self.btn_view_sections, self.btn_view_master, self.btn_compare]: btn.setStyleSheet(toggle_style)
         if hasattr(self, 'status_lbl'): self.status_lbl.setStyleSheet(f"color: {theme.get('accent', '#b366ff')}; font-weight: bold;")

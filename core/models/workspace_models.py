@@ -1,6 +1,6 @@
 # core/models/workspace_models.py
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 @dataclass
 class NodeModel:
@@ -22,6 +22,10 @@ class NodeModel:
     is_verified: int = 0
     original_text: str = ""
     node_type_id: str = ""
+    entity_type: str = ""
+    source_id: Optional[str] = None
+    entity_properties: Dict[str, Any] = field(default_factory=dict)
+    entity_state: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         # Ensure original_text defaults to note if not provided
@@ -29,6 +33,25 @@ class NodeModel:
             self.original_text = self.note
         if not self.node_type_id:
             self.node_type_id = "workspace.node.quote" if (self.quote or self.highlight_id or self.pdf_path) and not self.is_custom else "workspace.node.text"
+        if not self.entity_type:
+            self.entity_type = "entity.quote" if self.node_type_id == "workspace.node.quote" else "entity.text"
+        if not self.entity_properties:
+            self.entity_properties = {
+                "quote": self.quote,
+                "exact_text": self.quote,
+                "text": self.quote if self.entity_type in {"entity.quote", "entity.evidence"} else self.note,
+                "note_text": self.note,
+                "pdf_path": self.pdf_path,
+                "page_num": self.page_num,
+                "highlight_id": self.highlight_id,
+                "source_id": self.source_id,
+            }
+        if not self.entity_state:
+            self.entity_state = {
+                "is_verified": bool(self.is_verified),
+                "ai_generated": self.node_origin == "ai",
+                "origin": self.node_origin,
+            }
 
 @dataclass
 class EdgeModel:
@@ -38,6 +61,10 @@ class EdgeModel:
     label: str
     color: str
     weight: int
+    relation_type: str = "relation.basic"
+    evidence_ids: List[str] = field(default_factory=list)
+    relation_properties: Dict[str, Any] = field(default_factory=dict)
+    relation_state: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class WorkspaceModel:

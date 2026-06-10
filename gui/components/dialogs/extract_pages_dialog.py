@@ -1,15 +1,15 @@
 # gui/components/dialogs/extract_pages_dialog.py
-import os
-import fitz
+from pathlib import Path
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
                              QLineEdit, QPushButton, QMessageBox, QFileDialog)
-from PySide6.QtCore import Qt
+from core.events.event_bus import EventBus
+from core.events.domains.document_events import DocumentIntent, DocumentPayload
 
 class ExtractPagesDialog(QDialog):
     def __init__(self, source_pdf_path, project_manager, parent=None):
         super().__init__(parent)
         self.source_pdf_path = source_pdf_path
-        self.project_manager = project_manager
+        self.bus = EventBus.get_instance()
         self.setWindowTitle("Extract Pages to New PDF")
         self.setMinimumWidth(400)
         
@@ -34,7 +34,8 @@ class ExtractPagesDialog(QDialog):
         # 2. File Name Input
         layout.addWidget(QLabel("New PDF Name:"))
         self.name_input = QLineEdit()
-        default_name = os.path.basename(source_pdf_path).replace(".pdf", "_extracted.pdf")
+        source = Path(source_pdf_path)
+        default_name = f"{source.stem}_extracted.pdf"
         self.name_input.setText(default_name)
         layout.addWidget(self.name_input)
 
@@ -52,28 +53,6 @@ class ExtractPagesDialog(QDialog):
         btn_layout.addWidget(self.btn_extract)
         layout.addLayout(btn_layout)
 
-    def _parse_page_string(self, page_str, max_pages):
-        """Converts strings like '1-3, 5' into a sorted list of 0-indexed integers [0, 1, 2, 4]"""
-        pages = set()
-        try:
-            for part in page_str.split(','):
-                part = part.strip()
-                if not part: continue
-                
-                if '-' in part:
-                    start, end = part.split('-')
-                    start_idx = int(start.strip()) - 1
-                    end_idx = int(end.strip()) - 1
-                    pages.update(range(start_idx, end_idx + 1))
-                else:
-                    pages.add(int(part.strip()) - 1)
-                    
-            # Filter out out-of-bounds pages and sort
-            valid_pages = sorted([p for p in pages if 0 <= p < max_pages])
-            return valid_pages
-        except Exception:
-            return None
-
     def _perform_extraction(self):
         page_str = self.page_input.text().strip()
         new_name = self.name_input.text().strip()
@@ -85,43 +64,17 @@ class ExtractPagesDialog(QDialog):
         if not new_name.lower().endswith(".pdf"):
             new_name += ".pdf"
 
-        try:
-            src_doc = fitz.open(self.source_pdf_path)
-            max_pages = len(src_doc)
-            
-            pages_to_extract = self._parse_page_string(page_str, max_pages)
-            
-            if not pages_to_extract:
-                QMessageBox.warning(self, "Invalid Range", f"Could not parse pages. Ensure they are between 1 and {max_pages}.")
-                src_doc.close()
-                return
+        save_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Extracted PDF",
+            str(Path(self.source_pdf_path).with_name(new_name)),
+            "PDF Files (*.pdf)",
+        )
+        if not save_path:
+            return
 
-            # Ask user where to save the new PDF
-            save_path, _ = QFileDialog.getSaveFileName(
-                self, "Save Extracted PDF", 
-                os.path.join(os.path.dirname(self.source_pdf_path), new_name), 
-                "PDF Files (*.pdf)"
-            )
-
-            if not save_path:
-                src_doc.close()
-                return
-
-            # Execute the extraction
-            dest_doc = fitz.open()
-            for p_num in pages_to_extract:
-                dest_doc.insert_pdf(src_doc, from_page=p_num, to_page=p_num)
-                
-            dest_doc.save(save_path)
-            dest_doc.close()
-            src_doc.close()
-
-            # Add the newly created PDF to the project
-            if self.project_manager:
-                self.project_manager.add_pdf(save_path)
-                
-            QMessageBox.information(self, "Success", f"Successfully extracted {len(pages_to_extract)} pages!")
-            self.accept()
-
-        except Exception as e:
-            QMessageBox.critical(self, "Extraction Failed", f"An error occurred:\n{str(e)}")
+        self.bus.document_action_requested.emit(
+            DocumentIntent.EXTRACT_PAGES,
+            DocumentPayload(path=self.source_pdf_path, save_path=save_path, page_range=page_str),
+        )
+        self.accept()

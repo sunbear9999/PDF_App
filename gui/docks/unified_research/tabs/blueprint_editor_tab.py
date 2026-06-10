@@ -1,6 +1,7 @@
 import json
 import re
 import dataclasses
+import uuid
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, 
                              QComboBox, QFrame, QScrollArea, QLineEdit, 
                              QTextEdit, QCheckBox, QSpinBox, QGridLayout, 
@@ -10,7 +11,8 @@ from PySide6.QtGui import QCursor
 
 from core.engine.action_model import AIActionBlueprint, ActionStep
 from core.engine.default_blueprints import DefaultBlueprints
-from core.engine.master_runner import MasterActionRunner
+from core.events.event_bus import EventBus
+from core.events.domains.workflow_events import WorkflowEvent, WorkflowIntent, WorkflowPayload
 from gui.docks.unified_research.components.workflow_editor_canvas import VisualWorkflowEditor
 
 TYPES = {
@@ -331,6 +333,9 @@ class BlueprintEditorTab(QWidget):
         self.step_manager = getattr(self.main_window, 'step_manager', None)
         self.current_blueprint = None
         self.step_widgets = []
+        self.bus = EventBus.get_instance()
+        self._workflow_requests = {}
+        self.bus.workflow_state_changed.connect(self._handle_workflow_state)
         self._build_ui()
 
     def _build_ui(self):
@@ -490,11 +495,17 @@ class BlueprintEditorTab(QWidget):
         architect_bp = DefaultBlueprints.get_blueprint_architect(self.main_window.prompt_manager)
         state = {"user_text": user_text, "current_json": current_json}
         
-        self.ast_runner = MasterActionRunner(self.main_window, architect_bp, state)
-        self.ast_runner.progress_update.connect(lambda c: self.txt_ast_chat.insertPlainText(c))
-        self.ast_runner.action_complete.connect(self._on_chat_complete)
-        self.ast_runner.error.connect(lambda e: self.txt_ast_chat.append(f"<br><b style='color:red;'>Error: {e}</b>"))
-        self.ast_runner.start()
+        request_id = str(uuid.uuid4())
+        self._workflow_requests[request_id] = {"kind": "architect"}
+        self.bus.workflow_action_requested.emit(
+            WorkflowIntent.RUN_BLUEPRINT,
+            WorkflowPayload(
+                blueprint=architect_bp,
+                initial_state=state,
+                job_id=request_id,
+                job_name=architect_bp.name,
+            ),
+        )
 
     def _on_chat_complete(self, final_state):
         self.btn_ast_send.setEnabled(True)
@@ -673,11 +684,47 @@ class BlueprintEditorTab(QWidget):
             
         mock_state = {"user_input": "Test Input Data", "doc_path": "sample.pdf"}
         
-        self.debug_runner = MasterActionRunner(self.main_window, self.current_blueprint, mock_state)
-        self.debug_runner.state_snapshot.connect(self._on_debug_snapshot)
-        self.debug_runner.error.connect(lambda e: self.txt_debugger.append(f"<span style='color:red;'>ERROR: {e}</span>"))
-        self.debug_runner.action_complete.connect(lambda d: self.txt_debugger.append("\n<b>[PIPELINE COMPLETE]</b>"))
-        self.debug_runner.start()
+        request_id = str(uuid.uuid4())
+        self._workflow_requests[request_id] = {"kind": "debug"}
+        self.bus.workflow_action_requested.emit(
+            WorkflowIntent.RUN_BLUEPRINT,
+            WorkflowPayload(
+                blueprint=self.current_blueprint,
+                initial_state=mock_state,
+                job_id=request_id,
+                job_name=self.current_blueprint.name,
+            ),
+        )
+
+    def _handle_workflow_state(self, event, payload):
+        request_id = payload.get("job_id") if hasattr(payload, "get") else None
+        meta = self._workflow_requests.get(request_id)
+        if not meta:
+            return
+
+        kind = meta.get("kind")
+        if kind == "architect":
+            if event == WorkflowEvent.PROGRESS:
+                self.txt_ast_chat.insertPlainText((payload.get("data") or {}).get("chunk", ""))
+            elif event == WorkflowEvent.COMPLETED:
+                self._workflow_requests.pop(request_id, None)
+                self._on_chat_complete(payload.get("initial_state") or {})
+            elif event == WorkflowEvent.FAILED:
+                self._workflow_requests.pop(request_id, None)
+                self.btn_ast_send.setEnabled(True)
+                self.txt_ast_chat.append(f"<br><b style='color:red;'>Error: {payload.get('errors')}</b>")
+            return
+
+        if kind == "debug":
+            if event == WorkflowEvent.STATE_SNAPSHOT:
+                data = payload.get("data") or {}
+                self._on_debug_snapshot(data.get("step_id", ""), data.get("state_json", ""))
+            elif event == WorkflowEvent.FAILED:
+                self._workflow_requests.pop(request_id, None)
+                self.txt_debugger.append(f"<span style='color:red;'>ERROR: {payload.get('errors')}</span>")
+            elif event == WorkflowEvent.COMPLETED:
+                self._workflow_requests.pop(request_id, None)
+                self.txt_debugger.append("\n<b>[PIPELINE COMPLETE]</b>")
 
     def _on_debug_snapshot(self, step_id, state_json):
         self.txt_debugger.append(f"\n<b>--- STATE AFTER: {step_id} ---</b>")

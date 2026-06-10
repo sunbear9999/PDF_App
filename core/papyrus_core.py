@@ -13,9 +13,10 @@ from core.engine.blueprint_manager import BlueprintManager
 
 from core.engine.registries import build_default_blueprint_registry, build_default_workflow_node_type_registry
 from core.services.workspace_registries import build_default_workspace_ai_tool_registry, build_default_workspace_node_type_registry
+from core.ontology.registry import OntologyRegistry
 
 from core.services.embedding_service import EmbeddingService
-from core.services.workspace_services import WorkspaceService, WorkspaceGraphService
+from core.services.workspace_services import WorkspaceLayoutService, WorkspaceService, WorkspaceGraphService
 from core.services.project_app_service import ProjectAppService
 from core.services.document_app_service import DocumentAppService
 from core.services.tts_app_service import TTSAppService
@@ -25,6 +26,7 @@ from core.services.citation_app_service import CitationAppService
 from core.services.notes_app_service import NotesAppService
 from core.services.tag_app_service import TagAppService
 from core.services.prompt_app_service import PromptAppService
+from core.services.ontology_service import OntologyService
 
 def get_resource_path(relative_path):
     if hasattr(sys, '_MEIPASS'):
@@ -60,6 +62,7 @@ class PapyrusCore:
         self.workflow_node_type_registry = build_default_workflow_node_type_registry()
         self.workspace_ai_tools_registry = build_default_workspace_ai_tool_registry()
         self.workspace_node_type_registry = build_default_workspace_node_type_registry()
+        self.ontology_registry = OntologyRegistry()
 
         # 3. Headless App Services
         self.embedding_service = EmbeddingService(self.llm_manager, self.project_manager)
@@ -79,6 +82,9 @@ class PapyrusCore:
         )
         self.workspace_service = WorkspaceService(self.project_manager, self.bus)
         self.workspace_graph_service = WorkspaceGraphService(self.bus)
+        self.workspace_layout_service = WorkspaceLayoutService(self.project_manager, self.llm_manager, self.bus)
+        self.ontology_service = OntologyService(self.project_manager, self.bus, self.ontology_registry)
+        
 
     def _ensure_default_dictionary(self):
         """Silently provisions the default dictionary on first launch."""

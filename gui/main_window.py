@@ -31,7 +31,6 @@ from gui.docks.essay_dock import EssayTab
 from gui.components.workspace_view import WorkspaceView
 from core.engine.process_manager import ProcessRegistry
 from gui.components.universal_overlay import UniversalInternalOverlay
-from core.engine.master_runner import MasterActionRunner
 from core.engine.blueprint_manager import BlueprintManager
 from core.engine.step_manager import StepManager
 from gui.managers.layout_manager import LayoutManager
@@ -39,7 +38,10 @@ from core.events.event_bus import EventBus
 from gui.components.main_toolbar import MainToolbar
 from core.events.domains.document_events import AnnotationIntent, AnnotationPayload, DocumentIntent, DocumentPayload
 from core.events.domains.project_events import ProjectEvent, ProjectEventPayload, ProjectIntent, ProjectPayload
-
+from core.events.domains.workspace_events import WorkspaceEvent, WorkspaceEventPayload
+from core.services.document_ingestion_service import DocumentIngestionService
+from core.services.analysis_app_service import AnalysisAppService
+from core.services.workflow_runner_service import WorkflowRunnerService
 class MainWindow(QMainWindow):
     # ADD `core` to the signature
     def __init__(self, core):
@@ -66,9 +68,11 @@ class MainWindow(QMainWindow):
         self.workflow_node_type_registry = core.workflow_node_type_registry
         self.dictionary_manager = core.dictionary_manager
         self.citation_manager = core.citation_manager
+        self.active_ai_model = self._load_active_ai_model()
 
         self.workspace_ai_tools_registry = core.workspace_ai_tools_registry
         self.workspace_node_type_registry = core.workspace_node_type_registry
+        self.ontology_registry = getattr(core, "ontology_registry", None)
         self.workspace_service = core.workspace_service
         self.workspace_graph_service = core.workspace_graph_service
 
@@ -88,13 +92,15 @@ class MainWindow(QMainWindow):
         self.workspace_annotation_service = WorkspaceAnnotationService(self, self.bus)
         self.workspace_ai_service = WorkspaceAIService(
             self, self.workspace_service, self.workspace_graph_service,
-            self.workspace_annotation_service, self.workspace_ai_tools_registry, self.bus, self
+            self.workspace_annotation_service, self.workspace_ai_tools_registry,
+            event_bus=self.bus,
+            parent=self,
         )
         self.workspace_ai_service.error.connect(lambda msg: QMessageBox.warning(self, "AI Error", msg))
 
         from core.services.ai_bootstrap_service import AIBootstrapService
         self.ai_bootstrap_service = AIBootstrapService(self)
-
+        self.document_ingestion_service = DocumentIngestionService(self.shared_llm_manager, self)
         # 4. Connect to global events
         self.bus.project_loaded.connect(self._handle_project_event_ui_update)
         # 1. INITIALIZE VIEWER EXPLICITLY ONCE
@@ -155,13 +161,33 @@ class MainWindow(QMainWindow):
         self.universal_overlay = UniversalInternalOverlay(self, self.theme_manager.get_theme())
         self.ui_router = BlueprintUIRouter(self)
         self.ui_router.register_target("floating", self.universal_overlay)
+        self.workflow_runner_service = WorkflowRunnerService(
+            self,
+            event_bus=self.bus,
+            process_registry=self.process_registry,
+            ui_router=self.ui_router,
+            model_provider=self._get_active_ai_model,
+            parent=self,
+        )
+        if hasattr(self, "workspace_ai_service"):
+            self.workspace_ai_service.workflow_runner_service = self.workflow_runner_service
         from core.services.research_agent_service import ResearchAgentService
         self.research_agent_service = ResearchAgentService(
             self.project_manager,
             self.prompt_manager,
             self.blueprint_registry,
-            workflow_executor=lambda blueprint, state: self.prepare_ai_runner(blueprint, state),
-            runner_starter=self.enqueue_ai_runner,
+            workflow_executor=self.workflow_runner_service.prepare_runner,
+            runner_starter=self.workflow_runner_service.start_runner,
+            model_provider=self._get_active_ai_model,
+            parent=self,
+        )
+        self.analysis_app_service = AnalysisAppService(
+            self.project_manager,
+            self.prompt_manager,
+            registry=self.ontology_registry,
+            event_bus=self.bus,
+            workflow_executor=self.workflow_runner_service.prepare_runner,
+            runner_starter=self.workflow_runner_service.start_runner,
             model_provider=self._get_active_ai_model,
             parent=self,
         )
@@ -170,7 +196,10 @@ class MainWindow(QMainWindow):
         self.bus.annotation_action_requested.connect(self._handle_annot_ui_requests)
         self.bus.project_action_requested.connect(self._handle_project_ui_requests)
         self.bus.project_action_requested.connect(self._handle_project_intents)
-
+        self.bus.active_model_changed.connect(self._handle_active_model_changed)
+        self.bus.status_message_requested.connect(
+            lambda msg, duration=3000: self.statusBar().showMessage(msg, duration)
+        )
     def _handle_project_intents(self, intent: ProjectIntent, payload: ProjectPayload):
         if intent == ProjectIntent.FLUSH_UI_STATES:
             # 1. Ask LayoutManager to save the physical dock arrangement
@@ -187,6 +216,20 @@ class MainWindow(QMainWindow):
             except Exception: pass
         elif intent == ProjectIntent.SAVE_COMPLETED:
             self._show_save_indicator()
+
+    def _handle_active_model_changed(self, event, payload):
+        if event != WorkspaceEvent.ACTIVE_MODEL_CHANGED:
+            return
+        model_name = payload.get("model_name") if hasattr(payload, "get") else None
+        if not model_name:
+            return
+        self.active_ai_model = model_name
+        try:
+            settings = json.loads(self.project_manager.get_metadata("global_ai_settings", "{}"))
+            settings["selected_model"] = model_name
+            self.project_manager.set_metadata("global_ai_settings", json.dumps(settings))
+        except Exception:
+            pass
 
     def _handle_project_ui_requests(self, action: ProjectIntent, payload: ProjectPayload):
         if action == ProjectIntent.EXPORT_LOG_RESULT:
@@ -216,7 +259,7 @@ class MainWindow(QMainWindow):
             from gui.components.dialogs.quick_note_dialog import QuickNoteDialog
             self.quick_note_popup = QuickNoteDialog(
                 target_annot, annot_id, page_num, pdf_path,
-                self.project_manager, self.bus, self.theme_manager.get_theme(), self
+                self.theme_manager.get_theme(), self
             )
             self.quick_note_popup.show()
         elif action == AnnotationIntent.JUMP_TO_PAGE:
@@ -236,39 +279,35 @@ class MainWindow(QMainWindow):
 
     def execute_ai_blueprint(self, blueprint, initial_state, is_express=False):
         """
-        The singular entry point for ALL AI operations in the app.
-        Tabs just call this, and the UI Router handles the rest.
+        Legacy shim: workflow execution is owned by WorkflowRunnerService.
         """
-        runner = self.prepare_ai_runner(blueprint, initial_state, is_express=is_express)
-        self.enqueue_ai_runner(runner, is_express=is_express)
-        return runner
+        return self.workflow_runner_service.run_blueprint(blueprint, initial_state, is_express=is_express)
 
     def prepare_ai_runner(self, blueprint, initial_state, is_express=False):
-        if self.shared_llm_manager.collection is None:
-            self.project_manager._mount_project_database()
-
-        runner = MasterActionRunner(self, blueprint, initial_state)
-        self.ui_router.attach_runner(runner)
-        return runner
+        return self.workflow_runner_service.prepare_runner(blueprint, initial_state)
 
     def enqueue_ai_runner(self, runner, is_express=False):
-        blueprint = getattr(runner, "blueprint", None)
-
-        job_name = getattr(blueprint, 'name', 'AI Action')
-
-        # Determine job type based on express flag for the UI Monitor
-        job_type = "Express Tool" if is_express else "Agent"
-
-        self.process_registry.enqueue_runner(runner, job_name, job_type, is_express=is_express)
-        return runner
+        return self.workflow_runner_service.start_runner(runner, is_express=is_express)
 
     def _get_active_ai_model(self):
-        dock = getattr(self, "unified_dock", None)
-        combo = getattr(dock, "model_combo", None)
-        if combo:
-            return combo.currentText()
+        if getattr(self, "active_ai_model", None):
+            return self.active_ai_model
         models = self.shared_llm_manager.get_available_models() or []
         return models[0] if models else ""
+
+    def _load_active_ai_model(self):
+        try:
+            settings = json.loads(self.project_manager.get_metadata("global_ai_settings", "{}"))
+            model = settings.get("selected_model") or settings.get("active_model")
+            if model:
+                return model
+        except Exception:
+            pass
+        models = self.shared_llm_manager.get_available_models() or []
+        preferred = "gemma4:e2b"
+        if preferred in models:
+            return preferred
+        return models[0] if models else preferred
 
     def _run_startup_sequence(self):
         settings = QSettings("PDFMultitool", "Workspace")
@@ -283,6 +322,11 @@ class MainWindow(QMainWindow):
 
     def _handle_project_event_ui_update(self, event: ProjectEvent, payload: ProjectEventPayload):
         if event == ProjectEvent.LOADED:
+            self.active_ai_model = self._load_active_ai_model()
+            self.bus.active_model_changed.emit(
+                WorkspaceEvent.ACTIVE_MODEL_CHANGED,
+                WorkspaceEventPayload(model_name=self.active_ai_model),
+            )
             self._on_project_loaded_ui_update()
 
     def _refresh_research_agent_from_project_event(self, event: ProjectEvent, payload: ProjectEventPayload):
@@ -325,7 +369,15 @@ class MainWindow(QMainWindow):
                 if hasattr(r, 'refresh_project_ui'): r.refresh_project_ui()
 
             # 🔥 FIX: Tell the bus to open the first PDF instead of calling switch_to_pdf!
-            if self.project_manager.pdfs:
+            sources = self.project_manager.list_source_entities() if hasattr(self.project_manager, "list_source_entities") else []
+            sources = [s for s in sources if not s.state.get("is_removed")]
+            if sources:
+                first_source = sources[0]
+                self.bus.document_action_requested.emit(
+                    DocumentIntent.OPEN,
+                    DocumentPayload(source_id=first_source.id, path=first_source.properties.get("path") or first_source.origin_id),
+                )
+            elif self.project_manager.pdfs:
                 self.bus.document_action_requested.emit(DocumentIntent.OPEN, DocumentPayload(path=self.project_manager.pdfs[0]))
         finally:
             self.setUpdatesEnabled(True)

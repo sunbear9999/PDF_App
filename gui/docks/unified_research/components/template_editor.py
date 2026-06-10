@@ -1,36 +1,45 @@
 import json
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton, 
                              QLabel, QLineEdit, QTextEdit, QComboBox, QWidget, 
-                             QScrollArea, QMessageBox, QListWidget)
+                             QScrollArea, QMessageBox, QListWidget, QCheckBox, QListWidgetItem)
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QCursor
+from core.models.ontology_model import EntityType, RelationType
+from core.ontology.registry import OntologyRegistry
 
 class FieldRowWidget(QWidget):
     """A single row in the visual schema builder."""
-    def __init__(self, theme=None, parent=None):
+    def __init__(self, registry=None, theme=None, parent=None):
         super().__init__(parent)
+        self.registry = registry or OntologyRegistry()
         self.layout = QHBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
+
+        self.registry_field_combo = QComboBox()
+        self.registry_field_combo.addItem("Custom property", "")
+        self._populate_registry_fields()
+        self.registry_field_combo.currentIndexChanged.connect(self._apply_registry_field)
         
         self.key_input = QLineEdit()
-        self.key_input.setPlaceholderText("Field Name (e.g., main_themes)")
+        self.key_input.setPlaceholderText("Property key (e.g., thesis_role)")
         
         self.type_combo = QComboBox()
         self.type_combo.addItems([
-            "Short Answer (Text)", 
-            "Bullet Points (List of Texts)", 
-            "Argument Map (Claim + Logic)",
-            "Data Extraction (Metric + Value)"
+            "Node/Relation Property (Text)", 
+            "Node/Relation Property (List)", 
+            "Argument Property Group",
+            "Metric Property Group"
         ])
         
         self.desc_input = QLineEdit()
-        self.desc_input.setPlaceholderText("Description for the AI...")
+        self.desc_input.setPlaceholderText("How the AI should fill this property...")
         
         self.btn_remove = QPushButton("❌")
         self.btn_remove.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_remove.setFixedWidth(30)
         self.btn_remove.clicked.connect(self.deleteLater)
         
+        self.layout.addWidget(self.registry_field_combo, 2)
         self.layout.addWidget(self.key_input, 2)
         self.layout.addWidget(self.type_combo, 2)
         self.layout.addWidget(self.desc_input, 3)
@@ -39,6 +48,7 @@ class FieldRowWidget(QWidget):
         if theme:
             style = f"background: {theme.get('bg_input', '#2b2b2b')}; color: {theme.get('text_main', '#fff')}; border: 1px solid {theme.get('border', '#444')}; padding: 4px; border-radius: 4px;"
             self.key_input.setStyleSheet(style)
+            self.registry_field_combo.setStyleSheet(style)
             self.type_combo.setStyleSheet(style)
             self.desc_input.setStyleSheet(style)
             self.btn_remove.setStyleSheet("background: transparent; border: none;")
@@ -51,15 +61,39 @@ class FieldRowWidget(QWidget):
         
         if not key: return None, None
         
-        if ftype == "Short Answer (Text)":
+        if ftype == "Node/Relation Property (Text)":
             return key, desc
-        elif ftype == "Bullet Points (List of Texts)":
+        elif ftype == "Node/Relation Property (List)":
             return key, [desc]
-        elif ftype == "Argument Map (Claim + Logic)":
+        elif ftype == "Argument Property Group":
             return key, [{"claim": "string", "supporting_logic": desc}]
-        elif ftype == "Data Extraction (Metric + Value)":
+        elif ftype == "Metric Property Group":
             return key, [{"metric": "string", "value": desc}]
         return key, desc
+
+    def _populate_registry_fields(self):
+        for bp in self.registry.all_entities():
+            for field in getattr(bp, "fields", []) or []:
+                self.registry_field_combo.addItem(f"{bp.display_name}: {field.label}", {
+                    "key": field.key,
+                    "description": bp.description,
+                    "value_type": field.value_type,
+                })
+        for bp in self.registry.all_relations():
+            for field in getattr(bp, "fields", []) or []:
+                self.registry_field_combo.addItem(f"{bp.display_name} link: {field.label}", {
+                    "key": field.key,
+                    "description": bp.description,
+                    "value_type": field.value_type,
+                })
+
+    def _apply_registry_field(self):
+        data = self.registry_field_combo.currentData()
+        if not isinstance(data, dict):
+            return
+        self.key_input.setText(data.get("key", ""))
+        if not self.desc_input.text().strip():
+            self.desc_input.setText(data.get("description", ""))
 
 class TemplateEditorDialog(QDialog):
     def __init__(self, project_manager, theme=None, parent=None):
@@ -70,6 +104,7 @@ class TemplateEditorDialog(QDialog):
         self.resize(800, 500)
         self.templates = self.pm.get_analysis_templates()
         self.current_template_id = None
+        self.registry = OntologyRegistry()
         
         self._build_ui()
         self._load_template_list()
@@ -98,15 +133,55 @@ class TemplateEditorDialog(QDialog):
         right_panel.addWidget(QLabel("<b>Mode Title:</b>"))
         self.title_input = QLineEdit()
         right_panel.addWidget(self.title_input)
+
+        help_label = QLabel(
+            "Analysis modes extract workspace-ready graph data: selected node types become nodes, "
+            "selected connection types become relations, and extra properties are saved on those graph items."
+        )
+        help_label.setWordWrap(True)
+        right_panel.addWidget(help_label)
         
         right_panel.addWidget(QLabel("<b>AI Instructions:</b>"))
         self.inst_input = QTextEdit()
         self.inst_input.setFixedHeight(80)
         self.inst_input.setPlaceholderText("Tell the AI what to look for in the text...")
         right_panel.addWidget(self.inst_input)
+
+        prompt_keys = QHBoxLayout()
+        prompt_keys.addWidget(QLabel("<b>Chunk Prompt:</b>"))
+        self.chunk_prompt_input = QLineEdit("Graph Analysis Chunk System")
+        self.chunk_prompt_input.setToolTip("PromptManager key used for per-chunk graph extraction.")
+        prompt_keys.addWidget(self.chunk_prompt_input, 1)
+        prompt_keys.addWidget(QLabel("<b>Final Pass Prompt:</b>"))
+        self.master_prompt_input = QLineEdit("Graph Analysis Master System")
+        self.master_prompt_input.setToolTip("PromptManager key used to merge chunks into the master graph.")
+        prompt_keys.addWidget(self.master_prompt_input, 1)
+        btn_prompts = QPushButton("Edit Prompts")
+        btn_prompts.clicked.connect(self._open_prompt_manager)
+        prompt_keys.addWidget(btn_prompts)
+        right_panel.addLayout(prompt_keys)
+
+        graph_row = QHBoxLayout()
+        graph_col_nodes = QVBoxLayout()
+        graph_col_rels = QVBoxLayout()
+        graph_col_nodes.addWidget(QLabel("<b>Node types to extract:</b>"))
+        self.node_type_list = QListWidget()
+        self.node_type_list.setMinimumHeight(110)
+        graph_col_nodes.addWidget(self.node_type_list)
+        self.allow_text_nodes = QCheckBox("Allow fallback text nodes")
+        self.allow_text_nodes.setChecked(True)
+        graph_col_nodes.addWidget(self.allow_text_nodes)
+        graph_col_rels.addWidget(QLabel("<b>Connection types to find:</b>"))
+        self.relation_type_list = QListWidget()
+        self.relation_type_list.setMinimumHeight(110)
+        graph_col_rels.addWidget(self.relation_type_list)
+        graph_row.addLayout(graph_col_nodes, 1)
+        graph_row.addLayout(graph_col_rels, 1)
+        right_panel.addLayout(graph_row)
+        self._populate_registry_lists()
         
         # Visual Schema Builder
-        right_panel.addWidget(QLabel("<b>Output Structure (What the AI should extract):</b>"))
+        right_panel.addWidget(QLabel("<b>Extra Graph Properties (saved onto extracted nodes/relations):</b>"))
         
         self.fields_container = QWidget()
         self.fields_layout = QVBoxLayout(self.fields_container)
@@ -117,7 +192,7 @@ class TemplateEditorDialog(QDialog):
         scroll.setWidget(self.fields_container)
         right_panel.addWidget(scroll)
         
-        btn_add_field = QPushButton("➕ Add Output Field")
+        btn_add_field = QPushButton("➕ Add Graph Property")
         btn_add_field.clicked.connect(self._add_field_row)
         right_panel.addWidget(btn_add_field)
         
@@ -133,15 +208,47 @@ class TemplateEditorDialog(QDialog):
         main_layout.addLayout(right_panel)
 
     def _add_field_row(self, key="", ftype_idx=0, desc=""):
-        row = FieldRowWidget(self.theme)
+        row = FieldRowWidget(self.registry, self.theme)
         if key: row.key_input.setText(key)
         if desc: row.desc_input.setText(desc)
         row.type_combo.setCurrentIndex(ftype_idx)
         self.fields_layout.addWidget(row)
 
+    def _populate_registry_lists(self):
+        for bp in self.registry.all_entities():
+            item = QListWidgetItem(bp.display_name)
+            item.setData(Qt.ItemDataRole.UserRole, bp.type_key)
+            item.setToolTip(bp.description)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            default_checked = bp.type_key in {
+                EntityType.CLAIM.value,
+                EntityType.REASONING.value,
+                EntityType.QUOTE.value,
+            }
+            item.setCheckState(Qt.CheckState.Checked if default_checked else Qt.CheckState.Unchecked)
+            self.node_type_list.addItem(item)
+        for bp in self.registry.all_relations():
+            item = QListWidgetItem(bp.display_name)
+            item.setData(Qt.ItemDataRole.UserRole, bp.type_key)
+            item.setToolTip(bp.description)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            default_checked = bp.type_key in {
+                RelationType.SUPPORTS.value,
+                RelationType.CONTRADICTS.value,
+                RelationType.REASONS.value,
+                RelationType.DERIVED_FROM.value,
+            }
+            item.setCheckState(Qt.CheckState.Checked if default_checked else Qt.CheckState.Unchecked)
+            self.relation_type_list.addItem(item)
+
     def _clear_editor(self):
         self.title_input.clear()
         self.inst_input.clear()
+        self.chunk_prompt_input.setText("Graph Analysis Chunk System")
+        self.master_prompt_input.setText("Graph Analysis Master System")
+        self._set_checked_types(self.node_type_list, {EntityType.CLAIM.value, EntityType.REASONING.value, EntityType.QUOTE.value})
+        self._set_checked_types(self.relation_type_list, {RelationType.SUPPORTS.value, RelationType.CONTRADICTS.value, RelationType.REASONS.value, RelationType.DERIVED_FROM.value})
+        self.allow_text_nodes.setChecked(True)
         for i in reversed(range(self.fields_layout.count())): 
             self.fields_layout.itemAt(i).widget().setParent(None)
 
@@ -164,6 +271,11 @@ class TemplateEditorDialog(QDialog):
         self._clear_editor()
         self.title_input.setText(template.get("title", ""))
         self.inst_input.setText(template.get("instructions", ""))
+        self.chunk_prompt_input.setText(template.get("chunk_prompt_key", "Graph Analysis Chunk System"))
+        self.master_prompt_input.setText(template.get("master_prompt_key", "Graph Analysis Master System"))
+        self._set_checked_types(self.node_type_list, set(template.get("node_types") or []))
+        self._set_checked_types(self.relation_type_list, set(template.get("relation_types") or []))
+        self.allow_text_nodes.setChecked(bool(template.get("allow_text_nodes", True)))
         
         # Decompile the JSON string back into visual rows (Best effort)
         try:
@@ -193,7 +305,7 @@ class TemplateEditorDialog(QDialog):
                 if k: compiled_schema[k] = v
 
         if not compiled_schema:
-            return QMessageBox.warning(self, "Error", "You must add at least one output field.")
+            compiled_schema = {"graph_artifacts": "Registry-driven node and relation extraction"}
 
         schema_str = json.dumps(compiled_schema, indent=2)
         
@@ -201,7 +313,12 @@ class TemplateEditorDialog(QDialog):
             "id": self.current_template_id or f"tmpl_{title.replace(' ', '_').lower()}",
             "title": title,
             "instructions": self.inst_input.toPlainText(),
-            "schema": schema_str
+            "schema": schema_str,
+            "node_types": self._checked_types(self.node_type_list),
+            "relation_types": self._checked_types(self.relation_type_list),
+            "allow_text_nodes": self.allow_text_nodes.isChecked(),
+            "chunk_prompt_key": self.chunk_prompt_input.text().strip() or "Graph Analysis Chunk System",
+            "master_prompt_key": self.master_prompt_input.text().strip() or "Graph Analysis Master System",
         }
 
         if self.current_template_id:
@@ -217,6 +334,31 @@ class TemplateEditorDialog(QDialog):
         QMessageBox.information(self, "Saved", "Analysis Mode saved successfully!")
         self.accept()
 
+    def _checked_types(self, list_widget):
+        values = []
+        for idx in range(list_widget.count()):
+            item = list_widget.item(idx)
+            if item.checkState() == Qt.CheckState.Checked:
+                values.append(item.data(Qt.ItemDataRole.UserRole))
+        return values
+
+    def _set_checked_types(self, list_widget, selected):
+        selected = set(selected or [])
+        for idx in range(list_widget.count()):
+            item = list_widget.item(idx)
+            item.setCheckState(Qt.CheckState.Checked if item.data(Qt.ItemDataRole.UserRole) in selected else Qt.CheckState.Unchecked)
+
+    def _open_prompt_manager(self):
+        parent = self.parent()
+        while parent and not hasattr(parent, "prompt_manager"):
+            parent = parent.parent()
+        if not parent:
+            return QMessageBox.information(self, "Prompt Manager", "Open the main prompt manager to edit these prompt keys.")
+        from gui.components.dialogs.prompt_editor_dialog import PromptEditorDialog
+        dlg = PromptEditorDialog(parent.prompt_manager, parent)
+        dlg.view_mode_combo.setCurrentIndex(2)
+        dlg.exec()
+
     def _apply_theme(self):
         if not self.theme: return
         self.setStyleSheet(f"background-color: {self.theme.get('bg_main', '#1e1e1e')}; color: {self.theme.get('text_main', '#fff')};")
@@ -224,3 +366,7 @@ class TemplateEditorDialog(QDialog):
         self.list_widget.setStyleSheet(style)
         self.title_input.setStyleSheet(style)
         self.inst_input.setStyleSheet(style)
+        self.chunk_prompt_input.setStyleSheet(style)
+        self.master_prompt_input.setStyleSheet(style)
+        self.node_type_list.setStyleSheet(style)
+        self.relation_type_list.setStyleSheet(style)

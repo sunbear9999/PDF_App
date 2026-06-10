@@ -3,7 +3,6 @@ import os
 import sys
 import uuid
 import json
-import fitz
 import tempfile
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, 
                              QPushButton, QComboBox, QFileDialog, QLabel, QStackedWidget)

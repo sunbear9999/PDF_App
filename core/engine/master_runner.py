@@ -5,7 +5,7 @@ import sqlite3
 import re
 from PySide6.QtCore import QMutex, QThread, QWaitCondition, Signal, Qt
 from core.engine.action_model import AIActionBlueprint, ActionStep
-from core.events.domains.workspace_events import WorkflowIntent, WorkflowPayload
+from core.events.domains.workflow_events import WorkflowIntent, WorkflowPayload
 from core.utils.state_resolver import StateResolver
 from core.utils.json_utils import extract_and_heal_json
 
@@ -47,6 +47,7 @@ class MasterActionRunner(QThread):
             "USER_INPUT": lambda step, inputs, model: self._run_user_input(step, inputs),
             "BRANCH": lambda step, inputs, model: self._run_branch(step, inputs),
             "DATABASE_WRITE": lambda step, inputs, model: self._run_db_write(step, inputs),
+            "GRAPH_VALIDATOR": lambda step, inputs, model: self._run_graph_validator(step, inputs), # NEW
         }
 
     def register_step_handler(self, step_type: str, handler):
@@ -263,10 +264,13 @@ class MasterActionRunner(QThread):
             
             try:
                 parsed_res = json.loads(final_result)
-                if isinstance(parsed_res, list): aggregated_results.extend(parsed_res)
-                else: aggregated_results.append(parsed_res)
             except Exception:
-                aggregated_results.append(final_result)
+                success, healed = extract_and_heal_json(str(final_result))
+                parsed_res = healed if success else final_result
+            if isinstance(parsed_res, list):
+                aggregated_results.extend(parsed_res)
+            else:
+                aggregated_results.append(parsed_res)
                 
             self.step_complete.emit(f"{step.step_id}_item_{idx}", str(final_result), sub_state.copy())
             
@@ -356,6 +360,7 @@ class MasterActionRunner(QThread):
             json_mode=options.get("json_mode"), 
             temperature=options.get("temperature"),
             num_predict=options.get("num_predict"), 
+            num_ctx=options.get("num_ctx") or 16384,
             stop=options.get("stop_sequences")
         )
 
@@ -508,6 +513,82 @@ class MasterActionRunner(QThread):
         if len(conditions) == 1:
             return conditions[0]
         return {"$and": conditions}
+    # In core/engine/master_runner.py -> _run_graph_validator
+    def _run_graph_validator(self, step, inputs):
+        raw_data = inputs.get("tuple_data", "{}")
+        try:
+            parsed = json.loads(raw_data)
+        except Exception:
+            success, parsed = extract_and_heal_json(str(raw_data))
+            if not success: return "{}"
+
+        nodes_in = parsed.get("nodes", [])
+        edges_in = parsed.get("edges", [])
+        
+        valid_nodes = {}
+        
+        # 1. Parse Tuple-Arrays (Dynamic Nodes)
+        for n in nodes_in:
+            if isinstance(n, list) and len(n) >= 3:
+                n_id, n_type, n_text = str(n[0]), str(n[1]), str(n[2])
+                
+                # Extract the trailing properties dict if the LLM provided one
+                custom_props = n[3] if len(n) > 3 and isinstance(n[3], dict) else {}
+                
+                node_data = {
+                    "id": n_id,
+                    "type": n_type,
+                    "text": n_text,
+                    "exact_text": n_text if "quote" in n_type else None,
+                }
+                # Merge custom template properties (confidence, strength, etc.)
+                node_data.update(custom_props)
+                valid_nodes[n_id] = node_data
+
+        healed_edges = []
+        
+        # 2 & 3. Parse Tuple-Arrays (Dynamic Edges & Registry Healing)
+        for e in edges_in:
+            if isinstance(e, list) and len(e) >= 4:
+                e_id, e_type, e_src, e_tgt = str(e[0]), str(e[1]), str(e[2]), str(e[3])
+                custom_props = e[4] if len(e) > 4 and isinstance(e[4], dict) else {}
+                
+                if e_src not in valid_nodes or e_tgt not in valid_nodes:
+                    continue 
+
+                src_type = valid_nodes[e_src]["type"]
+                tgt_type = valid_nodes[e_tgt]["type"]
+
+                # Check the global registry, not hardcoded strings
+                if self.registry:
+                    rel_bp = self.registry.get_relation_blueprint(e_type)
+                    
+                    if not rel_bp or not rel_bp.allows(src_type, tgt_type):
+                        # Dynamic Healer: Find ANY valid relation for these two specific node types
+                        valid_fallback = None
+                        for potential_rel in self.registry.all_relations():
+                            if potential_rel.allows(src_type, tgt_type):
+                                valid_fallback = potential_rel.type_key
+                                break
+                        
+                        if valid_fallback:
+                            e_type = valid_fallback
+                        else:
+                            continue # Drop edge if ontology absolutely forbids connecting these two types
+
+                edge_data = {
+                    "id": e_id, 
+                    "type": e_type, 
+                    "source": e_src, 
+                    "target": e_tgt
+                }
+                edge_data.update(custom_props)
+                healed_edges.append(edge_data)
+
+        return json.dumps({
+            "entities": list(valid_nodes.values()),
+            "relations": healed_edges
+        })
 
 
 MasterWorkflowRunner = MasterActionRunner

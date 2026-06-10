@@ -15,6 +15,7 @@ from core.db.annotation_db import AnnotationDB
 from core.db.tag_db import TagDB
 from core.db.ai_db import AIDB
 from core.db.document_db import DocumentDB
+from core.db.graph_db import GraphDB
 from core.events.event_bus import EventBus
 from core.events.domains.document_events import DocumentEvent, DocumentEventPayload
 
@@ -44,6 +45,7 @@ class ProjectManager:
         self.db_tags = TagDB(self)
         self.db_ai = AIDB(self)
         self.db_docs = DocumentDB(self)
+        self.db_graph = GraphDB(self)
 
         self.db_docs.ensure_default_templates()
 
@@ -216,8 +218,10 @@ class ProjectManager:
             if self._conn:
                 try:
                     self._conn.execute("INSERT OR IGNORE INTO pdfs (path) VALUES (?)", (pdf_path,))
+                    self.db_graph.ensure_source_entity(pdf_path, commit=False)
                     self._conn.commit()
                 except sqlite3.Error as e:
+                    self._conn.rollback()
                     print(f"Error adding PDF to DB: {e}")
             return True
         return False
@@ -240,6 +244,7 @@ class ProjectManager:
                 cursor.execute("DELETE FROM pdfs WHERE path = ?", (pdf_path,))
                 cursor.execute("DELETE FROM highlights WHERE doc_id = ?", (pdf_path,))
                 cursor.execute("DELETE FROM nodes WHERE pdf_path = ?", (pdf_path,))
+                self.db_graph.remove_source_entity(pdf_path, purge=False, commit=False)
                 self._conn.commit()
             except sqlite3.Error as e:
                 self._conn.rollback()
@@ -278,6 +283,7 @@ class ProjectManager:
                 cursor.execute("UPDATE highlights SET doc_id = ? WHERE doc_id = ?", (new_path, old_path))
                 cursor.execute("UPDATE nodes SET pdf_path = ? WHERE pdf_path = ?", (new_path, old_path))
                 cursor.execute("UPDATE doc_tags SET doc_id = ? WHERE doc_id = ?", (new_path, old_path))
+                self.db_graph.rename_source_entity(old_path, new_path, commit=False)
                 self._conn.commit()
             except sqlite3.Error as e:
                 self._conn.rollback()
@@ -407,6 +413,29 @@ class ProjectManager:
     def save_node_embedding_threadsafe(self, node_id, vector): return self.db_workspaces.save_node_embedding_threadsafe(node_id, vector)
     def save_node_embedding(self, node_id, vector): return self.db_workspaces.save_node_embedding(node_id, vector)
     def get_node_embeddings_batch(self, node_ids): return self.db_workspaces.get_node_embeddings_batch(node_ids)
+
+    # --- Global Graph ---
+    def upsert_entity(self, entity): return self.db_graph.upsert_entity(entity)
+    def get_entity(self, entity_id): return self.db_graph.get_entity(entity_id)
+    def get_entities_by_type(self, entity_type): return self.db_graph.get_entities_by_type(entity_type)
+    def get_unverified_entities(self, limit=None, entity_type=None, offset=0): return self.db_graph.get_unverified_entities(limit=limit, entity_type=entity_type, offset=offset)
+    def delete_entity(self, entity_id): return self.db_graph.delete_entity(entity_id)
+    def upsert_relation(self, relation): return self.db_graph.upsert_relation(relation)
+    def get_relation(self, relation_id): return self.db_graph.get_relation(relation_id)
+    def get_relations_for_entity(self, entity_id, as_source=True, as_target=True): return self.db_graph.get_relations_for_entity(entity_id, as_source, as_target)
+    def get_relations_by_trait(self, trait, registry=None): return self.db_graph.get_relations_by_trait(trait, registry)
+    def delete_relation(self, relation_id): return self.db_graph.delete_relation(relation_id)
+    def upsert_view(self, view): return self.db_graph.upsert_view(view)
+    def get_view(self, view_id): return self.db_graph.get_view(view_id)
+    def get_views(self): return self.db_graph.get_views()
+    def upsert_view_entity_meta(self, meta): return self.db_graph.upsert_view_entity_meta(meta)
+    def get_entities_for_view(self, view_id): return self.db_graph.get_entities_for_view(view_id)
+    def get_relations_for_view(self, view_id): return self.db_graph.get_relations_for_view(view_id)
+    def ensure_source_entity(self, pdf_path, properties=None): return self.db_graph.ensure_source_entity(pdf_path, properties)
+    def get_source_entity(self, source_id): return self.db_graph.get_source_entity(source_id)
+    def get_source_entity_by_path(self, pdf_path): return self.db_graph.get_source_entity_by_path(pdf_path)
+    def get_source_path(self, source_id): return self.db_graph.get_source_path(source_id)
+    def list_source_entities(self): return self.db_graph.list_source_entities(self.pdfs)
 
     # --- Annotations ---
     def upsert_highlight(self, highlight_data): return self.db_annotations.upsert_highlight(highlight_data)

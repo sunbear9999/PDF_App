@@ -26,6 +26,9 @@ class ElidedLabel(QLabel):
         painter.drawText(self.rect(), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, elided)
 
 class DocumentExplorer(QWidget):
+    SOURCE_ID_ROLE = Qt.ItemDataRole.UserRole
+    PATH_ROLE = Qt.ItemDataRole.UserRole + 1
+
     def __init__(self, main_window, parent=None):
         super().__init__(parent)
         self.main_window = main_window
@@ -67,7 +70,7 @@ class DocumentExplorer(QWidget):
         self.doc_list.itemClicked.connect(
             lambda item: self.bus.document_action_requested.emit(
                 DocumentIntent.OPEN,
-                DocumentPayload(path=item.data(Qt.ItemDataRole.UserRole))
+                DocumentPayload(source_id=item.data(self.SOURCE_ID_ROLE), path=item.data(self.PATH_ROLE))
             )
         )
         layout.addWidget(self.doc_list)
@@ -95,7 +98,16 @@ class DocumentExplorer(QWidget):
 
         selected_tag = self.doc_tag_filter.currentData()
 
-        for path in self.pm.pdfs:
+        sources = self.pm.list_source_entities() if hasattr(self.pm, "list_source_entities") else []
+        if not sources:
+            sources = [self._legacy_source(path) for path in self.pm.pdfs]
+
+        for source in sources:
+            if source.state.get("is_removed"):
+                continue
+            path = source.properties.get("path") or source.origin_id
+            if not path or path not in set(self.pm.pdfs):
+                continue
             doc_tags = self.pm.get_tags_for_doc(path)
             if selected_tag and selected_tag != "ALL_TAGS":
                 if selected_tag not in [t.get("name") for t in doc_tags]:
@@ -110,7 +122,7 @@ class DocumentExplorer(QWidget):
             w_layout.setContentsMargins(5, 2, 5, 2)
             w_layout.setSpacing(4)
 
-            lbl = ElidedLabel(os.path.basename(path))
+            lbl = ElidedLabel(source.properties.get("title") or os.path.basename(path))
             lbl.setStyleSheet("background: transparent;")
             lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             w_layout.addWidget(lbl, 1)
@@ -129,7 +141,8 @@ class DocumentExplorer(QWidget):
             w_layout.addWidget(tag_container, 0)
             item.setSizeHint(widget.sizeHint())
             self.doc_list.setItemWidget(item, widget)
-            item.setData(Qt.ItemDataRole.UserRole, path)
+            item.setData(self.SOURCE_ID_ROLE, source.id)
+            item.setData(self.PATH_ROLE, path)
 
         self.doc_list.blockSignals(False)
 
@@ -158,7 +171,7 @@ class DocumentExplorer(QWidget):
 
         # SINGLE MODE
         else:
-            doc_path = item_at_pos.data(Qt.ItemDataRole.UserRole)
+            doc_path = item_at_pos.data(self.PATH_ROLE)
             manage_tags_action = menu.addAction("🏷️ Manage Tags for This Document")
             menu.addSeparator()
             rename_action = menu.addAction("✏️ Rename PDF")
@@ -183,7 +196,7 @@ class DocumentExplorer(QWidget):
 
     def _mass_assign_tag(self, selected_items, tag_id):
         for item in selected_items:
-            self.pm.assign_tag_to_doc(item.data(Qt.ItemDataRole.UserRole), tag_id)
+            self.pm.assign_tag_to_doc(item.data(self.PATH_ROLE), tag_id)
         self.refresh_list()
 
     def _rename_pdf(self, old_path):
@@ -200,30 +213,66 @@ class DocumentExplorer(QWidget):
             return
 
         if self.pm.rename_pdf(old_path, new_path):
+            old_source = self.pm.get_source_entity_by_path(old_path) if hasattr(self.pm, "get_source_entity_by_path") else None
+            new_source = self.pm.get_source_entity_by_path(new_path) if hasattr(self.pm, "get_source_entity_by_path") else None
             # Shout to the Event Bus so Workspaces/Chromadb can update!
             self.bus.pdf_renamed.emit(
                 DocumentEvent.PDF_RENAMED,
-                DocumentEventPayload(old_path=old_path, new_path=new_path),
+                DocumentEventPayload(
+                    old_path=old_path,
+                    new_path=new_path,
+                    old_source_id=old_source.id if old_source else None,
+                    new_source_id=new_source.id if new_source else None,
+                ),
             )
 
             if self.main_window.current_file_path == old_path or self.main_window.current_file_path == new_path:
                 self.main_window.current_file_path = None
-                self.bus.document_action_requested.emit(DocumentIntent.OPEN, DocumentPayload(path=new_path))
+                self.bus.document_action_requested.emit(DocumentIntent.OPEN, DocumentPayload(path=new_path, source_id=new_source.id if new_source else None))
     def _on_item_clicked(self, item):
-        pdf_path = item.data(Qt.ItemDataRole.UserRole)
-        self.bus.document_action_requested.emit(DocumentIntent.OPEN, DocumentPayload(path=pdf_path))
+        self.bus.document_action_requested.emit(
+            DocumentIntent.OPEN,
+            DocumentPayload(source_id=item.data(self.SOURCE_ID_ROLE), path=item.data(self.PATH_ROLE)),
+        )
     def _remove_pdf(self, doc_path):
         reply = QMessageBox.question(self, "Remove PDF", f"Remove '{os.path.basename(doc_path)}' from the project?",
                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if reply != QMessageBox.StandardButton.Yes: return
 
         if self.pm.remove_pdf(doc_path):
+            source = self.pm.get_source_entity_by_path(doc_path) if hasattr(self.pm, "get_source_entity_by_path") else None
+            
             # Shout to the Event Bus
-            self.bus.pdf_removed.emit(DocumentEvent.PDF_REMOVED, DocumentEventPayload(path=doc_path))
+            self.bus.pdf_removed.emit(DocumentEvent.PDF_REMOVED, DocumentEventPayload(path=doc_path, source_id=source.id if source else None))
 
             if self.main_window.current_file_path == doc_path:
                 self.main_window.current_file_path = None
-                if hasattr(self.main_window.viewer, 'scene') and self.main_window.viewer.scene: self.main_window.viewer.scene.clear()
-                if hasattr(self.main_window.viewer, 'doc'): self.main_window.viewer.doc = None
+                
+                # --- FIX: Safely halt the background render thread BEFORE clearing the scene ---
+                viewer = getattr(self.main_window, 'viewer', None)
+                if viewer:
+                    if hasattr(viewer, 'worker') and viewer.worker and viewer.worker.isRunning():
+                        viewer.worker.stop()
+                        viewer.worker.wait()
+                        
+                    if hasattr(viewer, 'scene') and viewer.scene: 
+                        viewer.scene.clear()
+                    viewer.doc = None
+                # ------------------------------------------------------------------------------
+
                 if self.doc_list.count() > 0:
-                    self.bus.document_action_requested.emit(DocumentIntent.OPEN, DocumentPayload(path=self.doc_list.item(0).data(Qt.ItemDataRole.UserRole)))
+                    first = self.doc_list.item(0)
+                    self.bus.document_action_requested.emit(
+                        DocumentIntent.OPEN,
+                        DocumentPayload(source_id=first.data(self.SOURCE_ID_ROLE), path=first.data(self.PATH_ROLE)),
+                    )
+
+    def _legacy_source(self, path):
+        from core.models.ontology_model import EntityModel, EntityType
+        return EntityModel(
+            id=path,
+            entity_type=EntityType.SOURCE.value,
+            origin_id=path,
+            properties={"path": path, "title": os.path.basename(path)},
+            state={"is_verified": True, "ai_generated": False},
+        )

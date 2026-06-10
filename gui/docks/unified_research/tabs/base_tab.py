@@ -3,6 +3,8 @@ from PySide6.QtWidgets import QWidget
 from PySide6.QtCore import QTimer
 import json
 from core.engine.action_model import AIActionBlueprint
+from core.events.event_bus import EventBus
+from core.events.domains.workflow_events import WorkflowIntent, WorkflowPayload
 from gui.docks.unified_research.components.chat_streamer import ChatMessageWidget
 
 class BaseTab(QWidget):
@@ -213,12 +215,21 @@ class BaseTab(QWidget):
             except Exception as e:
                 initial_state["workspace_data"] = "{}"
 
-        if "selected_model" not in initial_state and hasattr(self, "model_combo"):
+        if "selected_model" not in initial_state and hasattr(self.main_window, "_get_active_ai_model"):
+            initial_state["selected_model"] = self.main_window._get_active_ai_model()
+        elif "selected_model" not in initial_state and hasattr(self, "model_combo"):
             initial_state["selected_model"] = self.model_combo.currentText()
         elif "selected_model" not in initial_state and hasattr(self, "combo_models"):
             initial_state["selected_model"] = self.combo_models.currentText()
 
-        self.main_window.execute_ai_blueprint(blueprint, initial_state)
+        EventBus.get_instance().workflow_action_requested.emit(
+            WorkflowIntent.RUN_BLUEPRINT,
+            WorkflowPayload(
+                blueprint=blueprint,
+                initial_state=initial_state,
+                target_id=self.target_id,
+            ),
+        )
 
     def _metadata_json(self, key, default):
         raw = self.project_manager.get_metadata(key, json.dumps(default))

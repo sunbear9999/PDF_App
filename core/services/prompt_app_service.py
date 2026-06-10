@@ -85,6 +85,23 @@ class PromptAppService(QObject):
             "steps": [usage.as_dict() for usage in step_prompts],
         }
 
+    def get_analysis_template_prompt_usage(self, templates: list) -> list:
+        usage = []
+        for template in templates or []:
+            if not isinstance(template, dict):
+                continue
+            usage.append({
+                "id": template.get("id", ""),
+                "title": template.get("title") or template.get("name") or "Unnamed Analysis Mode",
+                "prompts": [
+                    template.get("chunk_prompt_key") or "Graph Analysis Chunk System",
+                    template.get("master_prompt_key") or "Graph Analysis Master System",
+                ],
+                "node_types": list(template.get("node_types") or []),
+                "relation_types": list(template.get("relation_types") or []),
+            })
+        return usage
+
     def _extract_step_prompts(self, step) -> list:
         explicit = set()
         implicit = set()

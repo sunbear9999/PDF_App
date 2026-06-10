@@ -70,7 +70,8 @@ def get_semantic_similarity_matrix(node_ids, texts, llm_manager, project_manager
                     embeddings_dict[n_id] = emb
                     # Save the newly generated embedding back to the cache
                     if project_manager:
-                        project_manager.save_node_embedding(n_id, emb)
+                        saver = getattr(project_manager, "save_node_embedding_threadsafe", None) or project_manager.save_node_embedding
+                        saver(n_id, emb)
         except Exception as e:
             print(f"[System] Failed to generate embeddings for similarity: {e}")
 

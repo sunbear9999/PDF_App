@@ -20,7 +20,7 @@ def register_default_docks(dock_manager, window_ref):
     def make_notes(w):
         dock = QDockWidget("📝 Notes List", w)
         from gui.docks.notes_dock import NotesTab
-        dock.setWidget(NotesTab(None, w.viewer, w))
+        dock.setWidget(NotesTab(parent=None, main_window=w)) # <-- Fixed
         return dock
 
     def make_dict(w):

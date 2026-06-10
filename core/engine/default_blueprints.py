@@ -359,31 +359,87 @@ class DefaultBlueprints:
             ]
         )
 
+    # In core/engine/default_blueprints.py -> get_analysis_blueprint
     @staticmethod
-    def get_analysis_blueprint(pm, chunks: list) -> AIActionBlueprint:
+    def get_analysis_blueprint(pm, doc_path: str = "{target_doc}") -> AIActionBlueprint:
+        chunk_script = """
+import fitz # PyMuPDF
+doc = fitz.open(state.get('target_doc'))
+chunks = []
+current_text = ""
+for i, page in enumerate(doc):
+    current_text += page.get_text()
+    if (i + 1) % 4 == 0 or i == len(doc) - 1:
+        chunks.append({"page_range": f"{max(1, i-2)}-{i+1}", "text": current_text[:6000]})
+        current_text = ""
+result = chunks
+"""
+
+        # The fast token-saver: deterministically merge the array of chunks before the LLM final pass
+        master_prep_script = """
+import json
+analyses = state.get('final_analysis', [])
+master_dict = {}
+for j_data in analyses:
+    try:
+        parsed = json.loads(j_data) if isinstance(j_data, str) else j_data
+        items = parsed if isinstance(parsed, list) else [parsed]
+        for obj in items:
+            if not isinstance(obj, dict): continue
+            for key, val in obj.items():
+                if key not in master_dict: master_dict[key] = []
+                vals = val if isinstance(val, list) else [val]
+                for v in vals:
+                    if isinstance(v, dict):
+                        v_str = json.dumps(v, sort_keys=True)
+                        if not any(isinstance(ex, dict) and json.dumps(ex, sort_keys=True) == v_str for ex in master_dict[key]):
+                            master_dict[key].append(v)
+                    else:
+                        if v not in master_dict[key]: master_dict[key].append(v)
+    except: pass
+# Inject directly into state for the master prompt to read
+state['combined_text'] = json.dumps(master_dict)
+result = "Master prep complete"
+"""
+        
         sub_blueprint = AIActionBlueprint(name="Analyze Chunk", description="", steps=[
             ActionStep(
-                step_id="analyze_chunk", step_type="LLM_QUERY",
-                inputs={"query": "{prompt:Analyze Chunk Query}"},
-                prompt_key="Document Analyzer", llm_options={"json_mode": True, "num_predict": 2000},
+                step_id="map_tuple_query", step_type="LLM_QUERY",
+                inputs={"query": "{prompt:Graph Analysis Chunk System}"},
+                llm_options={"json_mode": True, "num_predict": 1500, "temperature": 0.1},
+                output_key="chunk_tuple_data",
+                ui_format="silent"
+            ),
+            ActionStep(
+                step_id="validate_chunk", step_type="GRAPH_VALIDATOR",
+                inputs={"tuple_data": "{chunk_tuple_data}"},
+                output_key="chunk_json",
                 ui_format="nested_outline", 
                 ui_target="analysis_tab", 
-                ui_title="Section: {item.page_range}",
-                output_key="chunk_json",
-                required_context=[] 
+                ui_title="Section: {item.page_range}"
             )
         ])
+        
         return AIActionBlueprint(name="Document Analysis", description="", steps=[
-            ActionStep(step_id="process_all_chunks", step_type="FOREACH", inputs={"list": chunks, "sub_blueprint": sub_blueprint}, output_key="final_analysis"),
+            ActionStep(step_id="chunk_document", step_type="PYTHON_SCRIPT", inputs={"script": chunk_script}, output_key="doc_chunks", ui_format="silent"),
+            ActionStep(step_id="process_all_chunks", step_type="FOREACH", inputs={"list": "{doc_chunks}", "sub_blueprint": sub_blueprint}, output_key="final_analysis"),
+            
+            # --- NEW AUTOMATED MASTER PASS ---
+            ActionStep(step_id="prep_master", step_type="PYTHON_SCRIPT", inputs={"script": master_prep_script}, output_key="master_prep", ui_format="silent"),
             ActionStep(
-                step_id="async_teardown_buffer", 
-                step_type="LLM_QUERY", 
-                inputs={"query": "{prompt:Async Teardown Buffer Query}"}, 
-                model="{selected_model}",
-                llm_options={"num_predict": 5},
-                ui_format="silent",
-                output_key="teardown_junk",
-                required_context=[]
+                step_id="master_merge_llm", step_type="LLM_QUERY",
+                inputs={"query": "{prompt:Graph Analysis Master System}"},
+                llm_options={"json_mode": True, "num_predict": 4000, "temperature": 0.1},
+                output_key="master_tuple_data",
+                ui_format="silent"
+            ),
+            ActionStep(
+                step_id="validate_master", step_type="GRAPH_VALIDATOR",
+                inputs={"tuple_data": "{master_tuple_data}"},
+                output_key="master_json",
+                ui_format="nested_outline",
+                ui_target="analysis_tab",
+                ui_title="Master Document Graph"
             )
         ])
 

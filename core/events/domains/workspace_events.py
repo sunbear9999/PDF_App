@@ -15,6 +15,7 @@ class WorkspaceIntent(Enum):
     EDGE_COLOR_REQUEST = auto()
     EDGE_WEIGHT_REQUEST = auto()
     EDGE_DELETE_REQUEST = auto()
+    EDGE_DETAILS_REQUEST = auto()
 
     NODE_TEXT_COMMITTED = auto()
     NODE_EDIT_START = auto()
@@ -24,6 +25,7 @@ class WorkspaceIntent(Enum):
     NODE_JUMP_REQUEST = auto()
     NODE_CITATION_COPY = auto()
     NODE_CONNECT_START = auto()
+    NODE_CHILDREN_TOGGLE = auto()
     NODE_COLOR_REQUEST = auto()
     NODE_FONT_REQUEST = auto()
     NODE_TAGS_MANAGE = auto()
@@ -43,6 +45,8 @@ class WorkspaceIntent(Enum):
     FILTERS_RESET = auto()
     VIEW_RECENTER = auto()
     DECLUTTER_TRIGGERED = auto()
+    CALCULATE_LAYOUT = auto()
+    IMPORT_GRAPH = auto()
 
 
 @dataclass
@@ -76,6 +80,7 @@ class WorkspaceEvent(Enum):
     RUN_AI_TOOL = auto()
     AI_GRAPH_GENERATED = auto()
     ACTIVE_MODEL_CHANGED = auto()
+    LAYOUT_READY = auto()
 
 
 @dataclass
@@ -93,12 +98,3 @@ class WorkspaceEventPayload(BasePayload):
     tool_id: Optional[str] = None
     result_text: Optional[str] = None
     model_name: Optional[str] = None
-
-
-class WorkflowIntent(Enum):
-    ANALYSIS_REFRESH_REQUESTED = auto()
-
-
-@dataclass
-class WorkflowPayload(BasePayload):
-    data: Dict[str, Any] = field(default_factory=dict)

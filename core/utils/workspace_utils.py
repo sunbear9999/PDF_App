@@ -59,6 +59,10 @@ def node_model_from_node(node, workspace_id: int) -> NodeModel:
         is_verified=int(getattr(node, 'is_verified', 0)),
         original_text=getattr(node, 'original_text', getattr(node, 'note', '')),
         node_type_id=getattr(node, 'node_type_id', ''),
+        entity_type=getattr(node, 'entity_type', ''),
+        source_id=getattr(node, 'source_id', None),
+        entity_properties=dict(getattr(node, 'entity_properties', {}) or {}),
+        entity_state=dict(getattr(node, 'entity_state', {}) or {}),
     )
 
 
@@ -70,4 +74,8 @@ def edge_model_from_edge(edge) -> EdgeModel:
         label=edge.label_text,
         color=edge.base_color.name(),
         weight=getattr(edge, 'weight', 0),
+        relation_type=getattr(edge, "relation_type", "relation.basic"),
+        evidence_ids=list(getattr(edge, "evidence_ids", []) or []),
+        relation_properties=dict(getattr(edge, "relation_properties", {}) or {}),
+        relation_state=dict(getattr(edge, "relation_state", {}) or {}),
     )

@@ -32,6 +32,8 @@ class TagDB(BaseDB):
             cursor.execute("SELECT id, name, color FROM tags ORDER BY name COLLATE NOCASE")
             return [{"id": row[0], "name": row[1], "color": row[2]} for row in cursor.fetchall()]
         except sqlite3.Error as e:
+            if self._is_thread_error(e):
+                return self._read_tags_threadsafe("SELECT id, name, color FROM tags ORDER BY name COLLATE NOCASE")
             print(f"Error reading tags: {e}")
             return []
 
@@ -87,6 +89,13 @@ class TagDB(BaseDB):
             )
             return [{"id": row[0], "name": row[1], "color": row[2]} for row in cursor.fetchall()]
         except sqlite3.Error as e:
+            if self._is_thread_error(e):
+                return self._read_tags_threadsafe(
+                    """SELECT t.id, t.name, t.color FROM tags t
+                    INNER JOIN doc_tags dt ON dt.tag_id = t.id WHERE dt.doc_id = ?
+                    ORDER BY t.name COLLATE NOCASE""",
+                    (doc_id,),
+                )
             print(f"Error reading tags for doc {doc_id}: {e}")
             return []
 
@@ -101,6 +110,13 @@ class TagDB(BaseDB):
             )
             return [{"id": row[0], "name": row[1], "color": row[2]} for row in cursor.fetchall()]
         except sqlite3.Error as e:
+            if self._is_thread_error(e):
+                return self._read_tags_threadsafe(
+                    """SELECT t.id, t.name, t.color FROM tags t
+                    INNER JOIN node_tags nt ON nt.tag_id = t.id WHERE nt.node_id = ?
+                    ORDER BY t.name COLLATE NOCASE""",
+                    (node_id,),
+                )
             print(f"Error reading tags for node {node_id}: {e}")
             return []
 
@@ -112,4 +128,23 @@ class TagDB(BaseDB):
             return [{"doc_id": row[0], "doc_name": os.path.basename(row[0]) if row[0] else "Unknown Document"} for row in cursor.fetchall()]
         except sqlite3.Error as e:
             print(f"Error reading documents for tag {tag_id}: {e}")
+            return []
+
+    def _is_thread_error(self, error):
+        return "created in a thread" in str(error)
+
+    def _read_tags_threadsafe(self, query, params=()):
+        db_path = getattr(self.manager, "project_filepath", None)
+        if not db_path:
+            return []
+        try:
+            conn = sqlite3.connect(db_path, timeout=10.0)
+            try:
+                cursor = conn.cursor()
+                cursor.execute(query, params)
+                return [{"id": row[0], "name": row[1], "color": row[2]} for row in cursor.fetchall()]
+            finally:
+                conn.close()
+        except sqlite3.Error as e:
+            print(f"Error reading tags with thread-safe connection: {e}")
             return []

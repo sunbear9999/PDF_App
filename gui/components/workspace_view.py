@@ -8,13 +8,12 @@ from PySide6.QtWidgets import (QGraphicsView, QGraphicsScene, QMessageBox,
                              QHBoxLayout, QComboBox, QPushButton, QDialog,
                              QWidget,
                              QColorDialog, QFileDialog, QCheckBox, QSlider,
-                             QSizePolicy,QApplication)
+                             QSizePolicy,QApplication, QFormLayout, QLineEdit,
+                             QDoubleSpinBox, QSpinBox, QDialogButtonBox)
 from PySide6.QtCore import QPointF, Qt, QRectF, QRunnable, QThreadPool, Slot, QTimer
 from PySide6.QtGui import QColor, QPen, QBrush, QFont, QPainter, QImage, QShortcut, QKeySequence
 
 from gui.components.workspace_items import Node, Edge
-from core.layout_engine import calculate_force_directed_layout
-from core.utils.text_utils import get_semantic_similarity_matrix
 from core.utils.workspace_utils import (
     edge_model_from_edge,
     node_model_from_node,
@@ -54,6 +53,7 @@ from core.services.workspace_services import (
     WorkspaceService,
     WorkspaceStateService,
 )
+from core.services.graph_analysis_service import GraphAnalysisService
 
 
 
@@ -74,6 +74,7 @@ class WorkspaceView(QGraphicsView):
         self.bus = EventBus.get_instance()
         self.workspace_actions = build_default_workspace_action_registry()
         self.workspace_node_types = getattr(self.main_window, "workspace_node_type_registry", None) or build_default_workspace_node_type_registry()
+        self.graph_analysis_service = GraphAnalysisService(getattr(self.main_window, "ontology_registry", None))
 
         self.nodes = {}
         self.edges = []
@@ -176,7 +177,7 @@ class WorkspaceView(QGraphicsView):
         self.btn_ai_tools.setMenu(self.ai_menu)
         row1_layout.addWidget(self.btn_ai_tools)
 
-        self.btn_add_main_idea = QPushButton("💡 Idea")
+        self.btn_add_main_idea = QPushButton("➕ Node")
         self.btn_add_main_idea.setStyleSheet(compact_btn_style)
         self.btn_add_main_idea.clicked.connect(self.add_custom_bubble)
         row1_layout.addWidget(self.btn_add_main_idea)
@@ -313,6 +314,7 @@ class WorkspaceView(QGraphicsView):
         self.bus.pdf_renamed.connect(self._handle_document_event)
         self.bus.pdf_removed.connect(self._handle_document_event)
         self.bus.project_loaded.connect(self._handle_project_event)
+        self.bus.workspace_changed.connect(self._handle_workspace_event)
         QTimer.singleShot(0, self._sync_workspace)
         self.workspace_actions = build_default_workspace_action_registry()
         self.bus.workspace_action_requested.connect(self.handle_incoming_intent)
@@ -327,6 +329,10 @@ class WorkspaceView(QGraphicsView):
         if event == ProjectEvent.LOADED:
             self._sync_workspace()
 
+    def _handle_workspace_event(self, event: WorkspaceEvent, payload: WorkspaceEventPayload):
+        if event == WorkspaceEvent.LAYOUT_READY:
+            self._apply_layout_positions((payload.changes or {}).get("positions", {}))
+
     def _handle_document_event(self, event: DocumentEvent, payload: DocumentEventPayload):
         if event == DocumentEvent.HIGHLIGHT_CREATED:
             self.handle_highlight_created(payload.highlight_data)
@@ -335,9 +341,9 @@ class WorkspaceView(QGraphicsView):
         elif event == DocumentEvent.HIGHLIGHT_DELETED:
             self.handle_highlight_deleted(payload.annot_id)
         elif event == DocumentEvent.PDF_RENAMED:
-            self._on_pdf_renamed(payload.old_path, payload.new_path)
+            self._on_pdf_renamed(payload.old_path, payload.new_path, payload.old_source_id, payload.new_source_id)
         elif event == DocumentEvent.PDF_REMOVED:
-            self._on_pdf_removed(payload.path)
+            self._on_pdf_removed(payload.path, payload.source_id)
 
     def _handle_workspace_state_event(self, event: WorkspaceEvent, payload: WorkspaceEventPayload):
         if event == WorkspaceEvent.STATE_RESTORED:
@@ -420,6 +426,11 @@ class WorkspaceView(QGraphicsView):
             edge = next((e for e in self.edges if e.edge_id == edge_id), None)
             if edge:
                 self._change_edge_weight(edge)
+        elif intent_name == WorkspaceIntent.EDGE_DETAILS_REQUEST:
+            edge_id = payload.get("edge_id")
+            edge = next((e for e in self.edges if e.edge_id == edge_id), None)
+            if edge:
+                self._show_edge_details(edge, payload.get("extra", {}))
         elif intent_name == WorkspaceIntent.UPDATE_HISTORY_BUTTONS:
             if hasattr(self, 'btn_undo'): self.btn_undo.setEnabled(payload.get("can_undo", False))
             if hasattr(self, 'btn_redo'): self.btn_redo.setEnabled(payload.get("can_redo", False))
@@ -443,9 +454,14 @@ class WorkspaceView(QGraphicsView):
         elif intent_name == WorkspaceIntent.NODE_EDIT_START:
             node = self.nodes.get(payload.get("node_id"))
             if node:
-                node.trigger_edit()
+                if (payload.get("extra") or {}).get("action") == "change_type":
+                    self._change_node_type(node)
+                else:
+                    node.trigger_edit()
         elif intent_name == WorkspaceIntent.NODE_TAGS_MANAGE:
             self._manage_tags_for_node_ids(payload.get("node_ids", []))
+        elif intent_name == WorkspaceIntent.NODE_CHILDREN_TOGGLE:
+            self._toggle_node_children(self.nodes.get(payload.get("node_id")))
         elif intent_name == WorkspaceIntent.EDGE_EDIT_START:
             edge_id = payload.get("edge_id")
             edge = next((e for e in self.edges if e.edge_id == edge_id), None)
@@ -476,14 +492,21 @@ class WorkspaceView(QGraphicsView):
                 node = self.nodes.get(node_id)
                 if node and hasattr(node, "refresh_tag_badges"):
                     node.refresh_tag_badges()
-    def _on_pdf_renamed(self, old_path, new_path):
+    def _on_pdf_renamed(self, old_path, new_path, old_source_id=None, new_source_id=None):
         for node in self.nodes.values():
-            if getattr(node, 'pdf_path', None) == old_path:
+            if getattr(node, 'pdf_path', None) == old_path or getattr(node, "source_id", None) == old_source_id:
                 node.pdf_path = new_path
+                if new_source_id:
+                    node.source_id = new_source_id
+                    node.entity_properties["source_id"] = new_source_id
+                node.entity_properties["pdf_path"] = new_path
         self._refresh_pdf_list()
 
-    def _on_pdf_removed(self, doc_path):
-        nodes_to_delete = [n for n in self.nodes.values() if getattr(n, 'pdf_path', None) == doc_path]
+    def _on_pdf_removed(self, doc_path, source_id=None):
+        nodes_to_delete = [
+            n for n in self.nodes.values()
+            if getattr(n, 'pdf_path', None) == doc_path or (source_id and getattr(n, "source_id", None) == source_id)
+        ]
         for node in nodes_to_delete:
             self.delete_node(node)
         self._refresh_pdf_list()
@@ -582,6 +605,8 @@ class WorkspaceView(QGraphicsView):
             self._change_font_size_for_node(item)
         elif intent == "node_verify_requested":
             self._toggle_node_verification(item)
+        elif intent == "node_children_toggle":
+            self._toggle_node_children(item)
         elif intent == "node_jump_requested":
             self._jump_to_node_source(item)
         elif intent == "node_resized":
@@ -598,12 +623,21 @@ class WorkspaceView(QGraphicsView):
             self._change_edge_weight(item)
 
     def _commit_node_text(self, node, new_text):
-        if not node or new_text == node.note:
+        if not node:
+            return
+        current_note = node.editable_note_text() if hasattr(node, "editable_note_text") else node.note
+        if new_text == current_note:
             return
         current_orig = getattr(node, "original_text", node.note)
         if current_orig == node.note:
             node.original_text = node.note
         node.note = new_text
+        if hasattr(node, "entity_properties"):
+            node.entity_properties["note_text"] = new_text
+            if not (hasattr(node, "is_source_backed_entity") and node.is_source_backed_entity()):
+                node.entity_properties["text"] = new_text
+            elif hasattr(node, "quote_text"):
+                node.entity_properties["text"] = node.quote_text()
         node.refresh_layout()
         self._mark_workspace_dirty(autosave=True)
         self._emit_node_updated(node.node_id, {"note": new_text})
@@ -618,11 +652,35 @@ class WorkspaceView(QGraphicsView):
         self._mark_workspace_dirty(autosave=True)
         self._emit_edge_updated(edge.edge_id, {"label": new_text})
 
+    def _show_edge_details(self, edge, details=None):
+        details = details or {}
+        relation_type = details.get("relation_type") or getattr(edge, "relation_type", "relation.basic")
+        evidence_ids = details.get("evidence_ids", getattr(edge, "evidence_ids", [])) or []
+        properties = details.get("properties", getattr(edge, "relation_properties", {})) or {}
+        state = details.get("state", getattr(edge, "relation_state", {})) or {}
+        body = [
+            f"Relation: {relation_type}",
+            f"Source: {edge.source_node.node_id}",
+            f"Target: {edge.dest_node.node_id}",
+        ]
+        if evidence_ids:
+            body.append("Evidence IDs:")
+            body.extend(f"  - {evidence_id}" for evidence_id in evidence_ids)
+        if properties:
+            body.append("Properties:")
+            body.append(json.dumps(properties, indent=2, sort_keys=True))
+        if state:
+            body.append("State:")
+            body.append(json.dumps(state, indent=2, sort_keys=True))
+        QMessageBox.information(self, "Connection Details", "\n".join(body))
+
     def _toggle_node_verification(self, node):
         if not node:
             return
         self.save_state_for_undo()
         node.is_verified = not node.is_verified
+        if hasattr(node, "entity_state"):
+            node.entity_state["is_verified"] = bool(node.is_verified)
         if hasattr(node, "refresh_verify_button"):
             node.refresh_verify_button()
         pm = self._pm()
@@ -631,6 +689,54 @@ class WorkspaceView(QGraphicsView):
         self._mark_workspace_dirty(autosave=True)
         self._emit_node_updated(node.node_id, {"is_verified": int(node.is_verified)})
         node.update()
+
+    def _toggle_node_children(self, node):
+        if not node:
+            return
+        child_ids = ((getattr(node, "entity_properties", {}) or {}).get("graph_children") or {}).get("child_ids", [])
+        if not child_ids:
+            QMessageBox.information(self, "No Child Nodes", "This node has no collapsible graph children yet.")
+            return
+        self.save_state_for_undo()
+        collapsed = not bool(node.entity_state.get("children_collapsed", False))
+        node.entity_state["children_collapsed"] = collapsed
+        if hasattr(node, "refresh_child_button"):
+            node.refresh_child_button()
+        node.refresh_layout()
+        self._apply_collapsed_child_visibility()
+        self._mark_workspace_dirty(autosave=True)
+        self._emit_node_updated(node.node_id, {"entity_state": dict(node.entity_state)})
+
+    def _refresh_graph_annotations(self):
+        if self._rendering_workspace:
+            return
+        facts = self.graph_analysis_service.analyze_workspace(self.serialize_workspace())
+        for node_id, node in self.nodes.items():
+            node_facts = facts.get(node_id)
+            if not node_facts:
+                continue
+            node.entity_properties["computed_metrics"] = dict(node_facts.metrics)
+            node.entity_properties["computed_metric_labels"] = dict(node_facts.metric_labels)
+            node.entity_properties["graph_children"] = {
+                "child_ids": list(node_facts.child_ids),
+                "counts": dict(node_facts.child_counts),
+            }
+            if hasattr(node, "refresh_child_button"):
+                node.refresh_child_button()
+            node.refresh_layout()
+        self._apply_collapsed_child_visibility()
+
+    def _apply_collapsed_child_visibility(self):
+        hidden_child_ids = set()
+        for node in self.nodes.values():
+            if not node.entity_state.get("children_collapsed"):
+                continue
+            graph_children = node.entity_properties.get("graph_children") or {}
+            hidden_child_ids.update(graph_children.get("child_ids", []))
+
+        for node_id, node in self.nodes.items():
+            node._hidden_by_collapsed_parent = node_id in hidden_child_ids
+        self._apply_filter()
 
     def _jump_to_node_source(self, node):
         if not node:
@@ -763,6 +869,11 @@ class WorkspaceView(QGraphicsView):
             node_type_id=node_model.node_type_id,
             node_type_registry=self.workspace_node_types,
             action_registry=self.workspace_actions,
+            ontology_registry=getattr(self.main_window, "ontology_registry", None),
+            entity_type=node_model.entity_type,
+            source_id=node_model.source_id,
+            entity_properties=node_model.entity_properties,
+            entity_state=node_model.entity_state,
         )
 
         if position is None:
@@ -794,6 +905,7 @@ class WorkspaceView(QGraphicsView):
         self.scene_obj.addItem(edge)
         self.edges.append(edge)
         self._emit_edge_added(edge_model_from_edge(edge))
+        self._refresh_graph_annotations()
         self._mark_workspace_dirty(autosave=True)
 
     def update_scene_bounds(self):
@@ -825,7 +937,9 @@ class WorkspaceView(QGraphicsView):
             checked_data = ["ALL"]
 
         self.filter_combo.blockSignals(True)
-        populate_pdf_filter_combo(self.filter_combo, self._pm().pdfs if self._pm() else [], checked_data)
+        pm = self._pm()
+        sources = pm.list_source_entities() if pm and hasattr(pm, "list_source_entities") else (pm.pdfs if pm else [])
+        populate_pdf_filter_combo(self.filter_combo, sources, checked_data)
         self.filter_combo.blockSignals(False)
 
     def _refresh_tag_list(self, forced_checked=None):
@@ -851,7 +965,8 @@ class WorkspaceView(QGraphicsView):
         self.filter_combo.addItem("All PDFs", "ALL", checked=True)
         pm = self._pm()
         if pm:
-            populate_pdf_filter_combo(self.filter_combo, pm.pdfs, ["ALL"])
+            sources = pm.list_source_entities() if hasattr(pm, "list_source_entities") else pm.pdfs
+            populate_pdf_filter_combo(self.filter_combo, sources, ["ALL"])
         self.filter_combo.blockSignals(False)
         self._apply_filter()
 
@@ -859,8 +974,17 @@ class WorkspaceView(QGraphicsView):
         checked = self.filter_combo.get_checked_items()
         pm = self._pm()
         if "ALL" in checked or not checked:
+            sources = pm.list_source_entities() if pm and hasattr(pm, "list_source_entities") else []
+            if sources:
+                return [os.path.basename(s.properties.get("path") or s.origin_id or "") for s in sources]
             return [os.path.basename(p) for p in pm.pdfs] if pm else []
-        return [os.path.basename(p) for p in checked if p != "ALL"]
+        names = []
+        for item in checked:
+            if item == "ALL":
+                continue
+            path = pm.get_source_path(item) if pm and hasattr(pm, "get_source_path") else item
+            names.append(os.path.basename(path or item))
+        return names
 
     def _apply_filter(self):
         checked_pdfs = self.filter_combo.get_checked_items()
@@ -874,9 +998,11 @@ class WorkspaceView(QGraphicsView):
             self.btn_clear_filter.setVisible(is_filtered)
 
         for node in self.nodes.values():
-            pdf_ok = True if show_all_pdfs else (node.pdf_path is None or node.pdf_path in checked_pdfs)
+            source_key = getattr(node, "source_id", None) or getattr(node, "pdf_path", None)
+            pdf_ok = True if show_all_pdfs else (source_key is None or source_key in checked_pdfs or getattr(node, "pdf_path", None) in checked_pdfs)
             tag_ok = True if show_all_tags else any(t in (node.get_tag_names() if hasattr(node, "get_tag_names") else []) for t in checked_tags)
-            node.setVisible(pdf_ok and tag_ok)
+            collapse_ok = not bool(getattr(node, "_hidden_by_collapsed_parent", False))
+            node.setVisible(pdf_ok and tag_ok and collapse_ok)
 
         for edge in self.edges:
             edge.setVisible(edge.source_node.isVisible() and edge.dest_node.isVisible())
@@ -894,17 +1020,6 @@ class WorkspaceView(QGraphicsView):
 
         self._similarity_signature = signature
         self.similarity_matrix = {}
-
-        if len(node_items) < 2: return
-
-        llm_manager = self._llm()
-        if not llm_manager or not llm_manager.ai_enabled: return
-
-        node_ids = [n.node_id for n in node_items]
-        texts_to_embed = [f"{n.quote} {n.note}".strip() for n in node_items]
-        pm = self._pm()
-
-        self.similarity_matrix = get_semantic_similarity_matrix(node_ids, texts_to_embed, llm_manager, pm)
 
     def update_ghost_connections(self):
         if self._updating_ghost_links: return
@@ -983,10 +1098,18 @@ class WorkspaceView(QGraphicsView):
             if {existing.source_node, existing.dest_node} == {src_node, tgt_node}: return
 
         self.save_state_for_undo()
-        edge = Edge(src_node, tgt_node, f"~{int(sim_score * 100)}% similar")
+        edge = Edge(
+            src_node,
+            tgt_node,
+            f"~{int(sim_score * 100)}% similar",
+            relation_type="relation.similar_to",
+            relation_properties={"similarity_score": sim_score},
+            relation_state={"origin": "workspace"},
+        )
         self.scene_obj.addItem(edge)
         self.edges.append(edge)
         self._emit_edge_added(edge_model_from_edge(edge))
+        self._refresh_graph_annotations()
         self._mark_workspace_dirty(autosave=True)
         self.update_ghost_connections()
 
@@ -1153,38 +1276,41 @@ class WorkspaceView(QGraphicsView):
         if not dialog.exec(): return
         use_ai, semantic_strength = dialog.get_settings()
 
-        llm_manager = None
-        if use_ai:
-            try:
-                temp_manager = self._llm()
-                if temp_manager and temp_manager.ai_enabled: llm_manager = temp_manager
-                else: QMessageBox.information(self, "AI Disabled", "Ollama is not running. Falling back to standard math declutter.")
-            except Exception: pass
-
-        similarity_matrix = {}
-        if llm_manager:
-            node_ids = [n.node_id for n in target_nodes]
-            texts_to_embed = [f"{n.quote} {n.note}".strip() for n in target_nodes]
-            similarity_matrix = get_semantic_similarity_matrix(node_ids, texts_to_embed, llm_manager, self._pm())
-
         nodes_info = {n.node_id: {'width': n.base_width, 'height': n.base_height} for n in target_nodes}
         edges_info = [(e.source_node.node_id, e.dest_node.node_id) for e in self.edges if e.source_node in target_nodes and e.dest_node in target_nodes]
         avg_x = sum(n.pos().x() + n.base_width / 2 for n in target_nodes) / len(target_nodes)
         avg_y = sum(n.pos().y() + n.base_height / 2 for n in target_nodes) / len(target_nodes)
+        node_ids = [n.node_id for n in target_nodes]
+        texts_to_embed = [f"{n.quote} {n.note}".strip() for n in target_nodes]
 
         self.save_state_for_undo()
-        new_positions = calculate_force_directed_layout(nodes_info, edges_info, avg_x, avg_y, similarity_matrix=similarity_matrix, semantic_strength=semantic_strength)
+        self.bus.workspace_action_requested.emit(
+            WorkspaceIntent.CALCULATE_LAYOUT,
+            WorkspacePayload(extra={
+                "node_ids": node_ids,
+                "texts": texts_to_embed,
+                "nodes_info": nodes_info,
+                "edges_info": edges_info,
+                "center_x": avg_x,
+                "center_y": avg_y,
+                "use_ai": use_ai,
+                "semantic_strength": semantic_strength,
+            }),
+        )
 
-        if new_positions:
-            for node in target_nodes:
-                if node.node_id in new_positions:
-                    pos = new_positions[node.node_id]
-                    node.setPos(pos['x'], pos['y'])
-            for edge in self.edges:
-                if edge.source_node in target_nodes and edge.dest_node in target_nodes:
-                    edge.update_position()
-            self._mark_workspace_dirty(autosave=True)
-            self.update_scene_bounds()
+    def _apply_layout_positions(self, new_positions):
+        if not new_positions:
+            return
+        affected_ids = set(new_positions)
+        for node_id, pos in new_positions.items():
+            node = self.nodes.get(node_id)
+            if node:
+                node.setPos(pos["x"], pos["y"])
+        for edge in self.edges:
+            if edge.source_node.node_id in affected_ids or edge.dest_node.node_id in affected_ids:
+                edge.update_position()
+        self._mark_workspace_dirty(autosave=True)
+        self.update_scene_bounds()
 
     def _export_workspace(self):
         selected_nodes = [n for n in self.scene_obj.selectedItems() if isinstance(n, Node)]
@@ -1292,6 +1418,11 @@ class WorkspaceView(QGraphicsView):
                 node_type_id=data.get("node_type_id"),
                 node_type_registry=self.workspace_node_types,
                 action_registry=self.workspace_actions,
+                ontology_registry=getattr(self.main_window, "ontology_registry", None),
+                entity_type=data.get("entity_type"),
+                source_id=data.get("source_id"),
+                entity_properties=data.get("entity_properties"),
+                entity_state=data.get("entity_state"),
             )
             node.setPos(data['x'] + offset, data['y'] + offset)
             self.scene_obj.addItem(node)
@@ -1303,7 +1434,18 @@ class WorkspaceView(QGraphicsView):
             src_id = id_mapping.get(edata['source_old_id'])
             tgt_id = id_mapping.get(edata['dest_old_id'])
             if src_id and tgt_id and src_id in self.nodes and tgt_id in self.nodes:
-                edge = Edge(self.nodes[src_id], self.nodes[tgt_id], edata['label'], str(uuid.uuid4()), edata['color'], edata['weight'])
+                edge = Edge(
+                    self.nodes[src_id],
+                    self.nodes[tgt_id],
+                    edata['label'],
+                    str(uuid.uuid4()),
+                    edata['color'],
+                    edata['weight'],
+                    relation_type=edata.get("relation_type", "relation.basic"),
+                    evidence_ids=edata.get("evidence_ids", []),
+                    relation_properties=edata.get("relation_properties", {}),
+                    relation_state=edata.get("relation_state", {}),
+                )
                 self.scene_obj.addItem(edge)
                 self.edges.append(edge)
 
@@ -1404,6 +1546,7 @@ class WorkspaceView(QGraphicsView):
             QTimer.singleShot(0, lambda: edge.setParentItem(None))
         self._mark_workspace_dirty(autosave=True)
         self._emit_edge_deleted(getattr(edge, "edge_id", ""))
+        self._refresh_graph_annotations()
 
     def delete_selected_nodes(self):
         nodes_to_delete = [item for item in list(self.scene_obj.selectedItems()) if isinstance(item, Node)]
@@ -1510,9 +1653,11 @@ class WorkspaceView(QGraphicsView):
             return
 
         if isinstance(item, Edge):
-            menu, edit_action, color_action, weight_action, del_action = build_edge_context_menu(self, self, item)
+            menu, details_action, edit_action, color_action, weight_action, del_action = build_edge_context_menu(self, self, item)
             action = menu.exec(event.globalPos())
-            if action == edit_action:
+            if action == details_action:
+                item.trigger_details()
+            elif action == edit_action:
                 item.trigger_edit()
             elif action == color_action:
                 item.trigger_color_change()
@@ -1669,25 +1814,127 @@ class WorkspaceView(QGraphicsView):
         self.connecting_node.setPen(QPen(QColor("#00ff00"), 3, Qt.PenStyle.DashLine))
 
     def finish_connection(self, target_node):
-        text, ok = QInputDialog.getText(self, "Connection Label", "Enter text for connection:")
-        if ok:
-            edge = Edge(self.connecting_node, target_node, text)
-            self.scene_obj.addItem(edge)
-            self.edges.append(edge)
-            self._emit_edge_added(edge_model_from_edge(edge))
-            self._mark_workspace_dirty(autosave=True)
+        relation = self._choose_relation_blueprint(self.connecting_node, target_node)
+        if not relation:
+            self._finish_connection_cleanup()
+            return
+        field_values = self._prompt_relation_fields(relation)
+        if field_values is None:
+            self._finish_connection_cleanup()
+            return
+        props = relation.build_default_properties(field_values)
+        label = props.get("label") or relation.display_name
+        edge = Edge(
+            self.connecting_node,
+            target_node,
+            label,
+            relation_type=relation.type_key,
+            relation_properties=props,
+            relation_state=relation.build_default_state({"origin": "workspace"}),
+        )
+        self.scene_obj.addItem(edge)
+        self.edges.append(edge)
+        self._emit_edge_added(edge_model_from_edge(edge))
+        self._mark_workspace_dirty(autosave=True)
 
+        self._finish_connection_cleanup()
+
+    def _finish_connection_cleanup(self):
+        if not self.connecting_node:
+            return
         self.connecting_node.setPen(QPen(QColor("#ffffff" if self.connecting_node.isSelected() else "#555555"), 4 if self.connecting_node.isSelected() else 2))
         self.connecting_node = None
 
+    def _choose_relation_blueprint(self, source_node, target_node):
+        registry = getattr(self.main_window, "ontology_registry", None)
+        if not registry:
+            return None
+        source_type = getattr(source_node, "entity_type", "entity.text")
+        target_type = getattr(target_node, "entity_type", "entity.text")
+        relations = [rel for rel in registry.all_relations() if rel.allows(source_type, target_type)]
+        relations = sorted(relations, key=lambda rel: (rel.type_key == "relation.basic", rel.display_name))
+        if not relations:
+            QMessageBox.warning(self, "No Valid Connection", f"No registered relation can connect {source_type} to {target_type}.")
+            return None
+        labels = [f"{rel.display_name} ({rel.type_key})" for rel in relations]
+        label, ok = QInputDialog.getItem(self, "Connection Type", "Choose relationship:", labels, 0, False)
+        if not ok:
+            return None
+        return relations[labels.index(label)]
+
+    def _prompt_relation_fields(self, relation):
+        fields = list(getattr(relation, "fields", []) or [])
+        if not fields:
+            return {}
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"{relation.display_name} Details")
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+        editors = {}
+        defaults = relation.build_default_properties()
+        for field in fields:
+            default = defaults.get(field.key, field.default)
+            if field.choices:
+                editor = QComboBox(dialog)
+                for choice in field.choices:
+                    editor.addItem(str(choice), choice)
+                index = max(0, editor.findText(str(default)))
+                editor.setCurrentIndex(index)
+            elif field.value_type in {"float", "number"}:
+                editor = QDoubleSpinBox(dialog)
+                editor.setDecimals(3)
+                editor.setRange(
+                    float(field.minimum if field.minimum is not None else -1_000_000),
+                    float(field.maximum if field.maximum is not None else 1_000_000),
+                )
+                editor.setSingleStep(0.05)
+                editor.setValue(float(default if default is not None else 0.0))
+            elif field.value_type in {"int", "integer"}:
+                editor = QSpinBox(dialog)
+                editor.setRange(
+                    int(field.minimum if field.minimum is not None else -1_000_000),
+                    int(field.maximum if field.maximum is not None else 1_000_000),
+                )
+                editor.setValue(int(default if default is not None else 0))
+            else:
+                editor = QLineEdit(dialog)
+                editor.setText("" if default is None else str(default))
+            editors[field.key] = editor
+            form.addRow(field.label, editor)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        values = {}
+        for key, editor in editors.items():
+            if isinstance(editor, QComboBox):
+                values[key] = editor.currentData()
+            elif isinstance(editor, QDoubleSpinBox):
+                values[key] = editor.value()
+            elif isinstance(editor, QSpinBox):
+                values[key] = editor.value()
+            else:
+                values[key] = editor.text()
+        return values
+
     def add_custom_bubble(self):
         self.save_state_for_undo()
+        blueprint = self._choose_entity_blueprint(require_source=False)
+        if not blueprint:
+            return None
         node_id = f"custom_{uuid.uuid4()}"
         node = Node(
             node_id, quote="", note="", color="#005577", is_custom=True, width=180, height=80,
             node_type_id="workspace.node.text",
             node_type_registry=self.workspace_node_types,
             action_registry=self.workspace_actions,
+            ontology_registry=getattr(self.main_window, "ontology_registry", None),
+            entity_type=blueprint.type_key,
+            entity_properties=blueprint.build_default_properties({"text": "", "note_text": ""}),
+            entity_state=blueprint.build_default_state({"is_verified": True, "ai_generated": False, "origin": "human"}),
         )
         node.setPos(self.mapToScene(self.viewport().rect().center()))
         self.scene_obj.addItem(node)
@@ -1701,6 +1948,47 @@ class WorkspaceView(QGraphicsView):
         node.refresh_layout()
         node.trigger_edit()
         self._queue_background_embedding(node)
+        return node
+
+    def _choose_entity_blueprint(self, require_source=False, current_type=None, suggested_types=None):
+        registry = getattr(self.main_window, "ontology_registry", None)
+        if not registry:
+            return None
+        blueprints = [
+            bp for bp in registry.all_entities()
+            if bp.type_key != "entity.source" and (require_source or not getattr(bp, "requires_source", False))
+        ]
+        suggested = set(suggested_types or [])
+        blueprints = sorted(blueprints, key=lambda bp: (0 if bp.type_key in suggested else 1, bp.display_name))
+        labels = [bp.display_name for bp in blueprints]
+        if not labels:
+            return None
+        current_index = next((i for i, bp in enumerate(blueprints) if bp.type_key == current_type), 0)
+        label, ok = QInputDialog.getItem(self, "Node Type", "Choose node type:", labels, current_index, False)
+        if not ok:
+            return None
+        return blueprints[labels.index(label)]
+
+    def _change_node_type(self, node):
+        if not node:
+            return
+        has_source = bool(getattr(node, "source_id", None) or getattr(node, "pdf_path", None) or getattr(node, "highlight_id", None) or getattr(node, "quote", None))
+        blueprint = self._choose_entity_blueprint(
+            require_source=has_source,
+            current_type=getattr(node, "entity_type", None),
+            suggested_types=(getattr(node, "entity_properties", {}) or {}).get("suggested_entity_types", []),
+        )
+        if not blueprint:
+            return
+        self.save_state_for_undo()
+        node.entity_type = blueprint.type_key
+        node.entity_properties = blueprint.build_default_properties(dict(getattr(node, "entity_properties", {}) or {}))
+        node.entity_state = blueprint.build_default_state(dict(getattr(node, "entity_state", {}) or {}))
+        node.node_type_id = "workspace.node.quote" if blueprint.type_key in {"entity.quote", "entity.evidence"} else "workspace.node.text"
+        node.refresh_layout()
+        self._refresh_graph_annotations()
+        self._mark_workspace_dirty(autosave=True)
+        self._emit_node_updated(node.node_id, {"entity_type": blueprint.type_key})
 
     def sync_with_project(self, workspace_model: WorkspaceModel, pdf_annotations, force_reload=False):
         selected_ids = [n_id for n_id, n in self.nodes.items() if n.isSelected()]
@@ -1735,6 +2023,11 @@ class WorkspaceView(QGraphicsView):
                     data.node_type_id,
                     self.workspace_node_types,
                     self.workspace_actions,
+                    getattr(self.main_window, "ontology_registry", None),
+                    data.entity_type,
+                    data.source_id,
+                    data.entity_properties,
+                    data.entity_state,
                 )
                 self.scene_obj.addItem(node)
                 self.nodes[data.id] = node
@@ -1761,7 +2054,18 @@ class WorkspaceView(QGraphicsView):
             for edge_data in workspace_model.edges:
                 if edge_data.source in self.nodes and edge_data.target in self.nodes:
                     src, tgt = self.nodes[edge_data.source], self.nodes[edge_data.target]
-                    edge = Edge(src, tgt, edge_data.label, edge_data.id, edge_data.color, edge_data.weight)
+                    edge = Edge(
+                        src,
+                        tgt,
+                        edge_data.label,
+                        edge_data.id,
+                        edge_data.color,
+                        edge_data.weight,
+                        relation_type=edge_data.relation_type,
+                        evidence_ids=edge_data.evidence_ids,
+                        relation_properties=edge_data.relation_properties,
+                        relation_state=edge_data.relation_state,
+                    )
                     self.scene_obj.addItem(edge)
                     self.edges.append(edge)
 
@@ -1770,6 +2074,7 @@ class WorkspaceView(QGraphicsView):
         finally:
             self._rendering_workspace = False
 
+        self._refresh_graph_annotations()
         self._refresh_pdf_list()
         self._refresh_tag_list()
         self._apply_filter()

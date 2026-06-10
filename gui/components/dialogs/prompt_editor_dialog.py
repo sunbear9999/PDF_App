@@ -61,7 +61,7 @@ class PromptEditorDialog(QDialog):
 
         # View Mode Switcher
         self.view_mode_combo = QComboBox()
-        self.view_mode_combo.addItems(["📂 View by Category", "🗺️ View by Blueprint Pipeline"])
+        self.view_mode_combo.addItems(["📂 View by Category", "🗺️ View by Blueprint Pipeline", "📊 View by Analysis Mode"])
         self.view_mode_combo.currentIndexChanged.connect(self._on_view_mode_changed)
         left_layout.addWidget(self.view_mode_combo)
 
@@ -201,8 +201,10 @@ class PromptEditorDialog(QDialog):
 
         if self.view_mode_combo.currentIndex() == 0:
             self._populate_category_tree()
-        else:
+        elif self.view_mode_combo.currentIndex() == 1:
             self._populate_blueprint_tree()
+        else:
+            self._populate_analysis_mode_tree()
 
         self.tree.blockSignals(False)
 
@@ -268,6 +270,27 @@ class PromptEditorDialog(QDialog):
                 prompt_node = QTreeWidgetItem(step_node, [f"⚡ {p_key} (Auto-Injected)"])
                 prompt_node.setData(0, Qt.ItemDataRole.UserRole, p_key)
                 prompt_node.setForeground(0, Qt.GlobalColor.yellow)
+    
+    def _populate_analysis_mode_tree(self):
+        project_manager = getattr(self.parent(), "project_manager", None)
+        templates = project_manager.get_analysis_templates() if project_manager and hasattr(project_manager, "get_analysis_templates") else []
+        usage_rows = self.prompt_service.get_analysis_template_prompt_usage(templates)
+        if not usage_rows:
+            empty = QTreeWidgetItem(self.tree, ["No analysis modes found"])
+            empty.setFlags(empty.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            return
+
+        for row in usage_rows:
+            mode_node = QTreeWidgetItem(self.tree, [f"📊 {row['title']}"])
+            mode_node.setFlags(mode_node.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            mode_node.setExpanded(True)
+            for prompt_key in row["prompts"]:
+                prompt_item = QTreeWidgetItem(mode_node, [prompt_key])
+                prompt_item.setData(0, Qt.ItemDataRole.UserRole, prompt_key)
+            detail = QTreeWidgetItem(mode_node, [f"Nodes: {', '.join(row['node_types']) or 'registry defaults'}"])
+            detail.setFlags(detail.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            detail = QTreeWidgetItem(mode_node, [f"Relations: {', '.join(row['relation_types']) or 'registry defaults'}"])
+            detail.setFlags(detail.flags() & ~Qt.ItemFlag.ItemIsSelectable)
 
     def _on_item_selected(self):
         selected = self.tree.selectedItems()

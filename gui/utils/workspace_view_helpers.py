@@ -77,7 +77,15 @@ def populate_pdf_filter_combo(filter_combo, pdfs, checked_data):
     filter_combo.clear()
     filter_combo.addItem("All PDFs", "ALL", checked=("ALL" in checked_data))
     for pdf in pdfs:
-        filter_combo.addItem(build_pdf_display_name(pdf), pdf, checked=(pdf in checked_data))
+        if hasattr(pdf, "properties"):
+            path = pdf.properties.get("path") or pdf.origin_id
+            label = pdf.properties.get("title") or build_pdf_display_name(path)
+            data = pdf.id
+        else:
+            path = pdf
+            label = build_pdf_display_name(path)
+            data = path
+        filter_combo.addItem(label, data, checked=(data in checked_data or path in checked_data))
 
 
 def populate_tag_filter_combo(tag_filter_combo, tags, checked_data):
@@ -124,6 +132,8 @@ def build_node_context_menu(view, parent_widget, node, selected_nodes, connect_s
 
 def build_edge_context_menu(view, parent_widget, edge):
     menu = QMenu(parent_widget)
+    details_action = menu.addAction("ⓘ Connection Details")
+    menu.addSeparator()
     edit_action = menu.addAction("✏️ Edit Connection Text")
     color_action = menu.addAction("🎨 Change Line Color")
     weight_action = menu.addAction("📏 Change Line Weight")
@@ -132,7 +142,7 @@ def build_edge_context_menu(view, parent_widget, edge):
     menu.addSeparator()
     menu.addMenu(build_ai_menu(view, menu))
 
-    return menu, edit_action, color_action, weight_action, del_action
+    return menu, details_action, edit_action, color_action, weight_action, del_action
 
 
 def build_canvas_context_menu(view, parent_widget):

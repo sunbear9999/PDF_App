@@ -1,5 +1,6 @@
-# core/db/schema.py
 import sqlite3
+import json
+import uuid
 from core.db.base_db import BaseDB
 
 class DatabaseSchema(BaseDB):
@@ -94,6 +95,9 @@ class DatabaseSchema(BaseDB):
                 doc_path TEXT, template_id TEXT, chunk_index INTEGER, json_data TEXT
             )''')
 
+            self._ensure_graph_tables(cursor)
+            self._migrate_legacy_workspace_to_graph(cursor)
+
             self.manager._conn.commit()
 
             # Tracking and Auditing migrations
@@ -124,6 +128,261 @@ class DatabaseSchema(BaseDB):
             
         except sqlite3.Error as e:
             print(f"Database initialization error: {e}")
+
+    def _ensure_graph_tables(self, cursor):
+        cursor.execute('''CREATE TABLE IF NOT EXISTS entities (
+            id TEXT PRIMARY KEY,
+            entity_type TEXT NOT NULL,
+            origin_id TEXT,
+            properties TEXT NOT NULL DEFAULT '{}',
+            state TEXT NOT NULL DEFAULT '{}',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS relations (
+            id TEXT PRIMARY KEY,
+            relation_type TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            evidence_ids TEXT NOT NULL DEFAULT '[]',
+            properties TEXT NOT NULL DEFAULT '{}',
+            state TEXT NOT NULL DEFAULT '{}',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(source_id) REFERENCES entities(id) ON DELETE CASCADE,
+            FOREIGN KEY(target_id) REFERENCES entities(id) ON DELETE CASCADE
+        )''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS views (
+            id TEXT PRIMARY KEY,
+            view_type TEXT NOT NULL DEFAULT 'view.graph',
+            name TEXT NOT NULL,
+            properties TEXT NOT NULL DEFAULT '{}',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS view_entity_meta (
+            view_id TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            x REAL DEFAULT 0,
+            y REAL DEFAULT 0,
+            color TEXT,
+            is_collapsed INTEGER DEFAULT 0,
+            properties TEXT NOT NULL DEFAULT '{}',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(view_id, entity_id),
+            FOREIGN KEY(view_id) REFERENCES views(id) ON DELETE CASCADE,
+            FOREIGN KEY(entity_id) REFERENCES entities(id) ON DELETE CASCADE
+        )''')
+        self._ensure_columns(cursor, "entities", {
+            "created_at": "DATETIME DEFAULT CURRENT_TIMESTAMP",
+            "updated_at": "DATETIME DEFAULT CURRENT_TIMESTAMP",
+        })
+        self._ensure_columns(cursor, "relations", {
+            "created_at": "DATETIME DEFAULT CURRENT_TIMESTAMP",
+            "updated_at": "DATETIME DEFAULT CURRENT_TIMESTAMP",
+        })
+        self._ensure_columns(cursor, "views", {
+            "created_at": "DATETIME DEFAULT CURRENT_TIMESTAMP",
+            "updated_at": "DATETIME DEFAULT CURRENT_TIMESTAMP",
+        })
+        self._ensure_columns(cursor, "view_entity_meta", {
+            "created_at": "DATETIME DEFAULT CURRENT_TIMESTAMP",
+            "updated_at": "DATETIME DEFAULT CURRENT_TIMESTAMP",
+        })
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_entities_origin ON entities(origin_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_relations_type ON relations(relation_type)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_relations_source ON relations(source_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_relations_target ON relations(target_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_view_entity_meta_view ON view_entity_meta(view_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_view_entity_meta_entity ON view_entity_meta(entity_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_entities_unverified ON entities(json_extract(state, '$.is_verified'))")
+
+    def _migrate_legacy_workspace_to_graph(self, cursor):
+        cursor.execute("INSERT OR IGNORE INTO views (id, view_type, name, properties) VALUES ('1', 'view.graph', 'Main Board', '{}')")
+
+        try:
+            cursor.execute("SELECT id, name FROM workspaces")
+            for workspace_id, name in cursor.fetchall():
+                cursor.execute(
+                    "INSERT OR IGNORE INTO views (id, view_type, name, properties) VALUES (?, 'view.graph', ?, ?)",
+                    (str(workspace_id), name or f"Board {workspace_id}", json.dumps({"legacy_workspace_id": workspace_id})),
+                )
+        except sqlite3.Error:
+            pass
+
+        try:
+            cursor.execute("SELECT path FROM pdfs")
+            for (pdf_path,) in cursor.fetchall():
+                source_id = self._source_entity_id(pdf_path)
+                cursor.execute(
+                    """INSERT OR IGNORE INTO entities (id, entity_type, origin_id, properties, state)
+                       VALUES (?, 'entity.source', ?, ?, ?)""",
+                    (
+                        source_id,
+                        pdf_path,
+                        json.dumps({"path": pdf_path, "title": pdf_path.split("/")[-1] if pdf_path else ""}),
+                        json.dumps({"is_verified": True, "ai_generated": False, "origin": "human"}),
+                    ),
+                )
+        except sqlite3.Error:
+            pass
+
+        if not self._table_exists(cursor, "nodes"):
+            return
+
+        cursor.execute("PRAGMA table_info(nodes)")
+        node_cols = [col[1] for col in cursor.fetchall()]
+        select_cols = [
+            "id", "highlight_id", "workspace_id", "quote", "note_text", "color",
+            "is_custom", "pdf_path", "page_num", "manual_font_size", "x", "y",
+            "width", "height", "node_origin", "is_verified", "original_text",
+            "embedding_vector", "node_type_id",
+        ]
+        sql_select = ", ".join(col if col in node_cols else self._legacy_default_expr(col) for col in select_cols)
+        cursor.execute(f"SELECT {sql_select} FROM nodes")
+        for row in cursor.fetchall():
+            data = dict(zip(select_cols, row))
+            workspace_id = self._normalize_view_id(data.get("workspace_id"))
+            entity_type = self._legacy_entity_type(data)
+            quote = data.get("quote") or ""
+            note_text = data.get("note_text") or ""
+            source_backed = entity_type in {"entity.quote", "entity.evidence"}
+            properties = {
+                "quote": quote,
+                "exact_text": quote,
+                "text": quote if source_backed else note_text,
+                "note_text": "" if source_backed and note_text.strip() == quote.strip() else note_text,
+                "color": data.get("color"),
+                "is_custom": bool(data.get("is_custom")),
+                "pdf_path": data.get("pdf_path"),
+                "page_num": data.get("page_num"),
+                "highlight_id": data.get("highlight_id"),
+                "manual_font_size": data.get("manual_font_size"),
+                "original_text": data.get("original_text") or data.get("note_text") or "",
+                "embedding_vector": data.get("embedding_vector"),
+                "node_type_id": data.get("node_type_id") or "",
+            }
+            if data.get("pdf_path"):
+                properties["source_id"] = self._source_entity_id(data["pdf_path"])
+            state = {
+                "is_verified": bool(data.get("is_verified")),
+                "ai_generated": data.get("node_origin") == "ai",
+                "origin": data.get("node_origin") or "human",
+            }
+            origin_id = data.get("highlight_id") or data.get("pdf_path")
+            cursor.execute(
+                """INSERT OR IGNORE INTO entities (id, entity_type, origin_id, properties, state)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (data["id"], entity_type, origin_id, json.dumps(properties), json.dumps(state)),
+            )
+            cursor.execute(
+                """INSERT OR REPLACE INTO view_entity_meta
+                   (view_id, entity_id, x, y, color, is_collapsed, properties)
+                   VALUES (?, ?, ?, ?, ?, 0, ?)""",
+                (
+                    workspace_id,
+                    data["id"],
+                    data.get("x") or 0,
+                    data.get("y") or 0,
+                    data.get("color"),
+                    json.dumps({
+                        "width": data.get("width") or 150,
+                        "height": data.get("height") or 80,
+                        "legacy_workspace_id": workspace_id,
+                    }),
+                ),
+            )
+
+        if self._table_exists(cursor, "edges"):
+            cursor.execute("PRAGMA table_info(edges)")
+            edge_cols = [col[1] for col in cursor.fetchall()]
+            edge_select = ["edge_id", "source_id", "target_id", "label", "color", "weight", "workspace_id"]
+            sql_select = ", ".join(col if col in edge_cols else self._legacy_default_expr(col) for col in edge_select)
+            cursor.execute(f"SELECT {sql_select} FROM edges")
+            for row in cursor.fetchall():
+                edge = dict(zip(edge_select, row))
+                view_id = self._normalize_view_id(edge.get("workspace_id"))
+                props = {
+                    "label": edge.get("label") or "",
+                    "color": edge.get("color") or "#888888",
+                    "weight": edge.get("weight") if edge.get("weight") is not None else 2,
+                    "view_ids": [view_id],
+                    "legacy_workspace_id": view_id,
+                }
+                cursor.execute("SELECT 1 FROM entities WHERE id = ?", (edge.get("source_id"),))
+                if not cursor.fetchone():
+                    continue
+                cursor.execute("SELECT 1 FROM entities WHERE id = ?", (edge.get("target_id"),))
+                if not cursor.fetchone():
+                    continue
+                cursor.execute(
+                    """INSERT OR IGNORE INTO relations
+                       (id, relation_type, source_id, target_id, evidence_ids, properties, state)
+                       VALUES (?, 'relation.basic', ?, ?, '[]', ?, ?)""",
+                    (
+                        edge.get("edge_id"),
+                        edge.get("source_id"),
+                        edge.get("target_id"),
+                        json.dumps(props),
+                        json.dumps({"is_verified": True, "origin": "legacy"}),
+                    ),
+                )
+
+        cursor.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES ('graph_phase1_migrated', '1')")
+
+    def _table_exists(self, cursor, name):
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name = ?", (name,))
+        return cursor.fetchone() is not None
+
+    def _ensure_columns(self, cursor, table_name, columns):
+        cursor.execute(f"PRAGMA table_info({table_name})")
+        existing = {col[1] for col in cursor.fetchall()}
+        for col_name, col_type in columns.items():
+            if col_name not in existing:
+                try:
+                    cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type}")
+                except sqlite3.OperationalError:
+                    if "CURRENT_TIMESTAMP" in col_type:
+                        try:
+                            cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {col_name} DATETIME")
+                        except sqlite3.OperationalError:
+                            pass
+
+    def _legacy_default_expr(self, col):
+        defaults = {
+            "workspace_id": "1",
+            "is_custom": "0",
+            "manual_font_size": "NULL",
+            "x": "0",
+            "y": "0",
+            "width": "150",
+            "height": "80",
+            "node_origin": "'human'",
+            "is_verified": "0",
+            "embedding_vector": "NULL",
+            "node_type_id": "''",
+            "weight": "2",
+            "color": "'#888888'",
+        }
+        return f"{defaults.get(col, 'NULL')} AS {col}"
+
+    def _normalize_view_id(self, workspace_id):
+        if workspace_id is None or workspace_id == "default":
+            return "1"
+        return str(workspace_id)
+
+    def _source_entity_id(self, pdf_path):
+        return f"source:{uuid.uuid5(uuid.NAMESPACE_URL, pdf_path or '')}"
+
+    def _legacy_entity_type(self, data):
+        node_type_id = data.get("node_type_id") or ""
+        if node_type_id.startswith("entity."):
+            return node_type_id
+        if data.get("pdf_path") or data.get("highlight_id") or data.get("quote"):
+            return "entity.quote"
+        return "entity.text"
 
     def _ensure_nodes_table(self, cursor):
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='nodes'")

@@ -29,13 +29,11 @@ class AIBootstrapService(QObject):
             if not llm_manager or not getattr(llm_manager, 'ai_enabled', False): 
                 return
             
-            active_model = "gemma4:e2b" # Fallback default
-            
-            dock_manager = getattr(self.main_window, 'dock_manager', None)
-            if dock_manager:
-                research_docks = dock_manager.get_inner_widgets("research")
-                if research_docks and hasattr(research_docks[0], 'model_combo'):
-                    active_model = research_docks[0].model_combo.currentText()
+            active_model = (
+                self.main_window._get_active_ai_model()
+                if hasattr(self.main_window, "_get_active_ai_model")
+                else "gemma4:e2b"
+            )
                         
             self._preload_worker = PreloadWorker(llm_manager, active_model, self)
             self._preload_worker.finished.connect(self._preload_worker.deleteLater)
