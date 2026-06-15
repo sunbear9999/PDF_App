@@ -11,7 +11,6 @@ from core.events.domains.workspace_events import WorkspaceEvent, WorkspaceEventP
 from core.services.workspace_registries import build_default_workspace_node_type_registry, infer_workspace_node_type_id
 from core.models.ontology_model import EntityType
 from core.ontology.registry import OntologyRegistry
-from gui.ontology_ui.registry import OntologyUIRegistry
 
 def get_text_color_for_bg(bg_color):
     try:
@@ -76,16 +75,10 @@ class Edge(QGraphicsLineItem):
         self.relation_properties = dict(relation_properties or {})
         self.relation_state = dict(relation_state or {})
         self.bus = EventBus.get_instance()
-        self.ui_registry = OntologyUIRegistry()
-        self.ui_delegate = self.ui_registry.edge_delegate_for(self.relation_type)
-        if not self.label_text:
-            self.label_text = self.ui_delegate.default_label(self)
-            if self.label_text:
-                self.relation_properties.setdefault("label", self.label_text)
 
         self.setZValue(-1)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
-        self.setPen(self.ui_delegate.pen(self))
+        self.setPen(QPen(self.base_color, self.weight, Qt.PenStyle.SolidLine))
 
         self.text_item = EditableTextItem(self)
         self.text_item.setPlainText(self.label_text)
@@ -97,7 +90,7 @@ class Edge(QGraphicsLineItem):
         self.dest_node.add_edge(self)
         self.update_position()
 
-    def base_shape(self):
+    def shape(self):
         from PySide6.QtGui import QPainterPath, QPainterPathStroker
         path = QPainterPath()
         path.moveTo(self.line().p1())
@@ -111,35 +104,6 @@ class Edge(QGraphicsLineItem):
             text_rect = self.text_item.mapRectToParent(self.text_item.boundingRect())
             stroked_path.addRect(text_rect)
         return stroked_path
-
-    def shape(self):
-        return self.ui_delegate.shape(self)
-
-    def base_bounding_rect(self):
-        return super().boundingRect()
-
-    def boundingRect(self):
-        return self.ui_delegate.bounding_rect(self)
-
-    def paint_base_shell(self, painter, option, widget=None, pen=None):
-        painter.save()
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setPen(pen or self.pen())
-        painter.drawLine(self.line())
-        icon = self.ui_delegate.center_icon(self)
-        if icon:
-            center = self.line().center()
-            icon_rect = QRectF(center.x() - 10, center.y() - 10, 20, 20)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QBrush(QColor(0, 0, 0, 145)))
-            painter.drawEllipse(icon_rect)
-            painter.setPen(QPen(QColor("#ffffff")))
-            painter.setFont(QFont("Arial", 12, QFont.Weight.Bold))
-            painter.drawText(icon_rect, Qt.AlignmentFlag.AlignCenter, icon)
-        painter.restore()
-
-    def paint(self, painter, option, widget=None):
-        self.ui_delegate.paint(self, painter, option, widget)
 
     def update_position(self):
         start = self.source_node.mapToScene(self.source_node.rect().center())
@@ -164,20 +128,6 @@ class Edge(QGraphicsLineItem):
     def trigger_weight_change(self):
         self.bus.workspace_action_requested.emit(WorkspaceIntent.EDGE_WEIGHT_REQUEST, WorkspacePayload(edge_id=self.edge_id))
 
-    def trigger_type_change(self):
-        self.bus.workspace_action_requested.emit(WorkspaceIntent.EDGE_TYPE_REQUEST, WorkspacePayload(edge_id=self.edge_id))
-
-    def trigger_attributes_change(self):
-        self.bus.workspace_action_requested.emit(WorkspaceIntent.EDGE_ATTRIBUTES_REQUEST, WorkspacePayload(edge_id=self.edge_id))
-
-    def refresh_relation_delegate(self):
-        self.ui_delegate = self.ui_registry.edge_delegate_for(self.relation_type)
-        if not self.label_text:
-            self.label_text = self.ui_delegate.default_label(self)
-            self.text_item.setPlainText(self.label_text)
-        self.setPen(self.ui_delegate.pen(self))
-        self.update()
-
     def trigger_details(self):
         self.bus.workspace_action_requested.emit(
             WorkspaceIntent.EDGE_DETAILS_REQUEST,
@@ -200,7 +150,10 @@ class Edge(QGraphicsLineItem):
 
     def itemChange(self, change, value):
         if change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:
-            self.setPen(self.ui_delegate.pen(self))
+            if self.isSelected():
+                self.setPen(QPen(self.base_color, self.weight + 2, Qt.PenStyle.SolidLine))
+            else:
+                self.setPen(QPen(self.base_color, self.weight, Qt.PenStyle.SolidLine))
         return super().itemChange(change, value)
 
 class InPlaceTextItem(QGraphicsTextItem):
@@ -300,8 +253,6 @@ class Node(QGraphicsRectItem):
         self.action_registry = action_registry
         self.ontology_registry = ontology_registry or OntologyRegistry()
         self.entity_type = entity_type or self._infer_entity_type(node_type_id)
-        self.ui_registry = OntologyUIRegistry()
-        self.ui_delegate = self.ui_registry.node_delegate_for(self.entity_type)
         self.source_id = source_id
         self.entity_properties = dict(entity_properties or {})
         self.entity_state = dict(entity_state or {})
@@ -335,7 +286,7 @@ class Node(QGraphicsRectItem):
         self.metric_badges = []
 
         self.setBrush(QBrush(QColor(self.color)))
-        self.setPen(QPen(QColor(theme.get("border", "#555555")), 2))
+        self.setPen(QPen(QColor("#555555"), 2))
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges)
@@ -358,7 +309,7 @@ class Node(QGraphicsRectItem):
 
         t_layout = QHBoxLayout(self.toolbar_widget)
         t_layout.setContentsMargins(0, 0, 0, 0)
-        t_layout.setSpacing(6)
+        t_layout.setSpacing(4)
 
         self.toolbar_buttons = {}
         buttons = self._build_toolbar_buttons(t_layout)
@@ -391,7 +342,6 @@ class Node(QGraphicsRectItem):
             "node.connect": self.trigger_connect,
             "entity.connect": self.trigger_connect,
             "entity.toggle_children": self.trigger_toggle_children,
-            "entity.generate_counterargument": lambda checked=False: self.trigger_generic_action("entity.generate_counterargument"),
             "node.jump": self.trigger_jump,
             "entity.jump_source": self.trigger_jump,
             "node.copy_citation": self.trigger_copy_citation,
@@ -400,8 +350,6 @@ class Node(QGraphicsRectItem):
             "entity.verify": self.trigger_verify,
         }
         action_ids = self._resolve_action_ids()
-        action_ids.extend(action.action_id for action in self.ui_delegate.get_context_menu_actions(self))
-        action_ids = self._dedupe(action_ids)
         if not self.has_source_reference():
             action_ids = [action_id for action_id in action_ids if action_id not in {"node.jump", "node.copy_citation", "entity.jump_source", "entity.copy_citation"}]
 
@@ -445,11 +393,11 @@ class Node(QGraphicsRectItem):
                 self.btn_verify = btn
         if menu_ids:
             more_btn = QToolButton()
-            more_btn.setText("More")
+            more_btn.setText("⋯")
             more_btn.setToolTip("More actions")
             more_btn.setObjectName("NodeToolButton")
             more_btn.setAutoRaise(True)
-            more_btn.setFixedSize(54, 30)
+            more_btn.setFixedSize(30, 28)
             menu = QMenu(more_btn)
             for action_id in menu_ids:
                 action_def = self._get_action_definition(action_id)
@@ -464,8 +412,6 @@ class Node(QGraphicsRectItem):
             more_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
             layout.addWidget(more_btn)
             buttons.append(more_btn)
-        for widget in self.ui_delegate.get_custom_widgets(self):
-            layout.addWidget(widget)
         return buttons
 
     def _action_button_text(self, action_id, action_def):
@@ -487,10 +433,10 @@ class Node(QGraphicsRectItem):
 
     def _button_width(self, action_id):
         if action_id in {"entity.connect", "node.connect", "entity.jump_source", "node.jump", "entity.verify", "node.verify", "entity.toggle_children"}:
-            return 74
+            return 66
         if action_id in {"entity.change_type", "entity.edit", "node.edit"}:
-            return 64
-        return 58
+            return 56
+        return 44
 
     def _get_action_definition(self, action_id):
         try:
@@ -553,7 +499,7 @@ class Node(QGraphicsRectItem):
         return EntityType.TEXT.value
 
     def should_show_verify_action(self):
-        return bool(self.entity_state.get("ai_generated", False)) and not bool(self.entity_state.get("is_verified", self.is_verified))
+        return not bool(self.entity_state.get("is_verified", self.is_verified))
 
     def refresh_verify_button(self):
         if not hasattr(self, "btn_verify"):
@@ -563,12 +509,10 @@ class Node(QGraphicsRectItem):
             self.btn_verify.setText("✓")
             self.btn_verify.setToolTip("Verified")
             self.btn_verify.setStyleSheet(self._button_stylesheet(theme))
-            self.btn_verify.hide()
         else:
             self.btn_verify.setText("!")
             self.btn_verify.setToolTip("Verify entity")
             self.btn_verify.setStyleSheet(self._button_stylesheet(theme, alert=True))
-            self.btn_verify.show()
 
     def refresh_child_button(self):
         btn = self.toolbar_buttons.get("entity.toggle_children") if hasattr(self, "toolbar_buttons") else None
@@ -603,11 +547,11 @@ class Node(QGraphicsRectItem):
             """
         return f"""
             QPushButton#NodeToolButton {{
-                background-color: {theme['bg_input']};
+                background-color: {theme['bg_panel']};
                 color: {theme['text_main']};
-                border-radius: 7px;
+                border-radius: 5px;
                 padding: 0;
-                font-size: 12px;
+                font-size: 13px;
                 font-weight: 700;
                 border: 1px solid {theme['border']};
             }}
@@ -617,22 +561,17 @@ class Node(QGraphicsRectItem):
                 border-color: {theme['accent_hover']};
             }}
             QToolButton#NodeToolButton {{
-                background-color: {theme['bg_input']};
-                color: {theme['text_main']};
-                border-radius: 7px;
+                background-color: rgba(255, 255, 255, 34);
+                color: #ffffff;
+                border-radius: 6px;
                 padding: 0 6px;
-                font-size: 12px;
+                font-size: 11px;
                 font-weight: 700;
-                border: 1px solid {theme['border']};
+                border: 1px solid rgba(255, 255, 255, 86);
             }}
             QToolButton#NodeToolButton:hover {{
                 background-color: {theme['accent']};
-                color: #ffffff;
                 border-color: {theme['accent_hover']};
-            }}
-            QToolButton#NodeToolButton:pressed {{
-                background-color: {theme['accent_hover']};
-                color: #ffffff;
             }}
             QToolButton#NodeToolButton::menu-indicator {{ image: none; width: 0; }}
         """
@@ -641,8 +580,7 @@ class Node(QGraphicsRectItem):
         self.bus.workspace_action_requested.emit(WorkspaceIntent.NODE_VERIFY_TOGGLE, WorkspacePayload(node_id=self.node_id))
 
     def trigger_toggle_children(self):
-        if not self.ui_delegate.handle_action(self, "entity.toggle_children"):
-            self.bus.workspace_action_requested.emit(WorkspaceIntent.NODE_CHILDREN_TOGGLE, WorkspacePayload(node_id=self.node_id))
+        self.bus.workspace_action_requested.emit(WorkspaceIntent.NODE_CHILDREN_TOGGLE, WorkspacePayload(node_id=self.node_id))
 
     def has_collapsible_children(self):
         return bool((self.entity_properties.get("graph_children") or {}).get("child_ids"))
@@ -651,10 +589,7 @@ class Node(QGraphicsRectItem):
         return bool(self.source_id or self.pdf_path or self.highlight_id or (self.quote and not self.is_custom))
 
     def is_source_backed_entity(self):
-        try:
-            return bool(self.ontology_registry.get_entity_blueprint(self.entity_type).requires_source) or self.has_source_reference()
-        except Exception:
-            return self.has_source_reference()
+        return self.entity_type in {EntityType.QUOTE.value, EntityType.EVIDENCE.value} or self.has_source_reference()
 
     def quote_text(self):
         return (
@@ -913,32 +848,16 @@ class Node(QGraphicsRectItem):
                 WorkspaceEventPayload(node_id=self.node_id, changes={"x": self.pos().x(), "y": self.pos().y()}),
             )
         elif change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:
-            theme = ThemeManager().get_theme()
             if self.isSelected():
-                self.setPen(QPen(QColor(theme.get("text_main", "#ffffff")), 4))
+                self.setPen(QPen(QColor("#ffffff"), 4))
                 self.setZValue(150)
             else:
-                self.setPen(QPen(QColor(theme.get("border", "#555555")), 2))
+                self.setPen(QPen(QColor("#555555"), 2))
                 self.setZValue(1 if not self.is_hovered else 100)
         return super().itemChange(change, value)
 
-    def boundingRect(self):
-        return self.ui_delegate.bounding_rect(self)
-
     def paint(self, painter, option, widget=None):
-        self.ui_delegate.paint(self, painter, option, widget)
-
-    def paint_base_shell(self, painter, option, widget=None):
-        painter.save()
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setBrush(self.brush())
-        painter.setPen(self.pen())
-        painter.drawRoundedRect(self.rect(), 8, 8)
-        if self.is_hovered and not self.isSelected():
-            painter.setPen(QPen(QColor(255, 255, 255, 58), 1))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRoundedRect(self.rect().adjusted(2, 2, -2, -2), 7, 7)
-        painter.restore()
+        super().paint(painter, option, widget)
 
         if not self.quote and not self.note and not self.is_note_editing():
             painter.save()
@@ -1026,8 +945,6 @@ class Node(QGraphicsRectItem):
         self.bus.workspace_action_requested.emit(WorkspaceIntent.NODE_FONT_REQUEST, WorkspacePayload(node_id=self.node_id))
 
     def trigger_generic_action(self, action_id):
-        if self.ui_delegate.handle_action(self, action_id):
-            return
         self.bus.workspace_action_requested.emit(
             WorkspaceIntent.NODE_EDIT_START,
             WorkspacePayload(node_id=self.node_id, extra={"action": action_id}),
@@ -1047,7 +964,7 @@ class Node(QGraphicsRectItem):
 
         if blueprint:
             values = []
-            if self.is_source_backed_entity():
+            if self.entity_type in {EntityType.QUOTE.value, EntityType.EVIDENCE.value}:
                 note_text = self.editable_note_text()
                 quote_text = self.quote_text()
                 if note_text and note_text != quote_text:
@@ -1107,9 +1024,6 @@ class Node(QGraphicsRectItem):
         return str(value)
 
     def _collect_metric_badges(self):
-        return self.ui_delegate.get_metrics_display(self)
-
-    def collect_ontology_metric_badges(self):
         try:
             blueprint = self.ontology_registry.get_entity_blueprint(self.entity_type)
         except Exception:
