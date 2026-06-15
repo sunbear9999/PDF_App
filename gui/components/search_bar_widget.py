@@ -1,5 +1,5 @@
 # gui/components/search_bar_widget.py
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox, QSizePolicy
 
 class SearchBarWidget(QFrame):
     def __init__(self, parent=None):
@@ -9,7 +9,8 @@ class SearchBarWidget(QFrame):
         
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Find in document...")
-        self.search_input.setFixedWidth(200)
+        self.search_input.setMinimumWidth(80)
+        self.search_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         
         self.chk_match_case = QCheckBox("Match Case")
         
@@ -20,16 +21,22 @@ class SearchBarWidget(QFrame):
         
         self.scope_combo = QComboBox()
         self.scope_combo.addItems(["Current PDF", "Entire Project"])
+        self.scope_combo.setMinimumWidth(105)
         
         self.btn_close = QPushButton("✖")
         
-        layout.addWidget(self.search_input)
+        layout.addWidget(self.search_input, 1)
         layout.addWidget(self.chk_match_case)
         layout.addWidget(self.hit_label)
         layout.addWidget(self.btn_prev)
         layout.addWidget(self.btn_next)
         layout.addWidget(self.scope_combo)
         layout.addWidget(self.btn_close)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def set_compact_mode(self, compact: bool):
+        self.chk_match_case.setText("Case" if compact else "Match Case")
+        self.scope_combo.setMinimumWidth(82 if compact else 105)
 
     def update_theme(self, theme):
         self.setStyleSheet(f"""

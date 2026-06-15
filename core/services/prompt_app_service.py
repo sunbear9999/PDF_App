@@ -6,6 +6,15 @@ from core.events.event_bus import EventBus
 from core.models.prompt_models import BlueprintPromptUsage
 from core.events.domains.metadata_events import PromptIntent, PromptPayload
 class PromptAppService(QObject):
+    ANALYSIS_STATE_PROMPTS = {
+        "{analysis_chunk_system_prompt}": ["Graph Analysis Chunk Observations System"],
+        "{analysis_synthesis_system_prompt}": ["Graph Analysis Synthesis System"],
+        "{analysis_master_system_prompt}": ["Graph Analysis Master System", "Graph Analysis Compact Output Contract", "Graph Analysis Argument Chain Directive"],
+        "{analysis_chunk_query_prompt}": ["Graph Analysis Chunk Observations Query"],
+        "{analysis_synthesis_query_prompt}": ["Graph Analysis Synthesis Query"],
+        "{analysis_master_query_prompt}": ["Graph Analysis Master Query"],
+    }
+
     def __init__(self, prompt_manager, blueprint_manager=None, blueprint_registry=None, step_manager=None):
         super().__init__()
         self.pm = prompt_manager
@@ -90,17 +99,86 @@ class PromptAppService(QObject):
         for template in templates or []:
             if not isinstance(template, dict):
                 continue
+            rendered = self.render_analysis_template_prompts(template)
             usage.append({
                 "id": template.get("id", ""),
                 "title": template.get("title") or template.get("name") or "Unnamed Analysis Mode",
+                "blueprint": "DefaultBlueprints.get_analysis_blueprint",
                 "prompts": [
-                    template.get("chunk_prompt_key") or "Graph Analysis Chunk System",
+                    template.get("chunk_prompt_key") or "Graph Analysis Chunk Observations System",
+                    template.get("synthesis_prompt_key") or "Graph Analysis Synthesis System",
                     template.get("master_prompt_key") or "Graph Analysis Master System",
+                    template.get("chunk_query_prompt_key") or "Graph Analysis Chunk Observations Query",
+                    template.get("synthesis_query_prompt_key") or "Graph Analysis Synthesis Query",
+                    template.get("master_query_prompt_key") or "Graph Analysis Master Query",
+                    "Graph Analysis Compact Output Contract",
+                    "Graph Analysis Argument Chain Directive",
                 ],
+                "rendered": rendered,
                 "node_types": list(template.get("node_types") or []),
                 "relation_types": list(template.get("relation_types") or []),
             })
         return usage
+
+    def render_analysis_template_prompts(self, template: dict) -> list:
+        try:
+            from core.engine.analysis_runtime import AnalysisRuntime
+            runtime = AnalysisRuntime(None, self.pm, bus=object())
+            contract = runtime.build_contract(template)
+            contract["prompt_contract"] = runtime.build_prompt_contract(contract)
+            return [
+                {
+                    "title": "Step analysis_contract: chunk quote-selection system prompt",
+                    "content": runtime.chunk_system_prompt(template, contract),
+                },
+                {
+                    "title": "Step analyze_chunk_graph: quote-selection query template",
+                    "content": self._render_analysis_query_preview(runtime.chunk_query_prompt(template), chunk=True),
+                },
+                {
+                    "title": "Step analysis_contract: synthesis system prompt",
+                    "content": runtime.synthesis_system_prompt(template, contract),
+                },
+                {
+                    "title": "Step argument_synthesis_pass: synthesis query template",
+                    "content": self._render_analysis_query_preview(runtime.synthesis_query_prompt(template), chunk=False, synthesis=True),
+                },
+                {
+                    "title": "Step analysis_contract: final graph system prompt",
+                    "content": runtime.master_system_prompt(template, contract),
+                },
+                {
+                    "title": "Step master_diagram_pass: final graph query template",
+                    "content": self._render_analysis_query_preview(runtime.master_query_prompt(template), chunk=False),
+                },
+                {
+                    "title": "Registry contract injected as template_schema",
+                    "content": contract.get("prompt_contract", ""),
+                },
+            ]
+        except Exception as exc:
+            return [{
+                "title": "Prompt render failed",
+                "content": f"Could not render analysis prompts for this template: {exc}",
+            }]
+
+    def _render_analysis_query_preview(self, prompt: str, chunk: bool, synthesis: bool = False) -> str:
+        if chunk:
+            return (
+                str(prompt or "")
+                .replace("{item.page_range}", "[current chunk page range]")
+                .replace("{item.text}", "[current chunk PDF text]")
+                .replace("{item.template_instructions}", "[analysis mode instructions]")
+                .replace("{item.template_schema}", "[rendered registry contract]")
+                .replace("{analysis_limits.max_quotes_per_chunk}", "[template quote limit]")
+                .replace("{analysis_limits.quote_words}", "[template target quote words]")
+                .replace("{analysis_limits.max_quote_words}", "[template max quote words]")
+                .replace("{analysis_limits.explanation_words}", "[template explanation words]")
+            )
+        rendered = str(prompt or "").replace("{master_input}", "[numbered compact quote JSON from all sections]")
+        if synthesis:
+            return rendered
+        return rendered.replace("{argument_synthesis}", "[plain-text synthesis produced by argument_synthesis_pass]")
 
     def _extract_step_prompts(self, step) -> list:
         explicit = set()
@@ -120,6 +198,9 @@ class PromptAppService(QObject):
         for text in texts_to_scan:
             if text:
                 explicit.update(re.findall(r"\{prompt:(.*?)\}", text))
+                for state_token, prompt_keys in self.ANALYSIS_STATE_PROMPTS.items():
+                    if state_token in text:
+                        explicit.update(prompt_keys)
 
         if getattr(step, "step_type", "") == "LLM_QUERY":
             opts = getattr(step, "llm_options", {}) or {}

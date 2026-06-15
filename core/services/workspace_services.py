@@ -161,6 +161,10 @@ class WorkspaceAnnotationService:
         if not node:
             return
         source = None
+        quote = ""
+        if hasattr(node, "quote_text"):
+            quote = (node.quote_text() or "").strip()
+        quote = quote or (getattr(node, "quote", "") or "").strip()
         if not getattr(node, "pdf_path", None) or node.page_num is None:
             source = self.find_source_for_node(node)
             if source:
@@ -169,20 +173,27 @@ class WorkspaceAnnotationService:
                 if source.get("id") and not getattr(node, "highlight_id", None):
                     node.highlight_id = source.get("id")
 
-        if not getattr(node, "pdf_path", None) or node.page_num is None:
+        if not getattr(node, "pdf_path", None) and not quote:
             return
 
         main_win = self.main_window
         annot_id = getattr(node, "highlight_id", None) or getattr(node, "node_id", None)
         if source and source.get("id"):
             annot_id = source["id"]
-        if hasattr(main_win, "switch_to_pdf"):
-            main_win.switch_to_pdf(node.pdf_path)
-        if hasattr(main_win, "viewer"):
-            if hasattr(main_win.viewer, "jump_to_annotation"):
+        if getattr(node, "highlight_id", None) and getattr(node, "page_num", None) is not None:
+            if hasattr(main_win, "viewer") and hasattr(main_win.viewer, "jump_to_annotation"):
                 main_win.viewer.jump_to_annotation(node.page_num, annot_id)
-            else:
+                return
+            if hasattr(main_win, "viewer"):
                 main_win.viewer.jump_to_page(node.page_num)
+                return
+
+        if quote and hasattr(main_win, "viewer") and hasattr(main_win.viewer, "jump_to_source"):
+            doc_name = (
+                (getattr(node, "entity_properties", {}) or {}).get("doc_name")
+                or os.path.basename(getattr(node, "pdf_path", "") or "")
+            )
+            main_win.viewer.jump_to_source(doc_name, quote)
 
     def mirror_note_edit_to_notes(self, node):
         if not node or getattr(node, "is_custom", False) or getattr(node, "pdf_path", None) is None:

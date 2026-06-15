@@ -3,6 +3,8 @@ import sqlite3
 import json
 import os
 from core.db.base_db import BaseDB
+from core.models.ontology_model import RelationType
+from core.ontology.registry import OntologyRegistry, RelationTrait
 
 class DocumentDB(BaseDB):
     def get_metadata(self, key, default=None):
@@ -111,31 +113,42 @@ class DocumentDB(BaseDB):
                 "id": "default_argument_map",
                 "title": "Argument Map",
                 "instructions": (
-                    "Build an argument map for the document. In each chunk, identify explicit claims, "
-                    "the reasoning that connects those claims to evidence, and direct quotations that can "
-                    "serve as source-backed evidence. Preserve quote text exactly. During the final pass, "
-                    "deduplicate repeated claims and link recurring thesis/reasoning chains across chunks."
+                    "Build a concise argument map for the document. In each chunk, select short quotes that reveal "
+                    "the author's substantive claims, concrete data/evidence, causal support, important limitations, "
+                    "or counterpoints. Avoid methodology, framework, literature-review, or section-framing quotes "
+                    "unless they directly support the argument. During synthesis, infer one central thesis or "
+                    "overarching claim, then only a few broad support reasons. Treat smaller assertions, examples, "
+                    "and data points as evidence beneath those supports instead of promoting them into duplicate "
+                    "top-level claims. The final graph should be one readable evidence-backed hierarchy."
                 ),
                 "schema": json.dumps({
                     "graph_artifacts": "claims, reasoning nodes, exact quote evidence, and typed relations",
                     "workspace_goal": "quote -> reasoning -> claim chains that can be sent to a board",
                 }, indent=2),
                 "node_types": ["entity.claim", "entity.reasoning", "entity.quote"],
-                "relation_types": ["relation.supports", "relation.contradicts", "relation.reasons", "relation.derived_from"],
+                "relation_types": self._default_argument_relation_types(["entity.claim", "entity.reasoning", "entity.quote"]),
                 "allow_text_nodes": False,
-                "chunk_prompt_key": "Graph Analysis Chunk System",
+                "chunk_prompt_key": "Graph Analysis Chunk Observations System",
+                "synthesis_prompt_key": "Graph Analysis Synthesis System",
                 "master_prompt_key": "Graph Analysis Master System",
-                "analysis_template_version": 4,
+                "chunk_query_prompt_key": "Graph Analysis Chunk Observations Query",
+                "synthesis_query_prompt_key": "Graph Analysis Synthesis Query",
+                "master_query_prompt_key": "Graph Analysis Master Query",
+                "analysis_template_version": 12,
                 "limits": {
-                    "chunk_pages": 2,
-                    "max_chunk_chars": 6000,
-                    "max_master_chars": 10000,
-                    "num_ctx": 6144,
-                    "chunk_num_predict": 1200,
-                    "master_num_predict": 1400,
-                    "max_entities_per_chunk": 5,
-                    "max_relations_per_chunk": 9,
-                    "max_quotes_per_chunk": 3
+                    "chunk_pages": 4,
+                    "max_chunk_chars": 14000,
+                    "max_master_chars": 36000,
+                    "num_ctx": 24576,
+                    "chunk_num_predict": 1400,
+                    "synthesis_num_predict": 3500,
+                    "master_num_predict": 4000,
+                    "max_entities_per_chunk": 12,
+                    "max_relations_per_chunk": 16,
+                    "max_quotes_per_chunk": 5,
+                    "quote_words": 10,
+                    "max_quote_words": 18,
+                    "explanation_words": 10
                 },
             }
         ]
@@ -153,7 +166,7 @@ class DocumentDB(BaseDB):
             else:
                 existing = by_id[default["id"]]
                 if int(existing.get("analysis_template_version", 0) or 0) < int(default.get("analysis_template_version", 0) or 0):
-                    for key in ["instructions", "schema", "node_types", "relation_types", "allow_text_nodes", "chunk_prompt_key", "master_prompt_key", "limits", "analysis_template_version"]:
+                    for key in ["instructions", "schema", "node_types", "relation_types", "allow_text_nodes", "chunk_prompt_key", "synthesis_prompt_key", "master_prompt_key", "chunk_query_prompt_key", "synthesis_query_prompt_key", "master_query_prompt_key", "limits", "analysis_template_version"]:
                         existing[key] = default[key]
                     changed = True
                 for key, value in default.items():
@@ -175,19 +188,47 @@ class DocumentDB(BaseDB):
         default = self._default_analysis_templates()[0]
         template["id"] = template_id or "default_argument"
         template["title"] = template.get("title") or "Argument Map"
-        for key in ["node_types", "relation_types", "allow_text_nodes", "chunk_prompt_key", "master_prompt_key", "limits"]:
+        for key in ["node_types", "relation_types", "allow_text_nodes", "chunk_prompt_key", "synthesis_prompt_key", "master_prompt_key", "chunk_query_prompt_key", "synthesis_query_prompt_key", "master_query_prompt_key", "limits"]:
             template[key] = default[key]
         template["analysis_template_version"] = default["analysis_template_version"]
         if "graph_artifacts" not in str(template.get("schema", "")):
             template["schema"] = default["schema"]
 
+    def _default_argument_relation_types(self, node_types):
+        registry = OntologyRegistry()
+        preferred = [
+            RelationType.SUPPORTS.value,
+            RelationType.REASONS.value,
+            RelationType.REFUTES.value,
+            RelationType.CONTRADICTS.value,
+        ]
+        selected = [
+            rel_type for rel_type in preferred
+            if registry.get_relation_blueprint(rel_type)
+            and any(registry.validate_relation(rel_type, src, tgt) for src in node_types for tgt in node_types)
+        ]
+        if selected:
+            return selected
+        selected = []
+        argument_traits = {RelationTrait.EVIDENTIARY, RelationTrait.HIERARCHICAL, RelationTrait.SEMANTIC}
+        for bp in registry.all_relations():
+            traits = set(bp.traits or [])
+            if not traits.intersection(argument_traits):
+                continue
+            if not any(node_type in bp.valid_source_types for node_type in node_types):
+                continue
+            if not any(node_type in bp.valid_target_types for node_type in node_types):
+                continue
+            if any(registry.validate_relation(bp.type_key, src, tgt) for src in node_types for tgt in node_types):
+                selected.append(bp.type_key)
+        return selected
+
     def save_document_analysis(self, doc_path, template_id, chunk_index, json_data):
         if not self._conn: return
-        self._conn.execute(
+        self._execute_analysis_write(
             "INSERT INTO document_analyses (doc_path, template_id, chunk_index, json_data) VALUES (?, ?, ?, ?)",
-            (doc_path, template_id, chunk_index, json_data)
+            (doc_path, template_id, chunk_index, json_data),
         )
-        self._conn.commit()
 
     def get_document_analyses(self, doc_path, template_id):
         if not self._conn: return []
@@ -200,5 +241,24 @@ class DocumentDB(BaseDB):
     
     def clear_document_analyses(self, doc_path, template_id):
         if not self._conn: return
-        self._conn.execute("DELETE FROM document_analyses WHERE doc_path = ? AND template_id = ?", (doc_path, template_id))
-        self._conn.commit()
+        self._execute_analysis_write("DELETE FROM document_analyses WHERE doc_path = ? AND template_id = ?", (doc_path, template_id))
+
+    def _execute_analysis_write(self, sql, params):
+        try:
+            self._conn.execute(sql, params)
+            self._conn.commit()
+            return
+        except sqlite3.ProgrammingError as exc:
+            if "created in a thread" not in str(exc):
+                raise
+
+        db_path = getattr(self.manager, "project_filepath", None)
+        if not db_path:
+            raise
+        conn = sqlite3.connect(db_path, timeout=10.0)
+        try:
+            conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute(sql, params)
+            conn.commit()
+        finally:
+            conn.close()

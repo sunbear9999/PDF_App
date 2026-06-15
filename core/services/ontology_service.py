@@ -19,6 +19,7 @@ from core.models.ontology_model import (
     ViewPayload,
 )
 from core.ontology.registry import OntologyRegistry
+from core.events.domains.workspace_events import WorkspaceEvent, WorkspaceEventPayload
 
 
 class OntologyService(QObject):
@@ -98,6 +99,8 @@ class OntologyService(QObject):
         if payload.view_id:
             self.update_view_meta(entity.id, payload.view_id, data.get("view_meta", {}))
         self._emit_entity_changed(EntityIntent.ADD, entity)
+        if payload.view_id:
+            self._emit_workspace_changed(payload.view_id, {"entity_added": entity.id})
         return entity
 
     def update_entity_properties(self, entity_id: str, changes: dict) -> Optional[EntityModel]:
@@ -151,6 +154,7 @@ class OntologyService(QObject):
         )
         self.graph.upsert_view_entity_meta(meta)
         self.bus.view_changed.emit(EntityIntent.UPDATE_VIEW_META, EntityPayload(entity_id=entity_id, view_id=str(view_id), data=meta.to_dict()))
+        self._emit_workspace_changed(view_id, {"view_meta_updated": entity_id})
         return meta
 
     def remove_entity_from_view(self, entity_id: str, view_id: str):
@@ -190,6 +194,8 @@ class OntologyService(QObject):
         )
         self.graph.upsert_relation(relation)
         self._emit_relation_changed(RelationIntent.ADD, relation)
+        if payload.view_id:
+            self._emit_workspace_changed(payload.view_id, {"relation_added": relation.id})
         return relation
 
     def update_relation_properties(self, relation_id: str, changes: dict) -> Optional[RelationModel]:
@@ -282,3 +288,12 @@ class OntologyService(QObject):
             data=relation.to_dict(),
         )
         self.bus.relation_changed.emit(intent, payload)
+
+    def _emit_workspace_changed(self, view_id, summary: Optional[dict] = None):
+        try:
+            self.bus.workspace_changed.emit(
+                WorkspaceEvent.CHANGED,
+                WorkspaceEventPayload(workspace_id=int(view_id), summary=summary or {}),
+            )
+        except Exception:
+            pass

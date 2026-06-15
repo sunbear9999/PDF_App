@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from abc import ABC
+from typing import Any, Callable, Dict, Iterable, List, Optional, Type
 
 from core.models.ontology_model import EntityType, RelationType, ViewType
 
@@ -50,6 +51,235 @@ class ComputedMetricDefinition:
     label: str
     compute: Callable[[Any, Iterable[Any], Callable[[str], Optional[Any]]], Any]
 
+@dataclass(frozen=True)
+class VisualStyleDefinition:
+    color: str = "#888888"
+    line_style: str = "solid"
+    icon: str = ""
+    weight: int = 2
+
+class BaseOntologyNodePlugin(ABC):
+    type_key: str = EntityType.TEXT.value
+    display_name: str = "Text"
+    description: str = ""
+    default_properties: Dict[str, Any] = {}
+    default_state: Dict[str, Any] = {"is_verified": True, "ai_generated": False}
+    fields: List[FieldDefinition] = []
+    render_blocks: List[RenderBlockDefinition] = []
+    action_ids: List[str] = ["entity.edit", "entity.color", "entity.resize", "entity.change_type", "entity.connect"]
+    extraction_hints: Dict[str, Any] = {}
+    requires_source: bool = False
+    plugin_id: Optional[str] = None
+    prompt_keys: List[str] = []
+    on_created_intents: List[str] = []
+    on_updated_intents: List[str] = []
+    visual_style: VisualStyleDefinition = VisualStyleDefinition("#333333")
+
+    @classmethod
+    def data_schema(cls) -> Dict[str, Any]:
+        return {
+            "type": cls.type_key,
+            "properties": {field_def.key: field_def.value_type for field_def in cls.fields},
+            "required": [field_def.key for field_def in cls.fields if field_def.default is None],
+        }
+
+    @classmethod
+    def validate_properties(cls, properties: Dict[str, Any], prompt_manager=None) -> Dict[str, Any]:
+        merged = dict(cls.default_properties)
+        merged.update(properties or {})
+        return merged
+
+    @classmethod
+    def calculate_metrics(cls, entity, relations, get_entity: Callable[[str], Optional[Any]]) -> Dict[str, Any]:
+        return {}
+
+    @classmethod
+    def on_double_click(cls, entity, graph_context=None) -> List[ActionDefinition]:
+        return []
+
+    @classmethod
+    def on_connection(cls, entity, target_node, relation=None, graph_context=None) -> List[ActionDefinition]:
+        return []
+
+    @classmethod
+    def to_blueprint(cls) -> EntityBlueprint:
+        metric_defs = [
+            ComputedMetricDefinition(key, label, lambda entity, relations, get_entity, k=key: cls.calculate_metrics(entity, relations, get_entity).get(k))
+            for key, label in cls.metric_labels().items()
+        ]
+        return EntityBlueprint(
+            type_key=cls.type_key,
+            display_name=cls.display_name,
+            description=cls.description,
+            default_properties=dict(cls.default_properties),
+            default_state=dict(cls.default_state),
+            fields=list(cls.fields),
+            render_blocks=list(cls.render_blocks),
+            action_ids=list(cls.action_ids),
+            computed_metrics=metric_defs,
+            extraction_hints=dict(cls.extraction_hints),
+            requires_source=cls.requires_source,
+            plugin_id=cls.plugin_id,
+            on_created_intents=list(cls.on_created_intents),
+            on_updated_intents=list(cls.on_updated_intents),
+            visual_style=cls.visual_style,
+        )
+
+    @classmethod
+    def metric_labels(cls) -> Dict[str, str]:
+        return {}
+
+class BaseOntologyEdgePlugin(ABC):
+    type_key: str = RelationType.BASIC.value
+    display_name: str = "Connection"
+    description: str = ""
+    traits: List[RelationTrait] = []
+    valid_source_types: List[str] = ["*"]
+    valid_target_types: List[str] = ["*"]
+    default_properties: Dict[str, Any] = {}
+    default_state: Dict[str, Any] = {"is_verified": True}
+    fields: List[FieldDefinition] = []
+    plugin_id: Optional[str] = None
+    prompt_keys: List[str] = []
+    visual_style: VisualStyleDefinition = VisualStyleDefinition()
+
+    @classmethod
+    def data_schema(cls) -> Dict[str, Any]:
+        return {
+            "type": cls.type_key,
+            "properties": {field_def.key: field_def.value_type for field_def in cls.fields},
+        }
+
+    @classmethod
+    def validate_properties(cls, properties: Dict[str, Any], prompt_manager=None) -> Dict[str, Any]:
+        merged = dict(cls.default_properties)
+        merged.update(properties or {})
+        return merged
+
+    @classmethod
+    def calculate_metrics(cls, relation, graph_context=None) -> Dict[str, Any]:
+        strength = relation.properties.get("strength", relation.properties.get("confidence", 1.0))
+        try:
+            strength = max(0.0, min(1.0, float(strength)))
+        except Exception:
+            strength = 1.0
+        return {"support_weight": strength}
+
+    @classmethod
+    def on_connection(cls, source_node, target_node, graph_context=None) -> List[ActionDefinition]:
+        return []
+
+    @classmethod
+    def to_blueprint(cls) -> RelationBlueprint:
+        return RelationBlueprint(
+            type_key=cls.type_key,
+            display_name=cls.display_name,
+            description=cls.description,
+            traits=list(cls.traits),
+            valid_source_types=list(cls.valid_source_types),
+            valid_target_types=list(cls.valid_target_types),
+            default_properties=dict(cls.default_properties),
+            default_state=dict(cls.default_state),
+            fields=list(cls.fields),
+            plugin_id=cls.plugin_id,
+            visual_style=cls.visual_style,
+        )
+
+class EvidenceNodePlugin(BaseOntologyNodePlugin):
+    type_key = EntityType.EVIDENCE.value
+    display_name = "Evidence"
+    description = "A source-backed item that supports or refutes a claim."
+    default_properties = {"strength": 1.0, "status": "supports"}
+    fields = [
+        FieldDefinition("strength", "Strength", "float", 1.0, minimum=0.0, maximum=1.0),
+        FieldDefinition("status", "Status", "string", "supports", choices=["supports", "refutes", "mixed", "unclear"]),
+    ]
+    requires_source = True
+    prompt_keys = ["Ontology Evidence Extraction Schema"]
+    visual_style = VisualStyleDefinition("#2d6a4f")
+
+class ClaimNodePlugin(BaseOntologyNodePlugin):
+    type_key = EntityType.CLAIM.value
+    display_name = "Claim"
+    description = "An assertion whose confidence is calculated from connected evidence."
+    default_properties = {"confidence": 0.0, "claim_type": "factual"}
+    fields = [
+        FieldDefinition("confidence", "Confidence", "float", 0.0, minimum=0.0, maximum=1.0),
+        FieldDefinition("claim_type", "Claim Type", "string", "factual"),
+    ]
+    action_ids = ["entity.edit", "entity.color", "entity.resize", "entity.change_type", "entity.connect", "entity.toggle_children", "entity.generate_counterargument"]
+    render_blocks = [
+        RenderBlockDefinition("body", "text", "properties.text", "Text"),
+        RenderBlockDefinition("evidence_weight", "metric_badge", "metrics.evidence_weight", "Weight"),
+        RenderBlockDefinition("supporting", "metric_badge", "metrics.supporting_evidence_count", "For"),
+        RenderBlockDefinition("refuting", "metric_badge", "metrics.refuting_evidence_count", "Against"),
+        RenderBlockDefinition("confidence", "metric_badge", "metrics.computed_confidence", "Conf"),
+    ]
+    prompt_keys = ["Ontology Claim Extraction Schema", "Generate Counter Argument Query"]
+    visual_style = VisualStyleDefinition("#7f4f24")
+
+    @classmethod
+    def metric_labels(cls) -> Dict[str, str]:
+        return {
+            "evidence_weight": "Evidence Weight",
+            "supporting_evidence_count": "Supporting",
+            "refuting_evidence_count": "Refuting",
+            "unique_source_count": "Unique Sources",
+            "computed_confidence": "Calculated Score",
+        }
+
+    @classmethod
+    def calculate_metrics(cls, entity, relations, get_entity):
+        supporting = _claim_evidence_relations(entity, relations, get_entity, {RelationType.SUPPORTS.value})
+        refuting = _claim_evidence_relations(entity, relations, get_entity, {RelationType.REFUTES.value, RelationType.CONTRADICTS.value})
+        support_weight = sum(_relation_strength(rel, get_entity(rel.source_id)) for rel in supporting)
+        refute_weight = sum(_relation_strength(rel, get_entity(rel.source_id)) for rel in refuting)
+        return {
+            "supporting_evidence_count": len(supporting),
+            "refuting_evidence_count": len(refuting),
+            "unique_source_count": _claim_unique_source_count(entity, relations, get_entity),
+            "evidence_weight": round(support_weight - refute_weight, 2),
+            "computed_confidence": _claim_confidence(entity, relations, get_entity),
+        }
+
+class SupportsEdgePlugin(BaseOntologyEdgePlugin):
+    type_key = RelationType.SUPPORTS.value
+    display_name = "Supports"
+    description = "Positive evidentiary support."
+    traits = [RelationTrait.EVIDENTIARY]
+    valid_source_types = [EntityType.QUOTE.value, EntityType.EVIDENCE.value, EntityType.FINDING.value, EntityType.REASONING.value]
+    valid_target_types = [EntityType.CLAIM.value, EntityType.FINDING.value, EntityType.REASONING.value]
+    default_properties = {"strength": 1.0, "confidence": 1.0}
+    visual_style = VisualStyleDefinition("#00aa66", "solid", "+", 3)
+    fields = [
+        FieldDefinition("strength", "Strength", "float", 1.0, minimum=0.0, maximum=1.0),
+        FieldDefinition("confidence", "Confidence", "float", 1.0, minimum=0.0, maximum=1.0),
+    ]
+
+class RefutesEdgePlugin(SupportsEdgePlugin):
+    type_key = RelationType.REFUTES.value
+    display_name = "Refutes"
+    description = "Negative evidentiary support against a claim."
+    visual_style = VisualStyleDefinition("#d94848", "dash", "-", 3)
+
+class ContradictsEdgePlugin(RefutesEdgePlugin):
+    type_key = RelationType.CONTRADICTS.value
+    display_name = "Contradicts"
+    visual_style = VisualStyleDefinition("#e03131", "dashdot", "!", 3)
+
+class ImpliesEdgePlugin(BaseOntologyEdgePlugin):
+    type_key = RelationType.IMPLIES.value
+    display_name = "Implies"
+    description = "A claim-to-claim inferential implication."
+    traits = [RelationTrait.HIERARCHICAL, RelationTrait.SEMANTIC]
+    valid_source_types = [EntityType.CLAIM.value, EntityType.FINDING.value, EntityType.REASONING.value]
+    valid_target_types = [EntityType.CLAIM.value, EntityType.FINDING.value]
+    default_properties = {"confidence": 0.75, "reasoning_note": ""}
+    visual_style = VisualStyleDefinition("#4c6ef5", "solid", "→", 2)
+    fields = [
+        FieldDefinition("confidence", "Confidence", "float", 0.75, minimum=0.0, maximum=1.0),
+        FieldDefinition("reasoning_note", "Reasoning Note", "string", ""),
+    ]
 
 # --- Lifecycle ECS Blueprint ---
 @dataclass
@@ -66,6 +296,7 @@ class EntityBlueprint:
     extraction_hints: Dict[str, Any] = field(default_factory=dict)
     requires_source: bool = False
     plugin_id: Optional[str] = None
+    visual_style: VisualStyleDefinition = field(default_factory=lambda: VisualStyleDefinition("#333333"))
     
     # NEW: Automated Triggers
     on_created_intents: List[str] = field(default_factory=list)
@@ -100,6 +331,7 @@ class RelationBlueprint:
     fields: List[FieldDefinition] = field(default_factory=list)
     computed_effects: List[ComputedMetricDefinition] = field(default_factory=list)
     plugin_id: Optional[str] = None
+    visual_style: VisualStyleDefinition = field(default_factory=VisualStyleDefinition)
 
     def allows(self, source_type: str, target_type: str) -> bool:
         return _matches_type(source_type, self.valid_source_types) and _matches_type(target_type, self.valid_target_types)
@@ -135,14 +367,14 @@ def _matches_type(type_key: str, allowed: Iterable[str]) -> bool:
 
 # --- Module Level Metric Functions (Fixes NameError) ---
 def _claim_support_count(entity, relations, get_entity):
-    return len(_claim_evidence_relations(entity, relations, get_entity, {RelationType.SUPPORTS.value}))
+    return len(_inherited_evidence_relations(entity, relations, get_entity, {RelationType.SUPPORTS.value}))
 
 def _claim_contradiction_count(entity, relations, get_entity):
-    return len(_claim_evidence_relations(entity, relations, get_entity, {RelationType.CONTRADICTS.value}))
+    return len(_inherited_evidence_relations(entity, relations, get_entity, {RelationType.CONTRADICTS.value, RelationType.REFUTES.value}))
 
 def _claim_unique_source_count(entity, relations, get_entity):
     source_ids = set()
-    for rel in _claim_evidence_relations(entity, relations, get_entity, {RelationType.SUPPORTS.value, RelationType.CONTRADICTS.value}):
+    for rel in _inherited_evidence_relations(entity, relations, get_entity, {RelationType.SUPPORTS.value, RelationType.CONTRADICTS.value, RelationType.REFUTES.value}):
         evidence = get_entity(rel.source_id)
         if evidence and (sid := evidence.properties.get("source_id") or evidence.properties.get("pdf_path") or evidence.origin_id):
             source_ids.add(sid)
@@ -150,7 +382,7 @@ def _claim_unique_source_count(entity, relations, get_entity):
 
 def _claim_confidence(entity, relations, get_entity):
     support_scores, contradiction_scores, source_ids = [], [], set()
-    for rel in _claim_evidence_relations(entity, relations, get_entity, {RelationType.SUPPORTS.value, RelationType.CONTRADICTS.value}):
+    for rel in _inherited_evidence_relations(entity, relations, get_entity, {RelationType.SUPPORTS.value, RelationType.CONTRADICTS.value, RelationType.REFUTES.value}):
         evidence = get_entity(rel.source_id)
         rel_conf = float(rel.properties.get("confidence", rel.properties.get("strength", 1.0)) or 0.0)
         ev_strength = float(evidence.properties.get("strength", 1.0) or 0.0) if evidence else 1.0
@@ -176,23 +408,76 @@ def _claim_confidence(entity, relations, get_entity):
     contradiction_penalty = contradiction_strength * (0.55 + min(0.25, 0.05 * max(0, len(contradiction_scores) - 1)))
     return round(max(0.0, min(1.0, support_strength + source_bonus + volume_bonus - contradiction_penalty)), 3)
 
+def _inherited_support_count(entity, relations, get_entity):
+    return len(_inherited_evidence_relations(entity, relations, get_entity, {RelationType.SUPPORTS.value}))
+
+def _inherited_contradiction_count(entity, relations, get_entity):
+    return len(_inherited_evidence_relations(entity, relations, get_entity, {RelationType.CONTRADICTS.value, RelationType.REFUTES.value}))
+
+def _inherited_unique_source_count(entity, relations, get_entity):
+    source_ids = set()
+    for rel in _inherited_evidence_relations(entity, relations, get_entity, {RelationType.SUPPORTS.value, RelationType.CONTRADICTS.value, RelationType.REFUTES.value}):
+        evidence = get_entity(rel.source_id)
+        if evidence and (sid := evidence.properties.get("source_id") or evidence.properties.get("pdf_path") or evidence.origin_id):
+            source_ids.add(sid)
+    return len(source_ids)
+
 def _claim_evidence_relations(entity, relations, get_entity, relation_types):
-    """Return direct evidence plus evidence that supports/contradicts reasoning for a claim."""
-    direct = [rel for rel in relations if rel.target_id == entity.id and rel.relation_type in relation_types]
-    reasoning_link_types = set(relation_types)
-    if RelationType.SUPPORTS.value in relation_types:
-        reasoning_link_types.add(RelationType.REASONS.value)
-    reasoning_ids = {
-        rel.source_id
-        for rel in relations
-        if rel.target_id == entity.id and rel.relation_type in reasoning_link_types
-        if (reason := get_entity(rel.source_id)) and reason.entity_type == EntityType.REASONING.value
-    }
-    inherited = [
-        rel for rel in relations
-        if rel.target_id in reasoning_ids and rel.relation_type in relation_types
-    ]
-    return direct + inherited
+    return _inherited_evidence_relations(entity, relations, get_entity, relation_types)
+
+def _inherited_evidence_relations(entity, relations, get_entity, relation_types, max_depth=4):
+    """Return source-backed evidence flowing into an entity through evidentiary/hierarchical chains."""
+    registry = OntologyRegistry()
+    relation_types = set(relation_types or [])
+    evidence = {}
+
+    def is_source_backed(item):
+        if not item:
+            return False
+        try:
+            if registry.get_entity_blueprint(item.entity_type).requires_source:
+                return True
+        except Exception:
+            pass
+        props = getattr(item, "properties", {}) or {}
+        return bool(props.get("exact_text") or props.get("quote") or props.get("source_id") or props.get("pdf_path") or getattr(item, "origin_id", None))
+
+    def relation_traits(rel):
+        try:
+            return set(registry.get_relation_blueprint(rel.relation_type).traits or [])
+        except Exception:
+            return set()
+
+    def can_inherit_through(rel):
+        traits = relation_traits(rel)
+        return bool(traits.intersection({RelationTrait.HIERARCHICAL, RelationTrait.EVIDENTIARY, RelationTrait.SEMANTIC}))
+
+    def visit(target_id, depth, seen):
+        if depth > max_depth or target_id in seen:
+            return
+        seen = seen | {target_id}
+        for rel in relations:
+            if rel.target_id != target_id:
+                continue
+            source = get_entity(rel.source_id)
+            if not source:
+                continue
+            if rel.relation_type in relation_types and is_source_backed(source):
+                evidence.setdefault(source.id, rel)
+                continue
+            if can_inherit_through(rel):
+                visit(rel.source_id, depth + 1, seen)
+
+    visit(entity.id, 0, set())
+    return list(evidence.values())
+
+def _relation_strength(rel, evidence=None):
+    try:
+        rel_strength = float(rel.properties.get("strength", rel.properties.get("confidence", 1.0)) or 0.0)
+        evidence_strength = float((evidence.properties if evidence else {}).get("strength", 1.0) or 0.0)
+        return max(0.0, min(1.0, rel_strength * evidence_strength))
+    except Exception:
+        return 0.0
 
 def _source_cited_count(entity, relations, get_entity):
     return sum(1 for rel in relations if rel.source_id == entity.id and rel.relation_type == RelationType.REFERENCES.value)
@@ -217,11 +502,26 @@ class OntologyRegistry:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance.entities, cls._instance.relations, cls._instance.views, cls._instance.actions = {}, {}, {}, {}
+            cls._instance.node_plugins, cls._instance.edge_plugins = {}, {}
             cls._instance._register_core_ontology()
         return cls._instance
 
     def register_entity(self, blueprint: EntityBlueprint): self.entities[blueprint.type_key] = blueprint
     def register_relation(self, blueprint: RelationBlueprint): self.relations[blueprint.type_key] = blueprint
+    def register_node_plugin(self, plugin_cls: Type[BaseOntologyNodePlugin]):
+        self.node_plugins[plugin_cls.type_key] = plugin_cls
+        self.register_entity(plugin_cls.to_blueprint())
+
+    def register_edge_plugin(self, plugin_cls: Type[BaseOntologyEdgePlugin]):
+        self.edge_plugins[plugin_cls.type_key] = plugin_cls
+        self.register_relation(plugin_cls.to_blueprint())
+
+    def get_node_plugin(self, type_key: str) -> Type[BaseOntologyNodePlugin]:
+        return self.node_plugins.get(type_key) or self.node_plugins.get(EntityType.TEXT.value) or BaseOntologyNodePlugin
+
+    def get_edge_plugin(self, type_key: str) -> Type[BaseOntologyEdgePlugin]:
+        return self.edge_plugins.get(type_key) or self.edge_plugins.get(RelationType.BASIC.value) or BaseOntologyEdgePlugin
+
     def register_view(self, blueprint: ViewBlueprint): self.views[blueprint.type_key] = blueprint
     def register_action(self, action: ActionDefinition): self.actions[action.id] = action
 
@@ -239,6 +539,9 @@ class OntologyRegistry:
         return self.get_relation_blueprint(relation_type).allows(source_type, target_type)
 
     def compute_metrics(self, entity, relations, get_entity: Callable[[str], Optional[Any]]) -> Dict[str, Any]:
+        plugin_cls = self.node_plugins.get(entity.entity_type)
+        if plugin_cls:
+            return plugin_cls.calculate_metrics(entity, relations, get_entity)
         blueprint = self.get_entity_blueprint(entity.entity_type)
         return {metric.key: metric.compute(entity, relations, get_entity) for metric in blueprint.computed_metrics}
     
@@ -250,6 +553,7 @@ class OntologyRegistry:
             ActionDefinition("entity.change_type", "Type", "workspace.node.change_type", ["node"], "T", "Change node type"),
             ActionDefinition("entity.connect", "Connect", "workspace.node.connect", ["node"], "⛓", "Connect to another node"),
             ActionDefinition("entity.toggle_children", "Children", "workspace.node.toggle_children", ["node"], "▾", "Collapse or expand child nodes"),
+            ActionDefinition("entity.generate_counterargument", "Generate Counter-Argument", "ontology.blueprint.generate_counterargument", ["node"], "!", "Ask the AI workflow engine for a counter-argument"),
             ActionDefinition("entity.jump_source", "Source", "workspace.node.jump_source", ["node"], "↗", "Jump to source"),
             ActionDefinition("entity.copy_citation", "Cite", "workspace.node.copy_citation", ["node"], "C", "Copy citation"),
             ActionDefinition("entity.verify", "Verify", "workspace.node.verify", ["node"], "!", "Verify entity"),
@@ -263,20 +567,24 @@ class OntologyRegistry:
         ]
         common_actions = ["entity.edit", "entity.color", "entity.resize", "entity.change_type", "entity.connect"]
 
-        def entity(type_key, name, description, properties=None, fields=None, actions=None, metrics=None, hints=None, requires_source=False, on_created=None, render_blocks=None):
+        def entity(type_key, name, description, properties=None, fields=None, actions=None, metrics=None, hints=None, requires_source=False, on_created=None, render_blocks=None, style=None):
+            style = style or VisualStyleDefinition("#333333")
+            default_props = dict(properties or {})
+            default_props.setdefault("color", style.color)
             self.register_entity(EntityBlueprint(
                 type_key=type_key, display_name=name, description=description,
-                default_properties=properties or {}, fields=fields or [],
+                default_properties=default_props, fields=fields or [],
                 render_blocks=list(render_blocks or common_blocks), action_ids=actions or list(common_actions),
                 computed_metrics=metrics or [], extraction_hints=hints or {},
-                requires_source=requires_source, on_created_intents=on_created or []
+                requires_source=requires_source, on_created_intents=on_created or [],
+                visual_style=style,
             ))
 
-        entity(EntityType.TEXT.value, "Text", "A basic text node.", {"text": "", "title": ""})
-        entity(EntityType.QUOTE.value, "Quote", "An exact quotation.", {"exact_text": "", "page": None, "source_id": ""}, hints={"extractors": ["date", "person_org"]}, requires_source=True)
+        entity(EntityType.TEXT.value, "Text", "A basic text node.", {"text": "", "title": ""}, style=VisualStyleDefinition("#3b4252"))
+        entity(EntityType.QUOTE.value, "Quote", "An exact quotation.", {"exact_text": "", "page": None, "source_id": ""}, hints={"extractors": ["date", "person_org"]}, requires_source=True, style=VisualStyleDefinition("#2d6a4f"))
         
         entity(EntityType.EVIDENCE.value, "Evidence", "Supports or contradicts a claim.", {"strength": 1.0}, 
-            fields=[FieldDefinition("strength", "Strength", "float", 1.0, minimum=0.0, maximum=1.0)], requires_source=True)
+            fields=[FieldDefinition("strength", "Strength", "float", 1.0, minimum=0.0, maximum=1.0)], requires_source=True, style=VisualStyleDefinition("#2d6a4f"))
             
         claim_blocks = [
             RenderBlockDefinition("body", "text", "properties.text", "Text"),
@@ -295,10 +603,13 @@ class OntologyRegistry:
                 ComputedMetricDefinition("contradicting_evidence_count", "Contradicting", _claim_contradiction_count),
                 ComputedMetricDefinition("unique_source_count", "Unique Sources", _claim_unique_source_count),
                 ComputedMetricDefinition("computed_confidence", "Calculated Score", _claim_confidence)
-            ], actions=list(common_actions) + ["entity.toggle_children"], render_blocks=claim_blocks)
+            ], actions=list(common_actions) + ["entity.toggle_children"], render_blocks=claim_blocks, style=VisualStyleDefinition("#7f4f24"))
 
         reasoning_blocks = [
             RenderBlockDefinition("body", "text", "properties.text", "Reasoning"),
+            RenderBlockDefinition("supporting", "metric_badge", "metrics.supporting_evidence_count", "For"),
+            RenderBlockDefinition("contradicting", "metric_badge", "metrics.contradicting_evidence_count", "Against"),
+            RenderBlockDefinition("sources", "metric_badge", "metrics.unique_source_count", "Sources"),
             RenderBlockDefinition("role", "field_badge", "properties.reasoning_role", "Role"),
             RenderBlockDefinition("confidence", "field_badge", "properties.confidence", "Conf"),
             RenderBlockDefinition("verify", "verify_badge", "state.is_verified", "Verify"),
@@ -312,8 +623,14 @@ class OntologyRegistry:
                 FieldDefinition("reasoning_role", "Reasoning Role", "string", "premise", choices=["premise", "warrant", "assumption", "interpretation", "limitation"]),
                 FieldDefinition("confidence", "Confidence", "float", 0.75, minimum=0.0, maximum=1.0),
             ],
+            metrics=[
+                ComputedMetricDefinition("supporting_evidence_count", "Supporting", _inherited_support_count),
+                ComputedMetricDefinition("contradicting_evidence_count", "Contradicting", _inherited_contradiction_count),
+                ComputedMetricDefinition("unique_source_count", "Unique Sources", _inherited_unique_source_count),
+            ],
             actions=list(common_actions) + ["entity.toggle_children"],
             render_blocks=reasoning_blocks,
+            style=VisualStyleDefinition("#364fc7"),
         )
             
         entity(EntityType.QUESTION.value, "Question", "Open research question.", {"status": "open"}, 
@@ -355,11 +672,19 @@ class OntologyRegistry:
         entity(EntityType.METHOD.value, "Method", "Research methodology.", {"method_type": ""}, requires_source=True)
         entity(EntityType.DATA_TABLE.value, "Data/Table", "Structured data.", {"units": ""}, requires_source=True)
 
-        def relation(type_key, name, traits=None, sources=None, targets=None, props=None, fields=None):
+        def relation(type_key, name, traits=None, sources=None, targets=None, props=None, fields=None, style=None):
+            style = style or VisualStyleDefinition()
+            default_props = dict(props or {})
+            default_props.setdefault("label", name)
+            default_props.setdefault("color", style.color)
+            default_props.setdefault("line_style", style.line_style)
+            default_props.setdefault("icon", style.icon)
+            default_props.setdefault("weight", style.weight)
             self.register_relation(RelationBlueprint(
                 type_key=type_key, display_name=name, traits=traits or [],
                 valid_source_types=sources or ["*"], valid_target_types=targets or ["*"],
-                default_properties=props or {}, fields=fields or [],
+                default_properties=default_props, fields=fields or [],
+                visual_style=style,
             ))
 
         confidence_fields = [
@@ -371,22 +696,24 @@ class OntologyRegistry:
             FieldDefinition("citation_context", "Citation Context", "string", ""),
             FieldDefinition("confidence", "Confidence", "float", 1.0, minimum=0.0, maximum=1.0),
         ]
-        relation(RelationType.BASIC.value, "Connection", props={"label": "", "color": "#888"})
-        evidence_sources = [EntityType.QUOTE.value, EntityType.EVIDENCE.value, EntityType.CLAIM.value, EntityType.FINDING.value, EntityType.REASONING.value]
+        relation(RelationType.BASIC.value, "Connection", props={"label": "Connection"}, style=VisualStyleDefinition("#888888", "solid", "", 2))
+        evidence_sources = [EntityType.QUOTE.value, EntityType.EVIDENCE.value, EntityType.FINDING.value, EntityType.REASONING.value]
         argumentative_targets = [EntityType.CLAIM.value, EntityType.FINDING.value, EntityType.REASONING.value]
-        relation(RelationType.SUPPORTS.value, "Supports", [RelationTrait.EVIDENTIARY], evidence_sources, argumentative_targets, {"strength": 1.0, "confidence": 1.0}, confidence_fields)
-        relation(RelationType.CONTRADICTS.value, "Contradicts", [RelationTrait.EVIDENTIARY], evidence_sources, argumentative_targets, {"strength": 1.0, "confidence": 1.0}, confidence_fields)
-        relation(RelationType.REASONS.value, "Reasons For", [RelationTrait.HIERARCHICAL, RelationTrait.EVIDENTIARY], [EntityType.REASONING.value], [EntityType.CLAIM.value, EntityType.FINDING.value, EntityType.REASONING.value], {"confidence": 0.75, "reasoning_note": ""}, [FieldDefinition("confidence", "Confidence", "float", 0.75, minimum=0.0, maximum=1.0), FieldDefinition("reasoning_note", "Reasoning Note", "string", "")])
-        relation(RelationType.ANSWERS.value, "Answers", [RelationTrait.HIERARCHICAL], [EntityType.CLAIM.value, EntityType.FINDING.value, EntityType.QUOTE.value, EntityType.EVIDENCE.value], [EntityType.QUESTION.value], {"completeness": 1.0}, [FieldDefinition("completeness", "Completeness", "float", 1.0, minimum=0.0, maximum=1.0)])
-        relation(RelationType.FOLLOW_UP.value, "Follow-up", [RelationTrait.HIERARCHICAL], [EntityType.QUESTION.value], [EntityType.QUESTION.value], {"priority": "normal", "dependency": ""}, [FieldDefinition("priority", "Priority", "string", "normal", choices=["low", "normal", "high"]), FieldDefinition("dependency", "Dependency", "string", "")])
-        relation(RelationType.DERIVED_FROM.value, "Derived From", [RelationTrait.HIERARCHICAL, RelationTrait.EVIDENTIARY], [EntityType.CLAIM.value, EntityType.FINDING.value, EntityType.REASONING.value, EntityType.COUNTERARGUMENT.value, EntityType.TIMELINE_EVENT.value, EntityType.METHOD.value, EntityType.DATA_TABLE.value], [EntityType.QUOTE.value, EntityType.EVIDENCE.value, EntityType.SOURCE.value, EntityType.DATA_TABLE.value], {"reasoning_note": ""}, [FieldDefinition("reasoning_note", "Reasoning Note", "string", "")])
-        relation(RelationType.PART_OF.value, "Part Of", [RelationTrait.HIERARCHICAL], ["*"], ["*"], {"weight": 1.0})
-        relation(RelationType.REFERENCES.value, "References", [RelationTrait.CITATIONAL], [EntityType.QUOTE.value, EntityType.EVIDENCE.value, EntityType.CLAIM.value, EntityType.FINDING.value, EntityType.SOURCE.value, EntityType.PERSON_ORG.value], [EntityType.SOURCE.value, EntityType.QUOTE.value, EntityType.EVIDENCE.value, EntityType.PERSON_ORG.value], {"citation_context": ""}, citation_fields)
-        relation(RelationType.CAUSES.value, "Causes", [RelationTrait.CAUSAL], [EntityType.TIMELINE_EVENT.value, EntityType.CLAIM.value, EntityType.FINDING.value], [EntityType.TIMELINE_EVENT.value, EntityType.CLAIM.value, EntityType.FINDING.value], {"certainty": "unknown"}, [FieldDefinition("certainty", "Certainty", "string", "unknown", choices=["unknown", "weak", "moderate", "strong"])])
-        relation(RelationType.BEFORE_AFTER.value, "Before/After", [RelationTrait.TEMPORAL], [EntityType.TIMELINE_EVENT.value], [EntityType.TIMELINE_EVENT.value], {"date_certainty": "unknown", "order": "before"}, [FieldDefinition("order", "Order", "string", "before", choices=["before", "after"]), FieldDefinition("date_certainty", "Date Certainty", "string", "unknown", choices=["unknown", "approximate", "exact"])])
-        relation(RelationType.CRITIQUES.value, "Critiques", [RelationTrait.EVIDENTIARY], [EntityType.QUOTE.value, EntityType.EVIDENCE.value, EntityType.SOURCE.value, EntityType.CLAIM.value, EntityType.COUNTERARGUMENT.value], [EntityType.CLAIM.value, EntityType.FINDING.value, EntityType.METHOD.value, EntityType.SOURCE.value], {"severity": "medium"}, [FieldDefinition("severity", "Severity", "string", "medium", choices=["low", "medium", "high"]), FieldDefinition("confidence", "Confidence", "float", 1.0, minimum=0.0, maximum=1.0)])
-        relation(RelationType.SIMILAR_TO.value, "Similar To", [RelationTrait.SEMANTIC], ["*"], ["*"], {"similarity_score": 0.0}, [FieldDefinition("similarity_score", "Similarity", "float", 0.0, minimum=0.0, maximum=1.0)])
-        relation(RelationType.AUTHORED_BY.value, "Authored By", [RelationTrait.AUTHORSHIP], [EntityType.SOURCE.value, EntityType.QUOTE.value, EntityType.EVIDENCE.value], [EntityType.PERSON_ORG.value], {"role": "author"}, [FieldDefinition("role", "Role", "string", "author", choices=["author", "editor", "translator", "contributor"])])
+        relation(RelationType.SUPPORTS.value, "Supports", [RelationTrait.EVIDENTIARY], evidence_sources, argumentative_targets, {"strength": 1.0, "confidence": 1.0}, confidence_fields, VisualStyleDefinition("#00aa66", "solid", "+", 3))
+        relation(RelationType.REFUTES.value, "Refutes", [RelationTrait.EVIDENTIARY], evidence_sources, argumentative_targets, {"strength": 1.0, "confidence": 1.0}, confidence_fields, VisualStyleDefinition("#d94848", "dash", "-", 3))
+        relation(RelationType.CONTRADICTS.value, "Contradicts", [RelationTrait.EVIDENTIARY], evidence_sources, argumentative_targets, {"strength": 1.0, "confidence": 1.0}, confidence_fields, VisualStyleDefinition("#e03131", "dashdot", "!", 3))
+        relation(RelationType.IMPLIES.value, "Implies", [RelationTrait.HIERARCHICAL, RelationTrait.SEMANTIC], [EntityType.CLAIM.value, EntityType.FINDING.value, EntityType.REASONING.value], [EntityType.CLAIM.value, EntityType.FINDING.value], {"confidence": 0.75, "reasoning_note": ""}, [FieldDefinition("confidence", "Confidence", "float", 0.75, minimum=0.0, maximum=1.0), FieldDefinition("reasoning_note", "Reasoning Note", "string", "")], VisualStyleDefinition("#4c6ef5", "solid", "→", 2))
+        relation(RelationType.REASONS.value, "Reasons For", [RelationTrait.HIERARCHICAL, RelationTrait.EVIDENTIARY], [EntityType.REASONING.value], [EntityType.CLAIM.value, EntityType.FINDING.value, EntityType.REASONING.value], {"confidence": 0.75, "reasoning_note": ""}, [FieldDefinition("confidence", "Confidence", "float", 0.75, minimum=0.0, maximum=1.0), FieldDefinition("reasoning_note", "Reasoning Note", "string", "")], VisualStyleDefinition("#1971c2", "solid", "∴", 2))
+        relation(RelationType.ANSWERS.value, "Answers", [RelationTrait.HIERARCHICAL], [EntityType.CLAIM.value, EntityType.FINDING.value, EntityType.QUOTE.value, EntityType.EVIDENCE.value], [EntityType.QUESTION.value], {"completeness": 1.0}, [FieldDefinition("completeness", "Completeness", "float", 1.0, minimum=0.0, maximum=1.0)], VisualStyleDefinition("#099268", "solid", "✓", 2))
+        relation(RelationType.FOLLOW_UP.value, "Follow-up", [RelationTrait.HIERARCHICAL], [EntityType.QUESTION.value], [EntityType.QUESTION.value], {"priority": "normal", "dependency": ""}, [FieldDefinition("priority", "Priority", "string", "normal", choices=["low", "normal", "high"]), FieldDefinition("dependency", "Dependency", "string", "")], VisualStyleDefinition("#fab005", "dash", "?", 2))
+        relation(RelationType.DERIVED_FROM.value, "Derived From", [RelationTrait.HIERARCHICAL, RelationTrait.EVIDENTIARY], [EntityType.CLAIM.value, EntityType.FINDING.value, EntityType.REASONING.value, EntityType.COUNTERARGUMENT.value, EntityType.TIMELINE_EVENT.value, EntityType.METHOD.value, EntityType.DATA_TABLE.value], [EntityType.QUOTE.value, EntityType.EVIDENCE.value, EntityType.SOURCE.value, EntityType.DATA_TABLE.value], {"reasoning_note": ""}, [FieldDefinition("reasoning_note", "Reasoning Note", "string", "")], VisualStyleDefinition("#0b7285", "dot", "↩", 2))
+        relation(RelationType.PART_OF.value, "Part Of", [RelationTrait.HIERARCHICAL], ["*"], ["*"], {"weight": 1.0}, style=VisualStyleDefinition("#868e96", "dot", "⊂", 2))
+        relation(RelationType.REFERENCES.value, "References", [RelationTrait.CITATIONAL], [EntityType.QUOTE.value, EntityType.EVIDENCE.value, EntityType.CLAIM.value, EntityType.FINDING.value, EntityType.SOURCE.value, EntityType.PERSON_ORG.value], [EntityType.SOURCE.value, EntityType.QUOTE.value, EntityType.EVIDENCE.value, EntityType.PERSON_ORG.value], {"citation_context": ""}, citation_fields, VisualStyleDefinition("#6741d9", "dash", "↗", 2))
+        relation(RelationType.CAUSES.value, "Causes", [RelationTrait.CAUSAL], [EntityType.TIMELINE_EVENT.value, EntityType.CLAIM.value, EntityType.FINDING.value], [EntityType.TIMELINE_EVENT.value, EntityType.CLAIM.value, EntityType.FINDING.value], {"certainty": "unknown"}, [FieldDefinition("certainty", "Certainty", "string", "unknown", choices=["unknown", "weak", "moderate", "strong"])], VisualStyleDefinition("#e67700", "solid", "→", 2))
+        relation(RelationType.BEFORE_AFTER.value, "Before/After", [RelationTrait.TEMPORAL], [EntityType.TIMELINE_EVENT.value], [EntityType.TIMELINE_EVENT.value], {"date_certainty": "unknown", "order": "before"}, [FieldDefinition("order", "Order", "string", "before", choices=["before", "after"]), FieldDefinition("date_certainty", "Date Certainty", "string", "unknown", choices=["unknown", "approximate", "exact"])], VisualStyleDefinition("#5c940d", "dash", "⏱", 2))
+        relation(RelationType.CRITIQUES.value, "Critiques", [RelationTrait.EVIDENTIARY], [EntityType.QUOTE.value, EntityType.EVIDENCE.value, EntityType.SOURCE.value, EntityType.CLAIM.value, EntityType.COUNTERARGUMENT.value], [EntityType.CLAIM.value, EntityType.FINDING.value, EntityType.METHOD.value, EntityType.SOURCE.value], {"severity": "medium"}, [FieldDefinition("severity", "Severity", "string", "medium", choices=["low", "medium", "high"]), FieldDefinition("confidence", "Confidence", "float", 1.0, minimum=0.0, maximum=1.0)], VisualStyleDefinition("#c2255c", "dashdot", "!", 2))
+        relation(RelationType.SIMILAR_TO.value, "Similar To", [RelationTrait.SEMANTIC], ["*"], ["*"], {"similarity_score": 0.0}, [FieldDefinition("similarity_score", "Similarity", "float", 0.0, minimum=0.0, maximum=1.0)], VisualStyleDefinition("#12b886", "dot", "≈", 2))
+        relation(RelationType.AUTHORED_BY.value, "Authored By", [RelationTrait.AUTHORSHIP], [EntityType.SOURCE.value, EntityType.QUOTE.value, EntityType.EVIDENCE.value], [EntityType.PERSON_ORG.value], {"role": "author"}, [FieldDefinition("role", "Role", "string", "author", choices=["author", "editor", "translator", "contributor"])], VisualStyleDefinition("#7950f2", "solid", "✎", 2))
         relation(
             "relation.attributed_to",
             "Attributed To",
@@ -406,3 +733,8 @@ class OntologyRegistry:
         self.register_view(ViewBlueprint(ViewType.DATA.value, "Data View"))
         self.register_view(ViewBlueprint(ViewType.CITATION_NETWORK.value, "Citation Network", relation_traits=[RelationTrait.CITATIONAL]))
         self.register_view(ViewBlueprint(ViewType.TIMELINE.value, "Timeline View", relation_traits=[RelationTrait.TEMPORAL]))
+
+        for plugin_cls in [EvidenceNodePlugin, ClaimNodePlugin]:
+            self.register_node_plugin(plugin_cls)
+        for plugin_cls in [SupportsEdgePlugin, RefutesEdgePlugin, ContradictsEdgePlugin, ImpliesEdgePlugin]:
+            self.register_edge_plugin(plugin_cls)

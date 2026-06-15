@@ -4,6 +4,7 @@ from PySide6.QtCore import QByteArray, QSettings
 from PySide6.QtWidgets import QDockWidget
 
 class LayoutManager:
+    LAYOUT_VERSION = "dock-layout-v2"
     FACTORY_STATE = "AAAA/wAAAAD9AAAAAgAAAAAAAAQRAAAD+fwCAAAAAfwAAAApAAAD+QAAAREA/////AEAAAAD/AAAAAAAAADIAAAAnAD////8AgAAAAT7AAAAHgBEAG8AYwBFAHgAcABsAG8AcgBlAHIARABvAGMAawEAAAApAAADMAAAAKoA////+wAAABoAUwBjAHIAYQB0AGMAaABEAG8AYwBrAF8AMQEAAANfAAAAwwAAAGEA////+wAAABoAUwBjAHIAYQB0AGMAaABEAG8AYwBrAF8AMQEAAALfAAABQwAAAAAAAAAA+wAAABQAQwBoAGEAdABEAG8AYwBrAF8AMQEAAADgAAADWAAAAAAAAAAA/AAAAM4AAANDAAAB5AD////6AAAAAQIAAAAC+wAAABYARQBzAHMAYQB5AEQAbwBjAGsAXwAxAQAAAAD/////AAAAWAD////7AAAAGgBQAEQARgBWAGkAZQB3AGUAcgBEAG8AYwBrAQAAACkAAAQPAAAAXQD////8AAADSwAAAT0AAAAAAP////wCAAAAAfsAAAAeAFcAbwByAGsAcwBwAGEAYwBlAEQAbwBjAGsAXwAyAQAAAjIAAAIGAAAAAAAAAAAAAAABAAADYwAAA/n8AgAAAAj7AAAAFgBOAG8AdABlAHMARABvAGMAawBfADICAAAGEwAAABkAAAFkAAAD9vsAAAAeAFMAaQBuAGcAbABlAEEAdQBkAGkAbwBEAG8AYwBrAAAAAdQAAAJkAAAAAAAAAAD7AAAAGgBTAGMAcgBhAHQAYwBoAEQAbwBjAGsAXwAyAAAAA7MAAACFAAAAAAAAAAD7AAAAFgBOAG8AdABlAHMARABvAGMAawBfADEBAAAAKQAAAIcAAAAAAAAAAPsAAAAWAE4AbwB0AGUAcwBEAG8AYwBrAF8AMQAAAAApAAAEDwAAAAAAAAAA/AAAACkAAAP5AAABmAEAACH6AAAAAAEAAAAF+wAAAB4AVwBvAHIAawBzAHAAYQBjAGUARABvAGMAawBfADEBAAAAAP////8AAABKAP////sAAAAoAFMAaQBuAGcAbABlAEIAcgBhAGkAbgBzAHQAbwByAG0ARABvAGMAawEAAAAA/////wAAAikA////+wAAACoAUgBlAHMAZQBhAHIAYwBoAEEAcwBzAGkAcwB0AGEAbgB0AEQAbwBjAGsBAAAAAP////8AAAIoAP////sAAAAcAFMAaQBuAGcAbABlAEMAaABhAHQARABvAGMAawEAAAAA/////wAAAEoA////+wAAAB4AVwBvAHIAawBzAHAAYQBjAGUARABvAGMAawBfADEBAAAD8gAAA44AAAAAAAAAAPsAAAAaAFMAaQBuAGcAbABlAE8AQwBSAEQAbwBjAGsBAAADpQAAAJMAAAAAAAAAAPsAAAAoAFMAaQBuAGcAbABlAEQAaQBjAHQAaQBvAG4AYQByAHkARABvAGMAawAAAANdAAAA2wAAAAAAAAAAAAAAAAAAA/kAAAAEAAAABAAAAAgAAAAI/AAAAAEAAAACAAAAAQAAABYATQBhAGkAbgBUAG8AbwBsAGIAYQByAQAAAAD/////AAAAAAAAAAA="
 
     def __init__(self, main_window):
@@ -46,7 +47,11 @@ class LayoutManager:
             self.sync_dock_counts(counts)
             if state_str:
                 self.window.restoreState(QByteArray.fromBase64(state_str.encode('utf-8')))
-            # REMOVED the for dock in findChildren loop entirely! Let Qt handle visibility.
+            dock_manager = getattr(self.window, "dock_manager", None)
+            if dock_manager:
+                for dock in self.window.findChildren(QDockWidget):
+                    closable = dock.objectName() not in {"DocExplorerDock", "PDFViewerDock"}
+                    dock_manager.configure_dock(dock, closable=closable)
         except Exception as e:
             print(f"Error applying layout state: {e}")
     def reset_default_layout(self):
@@ -57,10 +62,12 @@ class LayoutManager:
         if hasattr(self, 'apply_startup_layout'):
             self.apply_startup_layout()
     def apply_factory_default(self):
-        # We must pass BOTH the string and the counts so it knows what to spawn!
-        self._apply_state(self.FACTORY_STATE, self.FACTORY_COUNTS)
+        self._apply_state("", self.FACTORY_COUNTS)
 
     def apply_startup_layout(self):
+        if self.settings.value("layout_version", "") != self.LAYOUT_VERSION:
+            self.apply_factory_default()
+            return
         default_state = str(self.settings.value("default_startup_layout", ""))
         counts_str = str(self.settings.value("default_startup_counts", ""))
 
@@ -82,6 +89,7 @@ class LayoutManager:
         counts = self.get_current_dock_counts()
         self.settings.setValue("default_startup_layout", state_bytes)
         self.settings.setValue("default_startup_counts", json.dumps(counts))
+        self.settings.setValue("layout_version", self.LAYOUT_VERSION)
         self.settings.sync()
 
     def save_template(self, name: str):
@@ -118,9 +126,13 @@ class LayoutManager:
         counts = self.get_current_dock_counts()
         self.settings.setValue("last_session_layout", state_bytes)
         self.settings.setValue("last_session_counts", json.dumps(counts))
+        self.settings.setValue("layout_version", self.LAYOUT_VERSION)
         self.settings.sync()
 
     def restore_last_session(self):
+        if self.settings.value("layout_version", "") != self.LAYOUT_VERSION:
+            self.apply_factory_default()
+            return
         state_str = str(self.settings.value("last_session_layout", ""))
         counts_str = str(self.settings.value("last_session_counts", ""))
         

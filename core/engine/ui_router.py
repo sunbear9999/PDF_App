@@ -183,9 +183,15 @@ class BlueprintUIRouter(QObject):
             if success:
                 self._dispatch(target_id, {"type": "citation_cards", "items": citations})
 
-        if runner and runner.blueprint.steps[-1].step_id == step_id:
+        # --- FIX 1: Immediately drop the active widget status when a live stream finishes ---
+        if ui_format in ["live_stream", "chat_widgets"]:
             self._dispatch(target_id, {"type": "hide_status"})
 
+        # --- FIX 2: Broadcast completion to ALL targets so no tab gets stuck waiting ---
+        if runner and runner.blueprint.steps[-1].step_id == step_id:
+            for t_id in self.registered_targets.keys():
+                self._dispatch(t_id, {"type": "hide_status"})
+                
         if target_id in ["chat_dock", "brainstorm_dock"] and ui_format in ["live_stream", "chat_widgets"]:
             pm = getattr(self.main_window, 'project_manager', None)
             if pm: pm.save_chat_message(target_id, "ai", result_str, ui_format)

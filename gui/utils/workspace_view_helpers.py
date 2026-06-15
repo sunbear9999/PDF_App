@@ -134,6 +134,8 @@ def build_edge_context_menu(view, parent_widget, edge):
     menu = QMenu(parent_widget)
     details_action = menu.addAction("ⓘ Connection Details")
     menu.addSeparator()
+    type_action = menu.addAction("⇄ Change Connection Type")
+    attrs_action = menu.addAction("⚙️ Edit Connection Attributes")
     edit_action = menu.addAction("✏️ Edit Connection Text")
     color_action = menu.addAction("🎨 Change Line Color")
     weight_action = menu.addAction("📏 Change Line Weight")
@@ -142,7 +144,7 @@ def build_edge_context_menu(view, parent_widget, edge):
     menu.addSeparator()
     menu.addMenu(build_ai_menu(view, menu))
 
-    return menu, details_action, edit_action, color_action, weight_action, del_action
+    return menu, details_action, type_action, attrs_action, edit_action, color_action, weight_action, del_action
 
 
 def build_canvas_context_menu(view, parent_widget):

@@ -1,4 +1,6 @@
 # core/utils/doc_parser.py
+import re
+
 import fitz
 
 class DocumentParser:
@@ -30,7 +32,7 @@ class DocumentParser:
 
             for page_idx in range(doc.page_count):
                 page_num = page_idx + 1
-                page_text = f"\n--- Page {page_num} ---\n" + doc.load_page(page_idx).get_text()
+                page_text = f"\n--- Page {page_num} ---\n" + DocumentParser._clean_page_text(doc.load_page(page_idx).get_text())
                 if not chunk_pages:
                     chunk_start = page_num
 
@@ -60,3 +62,24 @@ class DocumentParser:
         except Exception as e:
             print(f"[DocParser] Error chunking document: {e}")
             return []
+
+    @staticmethod
+    def _clean_page_text(text: str) -> str:
+        boilerplate_patterns = [
+            r"CC-BY-NC-ND 4\.0 International license",
+            r"It is made available under a",
+            r"is the author/funder, who has granted medRxiv a license",
+            r"\(which was not certified by peer review\)",
+            r"The copyright holder for this preprint",
+            r"this version posted .+",
+            r"https://doi\.org/\S+",
+            r"doi:\s*$",
+            r"medRxiv preprint",
+        ]
+        cleaned = []
+        for line in str(text or "").splitlines():
+            stripped = line.strip()
+            if any(re.search(pattern, stripped, re.IGNORECASE) for pattern in boilerplate_patterns):
+                continue
+            cleaned.append(line)
+        return "\n".join(cleaned)

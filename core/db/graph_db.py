@@ -560,6 +560,13 @@ class GraphDB(BaseDB):
         meta = entity.view_meta or {}
         meta_props = meta.get("properties", {}) if isinstance(meta, dict) else {}
         state = entity.state or {}
+        try:
+            from core.ontology.registry import OntologyRegistry
+            entity_blueprint = OntologyRegistry().get_entity_blueprint(entity.entity_type)
+            entity_style = getattr(entity_blueprint, "visual_style", None)
+            default_color = getattr(entity_style, "color", "#333333") or "#333333"
+        except Exception:
+            default_color = "#333333"
         node_type_id = props.get("node_type_id") or ("workspace.node.quote" if entity.entity_type in {EntityType.QUOTE.value, EntityType.EVIDENCE.value} else "workspace.node.text")
         source_id = props.get("source_id")
         pdf_path = props.get("pdf_path") or (self.get_source_path(source_id) if source_id else None)
@@ -572,7 +579,7 @@ class GraphDB(BaseDB):
             workspace_id=workspace_id,
             quote=props.get("quote") or props.get("exact_text") or "",
             note=note_text,
-            color=meta.get("color") or props.get("color") or "#333333",
+            color=meta.get("color") or props.get("color") or default_color,
             is_custom=bool(props.get("is_custom", entity.entity_type == EntityType.TEXT.value)),
             pdf_path=pdf_path,
             page_num=props.get("page_num") if props.get("page_num") is not None else props.get("page"),
@@ -593,14 +600,23 @@ class GraphDB(BaseDB):
 
     def _relation_from_edge(self, edge: EdgeModel, view_id: str) -> RelationModel:
         existing = self.get_relation(edge.id)
+        relation_type = edge.relation_type or (existing.relation_type if existing else RelationType.BASIC.value)
+        try:
+            from core.ontology.registry import OntologyRegistry
+            relation_blueprint = OntologyRegistry().get_relation_blueprint(relation_type)
+            relation_defaults = relation_blueprint.build_default_properties()
+        except Exception:
+            relation_defaults = {}
         properties = dict(existing.properties) if existing else {}
+        for key, value in relation_defaults.items():
+            properties.setdefault(key, value)
         properties.update(edge.relation_properties or {})
         view_ids = {str(v) for v in properties.get("view_ids", [])}
         view_ids.add(str(view_id))
         properties.update({
-            "label": edge.label or "",
-            "color": edge.color or "#888888",
-            "weight": int(edge.weight or 2),
+            "label": edge.label or properties.get("label") or "",
+            "color": edge.color or properties.get("color") or "#888888",
+            "weight": int(edge.weight or properties.get("weight") or 2),
             "view_ids": sorted(view_ids),
             "legacy_workspace_id": str(view_id),
         })
@@ -608,7 +624,7 @@ class GraphDB(BaseDB):
             id=edge.id,
             source_id=edge.source,
             target_id=edge.target,
-            relation_type=edge.relation_type or (existing.relation_type if existing else RelationType.BASIC.value),
+            relation_type=relation_type,
             evidence_ids=list(edge.evidence_ids or (existing.evidence_ids if existing else [])),
             properties=properties,
             state=dict(edge.relation_state or (existing.state if existing else {"is_verified": True, "origin": "workspace"})),
@@ -616,16 +632,31 @@ class GraphDB(BaseDB):
 
     def _edge_from_relation(self, relation: RelationModel) -> EdgeModel:
         props = relation.properties or {}
+        try:
+            from core.ontology.registry import OntologyRegistry
+            relation_blueprint = OntologyRegistry().get_relation_blueprint(relation.relation_type)
+            relation_defaults = relation_blueprint.build_default_properties()
+            style = getattr(relation_blueprint, "visual_style", None)
+        except Exception:
+            relation_blueprint = None
+            relation_defaults = {}
+            style = None
+        display_name = getattr(relation_blueprint, "display_name", "")
+        label = props.get("label") or relation_defaults.get("label") or display_name
+        color = props.get("color") or relation_defaults.get("color") or getattr(style, "color", None) or "#888888"
+        weight = props.get("weight") or relation_defaults.get("weight") or getattr(style, "weight", 2) or 2
+        merged_props = dict(relation_defaults)
+        merged_props.update(props)
         return EdgeModel(
             id=relation.id,
             source=relation.source_id,
             target=relation.target_id,
-            label=props.get("label") or "",
-            color=props.get("color") or "#888888",
-            weight=int(props.get("weight") or 2),
+            label=label,
+            color=color,
+            weight=int(weight),
             relation_type=relation.relation_type,
             evidence_ids=list(relation.evidence_ids or []),
-            relation_properties=dict(props),
+            relation_properties=merged_props,
             relation_state=dict(relation.state or {}),
         )
 

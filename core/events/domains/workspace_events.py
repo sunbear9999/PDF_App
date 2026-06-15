@@ -14,6 +14,8 @@ class WorkspaceIntent(Enum):
     EDGE_EDIT_START = auto()
     EDGE_COLOR_REQUEST = auto()
     EDGE_WEIGHT_REQUEST = auto()
+    EDGE_TYPE_REQUEST = auto()
+    EDGE_ATTRIBUTES_REQUEST = auto()
     EDGE_DELETE_REQUEST = auto()
     EDGE_DETAILS_REQUEST = auto()
 

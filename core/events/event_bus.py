@@ -83,6 +83,8 @@ class EventBus(QObject):
     view_action_requested = Signal(object, object)
     view_changed = Signal(object, object)
     discovery_items_changed = Signal(object, object)
+    ontology_action_requested = Signal(object, object)
+    ontology_changed = Signal(object, object)
 
     # --- Graph-Aware Document Analysis Domain ---
     analysis_action_requested = Signal(object, object)

@@ -281,12 +281,33 @@ class PromptEditorDialog(QDialog):
             return
 
         for row in usage_rows:
-            mode_node = QTreeWidgetItem(self.tree, [f"📊 {row['title']}"])
+            mode_node = QTreeWidgetItem(self.tree, [f"📊 {row['title']} via {row.get('blueprint', 'Document Analysis blueprint')}"])
             mode_node.setFlags(mode_node.flags() & ~Qt.ItemFlag.ItemIsSelectable)
             mode_node.setExpanded(True)
-            for prompt_key in row["prompts"]:
-                prompt_item = QTreeWidgetItem(mode_node, [prompt_key])
+
+            pipeline_node = QTreeWidgetItem(mode_node, ["Blueprint pipeline: analysis_contract -> chunk_document -> quote selection per section -> compact numbered quotes -> synthesis pass -> final graph builder -> finalize_analysis"])
+            pipeline_node.setFlags(pipeline_node.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+
+            editable_node = QTreeWidgetItem(mode_node, ["Editable shared PromptManager keys used by this mode"])
+            editable_node.setFlags(editable_node.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            editable_node.setExpanded(True)
+            for prompt_key in dict.fromkeys(row["prompts"]):
+                prompt_item = QTreeWidgetItem(editable_node, [prompt_key])
                 prompt_item.setData(0, Qt.ItemDataRole.UserRole, prompt_key)
+
+            rendered_node = QTreeWidgetItem(mode_node, ["Rendered LLM prompts/previews"])
+            rendered_node.setFlags(rendered_node.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            rendered_node.setExpanded(True)
+            for preview in row.get("rendered", []):
+                title = preview.get("title") or "Rendered prompt"
+                prompt_item = QTreeWidgetItem(rendered_node, [title])
+                prompt_item.setData(0, Qt.ItemDataRole.UserRole, {
+                    "preview": True,
+                    "title": title,
+                    "content": preview.get("content", ""),
+                })
+                prompt_item.setForeground(0, Qt.GlobalColor.cyan)
+
             detail = QTreeWidgetItem(mode_node, [f"Nodes: {', '.join(row['node_types']) or 'registry defaults'}"])
             detail.setFlags(detail.flags() & ~Qt.ItemFlag.ItemIsSelectable)
             detail = QTreeWidgetItem(mode_node, [f"Relations: {', '.join(row['relation_types']) or 'registry defaults'}"])
@@ -296,11 +317,22 @@ class PromptEditorDialog(QDialog):
         selected = self.tree.selectedItems()
         if not selected: return
         prompt_key = selected[0].data(0, Qt.ItemDataRole.UserRole)
-        if prompt_key:
+        if isinstance(prompt_key, dict) and prompt_key.get("preview"):
+            self.current_prompt_key = None
+            self.lbl_current_prompt.setText(f"<b>Preview:</b> {prompt_key.get('title', 'Rendered prompt')}")
+            self.prompt_editor.setPlainText(prompt_key.get("content", ""))
+            self.prompt_editor.setReadOnly(True)
+            self.btn_delete.setEnabled(False)
+            self.save_button.setEnabled(False)
+            self.restore_button.setEnabled(False)
+        elif prompt_key:
             self.current_prompt_key = prompt_key
             self.lbl_current_prompt.setText(f"<b>Editing:</b> {prompt_key}")
+            self.prompt_editor.setReadOnly(False)
             self.prompt_editor.setPlainText(self.prompt_manager.get_prompt(prompt_key))
             self.btn_delete.setEnabled(not self.prompt_service.is_core_prompt(prompt_key))
+            self.save_button.setEnabled(True)
+            self.restore_button.setEnabled(True)
 
     def _on_new_prompt(self):
         name, ok = QInputDialog.getText(self, "New Custom Prompt", "Enter a unique name for this prompt:")

@@ -3,324 +3,137 @@ import re
 import dataclasses
 import uuid
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, 
-                             QComboBox, QFrame, QScrollArea, QLineEdit, 
-                             QTextEdit, QCheckBox, QSpinBox, QGridLayout, 
-                             QInputDialog, QDoubleSpinBox, QStackedWidget, QSplitter, QTabWidget, QMessageBox)
-from PySide6.QtCore import Qt, Signal
+                             QComboBox, QFrame, QTextEdit, QLineEdit, QDialog,
+                             QInputDialog, QStackedWidget, QSplitter, QTabWidget, QMessageBox)
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QCursor
 
-from core.engine.action_model import AIActionBlueprint, ActionStep
+from core.engine.action_model import AIActionBlueprint
 from core.engine.default_blueprints import DefaultBlueprints
 from core.events.event_bus import EventBus
 from core.events.domains.workflow_events import WorkflowEvent, WorkflowIntent, WorkflowPayload
 from gui.docks.unified_research.components.workflow_editor_canvas import VisualWorkflowEditor
 
-TYPES = {
-    "AI Text Generation": "LLM_QUERY", 
-    "Semantic RAG Search": "RAG_SEARCH", 
-    "Loop (Run Action on List)": "FOREACH", 
-    "Condition (If/Then)": "CONDITION", 
-    "Branch (If/Else Paths)": "BRANCH",               # NEW
-    "Database Write": "DATABASE_WRITE",             # NEW
-    "Run Python Script": "PYTHON_SCRIPT"
-}
 
-FORMATS = {
-    "Silent (Background Data Only)": "silent", 
-    "Live Stream Text": "live_stream", 
-    "Data Table": "data_table",
-    "Card Grid": "card_grid",
-    "Draw Citation Bubbles": "chat_widgets", 
-    "Update Workspace": "workspace_graph", 
-    "Custom HTML Dashboard": "custom_view"
-}
-
-TARGETS = {
-    "Custom Tools Tab": "custom_tools_tab", 
-    "Chat Tab": "chat_dock", 
-    "Search Tab": "search_tab",
-    "Analysis Tab": "analysis_tab",
-    "Brainstorm Tab": "brainstorm_dock", 
-    "Floating Overlay": "floating"
-}
-
-def get_key(d, val, default):
-    for k, v in d.items():
-        if v == val: return k
-    return default
-
-# ... (Keep StepCardWidget exactly as it was) ...
-class StepCardWidget(QFrame):
-    delete_requested = Signal(object)
-    move_up_requested = Signal(object)
-    move_down_requested = Signal(object)
-    step_updated = Signal()
-
-    def __init__(self, step: ActionStep, available_vars: list, tool_names: list, theme: dict, parent=None):
+class BlueprintHelpDialog(QDialog):
+    """A comprehensive help and API documentation dialog for the Workflow Builder."""
+    def __init__(self, theme, parent=None):
         super().__init__(parent)
-        self.step = step
         self.theme = theme
-        self.available_vars = available_vars
-        self.tool_names = tool_names
+        self.setWindowTitle("Blueprint Architect Documentation")
+        self.resize(850, 650)
         self._build_ui()
-        self._populate_data()
 
     def _build_ui(self):
-        self.setObjectName("StepCard")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(12)
+        self.setStyleSheet(f"""
+            QDialog {{ background-color: {self.theme.get('bg_main', '#1e1e1e')}; color: {self.theme.get('text_main', '#fff')}; }}
+            QTabWidget::pane {{ border: 1px solid {self.theme.get('border', '#444')}; }}
+            QTabBar::tab {{ background: {self.theme.get('bg_panel', '#333')}; color: #aaa; padding: 8px 16px; border: 1px solid {self.theme.get('border', '#444')}; border-bottom: none; }}
+            QTabBar::tab:selected {{ background: {self.theme.get('bg_input', '#2b2b2b')}; color: #fff; font-weight: bold; border-top: 2px solid {self.theme.get('accent', '#b366ff')}; }}
+            QTextEdit {{ background-color: {self.theme.get('bg_input', '#252525')}; border: none; font-size: 13px; line-height: 1.4; }}
+        """)
 
-        header = QHBoxLayout()
-        self.input_id = QLineEdit()
-        self.input_id.setPlaceholderText("Step ID (e.g., generate_queries)")
-        self.input_id.setFixedWidth(200)
+        tabs = QTabWidget()
         
-        self.combo_type = QComboBox()
-        self.combo_type.addItems(list(TYPES.keys()))
-        self.combo_type.currentIndexChanged.connect(self._toggle_dynamic_inputs)
-        
-        self.input_step_ref = QLineEdit()
-        self.input_step_ref.setPlaceholderText("Library Ref (optional)")
-        self.input_step_ref.setFixedWidth(150)
+        # 1. Overview Tab
+        tab_overview = QTextEdit()
+        tab_overview.setReadOnly(True)
+        tab_overview.setHtml("""
+            <h2 style='color:#b366ff;'>Welcome to the Blueprint Builder</h2>
+            <p>Blueprints are powerful, multi-step AI pipelines. You can chain together LLM queries, RAG searches, and Python scripts to automate complex research tasks.</p>
+            <h3>Node Types:</h3>
+            <ul>
+                <li><b>LLM Query:</b> Prompts the AI. Can enforce JSON schemas.</li>
+                <li><b>RAG Search:</b> Searches your indexed PDFs and returns text context.</li>
+                <li><b>Python Script:</b> Runs local code to transform data or calculate metrics.</li>
+                <li><b>Branch / Condition:</b> Routes the workflow based on variables.</li>
+                <li><b>For Each:</b> Runs a sub-pipeline on a list of items.</li>
+            </ul>
+        """)
+        tabs.addTab(tab_overview, "Overview")
 
-        header.addWidget(QLabel("<b>ID:</b>"))
-        header.addWidget(self.input_id)
-        header.addWidget(QLabel("<b>Action Type:</b>"))
-        header.addWidget(self.combo_type, 1)
-        
-        for icon, signal in [("▲", self.move_up_requested), ("▼", self.move_down_requested), ("✖", self.delete_requested)]:
-            btn = QPushButton(icon)
-            btn.setFixedSize(24, 24)
-            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-            btn.setStyleSheet("background: transparent; border: none; font-weight: bold;" + ("color: #ff4444;" if icon == "✖" else f"color: {self.theme.get('text_muted', '#aaa')};"))
-            btn.clicked.connect(lambda checked, s=signal, c=self: s.emit(c))
-            header.addWidget(btn)
-        layout.addLayout(header)
+        # 2. Variables & Context Tab
+        tab_vars = QTextEdit()
+        tab_vars.setReadOnly(True)
+        tab_vars.setHtml("""
+            <h2 style='color:#b366ff;'>State Variables</h2>
+            <p>Every blueprint shares a <code>state</code> dictionary. When a node finishes, it saves its output to the key specified in <b>"Save Result As"</b>.</p>
+            <p>You can inject these variables into subsequent prompts using brackets: <code>{variable_name}</code></p>
+            <h3>Built-in Variables:</h3>
+            <ul>
+                <li><code>{user_input}</code> - The text the user entered when launching the tool.</li>
+                <li><code>{doc_path}</code> - The currently active document.</li>
+                <li><code>{project_manifest}</code> - The JSON project strategy document.</li>
+                <li><code>{workspace_data}</code> - The current state of the visual argument graph.</li>
+                <li><code>{selected_model}</code> - The LLM currently selected by the user.</li>
+            </ul>
+        """)
+        tabs.addTab(tab_vars, "State Variables")
 
-        var_str = ", ".join([f"{{{v}}}" for v in self.available_vars]) if self.available_vars else "None yet"
-        lbl_vars = QLabel(f"<i>Variables you can use:</i> <span style='color: {self.theme.get('accent', '#b366ff')};'>{{{'{user_input}'}}}, {{{'{doc_path}'}}}, {var_str}</span>")
-        lbl_vars.setWordWrap(True)
-        layout.addWidget(lbl_vars)
-
-        inp_frame = QFrame()
-        inp_frame.setStyleSheet(f"background-color: rgba(0,0,0,0.1); border: 1px solid {self.theme.get('border', '#444')}; border-radius: 6px;")
-        self.inp_layout = QVBoxLayout(inp_frame)
-        
-        self.llm_widget = QWidget()
-        llm_lyt = QVBoxLayout(self.llm_widget)
-        llm_lyt.setContentsMargins(0,0,0,0)
-        llm_lyt.addWidget(QLabel("<b>User Prompt:</b>"))
-        self.input_llm_query = QTextEdit()
-        self.input_llm_query.setMaximumHeight(60)
-        llm_lyt.addWidget(self.input_llm_query)
-        self.inp_layout.addWidget(self.llm_widget)
-        
-        self.rag_widget = QWidget()
-        rag_lyt = QVBoxLayout(self.rag_widget)
-        rag_lyt.setContentsMargins(0,0,0,0)
-        rag_lyt.addWidget(QLabel("<b>Search Query:</b>"))
-        self.input_rag_query = QLineEdit()
-        rag_lyt.addWidget(self.input_rag_query)
-        self.inp_layout.addWidget(self.rag_widget)
-
-        self.foreach_widget = QWidget()
-        # simplified foreach block to avoid excessive string length for this fix
-        self.inp_layout.addWidget(self.foreach_widget)
-        
-        self.condition_widget = QWidget()
-        cond_lyt = QVBoxLayout(self.condition_widget)
-        cond_lyt.setContentsMargins(0,0,0,0)
-        cond_lyt.addWidget(QLabel("<b>Python Logic:</b> <span style='color:#888;'>(e.g. len(state.get('context','')) > 100)</span>"))
-        self.input_cond = QLineEdit()
-        cond_lyt.addWidget(self.input_cond)
-        self.inp_layout.addWidget(self.condition_widget)
-
-        # --- NEW: Branch Widget ---
-        self.branch_widget = QWidget()
-        branch_lyt = QVBoxLayout(self.branch_widget)
-        branch_lyt.setContentsMargins(0,0,0,0)
-        branch_lyt.addWidget(QLabel("<b>Branch Logic:</b> <span style='color:#888;'>(e.g. state.get('use_advanced_rag') == True)</span>"))
-        self.input_branch_logic = QLineEdit()
-        branch_lyt.addWidget(self.input_branch_logic)
-        branch_lyt.addWidget(QLabel("<i>Note: Edit nested true/false steps in the JSON directly for now.</i>"))
-        self.inp_layout.addWidget(self.branch_widget)
-
-        # --- NEW: Database Write Widget ---
-        self.db_widget = QWidget()
-        db_lyt = QVBoxLayout(self.db_widget)
-        db_lyt.setContentsMargins(0,0,0,0)
-        db_lyt.addWidget(QLabel("<b>Table Name:</b>"))
-        self.input_db_table = QLineEdit()
-        db_lyt.addWidget(self.input_db_table)
-        db_lyt.addWidget(QLabel("<b>Payload (JSON):</b>"))
-        self.input_db_payload = QTextEdit()
-        self.input_db_payload.setMaximumHeight(60)
-        db_lyt.addWidget(self.input_db_payload)
-        self.inp_layout.addWidget(self.db_widget)
-        
-        self.python_widget = QWidget()
-        py_lyt = QVBoxLayout(self.python_widget)
-        py_lyt.setContentsMargins(0,0,0,0)
-        py_lyt.addWidget(QLabel("<b>Script:</b> <span style='color:#888;'>(Assign output to 'result' variable. Use 'state' dict.)</span>"))
-        self.input_script = QTextEdit()
-        self.input_script.setStyleSheet("font-family: monospace;")
-        py_lyt.addWidget(self.input_script)
-        self.inp_layout.addWidget(self.python_widget)
-        layout.addWidget(inp_frame)
-
-        self.ai_frame = QFrame()
-        self.ai_frame.setStyleSheet(f"background-color: rgba(0,0,0,0.1); border: 1px solid {self.theme.get('border', '#444')}; border-radius: 6px;")
-        ai_layout = QGridLayout(self.ai_frame)
-        ai_layout.addWidget(QLabel("<b>System Prompt:</b>"), 0, 0, 1, 4)
-        self.input_system = QTextEdit()
-        self.input_system.setMaximumHeight(40)
-        ai_layout.addWidget(self.input_system, 1, 0, 1, 4)
-        
-        self.spin_predict = QSpinBox()
-        self.spin_predict.setRange(-1, 8000)
-        self.spin_temp = QDoubleSpinBox()
-        self.spin_temp.setRange(0.0, 2.0)
-        self.spin_temp.setSingleStep(0.1)
-        self.chk_json = QCheckBox("Force Generic JSON Output")
-        
-        ai_layout.addWidget(QLabel("Max Tokens:"), 2, 0)
-        ai_layout.addWidget(self.spin_predict, 2, 1)
-        ai_layout.addWidget(QLabel("Temperature:"), 2, 2)
-        ai_layout.addWidget(self.spin_temp, 2, 3)
-        ai_layout.addWidget(self.chk_json, 3, 0, 1, 4)
-
-        self.lbl_schema_hint = QLabel("<b>Strict Output Schema (JSON):</b> <span style='color:#888;'>(Forces LLM to output this exact structure)</span>")
-        ai_layout.addWidget(self.lbl_schema_hint, 4, 0, 1, 4)
-        
-        self.input_output_schema = QTextEdit()
-        self.input_output_schema.setPlaceholderText('e.g., {"cards": [{"title": "string", "summary": "string"}]}')
-        self.input_output_schema.setStyleSheet("font-family: monospace;")
-        self.input_output_schema.setMaximumHeight(80)
-        ai_layout.addWidget(self.input_output_schema, 5, 0, 1, 4)
-
-        layout.addWidget(self.ai_frame)
-
-        out_frame = QFrame()
-        out_frame.setStyleSheet(f"background-color: rgba(0,0,0,0.1); border: 1px solid {self.theme.get('border', '#444')}; border-radius: 6px;")
-        out_layout = QGridLayout(out_frame)
-        out_layout.addWidget(QLabel("<b>📤 Output Routing</b>"), 0, 0, 1, 4)
-        
-        self.input_output_key = QLineEdit()
-        self.input_output_key.textChanged.connect(lambda _: self.step_updated.emit())
-        out_layout.addWidget(QLabel("Save Result As (Variable):"), 1, 0)
-        out_layout.addWidget(self.input_output_key, 1, 1, 1, 3)
-        
-        self.combo_ui_format = QComboBox()
-        self.combo_ui_format.addItems(list(FORMATS.keys()))
-        self.combo_ui_format.currentIndexChanged.connect(self._toggle_dynamic_inputs)
-        
-        self.combo_ui_target = QComboBox()
-        self.combo_ui_target.addItems(list(TARGETS.keys()))
-        
-        out_layout.addWidget(QLabel("Format:"), 2, 0)
-        out_layout.addWidget(self.combo_ui_format, 2, 1)
-        out_layout.addWidget(QLabel("Target:"), 2, 2)
-        out_layout.addWidget(self.combo_ui_target, 2, 3)
-        
-        layout.addWidget(out_frame)
-
-    def _populate_data(self):
-        self.input_id.setText(self.step.step_id)
-        self.combo_type.setCurrentText(get_key(TYPES, self.step.step_type, "AI Text Generation"))
-        self.input_step_ref.setText(getattr(self.step, 'step_ref', '') or "")
-
-        if self.step.step_type == "LLM_QUERY":
-            self.input_llm_query.setText(self.step.inputs.get("query", ""))
-        elif self.step.step_type == "CONDITION":
-            self.input_cond.setText(self.step.inputs.get("logic", ""))
-        elif self.step.step_type == "PYTHON_SCRIPT":
-            self.input_script.setText(self.step.inputs.get("script", ""))
-        elif self.step.step_type == "RAG_SEARCH":
-            q = self.step.inputs.get("queries", [""])[0] if "queries" in self.step.inputs else ""
-            self.input_rag_query.setText(q)
-        elif self.step.step_type == "BRANCH":
-            self.input_branch_logic.setText(self.step.inputs.get("logic", ""))
-        elif self.step.step_type == "DATABASE_WRITE":
-            self.input_db_table.setText(self.step.inputs.get("table", ""))
-            payload = self.step.inputs.get("payload", {})
-            self.input_db_payload.setText(json.dumps(payload) if isinstance(payload, dict) else str(payload))
+        # 3. Python API Tab
+        tab_python = QTextEdit()
+        tab_python.setReadOnly(True)
+        tab_python.setHtml("""
+            <h2 style='color:#00cc66;'>Python Script Environment</h2>
+            <p>Python nodes run in a secure local execution environment. They are perfect for transforming data between LLM steps.</p>
             
-        self.input_system.setText(self.step.system_prompt or "")
-        self.combo_ui_format.setCurrentText(get_key(FORMATS, self.step.ui_format, "Silent (Background Data Only)"))
-        self.combo_ui_target.setCurrentText(get_key(TARGETS, self.step.ui_target, "Floating Overlay"))
-        self.input_output_key.setText(self.step.output_key)
-        
-        self.spin_predict.setValue(self.step.llm_options.get("num_predict", 2048))
-        self.spin_temp.setValue(self.step.llm_options.get("temperature", 0.7))
-        self.chk_json.setChecked(self.step.llm_options.get("json_mode", False))
-
-        if self.step.output_schema:
-            try:
-                self.input_output_schema.setText(json.dumps(self.step.output_schema, indent=2))
-            except:
-                self.input_output_schema.setText(str(self.step.output_schema))
-        else:
-            self.input_output_schema.clear()
-
-        self._toggle_dynamic_inputs()
-
-    def _toggle_dynamic_inputs(self):
-        t = TYPES.get(self.combo_type.currentText())
-        self.llm_widget.setVisible(t == "LLM_QUERY")
-        self.rag_widget.setVisible(t == "RAG_SEARCH")
-        self.foreach_widget.setVisible(t == "FOREACH")
-        self.condition_widget.setVisible(t == "CONDITION")
-        self.python_widget.setVisible(t == "PYTHON_SCRIPT")
-        self.branch_widget.setVisible(t == "BRANCH")           # NEW
-        self.db_widget.setVisible(t == "DATABASE_WRITE")       # NEW
-        show_ai = (t == "LLM_QUERY") or (t == "FOREACH")
-        self.ai_frame.setVisible(show_ai)
-
-    def update_step_from_ui(self):
-        self.step.step_id = self.input_id.text().strip()
-        self.step.step_type = TYPES.get(self.combo_type.currentText(), "LLM_QUERY")
-        self.step.step_ref = self.input_step_ref.text().strip() or None
-
-        self.step.inputs = {}
-        if self.step.step_type == "LLM_QUERY":
-            self.step.inputs["query"] = self.input_llm_query.toPlainText().strip()
-        elif self.step.step_type == "CONDITION":
-            self.step.inputs["logic"] = self.input_cond.text().strip()
-        elif self.step.step_type == "PYTHON_SCRIPT":
-            self.step.inputs["script"] = self.input_script.toPlainText().strip()
-        elif self.step.step_type == "RAG_SEARCH":
-            self.step.inputs["queries"] = [self.input_rag_query.text().strip()]
-        elif self.step.step_type == "BRANCH":
-            self.step.inputs["logic"] = self.input_branch_logic.text().strip()
-        elif self.step.step_type == "DATABASE_WRITE":
-            self.step.inputs["table"] = self.input_db_table.text().strip()
-            try: self.step.inputs["payload"] = json.loads(self.input_db_payload.toPlainText() or "{}")
-            except: self.step.inputs["payload"] = {}
+            <h3>The Rules:</h3>
+            <ol>
+                <li>You have access to the global <code>state</code> dictionary.</li>
+                <li>You MUST assign your final output to a variable named <code>result</code>.</li>
+            </ol>
             
-        self.step.system_prompt = self.input_system.toPlainText().strip() or None
-        self.step.ui_format = FORMATS.get(self.combo_ui_format.currentText(), "silent")
-        self.step.ui_target = TARGETS.get(self.combo_ui_target.currentText(), "floating")
-        self.step.output_key = self.input_output_key.text().strip()
+            <pre style='background:#111; padding:10px; border-radius:4px;'>
+import json
+
+# 1. Read from previous steps
+ai_output = state.get("llm_raw_data", "{}")
+
+# 2. Transform
+data = json.loads(ai_output)
+count = len(data.get("items", []))
+
+# 3. Save to output
+result = f"Found {count} items."
+            </pre>
+
+            <h3 style='color:#00cc66;'>Exposed APIs:</h3>
+            <p>You have access to <code>analysis_api</code>, which connects directly to the Ontology Engine.</p>
+            <ul>
+                <li><code>analysis_api.build_contract(template_dict)</code> - Generates strict LLM schemas.</li>
+                <li><code>analysis_api.normalize_graph_object(raw_json, prefix, contract)</code> - Cleans, repairs, and deduplicates raw LLM graph JSON.</li>
+            </ul>
+        """)
+        tabs.addTab(tab_python, "Python API")
+
+        # 4. Routing & UI Tab
+        tab_ui = QTextEdit()
+        tab_ui.setReadOnly(True)
+        tab_ui.setHtml("""
+            <h2 style='color:#3399ff;'>UI Targets & Formatting</h2>
+            <p>The final step of your blueprint dictates how the user sees the data.</p>
+            <h3>Formats:</h3>
+            <ul>
+                <li><b>Live Stream:</b> Types out text dynamically like ChatGPT.</li>
+                <li><b>Data Table:</b> Renders an array of JSON objects as a spreadsheet.</li>
+                <li><b>Card Grid:</b> Renders an array of JSON objects as visual cards.</li>
+                <li><b>Workspace Graph:</b> Automatically parses nodes/edges and sends them to the spatial canvas.</li>
+            </ul>
+            <h3>Targets:</h3>
+            <ul>
+                <li><b>Floating Overlay:</b> Pops up over the main app.</li>
+                <li><b>Chat Tab / Custom Tools Tab:</b> Injects the result into the sidebar.</li>
+            </ul>
+        """)
+        tabs.addTab(tab_ui, "UI & Routing")
+
+        layout.addWidget(tabs)
         
-        self.step.llm_options["num_predict"] = self.spin_predict.value()
-        self.step.llm_options["temperature"] = self.spin_temp.value()
-        self.step.llm_options["json_mode"] = self.chk_json.isChecked()
-
-        schema_text = self.input_output_schema.toPlainText().strip()
-        if schema_text:
-            try:
-                self.step.output_schema = json.loads(schema_text)
-                self.step.llm_options["json_mode"] = True 
-            except json.JSONDecodeError:
-                print(f"Warning: Invalid JSON Schema in step {self.step.step_id}")
-                self.step.output_schema = None 
-        else:
-            self.step.output_schema = None
-
-    def update_theme(self, theme):
-        self.theme = theme
-        self.setStyleSheet(f"QFrame#StepCard {{ background-color: {theme.get('bg_input', '#2b2b2b')}; border: 1px solid {theme.get('border', '#444')}; border-left: 4px solid {theme.get('accent', '#b366ff')}; border-radius: 8px; margin-bottom: 4px; }} QLabel {{ color: {theme.get('text_main', '#fff')}; font-size: 12px; }} QLineEdit, QTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {{ background-color: {theme.get('bg_main', '#1e1e1e')}; color: {theme.get('text_main', '#fff')}; border: 1px solid {theme.get('border', '#444')}; border-radius: 4px; padding: 4px; }}")
+        btn_close = QPushButton("Close Documentation")
+        btn_close.clicked.connect(self.accept)
+        btn_close.setStyleSheet(f"background-color: {self.theme.get('bg_panel', '#333')}; padding: 8px; border-radius: 4px;")
+        layout.addWidget(btn_close)
 
 
 class BlueprintEditorTab(QWidget):
@@ -331,17 +144,19 @@ class BlueprintEditorTab(QWidget):
         self.bpm = getattr(self.main_window, 'blueprint_manager', None)
         self.blueprint_registry = getattr(self.main_window, 'blueprint_registry', None)
         self.step_manager = getattr(self.main_window, 'step_manager', None)
+        
         self.current_blueprint = None
-        self.step_widgets = []
         self.bus = EventBus.get_instance()
         self._workflow_requests = {}
         self.bus.workflow_state_changed.connect(self._handle_workflow_state)
+        
         self._build_ui()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
 
+        # --- Top Bar ---
         top_bar = QHBoxLayout()
         top_bar.addWidget(QLabel("<b>Target Blueprint:</b>"))
         
@@ -351,21 +166,27 @@ class BlueprintEditorTab(QWidget):
         
         self.btn_restore = QPushButton("🔄 Restore Default")
         self.btn_restore.clicked.connect(self._restore_default)
-        self.btn_restore.hide() # Hidden by default
+        self.btn_restore.hide() 
         top_bar.addWidget(self.btn_restore)
         
         self.btn_delete = QPushButton("🗑️ Delete")
         self.btn_delete.clicked.connect(self._delete_tool)
-        self.btn_delete.hide() # Hidden by default
+        self.btn_delete.hide() 
         top_bar.addWidget(self.btn_delete)
         
         btn_create = QPushButton("✨ New Tool")
-        btn_create.setStyleSheet(f"background-color: {self.theme.get('success', '#00cc66') if self.theme else '#00cc66'}; color: white; font-weight: bold; border-radius: 4px; padding: 4px 8px;")
+        btn_create.setStyleSheet(f"background-color: {self.theme.get('success', '#00cc66')}; color: white; font-weight: bold; border-radius: 4px; padding: 4px 8px;")
         btn_create.clicked.connect(self._create_new_tool)
         top_bar.addWidget(btn_create)
+
+        btn_help = QPushButton("❓ Docs & Help")
+        btn_help.setStyleSheet(f"background-color: {self.theme.get('bg_panel', '#333')}; color: white; border-radius: 4px; padding: 4px 8px;")
+        btn_help.clicked.connect(self._show_help)
+        top_bar.addWidget(btn_help)
         
         layout.addLayout(top_bar)
 
+        # --- Meta Layout ---
         meta_layout = QHBoxLayout()
         self.input_bp_name = QLineEdit()
         self.input_bp_desc = QLineEdit()
@@ -375,6 +196,7 @@ class BlueprintEditorTab(QWidget):
         meta_layout.addWidget(self.input_bp_desc, 2)
         layout.addLayout(meta_layout)
 
+        # --- Splitter (Canvas + Assistants) ---
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
         
         self.visual_editor = VisualWorkflowEditor(
@@ -387,6 +209,7 @@ class BlueprintEditorTab(QWidget):
         self.right_tabs = QTabWidget()
         self.right_tabs.setStyleSheet(f"QTabWidget::pane {{ border: 1px solid {self.theme.get('border', '#444')}; background-color: #111; }} QTabBar::tab {{ background: {self.theme.get('bg_panel', '#333')}; color: white; padding: 8px; }} QTabBar::tab:selected {{ background: {self.theme.get('accent', '#b366ff')}; }}")
         
+        # 1. AI Builder Assistant
         self.assistant_tab = QWidget()
         ast_lyt = QVBoxLayout(self.assistant_tab)
         self.txt_ast_chat = QTextEdit()
@@ -406,6 +229,7 @@ class BlueprintEditorTab(QWidget):
         ast_lyt.addLayout(ast_input_lyt)
         self.right_tabs.addTab(self.assistant_tab, "🤖 AI Builder")
 
+        # 2. Debugger
         self.debugger_tab = QWidget()
         dbg_lyt = QVBoxLayout(self.debugger_tab)
         self.btn_test_run = QPushButton("▶ Run Test in Debugger")
@@ -424,13 +248,15 @@ class BlueprintEditorTab(QWidget):
         
         layout.addWidget(self.main_splitter, 1)
 
+        # --- Bottom Bar ---
         bottom_bar = QHBoxLayout()
-        self.btn_add_step = QPushButton("➕ Add LLM Step")
-        self.btn_add_step.clicked.connect(self._add_new_step)
-        self.btn_connect = QPushButton("🔗 Connect Selected")
+        self.btn_add_step = QPushButton("➕ Add Node")
+        self.btn_add_step.clicked.connect(lambda: self.visual_editor.add_step("LLM_QUERY"))
+        self.btn_connect = QPushButton("🔗 Auto-Link Selected")
         self.btn_connect.clicked.connect(lambda: self.visual_editor.connect_selected())
         self.btn_save = QPushButton("💾 Save Blueprint")
         self.btn_save.clicked.connect(self._save_blueprints)
+        
         bottom_bar.addWidget(self.btn_add_step)
         bottom_bar.addWidget(self.btn_connect)
         bottom_bar.addStretch()
@@ -439,6 +265,10 @@ class BlueprintEditorTab(QWidget):
 
         self.update_theme(self.theme)
         if self.bpm: self._populate_combo_box()
+
+    def _show_help(self):
+        dlg = BlueprintHelpDialog(self.theme, self)
+        dlg.exec()
 
     def _delete_tool(self):
         key = self._current_blueprint_key()
@@ -451,7 +281,6 @@ class BlueprintEditorTab(QWidget):
             if key in self.bpm.blueprints:
                 del self.bpm.blueprints[key]
             
-            # Prevent the current blueprint from re-saving itself
             self.current_blueprint = None 
             self._save_blueprints()
             self._populate_combo_box()
@@ -537,14 +366,6 @@ class BlueprintEditorTab(QWidget):
             except Exception as e:
                 self.txt_ast_chat.append(f"<br><br><b style='color:#ff4444;'>❌ Failed to parse JSON blueprint: {e}</b>")
 
-    def _get_all_tool_names(self):
-        keys = []
-        if self.blueprint_registry:
-            keys.extend(definition.id for definition in self.blueprint_registry.all())
-        if self.bpm:
-            keys.extend(key for key in self.bpm.blueprints.keys() if key not in keys)
-        return keys
-
     def _populate_combo_box(self):
         current_key = self._current_blueprint_key()
         self.combo_blueprints.blockSignals(True)
@@ -557,13 +378,11 @@ class BlueprintEditorTab(QWidget):
                 seen.add(definition.id)
         if self.bpm:
             for key, blueprint in self.bpm.blueprints.items():
-                if key in seen:
-                    continue
+                if key in seen: continue
                 self.combo_blueprints.addItem(blueprint.name or key, key)
                 seen.add(key)
 
         self.combo_blueprints.blockSignals(False)
-
         if current_key and current_key in [self.combo_blueprints.itemData(i) for i in range(self.combo_blueprints.count())]:
             self._set_current_blueprint_key(current_key)
         else:
@@ -572,24 +391,16 @@ class BlueprintEditorTab(QWidget):
     def _create_new_tool(self):
         name, ok = QInputDialog.getText(self, "New Tool", "Enter a name for your custom tool:")
         if ok and name and name not in self.bpm.blueprints:
-            # --- FIXED: Route through Default Blueprints ---
-            from core.engine.default_blueprints import DefaultBlueprints
             new_bp = DefaultBlueprints.get_blank_custom_tool(name)
-            
             self.bpm.blueprints[name] = new_bp
             self._populate_combo_box()
             self._set_current_blueprint_key(name)
-
-    def _render_pipeline(self):
-        if self.current_blueprint:
-            self.visual_editor.load_blueprint(self.current_blueprint)
 
     def _load_selected_blueprint(self):
         if not self.bpm: return
         key = self._current_blueprint_key()
         if not key: return
         
-        # Toggle Toolbar Actions
         is_custom_override = key in self.bpm.blueprints
         is_registered_default = self._registry_definition(key) is not None
         self.btn_restore.setVisible(is_custom_override and is_registered_default)
@@ -610,7 +421,6 @@ class BlueprintEditorTab(QWidget):
         self.input_bp_name.setText(self.current_blueprint.name)
         self.input_bp_desc.setText(self.current_blueprint.description)
         
-        self.step_widgets.clear()
         self.visual_editor.load_blueprint(self.current_blueprint)
 
     def _current_blueprint_key(self):
@@ -626,33 +436,8 @@ class BlueprintEditorTab(QWidget):
         return self.blueprint_registry.get(key) if self.blueprint_registry else None
 
     def _create_registered_blueprint(self, key):
-        if not self.blueprint_registry:
-            return None
+        if not self.blueprint_registry: return None
         return self.blueprint_registry.create(key, pm=getattr(self.main_window, "prompt_manager", None))
-
-    def _add_new_step(self):
-        if not self.current_blueprint: return
-        self.visual_editor.add_step("LLM_QUERY")
-
-    def _remove_step(self, card_widget):
-        if card_widget.step in self.current_blueprint.steps: self.current_blueprint.steps.remove(card_widget.step)
-        self.step_widgets.remove(card_widget)
-        card_widget.setParent(None); card_widget.deleteLater()
-        self._render_pipeline()
-
-    def _move_step_up(self, card_widget):
-        idx = self.step_widgets.index(card_widget)
-        if idx > 0:
-            self.step_widgets[idx], self.step_widgets[idx-1] = self.step_widgets[idx-1], self.step_widgets[idx]
-            self.current_blueprint.steps[idx], self.current_blueprint.steps[idx-1] = self.current_blueprint.steps[idx-1], self.current_blueprint.steps[idx]
-            self._render_pipeline()
-
-    def _move_step_down(self, card_widget):
-        idx = self.step_widgets.index(card_widget)
-        if idx < len(self.step_widgets) - 1:
-            self.step_widgets[idx], self.step_widgets[idx+1] = self.step_widgets[idx+1], self.step_widgets[idx]
-            self.current_blueprint.steps[idx], self.current_blueprint.steps[idx+1] = self.current_blueprint.steps[idx+1], self.current_blueprint.steps[idx]
-            self._render_pipeline()
 
     def _save_blueprints(self):
         if not self.bpm: return
@@ -699,8 +484,7 @@ class BlueprintEditorTab(QWidget):
     def _handle_workflow_state(self, event, payload):
         request_id = payload.get("job_id") if hasattr(payload, "get") else None
         meta = self._workflow_requests.get(request_id)
-        if not meta:
-            return
+        if not meta: return
 
         kind = meta.get("kind")
         if kind == "architect":
@@ -745,11 +529,8 @@ class BlueprintEditorTab(QWidget):
         
         self.btn_save.setStyleSheet(f"background-color: {theme.get('accent', '#b366ff')}; font-weight: bold; color: white; border: none; border-radius: 4px; padding: 6px;")
         self.btn_add_step.setStyleSheet(style)
-        if hasattr(self, "btn_connect"):
-            self.btn_connect.setStyleSheet(style)
-        if hasattr(self, "visual_editor"):
-            self.visual_editor.update_theme(theme)
+        self.btn_connect.setStyleSheet(style)
+        if hasattr(self, "visual_editor"): self.visual_editor.update_theme(theme)
+        
         self.input_ast.setStyleSheet(style)
         self.btn_ast_send.setStyleSheet(f"background-color: {theme.get('accent', '#b366ff')}; color: white; padding: 4px;")
-        
-        for w in self.step_widgets: w.update_theme(theme)

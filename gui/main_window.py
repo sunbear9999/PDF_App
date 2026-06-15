@@ -40,7 +40,6 @@ from core.events.domains.document_events import AnnotationIntent, AnnotationPayl
 from core.events.domains.project_events import ProjectEvent, ProjectEventPayload, ProjectIntent, ProjectPayload
 from core.events.domains.workspace_events import WorkspaceEvent, WorkspaceEventPayload
 from core.services.document_ingestion_service import DocumentIngestionService
-from core.services.analysis_app_service import AnalysisAppService
 from core.services.workflow_runner_service import WorkflowRunnerService
 class MainWindow(QMainWindow):
     # ADD `core` to the signature
@@ -121,8 +120,7 @@ class MainWindow(QMainWindow):
         self.setDockOptions(
             QMainWindow.DockOption.AllowNestedDocks |
             QMainWindow.DockOption.AnimatedDocks |
-            QMainWindow.DockOption.AllowTabbedDocks |
-            QMainWindow.DockOption.GroupedDragging
+            QMainWindow.DockOption.AllowTabbedDocks
         )
         self.setDockNestingEnabled(True)
         self.blueprint_manager = BlueprintManager(self.blueprint_registry)
@@ -181,16 +179,6 @@ class MainWindow(QMainWindow):
             model_provider=self._get_active_ai_model,
             parent=self,
         )
-        self.analysis_app_service = AnalysisAppService(
-            self.project_manager,
-            self.prompt_manager,
-            registry=self.ontology_registry,
-            event_bus=self.bus,
-            workflow_executor=self.workflow_runner_service.prepare_runner,
-            runner_starter=self.workflow_runner_service.start_runner,
-            model_provider=self._get_active_ai_model,
-            parent=self,
-        )
         self.bus.project_loaded.connect(self._refresh_research_agent_from_project_event)
         self.bus.document_action_requested.connect(self._handle_doc_ui_requests)
         self.bus.annotation_action_requested.connect(self._handle_annot_ui_requests)
@@ -213,6 +201,7 @@ class MainWindow(QMainWindow):
                 import json
                 self.project_manager.set_metadata("window_layout_state", state_bytes)
                 self.project_manager.set_metadata("open_docks_count", json.dumps(counts))
+                self.project_manager.set_metadata("dock_layout_version", self.layout_manager.LAYOUT_VERSION)
             except Exception: pass
         elif intent == ProjectIntent.SAVE_COMPLETED:
             self._show_save_indicator()
@@ -346,13 +335,14 @@ class MainWindow(QMainWindow):
         try:
             state_str = self.project_manager.get_metadata("window_layout_state")
             dock_info = self.project_manager.get_metadata("open_docks_count")
+            layout_version = self.project_manager.get_metadata("dock_layout_version")
 
-            if state_str and dock_info:
+            if state_str and dock_info and layout_version == self.layout_manager.LAYOUT_VERSION:
                 import json
                 try: self.layout_manager._apply_state(state_str, json.loads(dock_info))
                 except Exception: pass
             else:
-                self.layout_manager.restore_last_session()
+                self.layout_manager.apply_factory_default()
 
             # Restore Scratchpads
             text_data = self.project_manager.get_metadata("scratchpad_texts")
@@ -568,7 +558,7 @@ class MainWindow(QMainWindow):
         # 1. Anchor: NEW Modular Document Explorer Dock
         self.doc_dock = QDockWidget("📁 Document Explorer", self)
         self.doc_dock.setObjectName("DocExplorerDock")
-        self.doc_dock.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
+        self.dock_manager.configure_dock(self.doc_dock, closable=False)
 
         from gui.components.document_explorer import DocumentExplorer
         self.doc_explorer = DocumentExplorer(self)
@@ -599,7 +589,7 @@ class MainWindow(QMainWindow):
         self.pdf_dock = QDockWidget("📄 PDF Viewer", self)
         self.pdf_dock.setObjectName("PDFViewerDock")
         self.pdf_dock.setWidget(self.viewer)
-        self.pdf_dock.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
+        self.dock_manager.configure_dock(self.pdf_dock, closable=False)
         title_bar = QWidget()
         title_layout = QHBoxLayout(title_bar)
         title_layout.setContentsMargins(10, 0, 10, 0)

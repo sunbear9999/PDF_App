@@ -53,7 +53,8 @@ class UnifiedResearchDock(QDockWidget):
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
         line = QFrame()
-        line.setFrameShape(QFrame.HLine)
+        line.setFrameShape(QFrame.VLine)
+        line.setFixedWidth(1)
         line.setStyleSheet("background-color: #444;")
         self.main_layout.addWidget(line)
 

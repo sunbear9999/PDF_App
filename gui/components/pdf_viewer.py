@@ -218,9 +218,7 @@ class PDFViewer(QGraphicsView):
             self.viewer_toolbar.adjustSize()
             self.viewer_toolbar.move(20, 20)
         if hasattr(self, 'search_bar') and self.search_bar.isVisible():
-            self.search_bar.adjustSize()
-            x_pos = self.viewport().width() - self.search_bar.width() - 20
-            self.search_bar.move(x_pos, 20)
+            self._position_search_bar()
         # Position HUD in bottom left
         if hasattr(self, 'page_hud') and self.page_hud.isVisible():
             self.page_hud.move(20, self.viewport().height() - self.page_hud.height() - 20)
@@ -233,12 +231,23 @@ class PDFViewer(QGraphicsView):
             self.current_search_text = ""
         else:
             self.search_bar.show()
-            self.search_bar.adjustSize()
-            x_pos = self.viewport().width() - self.search_bar.width() - 20
-            self.search_bar.move(x_pos, 20)
+            self._position_search_bar()
 
             self.search_bar.search_input.setFocus()
             self.search_bar.search_input.selectAll()
+
+    def _position_search_bar(self):
+        margin = 12
+        viewport_width = max(0, self.viewport().width())
+        available_width = max(220, viewport_width - (margin * 2))
+        bar_width = min(720, available_width)
+        compact = bar_width < 430
+        if hasattr(self.search_bar, "set_compact_mode"):
+            self.search_bar.set_compact_mode(compact)
+        self.search_bar.setFixedWidth(bar_width)
+        self.search_bar.adjustSize()
+        x_pos = max(margin, viewport_width - self.search_bar.width() - margin)
+        self.search_bar.move(x_pos, margin)
 
     def _on_search_text_changed(self, text):
         self.search_debounce_timer.start(400)

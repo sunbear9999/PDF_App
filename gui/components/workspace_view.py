@@ -20,6 +20,7 @@ from core.utils.workspace_utils import (
 )
 from gui.components.dialogs.workspace_dialogs import ColorOrganizerDialog, DeclutterSettingsDialog, OutlineDialog, WeakpointsDialog, WorkspaceProcessOverlay
 from gui.utils.dialog_helpers import style_dialog_with_theme
+from gui.theme.theme import ThemeManager
 from gui.utils.workspace_view_helpers import (
     build_ai_menu,
     build_selected_nodes_context_menu,
@@ -40,6 +41,9 @@ from core.events.event_bus import EventBus
 from core.events.domains.document_events import DocumentEvent, DocumentEventPayload
 from core.events.domains.project_events import ProjectEvent, ProjectEventPayload
 from core.events.domains.workspace_events import WorkspaceEvent, WorkspaceEventPayload, WorkspaceIntent, WorkspacePayload
+from core.events.domains.ontology_events import OntologyEvent, OntologyEventPayload
+from core.events.domains.workflow_events import WorkflowIntent, WorkflowPayload
+from core.engine.default_blueprints import DefaultBlueprints
 from core.services.workspace_registries import (
     build_default_workspace_action_registry,
     build_default_workspace_ai_tool_registry,
@@ -318,6 +322,7 @@ class WorkspaceView(QGraphicsView):
         QTimer.singleShot(0, self._sync_workspace)
         self.workspace_actions = build_default_workspace_action_registry()
         self.bus.workspace_action_requested.connect(self.handle_incoming_intent)
+        self.bus.ontology_action_requested.connect(self._handle_ontology_event)
         self.workspace_state_service = WorkspaceStateService(self.bus, self)
         self.bus.workspace_state_restored.connect(self._handle_workspace_state_event)
         self.workspace_service = self.main_window.workspace_service
@@ -332,6 +337,10 @@ class WorkspaceView(QGraphicsView):
     def _handle_workspace_event(self, event: WorkspaceEvent, payload: WorkspaceEventPayload):
         if event == WorkspaceEvent.LAYOUT_READY:
             self._apply_layout_positions((payload.changes or {}).get("positions", {}))
+        elif event == WorkspaceEvent.CHANGED:
+            workspace_id = payload.get("workspace_id") if hasattr(payload, "get") else getattr(payload, "workspace_id", None)
+            if workspace_id is None or int(workspace_id) == int(self.current_workspace_id):
+                QTimer.singleShot(0, self._sync_workspace)
 
     def _handle_document_event(self, event: DocumentEvent, payload: DocumentEventPayload):
         if event == DocumentEvent.HIGHLIGHT_CREATED:
@@ -355,6 +364,65 @@ class WorkspaceView(QGraphicsView):
         all_annots = self.workspace_annotation_service.get_annotation_index() if pm else {}
         self.sync_with_project(restored_model, all_annots)
         self._mark_workspace_dirty(autosave=True)
+
+    def _handle_ontology_event(self, event: OntologyEvent, payload: OntologyEventPayload):
+        if isinstance(payload, dict):
+            payload = OntologyEventPayload(**payload)
+        if event == OntologyEvent.NODE_COLLAPSE_REQUESTED:
+            self._toggle_ontology_node_collapse(self.nodes.get(payload.node_id))
+        elif event == OntologyEvent.BLUEPRINT_REQUESTED:
+            self._run_ontology_blueprint(payload)
+
+    def _toggle_ontology_node_collapse(self, node):
+        if not node:
+            return
+        child_ids = list(node.ui_delegate.related_nodes_for_collapse(node, self))
+        if not child_ids:
+            QMessageBox.information(self, "No Connected Evidence", "This node has no connected evidence to collapse yet.")
+            return
+        self.save_state_for_undo()
+        collapsed = not bool(node.entity_state.get("children_collapsed", False))
+        node.entity_state["children_collapsed"] = collapsed
+        node.entity_properties.setdefault("graph_children", {})["child_ids"] = child_ids
+        if hasattr(node, "refresh_child_button"):
+            node.refresh_child_button()
+        node.refresh_layout()
+        self._apply_collapsed_child_visibility()
+        self._mark_workspace_dirty(autosave=True)
+        self._emit_node_updated(node.node_id, {"entity_state": dict(node.entity_state)})
+        self.bus.ontology_changed.emit(
+            OntologyEvent.NODE_COLLAPSED if collapsed else OntologyEvent.NODE_EXPANDED,
+            OntologyEventPayload(node_id=node.node_id, entity_type=node.entity_type, data={"child_ids": child_ids}),
+        )
+
+    def _run_ontology_blueprint(self, payload: OntologyEventPayload):
+        node = self.nodes.get(payload.node_id)
+        text = ""
+        if node:
+            text = node.editable_note_text() or node.quote_text() or getattr(node, "note", "") or getattr(node, "quote", "")
+        if payload.blueprint_id == "Generate Counter-Argument":
+            allowed_docs = self.get_allowed_docs() if hasattr(self, "get_allowed_docs") else []
+            blueprint = DefaultBlueprints.get_opposing_views_blueprint(text, allowed_docs)
+        else:
+            registry = getattr(self.main_window, "blueprint_registry", None)
+            blueprint = registry.create(payload.blueprint_id) if registry and payload.blueprint_id else None
+        if not blueprint:
+            return
+        active_model = self.get_active_ai_model() if hasattr(self, "get_active_ai_model") else "{selected_model}"
+        self.bus.workflow_action_requested.emit(
+            WorkflowIntent.RUN_BLUEPRINT,
+            WorkflowPayload(
+                blueprint=blueprint,
+                initial_state={
+                    "selected_model": active_model,
+                    "ontology_node_id": payload.node_id,
+                    "ontology_entity_type": payload.entity_type,
+                },
+                job_name=blueprint.name,
+                target_id=payload.node_id,
+            ),
+        )
+
     def handle_incoming_intent(self, intent_name: WorkspaceIntent, payload: WorkspacePayload):
         """Central event routing block for Phase 1 decoupling."""
         if intent_name == WorkspaceIntent.NODE_PRESSED:
@@ -426,6 +494,16 @@ class WorkspaceView(QGraphicsView):
             edge = next((e for e in self.edges if e.edge_id == edge_id), None)
             if edge:
                 self._change_edge_weight(edge)
+        elif intent_name == WorkspaceIntent.EDGE_TYPE_REQUEST:
+            edge_id = payload.get("edge_id")
+            edge = next((e for e in self.edges if e.edge_id == edge_id), None)
+            if edge:
+                self._change_edge_type(edge)
+        elif intent_name == WorkspaceIntent.EDGE_ATTRIBUTES_REQUEST:
+            edge_id = payload.get("edge_id")
+            edge = next((e for e in self.edges if e.edge_id == edge_id), None)
+            if edge:
+                self._edit_edge_attributes(edge)
         elif intent_name == WorkspaceIntent.EDGE_DETAILS_REQUEST:
             edge_id = payload.get("edge_id")
             edge = next((e for e in self.edges if e.edge_id == edge_id), None)
@@ -683,6 +761,8 @@ class WorkspaceView(QGraphicsView):
             node.entity_state["is_verified"] = bool(node.is_verified)
         if hasattr(node, "refresh_verify_button"):
             node.refresh_verify_button()
+        if hasattr(node, "refresh_layout"):
+            node.refresh_layout()
         pm = self._pm()
         if pm:
             pm.set_node_verification(node.node_id, node.is_verified)
@@ -692,6 +772,8 @@ class WorkspaceView(QGraphicsView):
 
     def _toggle_node_children(self, node):
         if not node:
+            return
+        if hasattr(node, "ui_delegate") and node.ui_delegate.handle_action(node, "entity.toggle_children"):
             return
         child_ids = ((getattr(node, "entity_properties", {}) or {}).get("graph_children") or {}).get("child_ids", [])
         if not child_ids:
@@ -731,8 +813,11 @@ class WorkspaceView(QGraphicsView):
         for node in self.nodes.values():
             if not node.entity_state.get("children_collapsed"):
                 continue
-            graph_children = node.entity_properties.get("graph_children") or {}
-            hidden_child_ids.update(graph_children.get("child_ids", []))
+            if hasattr(node, "ui_delegate"):
+                hidden_child_ids.update(node.ui_delegate.related_nodes_for_collapse(node, self))
+            else:
+                graph_children = node.entity_properties.get("graph_children") or {}
+                hidden_child_ids.update(graph_children.get("child_ids", []))
 
         for node_id, node in self.nodes.items():
             node._hidden_by_collapsed_parent = node_id in hidden_child_ids
@@ -754,6 +839,35 @@ class WorkspaceView(QGraphicsView):
         else:
             QMessageBox.warning(self, "No Citation", "This is a custom node, not a PDF highlight.")
 
+    def _style_popup_menu(self, menu):
+        if not menu:
+            return menu
+        theme = self._theme().get_theme() if self._theme() else ThemeManager().get_theme()
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {theme['bg_panel']};
+                color: {theme['text_main']};
+                border: 1px solid {theme['border']};
+                border-radius: 6px;
+                padding: 5px;
+                font-weight: 600;
+            }}
+            QMenu::item {{
+                padding: 7px 22px 7px 22px;
+                border-radius: 4px;
+            }}
+            QMenu::item:selected {{
+                background-color: {theme['accent']};
+                color: #ffffff;
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background: {theme['border']};
+                margin: 5px 8px;
+            }}
+        """)
+        return menu
+
     def _change_edge_color(self, edge):
         if not edge:
             return
@@ -761,20 +875,115 @@ class WorkspaceView(QGraphicsView):
         if color.isValid():
             self.save_state_for_undo()
             edge.base_color = color
-            edge.setPen(QPen(edge.base_color, edge.weight + 2 if edge.isSelected() else edge.weight, Qt.PenStyle.SolidLine))
+            edge.setPen(edge.ui_delegate.pen(edge) if hasattr(edge, "ui_delegate") else QPen(edge.base_color, edge.weight + 2 if edge.isSelected() else edge.weight, Qt.PenStyle.SolidLine))
             self._mark_workspace_dirty(autosave=True)
             self._emit_edge_updated(edge.edge_id, {"color": color.name()})
 
     def _change_edge_weight(self, edge):
         if not edge:
             return
-        weight, ok = QInputDialog.getInt(self, "Line Weight", "Enter line weight (1-10):", edge.weight, 1, 10)
-        if ok:
-            self.save_state_for_undo()
-            edge.weight = weight
-            edge.setPen(QPen(edge.base_color, edge.weight + 2 if edge.isSelected() else edge.weight, Qt.PenStyle.SolidLine))
-            self._mark_workspace_dirty(autosave=True)
-            self._emit_edge_updated(edge.edge_id, {"weight": weight})
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Line Weight")
+        dialog.setMinimumWidth(360)
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+        spinner = QSpinBox(dialog)
+        spinner.setRange(1, 10)
+        spinner.setValue(edge.weight)
+        form.addRow("Weight", spinner)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        theme = self._theme().get_theme() if self._theme() else ThemeManager().get_theme()
+        style_dialog_with_theme(dialog, theme)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.save_state_for_undo()
+        edge.weight = spinner.value()
+        edge.setPen(edge.ui_delegate.pen(edge) if hasattr(edge, "ui_delegate") else QPen(edge.base_color, edge.weight + 2 if edge.isSelected() else edge.weight, Qt.PenStyle.SolidLine))
+        self._mark_workspace_dirty(autosave=True)
+        self._emit_edge_updated(edge.edge_id, {"weight": edge.weight})
+
+    def _valid_relations_for_edge(self, edge):
+        registry = getattr(self.main_window, "ontology_registry", None)
+        if not registry or not edge or not edge.source_node or not edge.dest_node:
+            return []
+        source_type = getattr(edge.source_node, "entity_type", "entity.text")
+        target_type = getattr(edge.dest_node, "entity_type", "entity.text")
+        relations = [rel for rel in registry.all_relations() if rel.allows(source_type, target_type)]
+        return sorted(relations, key=lambda rel: (rel.type_key == "relation.basic", rel.display_name))
+
+    def _change_edge_type(self, edge):
+        relations = self._valid_relations_for_edge(edge)
+        if not relations:
+            QMessageBox.warning(self, "No Valid Connection", "No registered relation can connect these node types.")
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Change Connection Type")
+        dialog.setMinimumWidth(440)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Choose relationship:"))
+        combo = QComboBox(dialog)
+        for rel in relations:
+            combo.addItem(f"{rel.display_name} ({rel.type_key})", rel.type_key)
+        current_index = next((i for i, rel in enumerate(relations) if rel.type_key == edge.relation_type), 0)
+        combo.setCurrentIndex(current_index)
+        layout.addWidget(combo)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        theme = self._theme().get_theme() if self._theme() else ThemeManager().get_theme()
+        style_dialog_with_theme(dialog, theme)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        relation = next((rel for rel in relations if rel.type_key == combo.currentData()), None)
+        if not relation or relation.type_key == edge.relation_type:
+            return
+        field_values = self._prompt_relation_fields(relation, current_values=edge.relation_properties)
+        if field_values is None:
+            return
+        old_relation = getattr(edge, "relation_type", "relation.basic")
+        self.save_state_for_undo()
+        edge.relation_type = relation.type_key
+        edge.relation_properties = relation.build_default_properties(field_values)
+        edge.relation_state = relation.build_default_state(dict(edge.relation_state or {}))
+        edge.label_text = edge.relation_properties.get("label") or relation.display_name
+        edge.text_item.setPlainText(edge.label_text)
+        if hasattr(edge, "refresh_relation_delegate"):
+            edge.refresh_relation_delegate()
+        edge.update_position()
+        self._refresh_graph_annotations()
+        self._mark_workspace_dirty(autosave=True)
+        self._emit_edge_updated(edge.edge_id, {
+            "relation_type": edge.relation_type,
+            "previous_relation_type": old_relation,
+            "relation_properties": dict(edge.relation_properties),
+            "relation_state": dict(edge.relation_state),
+            "label": edge.label_text,
+        })
+
+    def _edit_edge_attributes(self, edge):
+        registry = getattr(self.main_window, "ontology_registry", None)
+        if not registry or not edge:
+            return
+        relation = registry.get_relation_blueprint(getattr(edge, "relation_type", "relation.basic"))
+        field_values = self._prompt_relation_fields(relation, current_values=edge.relation_properties)
+        if field_values is None:
+            return
+        self.save_state_for_undo()
+        edge.relation_properties = relation.build_default_properties(field_values)
+        if edge.relation_properties.get("label"):
+            edge.label_text = edge.relation_properties["label"]
+            edge.text_item.setPlainText(edge.label_text)
+            edge.update_position()
+        if hasattr(edge, "refresh_relation_delegate"):
+            edge.refresh_relation_delegate()
+        self._refresh_graph_annotations()
+        self._mark_workspace_dirty(autosave=True)
+        self._emit_edge_updated(edge.edge_id, {"relation_properties": dict(edge.relation_properties), "label": edge.label_text})
 
     def _change_font_size_for_node(self, node):
         if not node:
@@ -1505,8 +1714,7 @@ class WorkspaceView(QGraphicsView):
                 current = current.parentItem()
 
             if not is_node:
-                self.connecting_node.setPen(QPen(QColor("#ffffff" if self.connecting_node.isSelected() else "#555555"), 4 if self.connecting_node.isSelected() else 2))
-                self.connecting_node = None
+                self._finish_connection_cleanup()
                 event.accept()
                 return
 
@@ -1606,6 +1814,7 @@ class WorkspaceView(QGraphicsView):
 
         if len(selected_nodes) > 1 and (item is None or (isinstance(item, Node) and item in selected_nodes)):
             menu, delete_action, color_action, manage_tags_action, declutter_action = build_selected_nodes_context_menu(self, self, selected_nodes)
+            self._style_popup_menu(menu)
             action = menu.exec(event.globalPos())
             if action == delete_action:
                 self.save_state_for_undo()
@@ -1628,6 +1837,7 @@ class WorkspaceView(QGraphicsView):
 
             connect_source = prior_selected[0] if (len(prior_selected) == 1 and prior_selected[0] is not item) else None
             menu, edit_action, color_action, manage_tags_action, cite_action, connect_action, delete_highlight_action, declutter_action = build_node_context_menu(self, self, item, selected_nodes, connect_source)
+            self._style_popup_menu(menu)
 
             action = menu.exec(event.globalPos())
             if action == edit_action:
@@ -1653,10 +1863,15 @@ class WorkspaceView(QGraphicsView):
             return
 
         if isinstance(item, Edge):
-            menu, details_action, edit_action, color_action, weight_action, del_action = build_edge_context_menu(self, self, item)
+            menu, details_action, type_action, attrs_action, edit_action, color_action, weight_action, del_action = build_edge_context_menu(self, self, item)
+            self._style_popup_menu(menu)
             action = menu.exec(event.globalPos())
             if action == details_action:
                 item.trigger_details()
+            elif action == type_action:
+                item.trigger_type_change()
+            elif action == attrs_action:
+                item.trigger_attributes_change()
             elif action == edit_action:
                 item.trigger_edit()
             elif action == color_action:
@@ -1670,6 +1885,7 @@ class WorkspaceView(QGraphicsView):
 
         if item is None:
             menu, declutter_action = build_canvas_context_menu(self, self)
+            self._style_popup_menu(menu)
             if menu.exec(event.globalPos()) == declutter_action:
                 self.trigger_declutter()
             return
@@ -1811,7 +2027,8 @@ class WorkspaceView(QGraphicsView):
 
     def start_connection(self, node):
         self.connecting_node = node
-        self.connecting_node.setPen(QPen(QColor("#00ff00"), 3, Qt.PenStyle.DashLine))
+        theme = self._theme().get_theme() if self._theme() else ThemeManager().get_theme()
+        self.connecting_node.setPen(QPen(QColor(theme.get("success", "#00cc66")), 3, Qt.PenStyle.DashLine))
 
     def finish_connection(self, target_node):
         relation = self._choose_relation_blueprint(self.connecting_node, target_node)
@@ -1835,6 +2052,7 @@ class WorkspaceView(QGraphicsView):
         self.scene_obj.addItem(edge)
         self.edges.append(edge)
         self._emit_edge_added(edge_model_from_edge(edge))
+        self._refresh_graph_annotations()
         self._mark_workspace_dirty(autosave=True)
 
         self._finish_connection_cleanup()
@@ -1842,7 +2060,8 @@ class WorkspaceView(QGraphicsView):
     def _finish_connection_cleanup(self):
         if not self.connecting_node:
             return
-        self.connecting_node.setPen(QPen(QColor("#ffffff" if self.connecting_node.isSelected() else "#555555"), 4 if self.connecting_node.isSelected() else 2))
+        theme = self._theme().get_theme() if self._theme() else ThemeManager().get_theme()
+        self.connecting_node.setPen(QPen(QColor(theme.get("text_main") if self.connecting_node.isSelected() else theme.get("border")), 4 if self.connecting_node.isSelected() else 2))
         self.connecting_node = None
 
     def _choose_relation_blueprint(self, source_node, target_node):
@@ -1856,22 +2075,42 @@ class WorkspaceView(QGraphicsView):
         if not relations:
             QMessageBox.warning(self, "No Valid Connection", f"No registered relation can connect {source_type} to {target_type}.")
             return None
-        labels = [f"{rel.display_name} ({rel.type_key})" for rel in relations]
-        label, ok = QInputDialog.getItem(self, "Connection Type", "Choose relationship:", labels, 0, False)
-        if not ok:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Connection Type")
+        dialog.setMinimumWidth(420)
+        layout = QVBoxLayout(dialog)
+        label = QLabel("Choose relationship:")
+        layout.addWidget(label)
+        combo = QComboBox(dialog)
+        for rel in relations:
+            combo.addItem(f"{rel.display_name} ({rel.type_key})", rel.type_key)
+        layout.addWidget(combo)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        theme = self._theme().get_theme() if self._theme() else ThemeManager().get_theme()
+        style_dialog_with_theme(dialog, theme)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
-        return relations[labels.index(label)]
+        selected_type = combo.currentData()
+        return next((rel for rel in relations if rel.type_key == selected_type), None)
 
-    def _prompt_relation_fields(self, relation):
+    def _prompt_relation_fields(self, relation, current_values=None):
         fields = list(getattr(relation, "fields", []) or [])
         if not fields:
             return {}
         dialog = QDialog(self)
         dialog.setWindowTitle(f"{relation.display_name} Details")
+        dialog.setMinimumWidth(460)
         layout = QVBoxLayout(dialog)
         form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         editors = {}
         defaults = relation.build_default_properties()
+        if current_values:
+            defaults.update(current_values)
         for field in fields:
             default = defaults.get(field.key, field.default)
             if field.choices:
@@ -1900,12 +2139,15 @@ class WorkspaceView(QGraphicsView):
                 editor = QLineEdit(dialog)
                 editor.setText("" if default is None else str(default))
             editors[field.key] = editor
+            editor.setMinimumWidth(220)
             form.addRow(field.label, editor)
         layout.addLayout(form)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dialog)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
+        theme = self._theme().get_theme() if self._theme() else ThemeManager().get_theme()
+        style_dialog_with_theme(dialog, theme)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
         values = {}
@@ -1946,7 +2188,7 @@ class WorkspaceView(QGraphicsView):
         node.setSelected(True)
         node.is_hovered = True
         node.refresh_layout()
-        node.trigger_edit()
+        QTimer.singleShot(0, node.trigger_edit)
         self._queue_background_embedding(node)
         return node
 
@@ -1964,10 +2206,26 @@ class WorkspaceView(QGraphicsView):
         if not labels:
             return None
         current_index = next((i for i, bp in enumerate(blueprints) if bp.type_key == current_type), 0)
-        label, ok = QInputDialog.getItem(self, "Node Type", "Choose node type:", labels, current_index, False)
-        if not ok:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Node Type")
+        dialog.setMinimumWidth(420)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Choose node type:"))
+        combo = QComboBox(dialog)
+        for bp in blueprints:
+            combo.addItem(f"{bp.display_name} ({bp.type_key})", bp.type_key)
+        combo.setCurrentIndex(current_index)
+        layout.addWidget(combo)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        theme = self._theme().get_theme() if self._theme() else ThemeManager().get_theme()
+        style_dialog_with_theme(dialog, theme)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
-        return blueprints[labels.index(label)]
+        selected_type = combo.currentData()
+        return next((bp for bp in blueprints if bp.type_key == selected_type), None)
 
     def _change_node_type(self, node):
         if not node:

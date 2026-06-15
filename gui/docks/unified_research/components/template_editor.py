@@ -1,99 +1,10 @@
 import json
-from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton, 
-                             QLabel, QLineEdit, QTextEdit, QComboBox, QWidget, 
-                             QScrollArea, QMessageBox, QListWidget, QCheckBox, QListWidgetItem)
+from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton, 
+                             QLabel, QLineEdit, QTextEdit,
+                             QMessageBox, QListWidget, QCheckBox, QListWidgetItem, QSpinBox, QGroupBox)
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QCursor
-from core.models.ontology_model import EntityType, RelationType
-from core.ontology.registry import OntologyRegistry
-
-class FieldRowWidget(QWidget):
-    """A single row in the visual schema builder."""
-    def __init__(self, registry=None, theme=None, parent=None):
-        super().__init__(parent)
-        self.registry = registry or OntologyRegistry()
-        self.layout = QHBoxLayout(self)
-        self.layout.setContentsMargins(0, 0, 0, 0)
-
-        self.registry_field_combo = QComboBox()
-        self.registry_field_combo.addItem("Custom property", "")
-        self._populate_registry_fields()
-        self.registry_field_combo.currentIndexChanged.connect(self._apply_registry_field)
-        
-        self.key_input = QLineEdit()
-        self.key_input.setPlaceholderText("Property key (e.g., thesis_role)")
-        
-        self.type_combo = QComboBox()
-        self.type_combo.addItems([
-            "Node/Relation Property (Text)", 
-            "Node/Relation Property (List)", 
-            "Argument Property Group",
-            "Metric Property Group"
-        ])
-        
-        self.desc_input = QLineEdit()
-        self.desc_input.setPlaceholderText("How the AI should fill this property...")
-        
-        self.btn_remove = QPushButton("❌")
-        self.btn_remove.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.btn_remove.setFixedWidth(30)
-        self.btn_remove.clicked.connect(self.deleteLater)
-        
-        self.layout.addWidget(self.registry_field_combo, 2)
-        self.layout.addWidget(self.key_input, 2)
-        self.layout.addWidget(self.type_combo, 2)
-        self.layout.addWidget(self.desc_input, 3)
-        self.layout.addWidget(self.btn_remove)
-
-        if theme:
-            style = f"background: {theme.get('bg_input', '#2b2b2b')}; color: {theme.get('text_main', '#fff')}; border: 1px solid {theme.get('border', '#444')}; padding: 4px; border-radius: 4px;"
-            self.key_input.setStyleSheet(style)
-            self.registry_field_combo.setStyleSheet(style)
-            self.type_combo.setStyleSheet(style)
-            self.desc_input.setStyleSheet(style)
-            self.btn_remove.setStyleSheet("background: transparent; border: none;")
-
-    def get_field_data(self):
-        """Converts this visual row into the actual JSON schema format."""
-        key = self.key_input.text().strip().replace(" ", "_")
-        desc = self.desc_input.text().strip() or "string"
-        ftype = self.type_combo.currentText()
-        
-        if not key: return None, None
-        
-        if ftype == "Node/Relation Property (Text)":
-            return key, desc
-        elif ftype == "Node/Relation Property (List)":
-            return key, [desc]
-        elif ftype == "Argument Property Group":
-            return key, [{"claim": "string", "supporting_logic": desc}]
-        elif ftype == "Metric Property Group":
-            return key, [{"metric": "string", "value": desc}]
-        return key, desc
-
-    def _populate_registry_fields(self):
-        for bp in self.registry.all_entities():
-            for field in getattr(bp, "fields", []) or []:
-                self.registry_field_combo.addItem(f"{bp.display_name}: {field.label}", {
-                    "key": field.key,
-                    "description": bp.description,
-                    "value_type": field.value_type,
-                })
-        for bp in self.registry.all_relations():
-            for field in getattr(bp, "fields", []) or []:
-                self.registry_field_combo.addItem(f"{bp.display_name} link: {field.label}", {
-                    "key": field.key,
-                    "description": bp.description,
-                    "value_type": field.value_type,
-                })
-
-    def _apply_registry_field(self):
-        data = self.registry_field_combo.currentData()
-        if not isinstance(data, dict):
-            return
-        self.key_input.setText(data.get("key", ""))
-        if not self.desc_input.text().strip():
-            self.desc_input.setText(data.get("description", ""))
+from core.models.ontology_model import EntityType
+from core.ontology.registry import OntologyRegistry, RelationTrait
 
 class TemplateEditorDialog(QDialog):
     def __init__(self, project_manager, theme=None, parent=None):
@@ -101,7 +12,7 @@ class TemplateEditorDialog(QDialog):
         self.pm = project_manager
         self.theme = theme
         self.setWindowTitle("Analysis Modes Builder")
-        self.resize(800, 500)
+        self.resize(920, 640)
         self.templates = self.pm.get_analysis_templates()
         self.current_template_id = None
         self.registry = OntologyRegistry()
@@ -135,43 +46,48 @@ class TemplateEditorDialog(QDialog):
         right_panel.addWidget(self.title_input)
 
         help_label = QLabel(
-            "Analysis modes extract workspace-ready graph data: selected node types become nodes, "
-            "selected connection types become relations, and extra properties are saved on those graph items."
+            "Describe the analysis goal, choose the graph node/link types, and set quote limits. "
+            "The app automatically runs: quote selection per section, evidence synthesis, then registry-driven graph generation."
         )
         help_label.setWordWrap(True)
         right_panel.addWidget(help_label)
         
-        right_panel.addWidget(QLabel("<b>AI Instructions:</b>"))
+        right_panel.addWidget(QLabel("<b>Analysis Goal:</b>"))
         self.inst_input = QTextEdit()
-        self.inst_input.setFixedHeight(80)
-        self.inst_input.setPlaceholderText("Tell the AI what to look for in the text...")
+        self.inst_input.setFixedHeight(95)
+        self.inst_input.setPlaceholderText("Example: Diagram the connections between people throughout this paper.")
         right_panel.addWidget(self.inst_input)
 
-        prompt_keys = QHBoxLayout()
-        prompt_keys.addWidget(QLabel("<b>Chunk Prompt:</b>"))
-        self.chunk_prompt_input = QLineEdit("Graph Analysis Chunk System")
-        self.chunk_prompt_input.setToolTip("PromptManager key used for per-chunk graph extraction.")
-        prompt_keys.addWidget(self.chunk_prompt_input, 1)
-        prompt_keys.addWidget(QLabel("<b>Final Pass Prompt:</b>"))
-        self.master_prompt_input = QLineEdit("Graph Analysis Master System")
-        self.master_prompt_input.setToolTip("PromptManager key used to merge chunks into the master graph.")
-        prompt_keys.addWidget(self.master_prompt_input, 1)
-        btn_prompts = QPushButton("Edit Prompts")
+        limits_box = QGroupBox("Quote Selection Limits")
+        limits_layout = QGridLayout(limits_box)
+        self.quotes_per_chunk = self._spin(1, 12, 5)
+        self.quote_words = self._spin(4, 30, 10)
+        self.max_quote_words = self._spin(6, 40, 18)
+        self.explanation_words = self._spin(4, 30, 10)
+        limits_layout.addWidget(QLabel("Quotes per section"), 0, 0)
+        limits_layout.addWidget(self.quotes_per_chunk, 0, 1)
+        limits_layout.addWidget(QLabel("Target quote words"), 0, 2)
+        limits_layout.addWidget(self.quote_words, 0, 3)
+        limits_layout.addWidget(QLabel("Max quote words"), 1, 0)
+        limits_layout.addWidget(self.max_quote_words, 1, 1)
+        limits_layout.addWidget(QLabel("Explanation words"), 1, 2)
+        limits_layout.addWidget(self.explanation_words, 1, 3)
+        btn_prompts = QPushButton("Advanced: Edit Shared Prompts")
         btn_prompts.clicked.connect(self._open_prompt_manager)
-        prompt_keys.addWidget(btn_prompts)
-        right_panel.addLayout(prompt_keys)
+        limits_layout.addWidget(btn_prompts, 0, 4, 2, 1)
+        right_panel.addWidget(limits_box)
 
         graph_row = QHBoxLayout()
         graph_col_nodes = QVBoxLayout()
         graph_col_rels = QVBoxLayout()
-        graph_col_nodes.addWidget(QLabel("<b>Node types to extract:</b>"))
+        graph_col_nodes.addWidget(QLabel("<b>Final graph node types:</b>"))
         self.node_type_list = QListWidget()
         self.node_type_list.setMinimumHeight(110)
         graph_col_nodes.addWidget(self.node_type_list)
         self.allow_text_nodes = QCheckBox("Allow fallback text nodes")
-        self.allow_text_nodes.setChecked(True)
+        self.allow_text_nodes.setChecked(False)
         graph_col_nodes.addWidget(self.allow_text_nodes)
-        graph_col_rels.addWidget(QLabel("<b>Connection types to find:</b>"))
+        graph_col_rels.addWidget(QLabel("<b>Final graph connection types:</b>"))
         self.relation_type_list = QListWidget()
         self.relation_type_list.setMinimumHeight(110)
         graph_col_rels.addWidget(self.relation_type_list)
@@ -179,22 +95,6 @@ class TemplateEditorDialog(QDialog):
         graph_row.addLayout(graph_col_rels, 1)
         right_panel.addLayout(graph_row)
         self._populate_registry_lists()
-        
-        # Visual Schema Builder
-        right_panel.addWidget(QLabel("<b>Extra Graph Properties (saved onto extracted nodes/relations):</b>"))
-        
-        self.fields_container = QWidget()
-        self.fields_layout = QVBoxLayout(self.fields_container)
-        self.fields_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(self.fields_container)
-        right_panel.addWidget(scroll)
-        
-        btn_add_field = QPushButton("➕ Add Graph Property")
-        btn_add_field.clicked.connect(self._add_field_row)
-        right_panel.addWidget(btn_add_field)
         
         # Save Area
         save_layout = QHBoxLayout()
@@ -207,12 +107,11 @@ class TemplateEditorDialog(QDialog):
         
         main_layout.addLayout(right_panel)
 
-    def _add_field_row(self, key="", ftype_idx=0, desc=""):
-        row = FieldRowWidget(self.registry, self.theme)
-        if key: row.key_input.setText(key)
-        if desc: row.desc_input.setText(desc)
-        row.type_combo.setCurrentIndex(ftype_idx)
-        self.fields_layout.addWidget(row)
+    def _spin(self, minimum, maximum, value):
+        spin = QSpinBox()
+        spin.setRange(minimum, maximum)
+        spin.setValue(value)
+        return spin
 
     def _populate_registry_lists(self):
         for bp in self.registry.all_entities():
@@ -232,31 +131,25 @@ class TemplateEditorDialog(QDialog):
             item.setData(Qt.ItemDataRole.UserRole, bp.type_key)
             item.setToolTip(bp.description)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            default_checked = bp.type_key in {
-                RelationType.SUPPORTS.value,
-                RelationType.CONTRADICTS.value,
-                RelationType.REASONS.value,
-                RelationType.DERIVED_FROM.value,
-            }
+            default_checked = self._is_default_argument_relation(bp)
             item.setCheckState(Qt.CheckState.Checked if default_checked else Qt.CheckState.Unchecked)
             self.relation_type_list.addItem(item)
 
     def _clear_editor(self):
         self.title_input.clear()
         self.inst_input.clear()
-        self.chunk_prompt_input.setText("Graph Analysis Chunk System")
-        self.master_prompt_input.setText("Graph Analysis Master System")
+        self.quotes_per_chunk.setValue(5)
+        self.quote_words.setValue(10)
+        self.max_quote_words.setValue(18)
+        self.explanation_words.setValue(10)
         self._set_checked_types(self.node_type_list, {EntityType.CLAIM.value, EntityType.REASONING.value, EntityType.QUOTE.value})
-        self._set_checked_types(self.relation_type_list, {RelationType.SUPPORTS.value, RelationType.CONTRADICTS.value, RelationType.REASONS.value, RelationType.DERIVED_FROM.value})
-        self.allow_text_nodes.setChecked(True)
-        for i in reversed(range(self.fields_layout.count())): 
-            self.fields_layout.itemAt(i).widget().setParent(None)
+        self._set_checked_types(self.relation_type_list, self._default_argument_relation_types())
+        self.allow_text_nodes.setChecked(False)
 
     def _create_new(self):
         self.current_template_id = None
         self._clear_editor()
         self.title_input.setText("New Analysis Mode")
-        self._add_field_row()
 
     def _load_template_list(self):
         self.list_widget.clear()
@@ -271,54 +164,64 @@ class TemplateEditorDialog(QDialog):
         self._clear_editor()
         self.title_input.setText(template.get("title", ""))
         self.inst_input.setText(template.get("instructions", ""))
-        self.chunk_prompt_input.setText(template.get("chunk_prompt_key", "Graph Analysis Chunk System"))
-        self.master_prompt_input.setText(template.get("master_prompt_key", "Graph Analysis Master System"))
+        limits = template.get("limits") if isinstance(template.get("limits"), dict) else {}
+        self.quotes_per_chunk.setValue(int(limits.get("max_quotes_per_chunk", 5) or 5))
+        self.quote_words.setValue(int(limits.get("quote_words", 10) or 10))
+        self.max_quote_words.setValue(int(limits.get("max_quote_words", 18) or 18))
+        self.explanation_words.setValue(int(limits.get("explanation_words", 10) or 10))
         self._set_checked_types(self.node_type_list, set(template.get("node_types") or []))
         self._set_checked_types(self.relation_type_list, set(template.get("relation_types") or []))
         self.allow_text_nodes.setChecked(bool(template.get("allow_text_nodes", True)))
-        
-        # Decompile the JSON string back into visual rows (Best effort)
-        try:
-            schema_dict = json.loads(template.get("schema", "{}"))
-            for k, v in schema_dict.items():
-                if isinstance(v, list) and len(v) > 0 and isinstance(v[0], dict) and "claim" in v[0]:
-                    self._add_field_row(k, 2, v[0].get("supporting_logic", ""))
-                elif isinstance(v, list) and len(v) > 0 and isinstance(v[0], dict) and "metric" in v[0]:
-                    self._add_field_row(k, 3, v[0].get("value", ""))
-                elif isinstance(v, list):
-                    self._add_field_row(k, 1, str(v[0]) if v else "")
-                else:
-                    self._add_field_row(k, 0, str(v))
-        except Exception:
-            self._add_field_row() # Fallback
 
     def _save_current(self):
         title = self.title_input.text().strip()
         if not title: return QMessageBox.warning(self, "Error", "Title cannot be empty.")
-        
-        # Compile visual rows into JSON
-        compiled_schema = {}
-        for i in range(self.fields_layout.count()):
-            widget = self.fields_layout.itemAt(i).widget()
-            if isinstance(widget, FieldRowWidget):
-                k, v = widget.get_field_data()
-                if k: compiled_schema[k] = v
-
-        if not compiled_schema:
-            compiled_schema = {"graph_artifacts": "Registry-driven node and relation extraction"}
+        instructions = self.inst_input.toPlainText().strip()
+        compiled_schema = {
+            "analysis_goal": instructions,
+            "chunk_stage": "Select short verbatim quotes and short relevance notes for this goal.",
+            "synthesis_stage": "Synthesize numbered quotes into one connected analysis plan.",
+            "graph_stage": "Use selected registry node and relation types for final graph output.",
+            "quote_selection_limits": {
+                "quotes_per_section": self.quotes_per_chunk.value(),
+                "target_quote_words": self.quote_words.value(),
+                "max_quote_words": self.max_quote_words.value(),
+                "explanation_words": self.explanation_words.value(),
+            },
+        }
 
         schema_str = json.dumps(compiled_schema, indent=2)
         
         template_data = {
             "id": self.current_template_id or f"tmpl_{title.replace(' ', '_').lower()}",
             "title": title,
-            "instructions": self.inst_input.toPlainText(),
+            "instructions": instructions,
             "schema": schema_str,
             "node_types": self._checked_types(self.node_type_list),
             "relation_types": self._checked_types(self.relation_type_list),
             "allow_text_nodes": self.allow_text_nodes.isChecked(),
-            "chunk_prompt_key": self.chunk_prompt_input.text().strip() or "Graph Analysis Chunk System",
-            "master_prompt_key": self.master_prompt_input.text().strip() or "Graph Analysis Master System",
+            "chunk_prompt_key": "Graph Analysis Chunk Observations System",
+            "synthesis_prompt_key": "Graph Analysis Synthesis System",
+            "master_prompt_key": "Graph Analysis Master System",
+            "chunk_query_prompt_key": "Graph Analysis Chunk Observations Query",
+            "synthesis_query_prompt_key": "Graph Analysis Synthesis Query",
+            "master_query_prompt_key": "Graph Analysis Master Query",
+            "analysis_template_version": 12,
+            "limits": {
+                "chunk_pages": 4,
+                "max_chunk_chars": 14000,
+                "max_master_chars": 36000,
+                "num_ctx": 24576,
+                "chunk_num_predict": 1400,
+                "synthesis_num_predict": 3500,
+                "master_num_predict": 4000,
+                "max_entities_per_chunk": 12,
+                "max_relations_per_chunk": 16,
+                "max_quotes_per_chunk": self.quotes_per_chunk.value(),
+                "quote_words": self.quote_words.value(),
+                "max_quote_words": self.max_quote_words.value(),
+                "explanation_words": self.explanation_words.value(),
+            },
         }
 
         if self.current_template_id:
@@ -341,6 +244,20 @@ class TemplateEditorDialog(QDialog):
             if item.checkState() == Qt.CheckState.Checked:
                 values.append(item.data(Qt.ItemDataRole.UserRole))
         return values
+
+    def _default_argument_relation_types(self):
+        return {bp.type_key for bp in self.registry.all_relations() if self._is_default_argument_relation(bp)}
+
+    def _is_default_argument_relation(self, bp):
+        node_types = {EntityType.CLAIM.value, EntityType.REASONING.value, EntityType.QUOTE.value}
+        traits = set(bp.traits or [])
+        if not traits.intersection({RelationTrait.EVIDENTIARY, RelationTrait.HIERARCHICAL, RelationTrait.SEMANTIC}):
+            return False
+        if not any(node_type in bp.valid_source_types for node_type in node_types):
+            return False
+        if not any(node_type in bp.valid_target_types for node_type in node_types):
+            return False
+        return any(self.registry.validate_relation(bp.type_key, src, tgt) for src in node_types for tgt in node_types)
 
     def _set_checked_types(self, list_widget, selected):
         selected = set(selected or [])
@@ -366,7 +283,7 @@ class TemplateEditorDialog(QDialog):
         self.list_widget.setStyleSheet(style)
         self.title_input.setStyleSheet(style)
         self.inst_input.setStyleSheet(style)
-        self.chunk_prompt_input.setStyleSheet(style)
-        self.master_prompt_input.setStyleSheet(style)
         self.node_type_list.setStyleSheet(style)
         self.relation_type_list.setStyleSheet(style)
+        for spin in [self.quotes_per_chunk, self.quote_words, self.max_quote_words, self.explanation_words]:
+            spin.setStyleSheet(style)

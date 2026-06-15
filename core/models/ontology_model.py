@@ -24,7 +24,9 @@ class EntityType(str, Enum):
 class RelationType(str, Enum):
     BASIC = "relation.basic"
     SUPPORTS = "relation.supports"
+    REFUTES = "relation.refutes"
     CONTRADICTS = "relation.contradicts"
+    IMPLIES = "relation.implies"
     REASONS = "relation.reasons"
     ANSWERS = "relation.answers"
     FOLLOW_UP = "relation.follow_up"

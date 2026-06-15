@@ -48,6 +48,11 @@ class MasterActionRunner(QThread):
             "BRANCH": lambda step, inputs, model: self._run_branch(step, inputs),
             "DATABASE_WRITE": lambda step, inputs, model: self._run_db_write(step, inputs),
             "GRAPH_VALIDATOR": lambda step, inputs, model: self._run_graph_validator(step, inputs), # NEW
+            "ANALYSIS_CONTRACT": lambda step, inputs, model: self._run_analysis_contract(step, inputs),
+            "DOCUMENT_CHUNK": lambda step, inputs, model: self._run_document_chunk(step, inputs),
+            "ANALYSIS_COMPACT": lambda step, inputs, model: self._run_analysis_compact(step, inputs),
+            "ANALYSIS_FINALIZE": lambda step, inputs, model: self._run_analysis_finalize(step, inputs),
+            "ANALYSIS_SEND_TO_WORKSPACE": lambda step, inputs, model: self._run_analysis_send_to_workspace(step, inputs),
         }
 
     def register_step_handler(self, step_type: str, handler):
@@ -151,7 +156,15 @@ class MasterActionRunner(QThread):
 
     def _run_python(self, step, inputs):
         script = inputs.get('script', '') 
-        local_scope = {"state": self.state.copy(), "result": None}
+        
+        # THE FIX: Expose analysis_api so users can call graph normalization, 
+        # chunking, and schema contracts in their own custom Python tools.
+        local_scope = {
+            "state": self.state.copy(), 
+            "result": None,
+            "analysis_api": self._analysis_runtime() 
+        }
+        
         try:
             exec(script, {}, local_scope)
             return local_scope.get("result", "")
@@ -193,6 +206,123 @@ class MasterActionRunner(QThread):
         except Exception as e:
             self.error.emit(f"Database Write Error: {e}")
             return f"DB Error: {e}"
+
+    def _analysis_runtime(self):
+        from core.engine.analysis_runtime import AnalysisRuntime
+        return AnalysisRuntime(
+            getattr(self.main_window, "project_manager", None),
+            getattr(self.main_window, "prompt_manager", None),
+            getattr(self.main_window, "ontology_registry", None),
+        )
+
+    def _run_analysis_contract(self, step, inputs):
+        runtime = self._analysis_runtime()
+        template = inputs.get("template") or {}
+        contract = runtime.build_contract(template)
+        contract["prompt_contract"] = runtime.build_prompt_contract(contract)
+        self.state["analysis_limits"] = contract.get("limits", {})
+        self.state["template_instructions"] = template.get("instructions", "")
+        self.state["template_schema"] = contract["prompt_contract"]
+        self.state["analysis_contract"] = contract
+        self.state["analysis_chunk_system_prompt"] = runtime.chunk_system_prompt(template, contract)
+        self.state["analysis_synthesis_system_prompt"] = runtime.synthesis_system_prompt(template, contract)
+        self.state["analysis_master_system_prompt"] = runtime.master_system_prompt(template, contract)
+        self.state["analysis_chunk_query_prompt"] = runtime.chunk_query_prompt(template)
+        self.state["analysis_synthesis_query_prompt"] = runtime.synthesis_query_prompt(template)
+        self.state["analysis_master_query_prompt"] = runtime.master_query_prompt(template)
+        self.state["llm_prompt_trace"] = []
+        self.state["analysis_prompt_trace"] = [
+            {"step": "analysis_contract", "name": "chunk_system_prompt", "content": self.state["analysis_chunk_system_prompt"]},
+            {"step": "analysis_contract", "name": "chunk_query_prompt_template", "content": self.state["analysis_chunk_query_prompt"]},
+            {"step": "analysis_contract", "name": "synthesis_system_prompt", "content": self.state["analysis_synthesis_system_prompt"]},
+            {"step": "analysis_contract", "name": "synthesis_query_prompt_template", "content": self.state["analysis_synthesis_query_prompt"]},
+            {"step": "analysis_contract", "name": "master_system_prompt", "content": self.state["analysis_master_system_prompt"]},
+            {"step": "analysis_contract", "name": "master_query_prompt_template", "content": self.state["analysis_master_query_prompt"]},
+            {"step": "analysis_contract", "name": "template_schema", "content": self.state["template_schema"]},
+        ]
+        return contract
+
+    def _run_document_chunk(self, step, inputs):
+        runtime = self._analysis_runtime()
+        template = inputs.get("template") or {}
+        contract = inputs.get("contract") or self.state.get("analysis_contract") or {}
+        doc_path = inputs.get("doc_path") or self.state.get("analysis_doc_path") or self.state.get("target_doc")
+        template_id = inputs.get("template_id") or self.state.get("analysis_template_id") or template.get("id") or "analysis"
+        chunks = runtime.chunk_document(doc_path, template_id, template, contract)
+        if not chunks:
+            raise ValueError("Could not parse document into analysis chunks.")
+        return chunks
+
+    def _run_analysis_compact(self, step, inputs):
+        runtime = self._analysis_runtime()
+        limits = self.state.get("analysis_limits") or {}
+        contract = inputs.get("contract") or self.state.get("analysis_contract") or {}
+        max_chars = int(inputs.get("max_chars") or limits.get("max_master_chars") or 16000)
+        return runtime.compact_master_input(inputs.get("chunks", self.state.get("final_analysis", [])), max_chars, contract)
+
+    def _run_analysis_finalize(self, step, inputs):
+        runtime = self._analysis_runtime()
+        template = inputs.get("template") or {}
+        template_id = inputs.get("template_id") or self.state.get("analysis_template_id") or template.get("id") or "analysis"
+        doc_path = inputs.get("doc_path") or self.state.get("analysis_doc_path") or self.state.get("target_doc")
+        run_id = inputs.get("run_id") or self.state.get("analysis_run_id") or runtime.run_id(doc_path, template_id)
+        contract = inputs.get("contract") or self.state.get("analysis_contract") or runtime.build_contract(template)
+        result = runtime.normalize_result(
+            doc_path,
+            template_id,
+            run_id,
+            template,
+            contract,
+            inputs.get("chunks", self.state.get("final_analysis", [])),
+            inputs.get("master", self.state.get("master_diagram", {})),
+            inputs.get("synthesis", self.state.get("argument_synthesis", "")),
+        )
+        result["prompt_trace"] = {
+            "rendered_templates": self.state.get("analysis_prompt_trace", []),
+            "llm_calls": self.state.get("llm_prompt_trace", []),
+            "blueprint": "DefaultBlueprints.get_analysis_blueprint",
+        }
+        runtime.save_result(result)
+        self._emit_analysis_event("RESULT_READY", result, doc_path, template_id, run_id, template)
+        self._emit_analysis_event("RUN_COMPLETED", result, doc_path, template_id, run_id, template)
+        return result
+
+    def _run_analysis_send_to_workspace(self, step, inputs):
+        runtime = self._analysis_runtime()
+        result = inputs.get("result") or self.state.get("analysis_result") or {}
+        workspace_id = int(inputs.get("workspace_id") or self.state.get("analysis_workspace_id") or 1)
+        summary = runtime.send_to_workspace(result, workspace_id)
+        try:
+            from core.events.event_bus import EventBus
+            from core.events.domains.analysis_events import AnalysisEvent, AnalysisPayload
+            EventBus.get_instance().analysis_result_changed.emit(
+                AnalysisEvent.SENT_TO_WORKSPACE,
+                AnalysisPayload(doc_path=result.get("doc_path"), template_id=result.get("template_id"), run_id=result.get("run_id"), workspace_id=workspace_id, result=summary),
+            )
+        except Exception:
+            pass
+        try:
+            from core.events.event_bus import EventBus
+            from core.events.domains.workspace_events import WorkspaceEvent, WorkspaceEventPayload
+            EventBus.get_instance().workspace_changed.emit(
+                WorkspaceEvent.CHANGED,
+                WorkspaceEventPayload(workspace_id=workspace_id, summary={"analysis_sent_to_workspace": True, **summary}),
+            )
+        except Exception:
+            pass
+        return summary
+
+    def _emit_analysis_event(self, event_name, result, doc_path=None, template_id=None, run_id=None, template=None):
+        try:
+            from core.events.event_bus import EventBus
+            from core.events.domains.analysis_events import AnalysisEvent, AnalysisPayload
+            event = getattr(AnalysisEvent, event_name)
+            EventBus.get_instance().analysis_result_changed.emit(
+                event,
+                AnalysisPayload(doc_path=doc_path, template_id=template_id, run_id=run_id, template=template or {}, result=result if isinstance(result, dict) else {"value": result}),
+            )
+        except Exception:
+            pass
 
     def _run_foreach(self, step, inputs):
         target_list_raw = inputs.get('list', [])
@@ -271,6 +401,42 @@ class MasterActionRunner(QThread):
                 aggregated_results.extend(parsed_res)
             else:
                 aggregated_results.append(parsed_res)
+
+            if step.step_id == "process_all_chunks":
+                try:
+                    runtime = self._analysis_runtime()
+                    contract = self.state.get("analysis_contract") or {}
+                    if isinstance(parsed_res, dict) and runtime._is_chunk_observation(parsed_res):
+                        chunk_norm = runtime._normalize_chunk_observation(parsed_res, idx)
+                    else:
+                        chunk_norm = runtime.normalize_graph_object(parsed_res if isinstance(parsed_res, dict) else {}, f"chunk{idx}", contract)
+                    from core.events.event_bus import EventBus
+                    from core.events.domains.analysis_events import AnalysisEvent, AnalysisPayload
+                    EventBus.get_instance().analysis_result_changed.emit(
+                        AnalysisEvent.CHUNK_RESULT,
+                        AnalysisPayload(
+                            doc_path=self.state.get("analysis_doc_path"),
+                            template_id=self.state.get("analysis_template_id"),
+                            run_id=self.state.get("analysis_run_id"),
+                            result={
+                                "chunk_number": idx + 1,
+                                "total_chunks": len(target_list),
+                                "doc_path": self.state.get("analysis_doc_path"),
+                                "chunk": chunk_norm,
+                            },
+                        ),
+                    )
+                    EventBus.get_instance().analysis_result_changed.emit(
+                        AnalysisEvent.PROGRESS,
+                        AnalysisPayload(
+                            doc_path=self.state.get("analysis_doc_path"),
+                            template_id=self.state.get("analysis_template_id"),
+                            run_id=self.state.get("analysis_run_id"),
+                            result={"message": f"Completed chunk {idx + 1}/{len(target_list)}."},
+                        ),
+                    )
+                except Exception:
+                    pass
                 
             self.step_complete.emit(f"{step.step_id}_item_{idx}", str(final_result), sub_state.copy())
             
@@ -337,9 +503,7 @@ class MasterActionRunner(QThread):
         # THE FIX: Ensure we cleanly resolve variables in the composed system prompt
         system_prompt = StateResolver.resolve_val(system_prompt, self.state, self.prompt_manager)
 
-        options = {"temperature": 0.7, "num_predict": 2048, "json_mode": False}
-        options.update(getattr(step, 'llm_options', {}))
-        if options["num_predict"] <= 0: options["num_predict"] = 2048
+        options = self._resolve_llm_options(step)
         
         import json
         if getattr(step, 'output_schema', None):
@@ -348,10 +512,12 @@ class MasterActionRunner(QThread):
             json_enforcer = self.prompt_manager.get_prompt("JSON Schema Enforcer")
             system_prompt += "\n\n" + json_enforcer.replace("{schema_str}", schema_str)
         elif options.get("json_mode") and "JSON" not in system_prompt:
-             system_prompt += "\n\nCRITICAL: Output ONLY valid JSON. No markdown blocks, no explanations."
+             system_prompt += "\n\n" + self.prompt_manager.get_prompt("JSON Mode Enforcer")
 
+        query_text = StateResolver.resolve_val(inputs.get('query', ''), self.state, self.prompt_manager)
+        self._record_llm_prompt_trace(step, system_prompt, query_text, options, resolved_model)
         raw_result = self.llm_manager.query(
-            question=inputs.get('query', ''), 
+            question=query_text, 
             selected_model=resolved_model,
             custom_system_prompt=system_prompt, 
             abort_event=self.job.abort_event if self.job else None,
@@ -368,17 +534,82 @@ class MasterActionRunner(QThread):
             raise ConnectionError(f"Engine Failed: {raw_result.strip()}")
         
         if getattr(step, 'output_schema', None):
-            # THE FIX 3: Use our Phase 1 utility to automatically repair truncated JSON arrays!
             success, parsed = extract_and_heal_json(raw_result)
             if success:
                 if isinstance(parsed, dict) and "final_output" in parsed:
                     return json.dumps(parsed["final_output"])
+                # Handle cases where the LLM wrapped the desired array in a dict key
+                if isinstance(parsed, dict) and len(parsed) == 1:
+                    first_key = list(parsed.keys())[0]
+                    if isinstance(parsed[first_key], (list, dict)):
+                        return json.dumps(parsed[first_key])
                 return json.dumps(parsed)
             else:
                 print("[Master Runner] JSON Healer failed. Returning raw text fallback.")
-                return parsed 
+                return raw_result.strip("` \n").removeprefix("json\n")
                 
         return raw_result
+
+    def _record_llm_prompt_trace(self, step, system_prompt: str, query_text: str, options: dict, resolved_model):
+        step_id = getattr(step, "step_id", "")
+        if step_id not in {"analyze_chunk_graph", "argument_synthesis_pass", "master_diagram_pass"}:
+            return
+        trace = self.state.setdefault("llm_prompt_trace", [])
+        item = self.state.get("item")
+        page_range = item.get("page_range") if isinstance(item, dict) else None
+        trace.append({
+            "step": step_id,
+            "page_range": page_range,
+            "model": resolved_model,
+            "options": dict(options or {}),
+            "system_prompt": system_prompt,
+            "query": query_text,
+        })
+
+    def _resolve_llm_options(self, step) -> dict:
+        options = {"temperature": 0.7, "num_predict": 2048, "num_ctx": 16384, "json_mode": False}
+        raw_options = getattr(step, "llm_options", {}) or {}
+        resolved_options = StateResolver.resolve_val(raw_options, self.state, self.prompt_manager)
+        if isinstance(resolved_options, dict):
+            options.update(resolved_options)
+
+        options["num_predict"] = self._coerce_int_option(options.get("num_predict"), 2048, minimum=1)
+        options["num_ctx"] = self._coerce_int_option(options.get("num_ctx"), 16384, minimum=1)
+        options["temperature"] = self._coerce_float_option(options.get("temperature"), 0.7, minimum=0.0)
+        options["json_mode"] = self._coerce_bool_option(options.get("json_mode"), False)
+        return options
+
+    @staticmethod
+    def _coerce_int_option(value, default: int, minimum=None) -> int:
+        try:
+            coerced = int(float(value))
+        except (TypeError, ValueError):
+            coerced = default
+        if minimum is not None and coerced < minimum:
+            return default
+        return coerced
+
+    @staticmethod
+    def _coerce_float_option(value, default: float, minimum=None) -> float:
+        try:
+            coerced = float(value)
+        except (TypeError, ValueError):
+            coerced = default
+        if minimum is not None and coerced < minimum:
+            return default
+        return coerced
+
+    @staticmethod
+    def _coerce_bool_option(value, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+        return default if value in (None, "") else bool(value)
 
     def _has_citation_source(self, step) -> bool:
         source_key = getattr(step, "citation_source_key", None)

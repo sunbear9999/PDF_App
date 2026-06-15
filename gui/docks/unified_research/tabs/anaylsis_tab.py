@@ -1,16 +1,20 @@
 # gui/docks/anaylsis_tab.py
 import os
 import json
+import hashlib
+import re
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, 
-                             QComboBox, QFrame, QScrollArea, QTabWidget, QButtonGroup, QStackedWidget, QMessageBox, QInputDialog)
-from PySide6.QtCore import Qt, QTimer
+                             QComboBox, QFrame, QScrollArea, QTabWidget, QButtonGroup, QStackedWidget, QMessageBox, QInputDialog, QDialog, QTextEdit, QToolButton)
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QCursor
 
 from core.events.event_bus import EventBus
-from core.events.domains.analysis_events import AnalysisEvent, AnalysisIntent, AnalysisPayload
+from core.events.domains.analysis_events import AnalysisEvent, AnalysisPayload
 from core.events.domains.workflow_events import WorkflowIntent, WorkflowPayload
+from core.engine.default_blueprints import DefaultBlueprints
 from gui.docks.unified_research.tabs.base_tab import BaseTab
 from gui.docks.unified_research.components.template_editor import TemplateEditorDialog
+from gui.docks.unified_research.components.note_bubble import NoteBubbleWidget
 
 
 class AnalysisResultCard(QFrame):
@@ -57,15 +61,34 @@ class AnalysisResultCard(QFrame):
 
         actions = QHBoxLayout()
         actions.addStretch()
+        if result.get("prompt_trace"):
+            btn_trace = QPushButton("View Prompt Trace")
+            btn_trace.clicked.connect(self._show_prompt_trace)
+            actions.addWidget(btn_trace)
         btn_send = QPushButton("Send to Workspace")
         btn_send.clicked.connect(lambda: on_send(result))
         actions.addWidget(btn_send)
         layout.addLayout(actions)
 
+    def _show_prompt_trace(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Document Analysis Prompt Trace")
+        dlg.setMinimumSize(900, 650)
+        layout = QVBoxLayout(dlg)
+        editor = QTextEdit()
+        editor.setReadOnly(True)
+        editor.setPlainText(json.dumps(self.result.get("prompt_trace", {}), indent=2))
+        layout.addWidget(editor)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dlg.accept)
+        layout.addWidget(close_btn)
+        dlg.exec()
+
 
 class AnalysisChunkCard(QFrame):
-    def __init__(self, chunk_number: int, total_chunks: int, chunk: dict, theme: dict, parent=None):
+    def __init__(self, chunk_number: int, total_chunks: int, chunk: dict, theme: dict, doc_name: str = "", viewer=None, parent=None):
         super().__init__(parent)
+        self.viewer = viewer
         self.setStyleSheet(f"""
             QFrame {{
                 background-color: {theme.get('bg_input', '#252525')};
@@ -76,54 +99,151 @@ class AnalysisChunkCard(QFrame):
         """)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 8, 10, 8)
-        title = QLabel(f"<b>Chunk {chunk_number}/{total_chunks}</b>")
-        layout.addWidget(title)
-        summary = chunk.get("summary") or ""
-        counts = f"{len(chunk.get('entities', []))} nodes, {len(chunk.get('relations', []))} links"
+        header = QHBoxLayout()
+        self.btn_toggle = QToolButton()
+        self.btn_toggle.setText("▾")
+        self.btn_toggle.setCheckable(True)
+        self.btn_toggle.setChecked(True)
+        self.btn_toggle.clicked.connect(self._set_expanded)
+        header.addWidget(self.btn_toggle)
+        title = QLabel(f"<b>Section {chunk_number}/{total_chunks}</b>")
+        header.addWidget(title)
+        header.addStretch()
+        layout.addLayout(header)
+        
+        summary = str(chunk.get("summary") or "").strip()
+        claims = chunk.get("claims") or (chunk.get("raw_observations") or {}).get("c") or []
+        quotes = chunk.get("quotes") or (chunk.get("raw_observations") or {}).get("q") or []
+        if not quotes:
+            quotes = self._quotes_from_entities(chunk.get("entities") or [])
+        if claims:
+            quote_count = sum(len(claim.get("q") or []) for claim in claims if isinstance(claim, dict))
+            counts = f"{len(claims)} claims, {quote_count} quotes"
+        elif quotes:
+            counts = f"{len(quotes)} selected quotes"
+        else:
+            counts = f"{len(chunk.get('entities', []))} nodes, {len(chunk.get('relations', []))} links"
         body = QLabel(f"{counts}" + (f" - {summary[:180]}" if summary else ""))
         body.setWordWrap(True)
         layout.addWidget(body)
 
+        self.content = QWidget()
+        content_layout = QVBoxLayout(self.content)
+        content_layout.setContentsMargins(0, 6, 0, 0)
+        layout.addWidget(self.content)
+        for quote in quotes[:5]:
+            if not isinstance(quote, dict):
+                continue
+            quote_text = str(quote.get("x") or "").strip()
+            if not quote_text:
+                continue
+            bubble = NoteBubbleWidget(doc_name, quote_text, str(quote.get("n") or ""), theme, self)
+            if viewer:
+                bubble.jump_requested.connect(viewer.jump_to_source)
+            bubble.btn_save.hide()
+            bubble.btn_similar.hide()
+            content_layout.addWidget(bubble)
+        for claim in claims[:6]:
+            if not isinstance(claim, dict):
+                continue
+            claim_text = str(claim.get("x") or "").strip()
+            reason = str(claim.get("r") or "").strip()
+            if claim_text:
+                claim_lbl = QLabel(f"<b>Claim:</b> {claim_text}")
+                claim_lbl.setWordWrap(True)
+                content_layout.addWidget(claim_lbl)
+            if reason:
+                reason_lbl = QLabel(f"<b>Reason:</b> {reason}")
+                reason_lbl.setWordWrap(True)
+                content_layout.addWidget(reason_lbl)
+            for quote in (claim.get("q") or [])[:3]:
+                if not isinstance(quote, dict):
+                    continue
+                quote_text = str(quote.get("x") or "").strip()
+                if not quote_text:
+                    continue
+                bubble = NoteBubbleWidget(doc_name, quote_text, str(quote.get("n") or claim_text), theme, self)
+                if viewer:
+                    bubble.jump_requested.connect(viewer.jump_to_source)
+                bubble.btn_save.hide()
+                bubble.btn_similar.hide()
+                content_layout.addWidget(bubble)
+
+    def _set_expanded(self, expanded: bool):
+        self.content.setVisible(expanded)
+        self.btn_toggle.setText("▾" if expanded else "▸")
+
+    def _quotes_from_entities(self, entities: list) -> list:
+        quotes = []
+        seen = set()
+        for entity in entities or []:
+            if not isinstance(entity, dict):
+                continue
+            props = entity.get("properties") if isinstance(entity.get("properties"), dict) else {}
+            quote_text = str(entity.get("exact_text") or props.get("exact_text") or props.get("quote") or "").strip()
+            if not quote_text:
+                continue
+            key = re.sub(r"\W+", "", quote_text.lower())[:180]
+            if key in seen:
+                continue
+            seen.add(key)
+            quotes.append({
+                "x": quote_text,
+                "n": str(props.get("note_text") or entity.get("text") or entity.get("title") or "").strip(),
+            })
+        return quotes
+
 
 class AnalysisTab(BaseTab):
+    # 1. Define Thread-Safe Signals
+    ui_signal = Signal(object, object)
+    workflow_signal = Signal(object, object)
+
     def __init__(self, main_window, parent=None):
         super().__init__(main_window, target_id="analysis_tab", parent=parent)
         self.pm = self.project_manager
         self._save_counter = 0  # Strict counter for DB saves
         self.bus = EventBus.get_instance()
+        
+        # 2. Connect the signals to safely hop back to the Main UI Thread
+        self.ui_signal.connect(self._safe_analysis_event, Qt.ConnectionType.QueuedConnection)
+        self.workflow_signal.connect(self._safe_workflow_action, Qt.ConnectionType.QueuedConnection)
+        
         self.bus.workflow_action_requested.connect(self._handle_workflow_action)
         self.bus.analysis_result_changed.connect(self._handle_analysis_event)
+        
         self._build_ui()
         QTimer.singleShot(100, self._refresh_selectors)
 
     def _handle_workflow_action(self, action: WorkflowIntent, payload: WorkflowPayload):
+        self.workflow_signal.emit(action, payload)
+
+    def _handle_analysis_event(self, event, payload):
+        self.ui_signal.emit(event, payload)
+
+    # --- Main Thread Safely Executed Methods (GUI UPDATES GO HERE) ---
+    def _safe_workflow_action(self, action, payload):
         if action == WorkflowIntent.ANALYSIS_REFRESH_REQUESTED:
             QTimer.singleShot(0, self._load_existing_analysis)
 
-    def _handle_analysis_event(self, event, payload):
+    def _safe_analysis_event(self, event, payload):
         if event == AnalysisEvent.RUN_STARTED:
             self.status_lbl.setText("Processing document graph analysis...")
             self.btn_run.setEnabled(False)
-            return
-        if event == AnalysisEvent.PROGRESS:
+        elif event == AnalysisEvent.PROGRESS:
             self.status_lbl.setText(payload.result.get("message", "Analysis is running..."))
-            return
-        if event == AnalysisEvent.CHUNK_RESULT:
+        elif event == AnalysisEvent.CHUNK_RESULT:
             self._render_chunk_result(payload.result)
-            return
-        if event == AnalysisEvent.RUN_FAILED:
+        elif event == AnalysisEvent.RUN_FAILED:
             self.status_lbl.setText(f"Analysis failed: {'; '.join(payload.errors or ['Unknown error'])}")
             self.btn_run.setEnabled(True)
-            return
-        if event == AnalysisEvent.RESULT_READY:
+        elif event == AnalysisEvent.RESULT_READY:
             self._render_analysis_result(payload.result)
-            return
-        if event == AnalysisEvent.RUN_COMPLETED:
+        elif event == AnalysisEvent.RUN_COMPLETED:
             self.status_lbl.setText("Analysis complete.")
             self.btn_run.setEnabled(True)
             self._load_existing_analysis()
-            return
-        if event == AnalysisEvent.SENT_TO_WORKSPACE:
+        elif event == AnalysisEvent.SENT_TO_WORKSPACE:
             self.status_lbl.setText(f"Sent {payload.result.get('entity_count', 0)} nodes to workspace {payload.workspace_id}.")
 
     # --- BULLETPROOF DB EXTRACTORS ---
@@ -206,13 +326,16 @@ class AnalysisTab(BaseTab):
         opts_layout = QHBoxLayout()
         opts_layout.addWidget(QLabel("<b>Document:</b>"))
         self.doc_selector = QComboBox()
+        self.doc_selector.currentIndexChanged.connect(self._load_run_existing_analysis)
         opts_layout.addWidget(self.doc_selector, 1)
 
-        opts_layout.addWidget(QLabel("<b>Template:</b>"))
+        opts_layout.addWidget(QLabel("<b>Analysis Mode:</b>"))
         self.combo_templates = QComboBox()
+        self.combo_templates.setToolTip("Selects the node/relation contract and PromptManager keys passed into the Document Analysis blueprint.")
+        self.combo_templates.currentIndexChanged.connect(self._load_run_existing_analysis)
         opts_layout.addWidget(self.combo_templates, 1)
 
-        self.btn_edit = QPushButton("✏️ Edit")
+        self.btn_edit = QPushButton("✏️ Edit Modes")
         self.btn_edit.clicked.connect(self._open_template_editor)
         opts_layout.addWidget(self.btn_edit)
 
@@ -316,42 +439,23 @@ class AnalysisTab(BaseTab):
         scroll.setWidget(container)
         return scroll, layout
     def receive_ai_widget(self, widget):
+        """Routes widgets without attempting dangerous concurrent DB writes."""
         is_run_tab = self.tabs.currentIndex() == 0
-        mode = self.mode_group.checkedId() if not is_run_tab else -1
         
-        if is_run_tab: target_layout = self.results_layout
+        if is_run_tab: 
+            target_layout = self.results_layout
         else:
+            mode = self.mode_group.checkedId()
             if mode == 0: target_layout = self.saved_layout
             elif mode == 1: target_layout = self.master_layout
             else: target_layout = self.compare_layout
 
         count = target_layout.count()
-        if count > 0: target_layout.insertWidget(count - 1, widget)
-        else: target_layout.addWidget(widget)
-
-        from gui.docks.unified_research.components.dynamic_outlines import UniversalOutlineWidget
-        if isinstance(widget, UniversalOutlineWidget):
-            doc_path = self.doc_selector.currentData() if is_run_tab else self.cmp_doc.currentData()
-            template_id = self._get_safe_template_id(self.combo_templates.currentData() if is_run_tab else self.cmp_template.currentData())
-            
-            if doc_path and template_id:
-                try:
-                    # Detect if this is the final Master Graph by its title
-                    title_text = getattr(widget, 'title_lbl', None)
-                    is_master = title_text and "Master Document Graph" in title_text.text()
-                    
-                    chunk_idx = 999999 if is_master else self._save_counter
-                    if not is_master:
-                        self._save_counter += 1
-                        
-                    data_to_save = getattr(widget, '_raw_ai_data', getattr(widget, 'raw_json', '{}'))
-                    
-                    if is_master:
-                        data_to_save = json.dumps({"master": json.loads(data_to_save)})
-                        
-                    self.pm.save_document_analysis(doc_path, template_id, chunk_idx, data_to_save)
-                except Exception as e:
-                    print(f"[AnalysisTab] Background save failed: {e}")
+        if count > 0: 
+            target_layout.insertWidget(count - 1, widget)
+        else: 
+            target_layout.addWidget(widget)
+   
     def _clear_layout(self, layout):
         while layout.count() > 1:
             item = layout.takeAt(0)
@@ -379,6 +483,7 @@ class AnalysisTab(BaseTab):
             cb.blockSignals(False)
 
         self._load_existing_analysis()
+        self._load_run_existing_analysis()
 
     def _open_template_editor(self):
         dlg = TemplateEditorDialog(self.pm, self.theme, self)
@@ -391,17 +496,36 @@ class AnalysisTab(BaseTab):
         if not doc_path or not template: return
         
         self._clear_layout(self.results_layout)
-        self.status_lbl.setText("Processing document graph analysis via Master Runner...")
+        self.status_lbl.setText("Running Document Analysis blueprint...")
         self.btn_run.setEnabled(False)
-        
-        self.bus.analysis_action_requested.emit(
-            AnalysisIntent.RUN,
-            AnalysisPayload(
-                doc_path=doc_path,
-                template_id=self._get_safe_template_id(template),
-                template=template,
+        template_id = self._get_safe_template_id(template)
+        run_id = self._analysis_run_id(doc_path, template_id)
+        self._save_counter = 0
+        blueprint = DefaultBlueprints.get_analysis_blueprint(self.prompt_manager)
+        self.bus.analysis_result_changed.emit(
+            AnalysisEvent.RUN_STARTED,
+            AnalysisPayload(doc_path=doc_path, template_id=template_id, template=template, run_id=run_id),
+        )
+        self.bus.workflow_action_requested.emit(
+            WorkflowIntent.RUN_BLUEPRINT,
+            WorkflowPayload(
+                blueprint=blueprint,
+                initial_state={
+                    "selected_model": self.main_window._get_active_ai_model() if hasattr(self.main_window, "_get_active_ai_model") else "",
+                    "analysis_doc_path": doc_path,
+                    "target_doc": doc_path,
+                    "analysis_template_id": template_id,
+                    "analysis_template": template,
+                    "analysis_run_id": run_id,
+                },
+                job_name=blueprint.name,
+                target_id="analysis_tab",
             ),
         )
+
+    def _analysis_run_id(self, doc_path, template_id):
+        raw = f"{doc_path}:{template_id}:{os.path.getmtime(doc_path) if doc_path and os.path.exists(doc_path) else ''}"
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
     def _trigger_comparison(self):
         doc1 = self.comp_doc1.currentData()
@@ -426,48 +550,42 @@ class AnalysisTab(BaseTab):
             
         self.send_to_pipeline(bp, {"outline_1": ctx1, "outline_2": ctx2})
 
-    def receive_ai_widget(self, widget):
-        is_run_tab = self.tabs.currentIndex() == 0
-        if is_run_tab: target_layout = self.results_layout
-        else:
-            mode = self.mode_group.checkedId()
-            if mode == 0: target_layout = self.saved_layout
-            elif mode == 1: target_layout = self.master_layout
-            else: target_layout = self.compare_layout
-
-        count = target_layout.count()
-        if count > 0: target_layout.insertWidget(count - 1, widget)
-        else: target_layout.addWidget(widget)
-
-        if is_run_tab:
-            from gui.docks.unified_research.components.dynamic_outlines import UniversalOutlineWidget
-            if isinstance(widget, UniversalOutlineWidget):
-                doc_path = self.doc_selector.currentData()
-                template_id = self._get_safe_template_id(self.combo_templates.currentData())
-                
-                if doc_path and template_id:
-                    chunk_idx = self._save_counter
-                    self._save_counter += 1
-                    
-                    try:
-                        # THE FIX: Prefer the exact JSON string injected by the UI router
-                        data_to_save = getattr(widget, '_raw_ai_data', getattr(widget, 'raw_json', '{}'))
-                        self.pm.save_document_analysis(doc_path, template_id, chunk_idx, data_to_save)
-                    except Exception as e:
-                        print(f"[AnalysisTab] Background save failed: {e}")
+    
 
     def _render_analysis_result(self, result: dict):
         # Keep completed chunk cards visible above the final master result.
         card = AnalysisResultCard(result, self.theme, self._send_result_to_workspace, self)
         self.results_layout.insertWidget(self.results_layout.count() - 1, card)
 
+    def _load_run_existing_analysis(self):
+        if not self.pm or not hasattr(self, "results_layout"):
+            return
+        doc_path = self.doc_selector.currentData()
+        template = self.combo_templates.currentData()
+        template_id = self._get_safe_template_id(template)
+        if not doc_path or not template_id:
+            return
+        self._clear_layout(self.results_layout)
+        master = self._saved_master_result(doc_path, template_id)
+        if master:
+            self.status_lbl.setText("Loaded saved analysis for the selected document and mode.")
+            self.results_layout.insertWidget(
+                self.results_layout.count() - 1,
+                AnalysisResultCard(master, self.theme, self._send_result_to_workspace, self),
+            )
+        else:
+            self.status_lbl.setText("No saved analysis loaded for this document and mode.")
+
     def _render_chunk_result(self, result: dict):
         chunk = result.get("chunk") or {}
+        doc_name = os.path.basename(result.get("doc_path") or self.doc_selector.currentData() or "")
         card = AnalysisChunkCard(
             result.get("chunk_number", 0),
             result.get("total_chunks", 0),
             chunk,
             self.theme,
+            doc_name,
+            getattr(self.main_window, "viewer", None),
             self,
         )
         self.results_layout.insertWidget(self.results_layout.count() - 1, card)
@@ -487,9 +605,19 @@ class AnalysisTab(BaseTab):
         if not ok:
             return
         workspace_id = ids[labels.index(label)]
-        self.bus.analysis_action_requested.emit(
-            AnalysisIntent.SEND_TO_WORKSPACE,
-            AnalysisPayload(run_id=result.get("run_id"), workspace_id=workspace_id, result=result),
+        blueprint = DefaultBlueprints.get_analysis_send_to_workspace_blueprint()
+        self.bus.workflow_action_requested.emit(
+            WorkflowIntent.RUN_BLUEPRINT,
+            WorkflowPayload(
+                blueprint=blueprint,
+                initial_state={
+                    "analysis_result": result,
+                    "analysis_workspace_id": workspace_id,
+                    "selected_model": self.main_window._get_active_ai_model() if hasattr(self.main_window, "_get_active_ai_model") else "",
+                },
+                job_name=blueprint.name,
+                target_id="analysis_tab",
+            ),
         )
 
     def _load_existing_analysis(self):
@@ -506,8 +634,6 @@ class AnalysisTab(BaseTab):
             self.saved_layout.insertWidget(0, lbl)
             return
 
-        from gui.docks.unified_research.components.dynamic_outlines import UniversalOutlineWidget
-        annot_manager = self.main_window.viewer.annot_manager if hasattr(self.main_window, 'viewer') else None
         from core.utils.json_utils import extract_and_heal_json
         
         for row in analyses:
@@ -515,8 +641,8 @@ class AnalysisTab(BaseTab):
                 c_idx, j_data = self._parse_db_row(row)
                 if c_idx == 999999:
                     try:
-                        parsed_master = json.loads(j_data).get("master", {})
-                        self._clear_layout(self.master_layout) # Ensure clear
+                        parsed_master = self._parse_saved_master_json(j_data)
+                        self._clear_layout(self.master_layout)
                         self.master_layout.insertWidget(
                             self.master_layout.count() - 1,
                             AnalysisResultCard(parsed_master, self.theme, self._send_result_to_workspace, self),
@@ -525,22 +651,61 @@ class AnalysisTab(BaseTab):
                         print(f"Master parse error: {e}")
                     continue
             
-                
                 success, parsed = extract_and_heal_json(j_data)
-                if success and isinstance(parsed, list):
-                    for i, item in enumerate(parsed):
-                        start_page = ((c_idx + i) * 4) + 1
-                        title = f"Section {c_idx + i + 1}: Pages {start_page}-{start_page + 3}"
-                        widget = UniversalOutlineWidget(title, json.dumps(item), self.theme, annot_manager)
-                        self.saved_layout.insertWidget(self.saved_layout.count() - 1, widget)
-                else:
-                    start_page = (c_idx * 4) + 1
-                    title = f"Section {c_idx + 1}: Pages {start_page}-{start_page + 3}"
-                    widget = UniversalOutlineWidget(title, j_data, self.theme, annot_manager)
-                    self.saved_layout.insertWidget(self.saved_layout.count() - 1, widget)
+                items = parsed if (success and isinstance(parsed, list)) else [j_data]
+                
+                for i, item in enumerate(items):
+                    start_page = ((c_idx + i) * 4) + 1 if isinstance(parsed, list) else (c_idx * 4) + 1
+                    title = f"Section {c_idx + i + 1 if isinstance(parsed, list) else c_idx + 1}: Pages {start_page}-{start_page + 3}"
+                    container = QFrame()
+                    container.setStyleSheet(f"background-color: {self.theme.get('bg_input', '#2b2b2b')}; border: 1px solid {self.theme.get('border', '#444')}; border-radius: 6px;")
+                    vbox = QVBoxLayout(container)
+                    vbox.setContentsMargins(0, 0, 0, 0)
+                    heading = QLabel(f"<b>{title}</b>")
+                    heading.setStyleSheet(f"padding: 8px; color: {self.theme.get('text_main', '#fff')};")
+                    vbox.addWidget(heading)
+                    payload_dict = item if isinstance(item, dict) else {}
+                    if "raw_observations" in payload_dict:
+                        section_chunk = payload_dict
+                    elif "c" in payload_dict or "claims" in payload_dict:
+                        section_chunk = {
+                            "summary": payload_dict.get("s") or payload_dict.get("summary") or "",
+                            "claims": payload_dict.get("c") or payload_dict.get("claims") or [],
+                        }
+                    else:
+                        section_chunk = payload_dict
+                    section_card = AnalysisChunkCard(
+                        c_idx + 1,
+                        len(analyses),
+                        section_chunk,
+                        self.theme,
+                        os.path.basename(doc_path),
+                        getattr(self.main_window, "viewer", None),
+                        self,
+                    )
+                    vbox.addWidget(section_card)
+                    self.saved_layout.insertWidget(self.saved_layout.count() - 1, container)
                     
             except Exception as e:
                 print(f"[AnalysisTab] Failed to load chunk: {e}")
+
+    def _saved_master_result(self, doc_path, template_id):
+        try:
+            analyses = self.pm.get_document_analyses(doc_path, template_id)
+        except Exception:
+            return {}
+        for row in analyses or []:
+            c_idx, j_data = self._parse_db_row(row)
+            if c_idx == 999999:
+                return self._parse_saved_master_json(j_data)
+        return {}
+
+    def _parse_saved_master_json(self, j_data):
+        try:
+            parsed = json.loads(j_data)
+            return parsed.get("master", {}) if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
 
     def update_theme(self, theme):
         super().update_theme(theme)
