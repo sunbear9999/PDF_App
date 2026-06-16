@@ -5,12 +5,6 @@ from typing import Any, Dict, List, Optional
 from .base import BasePayload
 
 
-class AnalysisIntent(Enum):
-    RUN = auto()
-    SEND_TO_WORKSPACE = auto()
-    REFRESH_REQUESTED = auto()
-
-
 class AnalysisEvent(Enum):
     RUN_STARTED = auto()
     PROGRESS = auto()

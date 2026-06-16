@@ -8,9 +8,8 @@ from PySide6.QtGui import QColor, QPen, QBrush, QFont, QTextDocument, QPainter, 
 from gui.theme.theme import ThemeManager
 from core.events.event_bus import EventBus
 from core.events.domains.workspace_events import WorkspaceEvent, WorkspaceEventPayload, WorkspaceIntent, WorkspacePayload
-from core.services.workspace_registries import build_default_workspace_node_type_registry, infer_workspace_node_type_id
+from core.registries import build_default_workspace_node_type_registry, infer_workspace_node_type_id, OntologyRegistry
 from core.models.ontology_model import EntityType
-from core.ontology.registry import OntologyRegistry
 
 def get_text_color_for_bg(bg_color):
     try:

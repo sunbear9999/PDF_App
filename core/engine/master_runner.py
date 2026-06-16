@@ -12,23 +12,38 @@ from core.utils.json_utils import extract_and_heal_json
 class MasterActionRunner(QThread):
     progress_update = Signal(str)
     step_complete = Signal(str, str, dict)
-    action_complete = Signal(dict)   
+    action_complete = Signal(dict)
     error = Signal(str)
     step_started = Signal(str)
     state_snapshot = Signal(str, str)
     user_input_requested = Signal(str, dict)
 
-    def __init__(self, main_window, blueprint: AIActionBlueprint, initial_state: dict):
+    def __init__(
+        self,
+        blueprint: AIActionBlueprint,
+        initial_state: dict,
+        *,
+        llm_manager,
+        prompt_manager,
+        step_manager=None,
+        process_registry=None,
+        project_manager=None,
+        ontology_registry=None,
+        blueprint_manager=None,
+        extra_step_handlers=None,
+    ):
         super().__init__()
-        self.main_window = main_window
-        self.llm_manager = main_window.shared_llm_manager
-        self.prompt_manager = main_window.prompt_manager
-        self.step_manager = getattr(main_window, 'step_manager', None) 
-        self.registry = getattr(main_window, 'process_registry', None)
-        
+        self.llm_manager = llm_manager
+        self.prompt_manager = prompt_manager
+        self.step_manager = step_manager
+        self.registry = process_registry
+        self.project_manager = project_manager
+        self.ontology_registry = ontology_registry
+        self.blueprint_manager = blueprint_manager
+
         import copy
         self.blueprint = copy.deepcopy(blueprint)
-        self.state = initial_state.copy() 
+        self.state = initial_state.copy()
         self.job = None
         self.current_executing_step = None
         self.resolved_step_specs = {}
@@ -36,7 +51,8 @@ class MasterActionRunner(QThread):
         self._wait_condition = QWaitCondition()
         self._user_response = None
         self.step_handlers = self._build_step_handlers()
-        self.step_handlers.update(getattr(main_window, "workflow_step_handlers", {}) or {})
+        if extra_step_handlers:
+            self.step_handlers.update(extra_step_handlers)
 
     def _build_step_handlers(self):
         return {
@@ -187,8 +203,8 @@ class MasterActionRunner(QThread):
     def _run_db_write(self, step, inputs):
         table_name = inputs.get('table')
         payload = inputs.get('payload', {})
-        pm = getattr(self.main_window, 'project_manager', None)
-        
+        pm = self.project_manager
+
         if not pm or not pm.project_filepath or not table_name or not payload:
             return "Failed: Missing DB Context or Payload"
 
@@ -209,11 +225,7 @@ class MasterActionRunner(QThread):
 
     def _analysis_runtime(self):
         from core.engine.analysis_runtime import AnalysisRuntime
-        return AnalysisRuntime(
-            getattr(self.main_window, "project_manager", None),
-            getattr(self.main_window, "prompt_manager", None),
-            getattr(self.main_window, "ontology_registry", None),
-        )
+        return AnalysisRuntime(self.project_manager, self.prompt_manager, self.ontology_registry)
 
     def _run_analysis_contract(self, step, inputs):
         runtime = self._analysis_runtime()
@@ -352,8 +364,8 @@ class MasterActionRunner(QThread):
             else:
                 sub_bp_name = inputs.get('sub_blueprint_name')
                 sub_blueprint = None
-                if hasattr(self.main_window, 'blueprint_manager'):
-                    sub_blueprint = self.main_window.blueprint_manager.get_blueprint(sub_bp_name, lambda: None)
+                if self.blueprint_manager:
+                    sub_blueprint = self.blueprint_manager.get_blueprint(sub_bp_name, lambda: None)
                 if not sub_blueprint:
                     raise ValueError(f"FOREACH failed: Could not find tool '{sub_bp_name}'")
         
@@ -790,14 +802,14 @@ class MasterActionRunner(QThread):
                 src_type = valid_nodes[e_src]["type"]
                 tgt_type = valid_nodes[e_tgt]["type"]
 
-                # Check the global registry, not hardcoded strings
-                if self.registry:
-                    rel_bp = self.registry.get_relation_blueprint(e_type)
-                    
+                # Check the ontology registry, not hardcoded strings
+                if self.ontology_registry:
+                    rel_bp = self.ontology_registry.get_relation_blueprint(e_type)
+
                     if not rel_bp or not rel_bp.allows(src_type, tgt_type):
                         # Dynamic Healer: Find ANY valid relation for these two specific node types
                         valid_fallback = None
-                        for potential_rel in self.registry.all_relations():
+                        for potential_rel in self.ontology_registry.all_relations():
                             if potential_rel.allows(src_type, tgt_type):
                                 valid_fallback = potential_rel.type_key
                                 break

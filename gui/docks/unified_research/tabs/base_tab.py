@@ -18,6 +18,7 @@ class BaseTab(QWidget):
         self.blueprint_manager = getattr(main_window, 'blueprint_manager', None)
         self.prompt_manager = getattr(main_window, 'prompt_manager', None)
         self.project_manager = getattr(main_window, 'project_manager', None)
+        self.llm_manager = getattr(main_window, 'shared_llm_manager', None)
 
         if self.target_id and hasattr(main_window, 'ui_router'):
             main_window.ui_router.register_target(self.target_id, self)

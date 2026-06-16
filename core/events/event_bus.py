@@ -87,11 +87,16 @@ class EventBus(QObject):
     ontology_changed = Signal(object, object)
 
     # --- Graph-Aware Document Analysis Domain ---
-    analysis_action_requested = Signal(object, object)
     analysis_result_changed = Signal(object, object)
 
     # --- Workflow Runner Domain ---
     workflow_state_changed = Signal(object, object)
+
+    # --- UI Render Domain ---
+    # Emitted by BlueprintUIRouter to dispatch AI output to tabs without direct method calls.
+    # target_id: str identifying the tab ("chat_dock", "floating", etc.)
+    # payload: dict describing what to render
+    ui_render_requested = Signal(str, object)
 
     @classmethod
     def get_instance(cls):

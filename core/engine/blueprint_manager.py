@@ -4,7 +4,7 @@ import json
 import copy
 import sys
 from core.engine.action_model import AIActionBlueprint
-from core.engine.registries import BlueprintDefinition
+from core.registries import BlueprintDefinition
 
 class BlueprintManager:
     def __init__(self, registry=None):

@@ -40,7 +40,6 @@ from core.events.domains.document_events import AnnotationIntent, AnnotationPayl
 from core.events.domains.project_events import ProjectEvent, ProjectEventPayload, ProjectIntent, ProjectPayload
 from core.events.domains.workspace_events import WorkspaceEvent, WorkspaceEventPayload
 from core.services.document_ingestion_service import DocumentIngestionService
-from core.services.workflow_runner_service import WorkflowRunnerService
 class MainWindow(QMainWindow):
     # ADD `core` to the signature
     def __init__(self, core):
@@ -75,9 +74,12 @@ class MainWindow(QMainWindow):
         self.workspace_service = core.workspace_service
         self.workspace_graph_service = core.workspace_graph_service
 
-        # --- IMPORTANT LEGACY HOOK ---
-        # Keep this for now so the ProjectManager can still warn the Viewer before saving
-        self.project_manager.main_window = self
+        # Build the AppContext facade used by docks and plugins
+        from gui.app_context import AppContext
+        self.app_context = AppContext.from_core(core)
+
+        # Wire the viewer halt callback so ProjectManager can stop rendering before saving
+        self.project_manager._halt_viewer_callback = self._halt_pdf_viewer
 
         # 2. Setup the GUI Managers
         from gui.managers.dock_manager import DockManager
@@ -159,26 +161,16 @@ class MainWindow(QMainWindow):
         self.universal_overlay = UniversalInternalOverlay(self, self.theme_manager.get_theme())
         self.ui_router = BlueprintUIRouter(self)
         self.ui_router.register_target("floating", self.universal_overlay)
-        self.workflow_runner_service = WorkflowRunnerService(
-            self,
-            event_bus=self.bus,
-            process_registry=self.process_registry,
-            ui_router=self.ui_router,
-            model_provider=self._get_active_ai_model,
-            parent=self,
-        )
+
+        # Wire GUI-dependent pieces into the services that now live in PapyrusCore
+        self.workflow_runner_service = core.workflow_runner_service
+        self.workflow_runner_service.set_ui_router(self.ui_router)
+        self.workflow_runner_service.set_model_provider(self._get_active_ai_model)
+        self.research_agent_service = core.research_agent_service
+        self.research_agent_service.model_provider = self._get_active_ai_model
+
         if hasattr(self, "workspace_ai_service"):
             self.workspace_ai_service.workflow_runner_service = self.workflow_runner_service
-        from core.services.research_agent_service import ResearchAgentService
-        self.research_agent_service = ResearchAgentService(
-            self.project_manager,
-            self.prompt_manager,
-            self.blueprint_registry,
-            workflow_executor=self.workflow_runner_service.prepare_runner,
-            runner_starter=self.workflow_runner_service.start_runner,
-            model_provider=self._get_active_ai_model,
-            parent=self,
-        )
         self.bus.project_loaded.connect(self._refresh_research_agent_from_project_event)
         self.bus.document_action_requested.connect(self._handle_doc_ui_requests)
         self.bus.annotation_action_requested.connect(self._handle_annot_ui_requests)
@@ -233,6 +225,17 @@ class MainWindow(QMainWindow):
         if intent == DocumentIntent.SHOW_OCR_BANNER:
             if hasattr(self, 'ocr_banner'):
                 self.ocr_banner.show()
+        elif intent == DocumentIntent.FIND_SIMILAR:
+            viewer = getattr(self, 'viewer', None)
+            if viewer and payload.text:
+                viewer.annot_manager.trigger_similar_context(payload.text)
+        elif intent == DocumentIntent.FIND_TEXT:
+            viewer = getattr(self, 'viewer', None)
+            if viewer and payload.text:
+                if not viewer.search_bar.isVisible():
+                    viewer.annot_manager.toggle_search()
+                viewer.search_bar.search_input.setText(payload.text)
+                viewer.execute_search(payload.text, "Current Document", False)
     def _handle_annot_ui_requests(self, action: AnnotationIntent, payload: AnnotationPayload):
         if action == AnnotationIntent.EDIT_POPUP:
             annot_id = payload.get("annot_id")
@@ -265,6 +268,17 @@ class MainWindow(QMainWindow):
             ):
                 self.viewer.reload_page(page_num)
 
+
+    def _halt_pdf_viewer(self, path):
+        """Called by ProjectManager before saving the active PDF to stop the render worker."""
+        if getattr(self, 'current_file_path', None) == path:
+            viewer = getattr(self, 'viewer', None)
+            if viewer:
+                if viewer.worker and viewer.worker.isRunning():
+                    viewer.worker.stop()
+                    viewer.worker.wait()
+                return viewer
+        return None
 
     def execute_ai_blueprint(self, blueprint, initial_state, is_express=False):
         """
@@ -461,6 +475,7 @@ class MainWindow(QMainWindow):
         self.theme_manager.set_theme(theme_name)
 
     def update_theme(self, theme):
+        self.bus.theme_changed.emit(None, theme)
         self.top_toolbar.setStyleSheet(f"background-color: {theme['bg_panel']}; border-bottom: 1px solid {theme['border']};")
         self.ocr_banner.setStyleSheet(f"background-color: {theme['warning']}; border-bottom: 1px solid {theme['border']};")
         self.lbl_ocr_banner.setStyleSheet(f"font-weight: bold; color: #1e1e1e; border: none;")

@@ -2,15 +2,28 @@ from PySide6.QtCore import QObject
 from core.utils.citation_utils import extract_inline_citations, strip_inline_citation_block
 from core.utils.json_utils import extract_and_heal_json, extract_json_from_tags
 from core.utils.state_resolver import StateResolver
+from core.events.event_bus import EventBus
 import json
 import shiboken6
 
 class BlueprintUIRouter(QObject):
-    """Routes workflow presentation data without constructing GUI widgets."""
+    """Routes workflow presentation data to UI tabs via the EventBus.
 
-    def __init__(self, main_window):
+    Tabs subscribe to ``bus.ui_render_requested`` and self-filter by ``target_id``.
+    The ``registered_targets`` dict is retained for direct-call fallback and
+    process-registry lifetime tracking during the migration period.
+    """
+
+    def __init__(self, main_window=None, *, process_registry=None, project_manager=None):
         super().__init__()
-        self.main_window = main_window
+        self.bus = EventBus.get_instance()
+        # Legacy shim: allow main_window for backward compat while migration is ongoing
+        if main_window is not None:
+            self._process_registry = getattr(main_window, 'process_registry', None)
+            self._project_manager = getattr(main_window, 'project_manager', None)
+        else:
+            self._process_registry = process_registry
+            self._project_manager = project_manager
         self.registered_targets = {}
 
     def register_target(self, target_id: str, widget_instance):
@@ -40,7 +53,7 @@ class BlueprintUIRouter(QObject):
     def _get_runner(self):
         sender = self.sender()
         if sender: return sender
-        registry = getattr(self.main_window, 'process_registry', None)
+        registry = self._process_registry
         if registry and registry.active_job: return registry.active_job.runner
         return None
 
@@ -91,7 +104,7 @@ class BlueprintUIRouter(QObject):
         # 2. Pure-Python Manifest Update (No raw pattern matching)
         success, manifest_data = extract_json_from_tags(result_str, "UPDATE_MANIFEST")
         if success and isinstance(manifest_data, dict):
-            pm = getattr(self.main_window, 'project_manager', None)
+            pm = self._project_manager
             if pm and hasattr(pm, 'db_docs'):
                 current_manifest_str = pm.get_metadata("project_manifest", "{}")
                 try: current_manifest = json.loads(current_manifest_str)
@@ -189,11 +202,13 @@ class BlueprintUIRouter(QObject):
 
         # --- FIX 2: Broadcast completion to ALL targets so no tab gets stuck waiting ---
         if runner and runner.blueprint.steps[-1].step_id == step_id:
-            for t_id in self.registered_targets.keys():
+            for t_id in list(self.registered_targets.keys()):
                 self._dispatch(t_id, {"type": "hide_status"})
+            # Notify any bus-subscribed tabs that haven't registered directly
+            self.bus.ui_render_requested.emit("*", {"type": "hide_status"})
                 
         if target_id in ["chat_dock", "brainstorm_dock"] and ui_format in ["live_stream", "chat_widgets"]:
-            pm = getattr(self.main_window, 'project_manager', None)
+            pm = self._project_manager
             if pm: pm.save_chat_message(target_id, "ai", result_str, ui_format)
 
     def _handle_error(self, err_msg):
@@ -206,9 +221,13 @@ class BlueprintUIRouter(QObject):
         self._dispatch(target_id, {"type": "error", "message": err_msg})
 
     def _dispatch(self, target_id: str, payload: dict):
+        # Direct-call path for already-registered targets (existing tabs).
         target_ui = self.get_target(target_id)
         if target_ui and hasattr(target_ui, "receive_ai_payload"):
             target_ui.receive_ai_payload(payload)
+        else:
+            # No registered target: broadcast on bus so subscribed tabs (e.g. plugins) can handle it.
+            self.bus.ui_render_requested.emit(target_id, payload)
 
     def _resolve_step(self, runner, step_id: str):
         resolved_steps = getattr(runner, "resolved_step_specs", {})

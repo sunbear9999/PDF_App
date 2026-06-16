@@ -11,9 +11,13 @@ from core.citation_manager import CitationManager
 from core.engine.step_manager import StepManager
 from core.engine.blueprint_manager import BlueprintManager
 
-from core.engine.registries import build_default_blueprint_registry, build_default_workflow_node_type_registry
-from core.services.workspace_registries import build_default_workspace_ai_tool_registry, build_default_workspace_node_type_registry
-from core.ontology.registry import OntologyRegistry
+from core.registries import (
+    build_default_blueprint_registry,
+    build_default_blueprint_node_type_registry,
+    build_default_workspace_ai_tool_registry,
+    build_default_workspace_node_type_registry,
+    OntologyRegistry,
+)
 
 from core.services.embedding_service import EmbeddingService
 from core.services.workspace_services import WorkspaceLayoutService, WorkspaceService, WorkspaceGraphService
@@ -27,6 +31,9 @@ from core.services.notes_app_service import NotesAppService
 from core.services.tag_app_service import TagAppService
 from core.services.prompt_app_service import PromptAppService
 from core.services.ontology_service import OntologyService
+from core.services.workflow_runner_service import WorkflowRunnerService
+from core.services.research_agent_service import ResearchAgentService
+from core.plugins.plugin_loader import load_plugins
 
 def get_resource_path(relative_path):
     if hasattr(sys, '_MEIPASS'):
@@ -59,7 +66,7 @@ class PapyrusCore:
         # 2. Registries
         self.blueprint_registry = build_default_blueprint_registry()
         self.blueprint_manager = BlueprintManager(self.blueprint_registry)
-        self.workflow_node_type_registry = build_default_workflow_node_type_registry()
+        self.workflow_node_type_registry = build_default_blueprint_node_type_registry()
         self.workspace_ai_tools_registry = build_default_workspace_ai_tool_registry()
         self.workspace_node_type_registry = build_default_workspace_node_type_registry()
         self.ontology_registry = OntologyRegistry()
@@ -84,7 +91,42 @@ class PapyrusCore:
         self.workspace_graph_service = WorkspaceGraphService(self.bus)
         self.workspace_layout_service = WorkspaceLayoutService(self.project_manager, self.llm_manager, self.bus)
         self.ontology_service = OntologyService(self.project_manager, self.bus, self.ontology_registry)
-        
+
+        # 4. Workflow Services (ui_router and model_provider injected later by GUI layer)
+        self.workflow_runner_service = WorkflowRunnerService(
+            llm_manager=self.llm_manager,
+            prompt_manager=self.prompt_manager,
+            step_manager=self.step_manager,
+            process_registry=self.process_registry,
+            project_manager=self.project_manager,
+            ontology_registry=self.ontology_registry,
+            blueprint_manager=self.blueprint_manager,
+            event_bus=self.bus,
+        )
+        self.research_agent_service = ResearchAgentService(
+            self.project_manager,
+            self.prompt_manager,
+            self.blueprint_registry,
+            workflow_executor=self.workflow_runner_service.prepare_runner,
+            runner_starter=self.workflow_runner_service.start_runner,
+        )
+
+        # 5. Plugin dock specs (populated by register_plugin; consumed by MainWindow)
+        self.plugin_dock_specs = []
+
+        # Discover and register external plugins
+        load_plugins(self)
+
+
+    def register_plugin(self, plugin) -> None:
+        """Orchestrate full plugin registration, then store any dock spec."""
+        plugin.on_register(self)
+        plugin.register_blueprints(self.blueprint_registry)
+        plugin.register_workspace_tools(self.workspace_ai_tools_registry)
+        plugin.register_ontology_types(self.ontology_registry)
+        dock_spec = plugin.get_dock_spec()
+        if dock_spec is not None:
+            self.plugin_dock_specs.append(dock_spec)
 
     def _ensure_default_dictionary(self):
         """Silently provisions the default dictionary on first launch."""

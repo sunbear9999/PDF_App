@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from gui.components.base.core import SOLARIZED_THEME, ThemedMixin as ModernThemedMixin
+from gui.components.base.core import SOLARIZED_THEME, ThemedMixin as ModernThemedMixin, BaseDock
 from gui.components.base.forms import SchemaFormBuilder
 from gui.components.base.layouts import BasePromptWorkspace, BaseToolDock
 
@@ -205,6 +205,7 @@ def make_transparent_scroll_area(content: QWidget | None = None) -> tuple[QScrol
 ThemedMixin = CompatThemedMixin
 
 __all__ = [
+    "BaseDock",
     "BaseCard",
     "BaseDialog",
     "BasePanel",

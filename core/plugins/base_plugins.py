@@ -1,26 +1,57 @@
-# core/papyrus_core.py
-from core.events.event_bus import EventBus
-from core.engine.process_manager import ProcessRegistry
+from __future__ import annotations
 
-class PapyrusCore:
-    """The headless engine of the application. Plugins interact with this, not the GUI."""
-    def __init__(self):
-        self.bus = EventBus.get_instance()
-        self.services = {}
-        self.registries = {}
-        
-        # 1. Initialize core infrastructure
-        self.process_registry = ProcessRegistry()
-        
-        # 2. Boot registries
-        self._boot_registries()
-        
-        # 3. Boot services
-        self._boot_services()
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Callable, List, Optional
+from typing import Protocol, runtime_checkable
 
-    def get_service(self, service_class):
-        return self.services.get(service_class.__name__)
+if TYPE_CHECKING:
+    from core.papyrus_core import PapyrusCore
+    from core.registries import BlueprintRegistry, WorkspaceAIToolRegistry, OntologyRegistry
 
-    def register_plugin(self, plugin_module):
-        """Called during boot to let plugins inject their own services/blueprints."""
-        plugin_module.initialize(self)
+
+@dataclass
+class PluginDockSpec:
+    """Lightweight dock description a plugin can return.
+
+    The GUI layer converts this into a full DockDefinition using the plugin's
+    factory. Keeps core free of Qt imports.
+    """
+    id: str
+    menu_name: str
+    area: str = "right"
+    is_singleton: bool = True
+    factory: Optional[Callable[[Any], Any]] = None
+
+
+@runtime_checkable
+class PapyrusPlugin(Protocol):
+    """Protocol that every Papyrus plugin must implement.
+
+    Drop a class implementing this protocol into plugins/<name>/plugin.py
+    and name it ``Plugin``. The plugin loader discovers and registers it
+    automatically at startup.
+    """
+
+    plugin_id: str
+    name: str
+    version: str
+
+    def on_register(self, core: "PapyrusCore") -> None:
+        """Called once after the plugin is discovered, before the GUI starts."""
+        ...
+
+    def register_blueprints(self, registry: "BlueprintRegistry") -> None:
+        """Register any AI action blueprints this plugin provides."""
+        ...
+
+    def register_workspace_tools(self, registry: "WorkspaceAIToolRegistry") -> None:
+        """Register workspace AI tools (toolbar / context menu entries)."""
+        ...
+
+    def register_ontology_types(self, registry: "OntologyRegistry") -> None:
+        """Register custom entity or relation types for the knowledge graph."""
+        ...
+
+    def get_dock_spec(self) -> Optional[PluginDockSpec]:
+        """Return a dock spec if this plugin provides a GUI dock, else None."""
+        ...

@@ -1090,7 +1090,8 @@ class AnalysisRuntime:
                 "Select only quotes that would help build the requested final analysis, not background, section framing, method, or framework lines unless the analysis goal asks for them. "
                 "For argument-style goals, prefer substantive positions, concrete data/evidence, causal supports, limitations, or counterpoints. "
                 "Every q[].x must be exact text copied from the chunk, about 10 words and never more than 18 words. "
-                "Every q[].n must be about 10 words explaining why the quote matters for the analysis mode. "
+                "Every q[].n must name this quote's specific argument role in about 10 words — briefly state which claim or pillar this quote supports and how. "
+                "Never restate the quote in n. Never write generic labels like 'evidence', 'supports argument', or 'shows this is important'. "
                 "Do not include claims, graph node types, relation types, aliases, confidence scores, page guesses, or schema fields."
             ),
         ])

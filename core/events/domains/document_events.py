@@ -13,6 +13,8 @@ class DocumentIntent(Enum):
     UPDATE_HIGHLIGHT_NOTE = auto()
     UPDATE_HIGHLIGHT_COLOR = auto()
     DELETE_HIGHLIGHT = auto()
+    FIND_SIMILAR = auto()   # Trigger semantic similarity search in the viewer
+    FIND_TEXT = auto()      # Open the viewer search bar and search for text
 
 @dataclass
 class DocumentPayload(BasePayload):

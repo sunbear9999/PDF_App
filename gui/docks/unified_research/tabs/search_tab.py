@@ -74,7 +74,7 @@ class SearchTab(BaseTab):
         options_layout = QHBoxLayout()
         options_layout.addWidget(QLabel("Model:"))
         self.model_combo = QComboBox()
-        models = self.main_window.shared_llm_manager.get_available_models()
+        models = self.llm_manager.get_available_models() if self.llm_manager else []
         if models: self.model_combo.addItems(models)
         options_layout.addWidget(self.model_combo, 1)
 
@@ -104,7 +104,10 @@ class SearchTab(BaseTab):
     def _handle_manual_search(self, engine, text):
         if not text: return
         if engine == "rag":
-            self.main_window.viewer.annot_manager.trigger_similar_context(text)
+            from core.events.domains.document_events import DocumentIntent, DocumentPayload
+            EventBus.get_instance().document_action_requested.emit(
+                DocumentIntent.FIND_SIMILAR, DocumentPayload(text=text)
+            )
         else:
             self._execute_external_search(engine, text)
 
@@ -188,7 +191,7 @@ class SearchTab(BaseTab):
 
         if self.chk_advanced.isChecked():
             allowed_docs = [os.path.basename(p) for p in self.project_manager.pdfs]
-            self.math_worker = AsyncCitationWorker(goal, allowed_docs, self.project_manager, self.main_window.shared_llm_manager, parent=self)
+            self.math_worker = AsyncCitationWorker(goal, allowed_docs, self.project_manager, self.llm_manager, parent=self)
             self.math_worker.citation_received.connect(self._add_citation_card)
             self.math_worker.start()
 
@@ -202,12 +205,10 @@ class SearchTab(BaseTab):
         pm = self.project_manager
         target_path = next((p for p in pm.pdfs if doc_name in os.path.basename(p)), None)
         if target_path:
-            self.main_window.switch_to_pdf(target_path)
-            viewer = self.main_window.viewer
-            if not viewer.search_bar.isVisible():
-                viewer.toggle_search_bar()
-            viewer.search_bar.search_input.setText(text)
-            viewer.execute_search(text, "Current Document", False)
+            from core.events.domains.document_events import DocumentIntent, DocumentPayload
+            bus = EventBus.get_instance()
+            bus.document_action_requested.emit(DocumentIntent.OPEN, DocumentPayload(path=target_path))
+            bus.document_action_requested.emit(DocumentIntent.FIND_TEXT, DocumentPayload(text=text))
 
     def update_theme(self, theme):
         super().update_theme(theme)

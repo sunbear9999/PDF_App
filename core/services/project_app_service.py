@@ -30,6 +30,7 @@ class ProjectAppService(QObject):
         self.pm.save_all_docs()
         if hasattr(self.pm, "save_project"):
             self.pm.save_project()
+        self.bus.project_saved.emit(ProjectEvent.SAVED, ProjectEventPayload())
         self.bus.project_action_requested.emit(ProjectIntent.SAVE_COMPLETED, ProjectPayload())
 
     def _export_llm_log(self, path: str):

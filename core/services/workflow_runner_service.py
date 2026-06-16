@@ -14,23 +14,37 @@ class WorkflowRunnerService(QObject):
 
     def __init__(
         self,
-        app_context,
-        event_bus: Optional[EventBus] = None,
+        *,
+        llm_manager,
+        prompt_manager,
+        step_manager=None,
         process_registry=None,
+        project_manager=None,
+        ontology_registry=None,
+        blueprint_manager=None,
+        event_bus: Optional[EventBus] = None,
         ui_router=None,
         model_provider: Optional[Callable[[], str]] = None,
         parent=None,
     ):
         super().__init__(parent)
-        self.app_context = app_context
+        self.llm_manager = llm_manager
+        self.prompt_manager = prompt_manager
+        self.step_manager = step_manager
+        self.process_registry = process_registry
+        self.project_manager = project_manager
+        self.ontology_registry = ontology_registry
+        self.blueprint_manager = blueprint_manager
         self.bus = event_bus or EventBus.get_instance()
-        self.process_registry = process_registry or getattr(app_context, "process_registry", None)
         self.ui_router = ui_router
         self.model_provider = model_provider
         self.bus.workflow_action_requested.connect(self.handle_intent)
 
     def set_ui_router(self, ui_router):
         self.ui_router = ui_router
+
+    def set_model_provider(self, provider: Callable[[], str]):
+        self.model_provider = provider
 
     def handle_intent(self, intent, payload):
         if isinstance(payload, dict):
@@ -60,12 +74,20 @@ class WorkflowRunnerService(QObject):
         if "selected_model" not in state and self.model_provider:
             state["selected_model"] = self.model_provider()
 
-        llm_manager = getattr(self.app_context, "shared_llm_manager", None)
-        project_manager = getattr(self.app_context, "project_manager", None)
-        if llm_manager and getattr(llm_manager, "collection", None) is None and project_manager:
-            project_manager._mount_project_database()
+        if self.llm_manager and getattr(self.llm_manager, "collection", None) is None and self.project_manager:
+            self.project_manager._mount_project_database()
 
-        runner = MasterActionRunner(self.app_context, blueprint, state)
+        runner = MasterActionRunner(
+            blueprint,
+            state,
+            llm_manager=self.llm_manager,
+            prompt_manager=self.prompt_manager,
+            step_manager=self.step_manager,
+            process_registry=self.process_registry,
+            project_manager=self.project_manager,
+            ontology_registry=self.ontology_registry,
+            blueprint_manager=self.blueprint_manager,
+        )
         self._attach_runner(runner)
         return runner
 

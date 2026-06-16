@@ -30,6 +30,8 @@ class ProjectManager:
         self.max_cache_size = max_cache_size
         self.active_file = None
         self._conn = None
+        # Set by the GUI layer to stop the viewer before saving the active PDF.
+        self._halt_viewer_callback = None
 
         if getattr(sys, 'frozen', False):
             root_dir = sys._MEIPASS
@@ -340,13 +342,8 @@ class ProjectManager:
             print(f"Error evicting docs: {e}")
 
     def _halt_viewer_if_active(self, path):
-        if hasattr(self, 'main_window') and self.main_window and self.main_window.current_file_path == path:
-            viewer = getattr(self.main_window, 'viewer', None)
-            if viewer:
-                if viewer.worker and viewer.worker.isRunning():
-                    viewer.worker.stop()
-                    viewer.worker.wait()
-                return viewer
+        if self._halt_viewer_callback:
+            return self._halt_viewer_callback(path)
         return None
 
     def _save_single_doc(self, doc, path):

@@ -9,15 +9,18 @@ from core.events.domains.tool_events import TTSIntent, TTSPayload, TTSStatus, TT
 class TTSTab(QWidget):
     def __init__(self, parent=None, main_window=None):
         super().__init__(parent)
-        self.main_window = main_window
+        self.main_window = main_window  # kept for theme fallback only
         self.bus = EventBus.get_instance()
         self.theme = None
         self.voice_mapping = {}
+        self._current_path: str = ""
+        self._page_count: int = 9999
 
         self._build_ui()
 
         # --- Event Listeners ---
         self.bus.tts_status_updated.connect(self._handle_status_update)
+        self.bus.pdf_switched.connect(self._on_pdf_switched)
 
         # Ask the service for available voices on boot
         self.bus.tts_action_requested.emit(TTSIntent.FETCH_VOICES, TTSPayload())
@@ -135,16 +138,31 @@ class TTSTab(QWidget):
         if self.status_lbl.text() == "Ready":
             self.status_lbl.setStyleSheet(f"color: {theme['text_muted']}; margin-top: 5px; font-weight: bold; background: transparent;")
 
+    def _on_pdf_switched(self, event, payload):
+        path = payload.path if hasattr(payload, 'path') else None
+        if path:
+            self._current_path = path
+        doc = getattr(payload, 'doc', None)
+        if doc is None and hasattr(payload, 'path') and payload.path:
+            import fitz
+            try:
+                doc = fitz.open(payload.path)
+                self._page_count = len(doc)
+                doc.close()
+            except Exception:
+                pass
+        elif doc is not None:
+            self._page_count = len(doc)
+        self.sync_file(self._current_path)
+
     def sync_file(self, filepath):
         self.text_editor.clear()
-        if self.main_window.viewer.doc:
-            max_pages = len(self.main_window.viewer.doc)
-            self.spin_start.setMaximum(max_pages)
-            self.spin_end.setMaximum(max_pages)
-            self.spin_end.setValue(min(3, max_pages))
+        self.spin_start.setMaximum(self._page_count)
+        self.spin_end.setMaximum(self._page_count)
+        self.spin_end.setValue(min(3, self._page_count))
 
     def pull_text(self):
-        if not self.main_window.current_file_path:
+        if not self._current_path:
             QMessageBox.warning(self, "Error", "No PDF loaded.")
             return
 
@@ -152,7 +170,7 @@ class TTSTab(QWidget):
         end = self.spin_end.value()
         ignore = self.chk_ignore.isChecked()
 
-        text = extract_filtered_blocks(self.main_window.current_file_path, ignore, start, end)
+        text = extract_filtered_blocks(self._current_path, ignore, start, end)
         text = sanitize_extracted_text(text, collapse_whitespace=True)
         self.text_editor.setPlainText(text)
 
