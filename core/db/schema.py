@@ -124,8 +124,14 @@ class DatabaseSchema(BaseDB):
                 ui_format TEXT DEFAULT 'live_stream', timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
             )''')
             
+            # Plugin-contributed tables (CREATE TABLE IF NOT EXISTS; idempotent)
+            from core.plugins.plugin_db_registry import PluginTableRegistry
+            for tbl_name, meta in PluginTableRegistry.get_instance().get_tables().items():
+                col_defs = ", ".join(f"{col} {typ}" for col, typ in meta["schema"].items())
+                cursor.execute(f"CREATE TABLE IF NOT EXISTS {tbl_name} ({col_defs})")
+
             self.manager._conn.commit()
-            
+
         except sqlite3.Error as e:
             print(f"Database initialization error: {e}")
 

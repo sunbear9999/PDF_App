@@ -158,6 +158,8 @@ class DocumentExplorer(QWidget):
 
         menu = QMenu(self)
 
+        global_pos = self.doc_list.viewport().mapToGlobal(pos)
+
         # BATCH MODE
         if len(selected_items) > 1:
             mass_tag_menu = menu.addMenu(f"🏷️ Mass Assign Tag to {len(selected_items)} Docs")
@@ -167,7 +169,9 @@ class DocumentExplorer(QWidget):
                 for t in tags:
                     action = mass_tag_menu.addAction(t.get("name"))
                     action.triggered.connect(lambda checked=False, t_id=t.get("id"): self._mass_assign_tag(selected_items, t_id))
-            menu.exec(self.doc_list.viewport().mapToGlobal(pos))
+            paths = [i.data(self.PATH_ROLE) for i in selected_items]
+            self._inject_plugin_doc_items(menu, paths)
+            menu.exec(global_pos)
 
         # SINGLE MODE
         else:
@@ -177,8 +181,9 @@ class DocumentExplorer(QWidget):
             rename_action = menu.addAction("✏️ Rename PDF")
             remove_action = menu.addAction("🗑️ Remove PDF from Project")
             extract_action = menu.addAction("✂️ Extract Pages to New PDF")
+            self._inject_plugin_doc_items(menu, [doc_path])
 
-            chosen = menu.exec(self.doc_list.viewport().mapToGlobal(pos))
+            chosen = menu.exec(global_pos)
 
             if chosen == manage_tags_action:
                 from gui.components.dialogs.tag_manager_dialog import TagAssignmentDialog
@@ -193,6 +198,34 @@ class DocumentExplorer(QWidget):
                 from gui.components.dialogs.extract_pages_dialog import ExtractPagesDialog
                 if ExtractPagesDialog(doc_path, self.pm, self.main_window).exec():
                     self.refresh_list()
+
+    def _inject_plugin_doc_items(self, menu: "QMenu", doc_paths: list) -> None:
+        """Append plugin-registered document_list context menu actions."""
+        action_registry = getattr(
+            getattr(self.main_window, "app_context", None), "action_registry", None
+        )
+        if not action_registry:
+            return
+        from gui.registry.context_menu_registry import ContextMenuContext
+        ctx = ContextMenuContext(
+            context_type="document_list:item",
+            selected_ids=doc_paths,
+            payload={"paths": doc_paths},
+            event_bus=getattr(self.main_window, "bus", None),
+        )
+        specs = list(action_registry.iter_mount("context_menu:document_list:item"))
+        if not specs:
+            return
+        menu.addSeparator()
+        for spec in specs:
+            if spec.separator_before:
+                menu.addSeparator()
+            label = f"{spec.icon} {spec.label}".strip() if spec.icon else spec.label
+            action = menu.addAction(label)
+            if spec.tooltip:
+                action.setToolTip(spec.tooltip)
+            if spec.callback:
+                action.triggered.connect(lambda checked=False, cb=spec.callback, c=ctx: cb(c))
 
     def _mass_assign_tag(self, selected_items, tag_id):
         for item in selected_items:

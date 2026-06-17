@@ -56,6 +56,10 @@ class BlueprintRegistry:
     def unregister(self, blueprint_id: str):
         self._definitions.pop(blueprint_id, None)
 
+    def remove_by_plugin(self, plugin_id: str) -> None:
+        self._definitions = {bid: d for bid, d in self._definitions.items()
+                             if d.plugin_id != plugin_id}
+
     def get(self, blueprint_id: str) -> Optional[BlueprintDefinition]:
         return self._definitions.get(blueprint_id)
 

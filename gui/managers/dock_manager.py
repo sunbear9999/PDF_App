@@ -9,10 +9,11 @@ import shiboken6
 class DockDefinition:
     id: str
     object_name_prefix: str
-    menu_name: str  # <--- NEW: Allows dynamic UI toggle mapping
+    menu_name: str
     area: Qt.DockWidgetArea
     is_singleton: bool
     factory: Callable[['MainWindow'], QDockWidget]
+    plugin_id: str = ""
 
 class DockManager:
     def __init__(self, main_window):
@@ -66,6 +67,9 @@ class DockManager:
 
         # 2. Instantiate via Factory
         dock = defn.factory(self.window)
+        if defn.plugin_id:
+            dock.setProperty("papyrus_plugin_id", defn.plugin_id)
+        self._inject_plugin_toolbar(dock, dock_id)
         self.configure_dock(dock, closable=True)
 
         # 3. Object Naming for Layout Serialization
@@ -156,6 +160,96 @@ class DockManager:
             counts[dock_id] = len(self.get_instances(dock_id))
         return counts
         
+    def _inject_plugin_toolbar(self, dock: QDockWidget, dock_id: str) -> None:
+        """Inject ToolbarButtonSpecs registered for this dock_id by plugins."""
+        registry = getattr(getattr(self.window, "app_context", None), "plugin_extension_registry", None)
+        if not registry:
+            return
+        specs = registry.get_toolbar_buttons(dock_target=dock_id)
+        if not specs:
+            return
+
+        inner = dock.widget()
+        if not inner:
+            return
+
+        specs = sorted(specs, key=lambda s: s.position)
+
+        # Preferred: dock exposes _plugin_toolbar_layout (a QHBoxLayout)
+        toolbar_layout = getattr(inner, "_plugin_toolbar_layout", None)
+        if toolbar_layout is not None:
+            for spec in specs:
+                btn = self._make_plugin_btn(spec)
+                toolbar_layout.addWidget(btn)
+            return
+
+        # Fallback: prepend a thin strip at top of the widget's main layout
+        main_layout = inner.layout()
+        if main_layout is None:
+            return
+        from PySide6.QtWidgets import QHBoxLayout, QFrame
+        strip = QFrame()
+        strip.setObjectName("PluginToolbarStrip")
+        strip_layout = QHBoxLayout(strip)
+        strip_layout.setContentsMargins(6, 3, 6, 3)
+        strip_layout.setSpacing(4)
+        for spec in specs:
+            strip_layout.addWidget(self._make_plugin_btn(spec))
+        strip_layout.addStretch()
+        main_layout.insertWidget(0, strip)
+
+    @staticmethod
+    def _make_plugin_btn(spec) -> "QPushButton":
+        from PySide6.QtWidgets import QPushButton
+        label = f"{spec.icon} {spec.label}".strip() if getattr(spec, "icon", "") else spec.label
+        btn = QPushButton(label)
+        btn.setToolTip(getattr(spec, "tooltip", "") or "")
+        cb = getattr(spec, "callback", None)
+        if cb:
+            btn.clicked.connect(cb)
+        return btn
+
+    def broadcast_theme(self, theme: dict) -> None:
+        """Push a theme update to all live dock inner widgets."""
+        for dock_id in self.registry.keys():
+            for dock in self.get_instances(dock_id):
+                inner = dock.widget()
+                if inner and hasattr(inner, "update_theme"):
+                    try:
+                        inner.update_theme(theme)
+                    except RuntimeError:
+                        pass
+
+    def toggle_by_menu_name(self, menu_name: str, checked: bool) -> None:
+        """Show or hide the first singleton dock whose menu_name matches."""
+        for defn in self.registry.values():
+            if defn.menu_name == menu_name:
+                instances = self.get_instances(defn.id)
+                if checked:
+                    if instances:
+                        instances[0].show()
+                        instances[0].raise_()
+                    else:
+                        self.spawn(defn.id)
+                else:
+                    for dock in instances:
+                        dock.hide()
+                return
+
+    def remove_plugin_docks(self, plugin_id: str) -> None:
+        """Close and destroy all docks belonging to plugin_id; purge from registry."""
+        for dock in self.window.findChildren(QDockWidget):
+            if not shiboken6.isValid(dock):
+                continue
+            if dock.property("papyrus_plugin_id") == plugin_id:
+                dock.close()
+                dock.deleteLater()
+        stale_ids = [did for did, defn in self.registry.items()
+                     if getattr(defn, "plugin_id", "") == plugin_id]
+        for did in stale_ids:
+            self.registry.pop(did, None)
+            self.instances.pop(did, None)
+
     def clear_all(self):
         for dock_id in self.registry.keys():
             for dock in self.get_instances(dock_id):

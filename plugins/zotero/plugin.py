@@ -31,7 +31,7 @@ class Plugin:
     name = "Zotero Integration"
     version = "1.0.0"
     dependencies: list = []
-
+    require_internet: bool = False
     def __init__(self):
         self._db = None
         self._formatter = None
@@ -99,16 +99,15 @@ class Plugin:
         formatter = self._formatter
 
         # Zotero search tab in the Research Assistant panel
-        registry.register_research_tab(ResearchTabSpec(
+        registry.add_research_tab(ResearchTabSpec(
             tab_id="zotero_search",
-            tab_label="📚 Zotero",
+            label="📚 Zotero",
             factory=lambda ctx: _make_research_tab(ctx, db, formatter),
         ))
 
         # "Sync Zotero" button injected into the Citation Dock toolbar
-        # Opens a smart matching dialog instead of blindly appending entries
-        registry.register_toolbar_button(ToolbarButtonSpec(
-            dock_id="citations",
+        registry.add_toolbar_button(ToolbarButtonSpec(
+            dock_target="citations",
             button_id="zotero_sync_citations",
             label="⚡ Sync Zotero",
             tooltip="Link Zotero library entries to project PDFs",

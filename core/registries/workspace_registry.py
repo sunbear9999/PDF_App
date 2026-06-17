@@ -83,6 +83,10 @@ class WorkspaceNodeTypeRegistry:
     def all(self) -> Iterable[WorkspaceNodeTypeDefinition]:
         return self._types.values()
 
+    def remove_by_plugin(self, plugin_id: str) -> None:
+        self._types = {k: v for k, v in self._types.items()
+                       if getattr(v, "plugin_id", None) != plugin_id}
+
     def resolve(self, node) -> WorkspaceNodeTypeDefinition:
         type_id = getattr(node, "node_type_id", None) or infer_workspace_node_type_id(node)
         return self.get(type_id) or self.get("workspace.node.text") or WorkspaceNodeTypeDefinition(
@@ -168,6 +172,10 @@ class WorkspaceAIToolRegistry:
         for tool in self._tools.values():
             if mount_point in tool.mount_points:
                 yield tool
+
+    def remove_by_plugin(self, plugin_id: str) -> None:
+        self._tools = {k: v for k, v in self._tools.items()
+                       if getattr(v, "plugin_id", None) != plugin_id}
 
 
 def build_default_workspace_ai_tool_registry() -> WorkspaceAIToolRegistry:

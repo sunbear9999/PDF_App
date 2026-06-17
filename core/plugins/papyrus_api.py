@@ -33,6 +33,103 @@ class PluginDependencyError(RuntimeError):
     pass
 
 
+class _PluginDBNamespace:
+    """Namespaced database helpers exposed as ``api.db``."""
+
+    def __init__(self, core: "PapyrusCore", plugin_id: str) -> None:
+        self._core = core
+        self._plugin_id = plugin_id
+
+    def register_table(self, table_name: str, schema_dict: Dict[str, str]) -> None:
+        """Register a plugin-owned SQLite table.
+
+        The table is created (``CREATE TABLE IF NOT EXISTS``) the next time a
+        project is opened. The ``plugin_`` prefix is added automatically.
+
+        :param table_name: Logical name without the ``plugin_`` prefix.
+        :param schema_dict: Column name → SQLite type, e.g.
+                            ``{"ticker": "TEXT NOT NULL", "shares": "REAL DEFAULT 0"}``.
+        """
+        from core.plugins.plugin_db_registry import PluginTableRegistry
+        PluginTableRegistry.get_instance().register_table(
+            table_name, schema_dict, self._plugin_id
+        )
+
+    def execute(self, sql: str, params: tuple = ()) -> list:
+        """Run SQL against the open project database.
+
+        Returns a list of rows (each row a tuple). Commits automatically for
+        DML statements. Raises RuntimeError if no project is open.
+
+        Must be called from the main thread or with external locking.
+        """
+        conn = getattr(self._core.project_manager, "_conn", None)
+        if conn is None:
+            raise RuntimeError("No project is currently open.")
+        cursor = conn.execute(sql, params)
+        conn.commit()
+        return cursor.fetchall()
+
+
+class _PluginTaskNamespace:
+    """Background task helpers exposed as ``api.tasks``."""
+
+    def __init__(self, core: "PapyrusCore", plugin_id: str) -> None:
+        self._core = core
+        self._plugin_id = plugin_id
+        self._active_workers: List[Any] = []  # List[PluginWorker]
+
+    def run_background(
+        self,
+        func: Callable,
+        *args: Any,
+        job_name: str = "",
+        on_done: Optional[Callable] = None,
+        on_error: Optional[Callable] = None,
+    ) -> Any:
+        """Run *func* in a background QThread tracked by ProcessRegistry.
+
+        :param func: Callable to execute; must be thread-safe.
+        :param args: Positional arguments forwarded to *func*.
+        :param job_name: Label shown in the process monitor (optional).
+        :param on_done: Called with the return value on the main thread.
+        :param on_error: Called with the error string on the main thread.
+        :returns: The ``LLMJob`` handle (can be used to cancel).
+        """
+        from core.plugins.plugin_worker import PluginWorker
+
+        name = job_name or f"{self._plugin_id}.task"
+        worker = PluginWorker(func, args, job_name=name)
+
+        if on_done:
+            worker.finished.connect(on_done)
+        if on_error:
+            worker.error.connect(on_error)
+
+        self._active_workers.append(worker)
+        worker.finished.connect(
+            lambda _r, w=worker: self._active_workers.remove(w) if w in self._active_workers else None
+        )
+        worker.error.connect(
+            lambda _e, w=worker: self._active_workers.remove(w) if w in self._active_workers else None
+        )
+
+        job = self._core.process_registry.enqueue_runner(
+            worker, name, job_type="Plugin", is_express=True
+        )
+        return job
+
+    def kill_all(self) -> None:
+        """Kill all background tasks from this plugin."""
+        for worker in list(self._active_workers):
+            job = getattr(worker, "job", None)
+            if job and hasattr(job, "kill"):
+                job.kill()
+            elif worker.isRunning():
+                worker.terminate()
+        self._active_workers.clear()
+
+
 class PapyrusAPI:
     """
     Typed facade exposing the backend to plugins.
@@ -54,6 +151,13 @@ class PapyrusAPI:
         self._plugin_id = plugin_id
         # Tracks (signal, slot) pairs so we can disconnect on unload
         self._subscriptions: List[Tuple[Any, Callable]] = []
+        # Tracks service IDs registered by this plugin so _cleanup() can remove them
+        self._registered_service_ids: List[str] = []
+        # Tracks workflow step types registered by this plugin for cleanup
+        self._registered_step_types: List[str] = []
+        # Lazy-initialised namespaces
+        self._db_ns: Optional["_PluginDBNamespace"] = None
+        self._tasks_ns: Optional["_PluginTaskNamespace"] = None
         # Per-plugin persistent config (lazy import to avoid circular at module level)
         from core.plugins.plugin_config import PluginConfig
         self._config = PluginConfig(plugin_id or "_unknown", core.user_data_dir)
@@ -132,6 +236,24 @@ class PapyrusAPI:
         return self._core.citation_app_service
 
     # ----------------------------------------------------------------
+    # Section B2: Database and task namespaces
+    # ----------------------------------------------------------------
+
+    @property
+    def db(self) -> "_PluginDBNamespace":
+        """Plugin database helpers: register_table() and execute()."""
+        if self._db_ns is None:
+            self._db_ns = _PluginDBNamespace(self._core, self._plugin_id)
+        return self._db_ns
+
+    @property
+    def tasks(self) -> "_PluginTaskNamespace":
+        """Background task helpers: run_background() and kill_all()."""
+        if self._tasks_ns is None:
+            self._tasks_ns = _PluginTaskNamespace(self._core, self._plugin_id)
+        return self._tasks_ns
+
+    # ----------------------------------------------------------------
     # Section C: Event subscription helpers
     # ----------------------------------------------------------------
 
@@ -189,6 +311,7 @@ class PapyrusAPI:
                 f"Use a unique, namespaced id."
             )
         self._core._custom_services[service_id] = instance
+        self._registered_service_ids.append(service_id)
 
     def get_service(self, service_id: str) -> Optional[Any]:
         """
@@ -247,6 +370,52 @@ class PapyrusAPI:
 
         self.subscribe("project_clearing_started", _slot)
 
+    def register_active_node(
+        self,
+        type_key: str,
+        controller_cls: type,
+        requires_internet: bool = False,
+    ) -> None:
+        """Register an ActiveController for *type_key*.
+
+        The controller's ``tick()`` fires on a QTimer, ``on_data_updated()``
+        fires when a node of this type changes, and ``get_custom_ui()`` can
+        embed a QWidget inside the workspace node via QGraphicsProxyWidget.
+
+        :param type_key: Entity type key (must already be registered in the
+                         ontology registry).
+        :param controller_cls: Subclass of ``ActiveController``.
+        :param requires_internet: True if the controller makes network calls.
+        """
+        self._core.ontology_registry.register_active_node(
+            type_key, controller_cls, requires_internet, self._plugin_id
+        )
+
+    def on_text_selected(self, callback: Callable[[str, dict], None]) -> None:
+        """Register a callback invoked when the user selects text in the PDF viewer.
+
+        :param callback: Receives ``(selected_text: str, context: dict)``.
+                         ``context`` may include ``page_num``, ``rect``, ``doc_path``.
+        """
+        def _slot(event, payload):
+            callback(
+                getattr(payload, "text", ""),
+                getattr(payload, "context", {}),
+            )
+        self.subscribe("document_text_selected", _slot)
+
+    def on_editor_before_save(self, callback: Callable[[str, str], None]) -> None:
+        """Register a callback invoked before an essay or note is saved.
+
+        :param callback: Receives ``(filepath: str, content: str)``.
+        """
+        def _slot(event, payload):
+            callback(
+                getattr(payload, "path", ""),
+                getattr(payload, "content", ""),
+            )
+        self.subscribe("editor_before_save", _slot)
+
     # ----------------------------------------------------------------
     # Section G: Per-plugin persistent configuration
     # ----------------------------------------------------------------
@@ -282,6 +451,41 @@ class PapyrusAPI:
         if signal is not None:
             signal.emit(message, level, duration)
 
+    def register_workflow_step(self, step_cls: type) -> None:
+        """Register a CustomExecutionStep subclass as a plugin-contributed workflow step.
+
+        This registers the step as both a callable handler in MasterActionRunner
+        and as a WorkflowNodeType in the workflow node type registry (so it
+        appears in the workflow builder UI).
+
+        :param step_cls: A subclass of ``CustomExecutionStep`` with ``step_type``,
+                         ``input_schema``, ``output_schema``, and ``execute()`` defined.
+        """
+        from core.plugins.plugin_step_protocol import CustomExecutionStep
+        from core.engine.master_runner import MasterActionRunner
+        from core.engine.workflow_model import WorkflowNodeType
+
+        if not (isinstance(step_cls, type) and issubclass(step_cls, CustomExecutionStep)):
+            raise TypeError(f"{step_cls} must subclass CustomExecutionStep")
+        if not step_cls.step_type:
+            raise ValueError("CustomExecutionStep.step_type must be a non-empty string")
+
+        step_cls.plugin_id = self._plugin_id
+
+        node_type = WorkflowNodeType(
+            id=f"plugin.{step_cls.step_type.lower()}",
+            label=step_cls.label or step_cls.step_type,
+            category=step_cls.category or "Plugin",
+            step_type=step_cls.step_type,
+            description=step_cls.description or "",
+            plugin_id=self._plugin_id,
+            input_schema=dict(step_cls.input_schema),
+            output_schema=dict(step_cls.output_schema),
+        )
+        self._core.workflow_node_type_registry.register(node_type)
+        MasterActionRunner.register_plugin_step_handler(step_cls.step_type, step_cls)
+        self._registered_step_types.append(step_cls.step_type)
+
     def reload_plugin(self, plugin_id: str) -> bool:
         """
         Hot-reload a plugin by ID. Dev mode only.
@@ -299,10 +503,24 @@ class PapyrusAPI:
     # ----------------------------------------------------------------
 
     def _cleanup(self) -> None:
-        """Disconnect all tracked subscriptions. Called on plugin unload."""
+        """Disconnect all tracked subscriptions and remove registered services. Called on plugin unload."""
         for signal, slot in self._subscriptions:
             try:
                 signal.disconnect(slot)
             except RuntimeError:
                 pass
         self._subscriptions.clear()
+        for service_id in self._registered_service_ids:
+            self._core._custom_services.pop(service_id, None)
+        self._registered_service_ids.clear()
+        # Remove plugin table registrations (does NOT drop the actual SQLite table)
+        from core.plugins.plugin_db_registry import PluginTableRegistry
+        PluginTableRegistry.get_instance().remove_by_plugin(self._plugin_id)
+        # Kill any running background tasks
+        if self._tasks_ns is not None:
+            self._tasks_ns.kill_all()
+        # Unregister plugin workflow step handlers
+        from core.engine.master_runner import MasterActionRunner
+        for st in self._registered_step_types:
+            MasterActionRunner.unregister_plugin_step_handler(st)
+        self._registered_step_types.clear()

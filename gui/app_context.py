@@ -6,8 +6,8 @@ Plugins and docks should depend on AppContext, not MainWindow.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Optional
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
     from core.papyrus_core import PapyrusCore
@@ -30,6 +30,9 @@ if TYPE_CHECKING:
     from core.services.workspace_services import WorkspaceService, WorkspaceGraphService
     from core.services.workflow_runner_service import WorkflowRunnerService
     from core.services.research_agent_service import ResearchAgentService
+    from core.plugins.extension_registry import PluginExtensionRegistry
+    from gui.registry.action_spec import ActionRegistry
+    from gui.registry.context_menu_registry import ContextMenuRegistry
 
 
 @dataclass
@@ -40,6 +43,9 @@ class AppContext:
     Constructed once in MainWindow from a PapyrusCore instance.  Docks and
     tabs should accept AppContext rather than MainWindow so they remain
     testable and plugin-compatible.
+
+    GUI-only fields (ui_router, theme_manager, viewer) are set by MainWindow
+    after construction and are None until then.
     """
 
     bus: "EventBus"
@@ -60,6 +66,18 @@ class AppContext:
     workspace_graph_service: "WorkspaceGraphService"
     workflow_runner_service: "WorkflowRunnerService"
     research_agent_service: "ResearchAgentService"
+
+    # Plugin extension specs collected at startup
+    plugin_extension_registry: Optional["PluginExtensionRegistry"] = field(default=None)
+
+    # GUI extensibility registries — created by MainWindow and available to all docks/plugins
+    action_registry: Optional["ActionRegistry"] = field(default=None)
+    context_menu_registry: Optional["ContextMenuRegistry"] = field(default=None)
+
+    # Wired in by MainWindow after GUI is constructed
+    ui_router: Optional[Any] = field(default=None)
+    theme_manager: Optional[Any] = field(default=None)
+    viewer: Optional[Any] = field(default=None)
 
     @classmethod
     def from_core(cls, core: "PapyrusCore") -> "AppContext":
@@ -82,4 +100,5 @@ class AppContext:
             workspace_graph_service=core.workspace_graph_service,
             workflow_runner_service=core.workflow_runner_service,
             research_agent_service=core.research_agent_service,
+            plugin_extension_registry=getattr(core, "plugin_extension_registry", None),
         )

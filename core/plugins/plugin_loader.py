@@ -6,11 +6,27 @@ import sys
 from collections import deque
 from typing import TYPE_CHECKING, Dict, List, Tuple
 
-from core.plugins.base_plugins import PapyrusPlugin
-
 if TYPE_CHECKING:
     from core.papyrus_core import PapyrusCore
     from core.plugins.papyrus_api import PapyrusAPI
+
+
+_REQUIRED_PLUGIN_METHODS = frozenset([
+    "on_load", "on_register", "register_blueprints", "register_workspace_tools",
+    "register_ontology_types", "get_dock_spec", "register_gui_extensions",
+    "on_project_open", "on_project_close", "on_unload",
+])
+_REQUIRED_PLUGIN_ATTRS = frozenset(["plugin_id", "name", "version", "dependencies"])
+
+
+def _is_valid_plugin(instance) -> bool:
+    """Return True if *instance* looks like a valid Papyrus plugin.
+
+    Uses explicit hasattr checks instead of isinstance() against the Protocol
+    so that missing optional attributes like requires_internet don't silently
+    break all plugins under Python 3.12's stricter runtime-checkable rules.
+    """
+    return all(hasattr(instance, m) for m in _REQUIRED_PLUGIN_METHODS | _REQUIRED_PLUGIN_ATTRS)
 
 
 class PluginLoadError(RuntimeError):
@@ -48,8 +64,8 @@ def _discover_plugins(plugins_dir: str) -> Dict[str, PapyrusPlugin]:
                 continue
 
             instance = plugin_cls()
-            if not isinstance(instance, PapyrusPlugin):
-                print(f"[PluginLoader] {entry}: 'Plugin' does not implement PapyrusPlugin, skipping.")
+            if not _is_valid_plugin(instance):
+                print(f"[PluginLoader] {entry}: 'Plugin' does not implement required plugin interface, skipping.")
                 continue
 
             plugin_id = instance.plugin_id
@@ -114,12 +130,7 @@ def _tag_plugin_specs(registry, plugin_id: str, before_count: dict) -> None:
     *before_count* maps list-attribute-name → count before registration.
     Any spec in those lists beyond the previous count gets plugin_id set.
     """
-    list_attrs = [
-        "_toolbar_buttons", "_research_tabs", "_ai_renderers", "_extra_docks",
-        "_menu_items", "_main_toolbar_buttons", "_shortcuts", "_commands",
-        "_workspace_context_menu_items",
-    ]
-    for attr in list_attrs:
+    for attr in registry._spec_list_attrs():
         lst = getattr(registry, attr, [])
         prev = before_count.get(attr, len(lst))
         for spec in lst[prev:]:
@@ -167,14 +178,7 @@ def load_plugins(core: "PapyrusCore") -> List[PapyrusPlugin]:
 
             # Snapshot counts before registration so we can tag new specs
             reg = core.plugin_extension_registry
-            before = {
-                attr: len(getattr(reg, attr, []))
-                for attr in [
-                    "_toolbar_buttons", "_research_tabs", "_ai_renderers", "_extra_docks",
-                    "_menu_items", "_main_toolbar_buttons", "_shortcuts", "_commands",
-                    "_workspace_context_menu_items",
-                ]
-            }
+            before = {attr: len(getattr(reg, attr, [])) for attr in reg._spec_list_attrs()}
 
             core.register_plugin(instance, api)
 
@@ -184,6 +188,8 @@ def load_plugins(core: "PapyrusCore") -> List[PapyrusPlugin]:
             core._loaded_plugins.append((instance, api))
             loaded.append(instance)
             print(f"[PluginLoader] Loaded: {instance.name} ({instance.plugin_id}) v{instance.version}")
+            if hasattr(core, "bus"):
+                core.bus.plugin_loaded.emit(instance.plugin_id)
 
         except Exception as exc:
             print(f"[PluginLoader] Failed to register plugin '{instance.plugin_id}': {exc}")
@@ -220,16 +226,26 @@ def reload_plugin(core: "PapyrusCore", plugin_id: str) -> bool:
     except Exception as exc:
         print(f"[HotReload] on_unload error for '{plugin_id}': {exc}")
     api._cleanup()
+    if hasattr(core, "bus"):
+        core.bus.plugin_unloaded.emit(plugin_id)
 
-    # 2. Remove extension specs contributed by this plugin
+    # 2. Remove extension specs, dock specs, and registry entries from this plugin
     core.plugin_extension_registry.remove_plugin_specs(plugin_id)
+    core.plugin_dock_specs = [s for s in core.plugin_dock_specs if s.plugin_id != plugin_id]
+    core.blueprint_registry.remove_by_plugin(plugin_id)
+    core.workspace_ai_tools_registry.remove_by_plugin(plugin_id)
+    core.workspace_node_type_registry.remove_by_plugin(plugin_id)
+    core.workflow_node_type_registry.remove_by_plugin(plugin_id)
+    core.ontology_registry.remove_by_plugin(plugin_id)
 
     # 3. Remove from loaded list
     core._loaded_plugins = [(p, a) for p, a in core._loaded_plugins if p.plugin_id != plugin_id]
 
-    # 4. Invalidate module cache
+    # 4. Invalidate module cache (main module + all submodules)
     module_name = f"plugins.{plugin_id}.plugin"
-    sys.modules.pop(module_name, None)
+    prefix = f"plugins.{plugin_id}."
+    for k in [k for k in sys.modules if k == module_name or k.startswith(prefix)]:
+        sys.modules.pop(k, None)
 
     # 5. Re-discover just this plugin
     plugins_dir = _plugins_dir()
@@ -248,20 +264,15 @@ def reload_plugin(core: "PapyrusCore", plugin_id: str) -> bool:
             new_instance.on_register(new_api)
 
         reg = core.plugin_extension_registry
-        before = {
-            attr: len(getattr(reg, attr, []))
-            for attr in [
-                "_toolbar_buttons", "_research_tabs", "_ai_renderers", "_extra_docks",
-                "_menu_items", "_main_toolbar_buttons", "_shortcuts", "_commands",
-                "_workspace_context_menu_items",
-            ]
-        }
+        before = {attr: len(getattr(reg, attr, [])) for attr in reg._spec_list_attrs()}
 
         core.register_plugin(new_instance, new_api)
         _tag_plugin_specs(reg, plugin_id, before)
 
         core._loaded_plugins.append((new_instance, new_api))
         print(f"[HotReload] Reloaded: {new_instance.name} ({plugin_id}) v{new_instance.version}")
+        if hasattr(core, "bus"):
+            core.bus.plugin_loaded.emit(plugin_id)
         return True
 
     except Exception as exc:

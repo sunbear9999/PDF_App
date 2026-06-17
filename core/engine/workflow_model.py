@@ -17,6 +17,8 @@ class WorkflowNodeType:
     output_ports: List[str] = field(default_factory=lambda: ["result"])
     input_ports: List[str] = field(default_factory=list)
     plugin_id: Optional[str] = None
+    input_schema: Dict[str, Any] = field(default_factory=dict)   # {key: {type, label, required}}
+    output_schema: Dict[str, Any] = field(default_factory=dict)  # {key: {type, label}}
 
 
 @dataclass

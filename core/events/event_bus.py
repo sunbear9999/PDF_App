@@ -47,6 +47,8 @@ class EventBus(QObject):
     # --- Document Intents ---
     document_action_requested = Signal(object, object) # Enum, Dataclass
     document_opened = Signal(object, object)
+    document_text_selected = Signal(object, object)   # (event_enum, payload with .text/.context)
+    editor_before_save = Signal(object, object)        # (event_enum, payload with .path/.content)
 
     # --- Annotation Intents ---
     annotation_action_requested = Signal(object, object)
@@ -55,6 +57,7 @@ class EventBus(QObject):
     ocr_action_requested = Signal(object, object)
     # --- Tool Results (UI Listeners) ---
     tts_status_updated = Signal(object, object)
+    tts_text_extracted = Signal(object, object)
     ocr_status_updated = Signal(object, object)
     # --- Dictionary Domain ---
     dictionary_action_requested = Signal(object, object)
@@ -68,6 +71,12 @@ class EventBus(QObject):
     # --- Notes Domain ---
     notes_action_requested = Signal(object, object)
     notes_data_ready = Signal(object, object)
+    # --- Essay Domain ---
+    essay_action_requested = Signal(object, object)
+    essay_data_ready = Signal(object, object)
+    # --- Index / Search Domain ---
+    index_action_requested = Signal(object, object)
+    index_status_ready = Signal(object, object)
     # --- Tool & Dialog Domains ---
     tag_action_requested = Signal(object, object)
     tag_data_updated = Signal(object, object)
@@ -91,6 +100,11 @@ class EventBus(QObject):
 
     # --- Workflow Runner Domain ---
     workflow_state_changed = Signal(object, object)
+
+    # --- Plugin Notification Domain ---
+    plugin_notification_requested = Signal(str, str, int)  # message, level, duration_ms
+    plugin_loaded = Signal(str)    # plugin_id
+    plugin_unloaded = Signal(str)  # plugin_id
 
     # --- UI Render Domain ---
     # Emitted by BlueprintUIRouter to dispatch AI output to tabs without direct method calls.

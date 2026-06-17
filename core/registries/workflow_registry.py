@@ -29,6 +29,10 @@ class BlueprintNodeTypeRegistry:
             if node_type.category == category:
                 yield node_type
 
+    def remove_by_plugin(self, plugin_id: str) -> None:
+        self._types = {k: v for k, v in self._types.items()
+                       if getattr(v, "plugin_id", None) != plugin_id}
+
 
 def build_default_blueprint_node_type_registry() -> BlueprintNodeTypeRegistry:
     registry = BlueprintNodeTypeRegistry()

@@ -136,6 +136,7 @@ class PapyrusCore:
         plugin.register_ontology_types(self.ontology_registry)
         dock_spec = plugin.get_dock_spec()
         if dock_spec is not None:
+            dock_spec.plugin_id = plugin.plugin_id
             self.plugin_dock_specs.append(dock_spec)
         if hasattr(plugin, "register_gui_extensions"):
             plugin.register_gui_extensions(self.plugin_extension_registry)

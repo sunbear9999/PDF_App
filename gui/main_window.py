@@ -108,7 +108,6 @@ class MainWindow(QMainWindow):
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.top_toolbar)
         from gui.managers.workspace_builder import WorkspaceBuilder
         WorkspaceBuilder(self).build()
-        self._setup_shortcuts()
 
         # Connect Theme Manager
         self.theme_manager.theme_changed.connect(self.update_theme)
@@ -137,6 +136,10 @@ class MainWindow(QMainWindow):
         self.app_context.ui_router = self.ui_router
         self.app_context.theme_manager = self.theme_manager
         self.app_context.viewer = self.viewer
+        # plugin_extension_registry is already set from from_core(), but sync it in case
+        # plugins registered dock specs before app_context was created
+        if not self.app_context.plugin_extension_registry:
+            self.app_context.plugin_extension_registry = getattr(core, "plugin_extension_registry", None)
 
         # Register any AI renderers contributed by plugins
         if self.app_context.plugin_extension_registry:
@@ -161,15 +164,42 @@ class MainWindow(QMainWindow):
             lambda msg, duration=3000: self.statusBar().showMessage(msg, duration)
         )
 
-        # Plugin keyboard shortcuts
+        # Keyboard shortcuts (core + plugin)
         from gui.managers.shortcut_manager import ShortcutManager
         self._shortcut_manager = ShortcutManager(self)
+        self._shortcut_manager.register_core_shortcuts()
         self._shortcut_manager.register_plugin_shortcuts()
+
+        # ActionRegistry + ContextMenuRegistry
+        from gui.registry.action_spec import ActionRegistry
+        from gui.registry.context_menu_registry import ContextMenuRegistry
+        from gui.registry.extension_spec_bridge import bridge_plugin_extensions
+        self._action_registry = ActionRegistry()
+        self._context_menu_registry = ContextMenuRegistry(self._action_registry)
+        if self.app_context.plugin_extension_registry:
+            bridge_plugin_extensions(
+                self.app_context.plugin_extension_registry,
+                self._action_registry,
+            )
+        self.app_context.action_registry = self._action_registry
+        self.app_context.context_menu_registry = self._context_menu_registry
 
         # Toast notifications for api.notify()
         from gui.components.toast_manager import ToastManager
         self._toast_manager = ToastManager(self)
         self.bus.plugin_notification_requested.connect(self._toast_manager._on_notification)
+
+        # Plugin lifecycle: sweep widgets when a plugin is unloaded (hot-reload)
+        self.bus.plugin_unloaded.connect(self.dock_manager.remove_plugin_docks)
+        self.bus.plugin_unloaded.connect(self._sweep_plugin_toolbar_widgets)
+
+        # Active controller timer management
+        from gui.managers.plugin_controller_manager import PluginControllerManager
+        self._plugin_controller_manager = PluginControllerManager(
+            core.ontology_registry, self.bus, parent=self
+        )
+        self.bus.plugin_loaded.connect(self._plugin_controller_manager.on_plugin_loaded)
+        self.bus.plugin_unloaded.connect(self._plugin_controller_manager.teardown_plugin)
 
         # Ctrl+P command palette
         from gui.components.command_palette import CommandPalette
@@ -247,15 +277,16 @@ class MainWindow(QMainWindow):
         y = available.y() + (available.height() - height) // 2
         self.setGeometry(x, y, width, height)
 
-    def _setup_shortcuts(self):
-        QShortcut(QKeySequence("Ctrl+="), self).activated.connect(self.viewer.zoom_in)
-        QShortcut(QKeySequence("Ctrl++"), self).activated.connect(self.viewer.zoom_in)
-        QShortcut(QKeySequence("Ctrl+-"), self).activated.connect(self.viewer.zoom_out)
-        QShortcut(QKeySequence("Ctrl+0"), self).activated.connect(self.viewer.zoom_reset)
-        QShortcut(QKeySequence("Ctrl+F"), self).activated.connect(self.viewer.annot_manager.toggle_search)
-        QShortcut(QKeySequence("Ctrl+S"), self).activated.connect(lambda: self.bus.project_action_requested.emit(ProjectIntent.SAVE, ProjectPayload()))
-        QShortcut(QKeySequence("F11"), self).activated.connect(self.toggle_full_screen)
-
+    def _sweep_plugin_toolbar_widgets(self, plugin_id: str) -> None:
+        """Remove main-toolbar buttons tagged with papyrus_plugin_id == plugin_id."""
+        from PySide6.QtWidgets import QPushButton
+        toolbar = getattr(self, "toolbar", None)
+        if toolbar is None:
+            return
+        for btn in toolbar.findChildren(QPushButton):
+            if btn.property("papyrus_plugin_id") == plugin_id:
+                toolbar.removeAction(toolbar.widgetForAction(btn))
+                btn.deleteLater()
 
     def toggle_full_screen(self):
         from PySide6.QtCore import Qt

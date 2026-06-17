@@ -227,7 +227,38 @@ class AnnotationManager(QObject):
         cite_action = menu.addAction("📋 Copy In-Text Citation")
         cite_action.triggered.connect(self.copy_in_text_citation)
 
+        self._inject_plugin_items(menu, extracted_text)
         menu.exec(global_pos)
+
+    def _inject_plugin_items(self, menu, selected_text: str = "") -> None:
+        """Append plugin-registered PDF context menu actions to an existing menu."""
+        main_window = self.viewer.window()
+        action_registry = getattr(
+            getattr(main_window, "app_context", None), "action_registry", None
+        )
+        if not action_registry:
+            return
+        from gui.registry.context_menu_registry import ContextMenuContext
+        ctx = ContextMenuContext(
+            context_type="pdf:text_selection",
+            selected_ids=[],
+            payload={"text": selected_text},
+            event_bus=getattr(main_window, "bus", None),
+        )
+        specs = list(action_registry.iter_mount("context_menu:pdf:text_selection"))
+        if not specs:
+            return
+        menu.addSeparator()
+        for spec in specs:
+            if spec.separator_before:
+                menu.addSeparator()
+            label = f"{spec.icon} {spec.label}".strip() if spec.icon else spec.label
+            action = menu.addAction(label)
+            if spec.tooltip:
+                action.setToolTip(spec.tooltip)
+            if spec.callback:
+                action.triggered.connect(lambda checked=False, cb=spec.callback, c=ctx: cb(c))
+
     def copy_in_text_citation(self):
         main_window = self.viewer.window()
         current_doc = main_window.current_file_path

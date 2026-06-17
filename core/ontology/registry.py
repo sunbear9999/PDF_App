@@ -503,6 +503,7 @@ class OntologyRegistry:
             cls._instance = super().__new__(cls)
             cls._instance.entities, cls._instance.relations, cls._instance.views, cls._instance.actions = {}, {}, {}, {}
             cls._instance.node_plugins, cls._instance.edge_plugins = {}, {}
+            cls._instance._active_controllers: Dict[str, dict] = {}
             cls._instance._register_core_ontology()
         return cls._instance
 
@@ -534,6 +535,53 @@ class OntologyRegistry:
     def all_relations(self) -> Iterable[RelationBlueprint]: return self.relations.values()
     def all_views(self) -> Iterable[ViewBlueprint]: return self.views.values()
     def all_actions(self) -> Iterable[ActionDefinition]: return self.actions.values()
+
+    def remove_by_plugin(self, plugin_id: str) -> None:
+        for attr in ("entities", "relations", "views", "actions", "node_plugins", "edge_plugins"):
+            setattr(self, attr, {k: v for k, v in getattr(self, attr).items()
+                                 if getattr(v, "plugin_id", None) != plugin_id})
+        self.remove_active_controllers_by_plugin(plugin_id)
+
+    # ----------------------------------------------------------------
+    # Active controller registry
+    # ----------------------------------------------------------------
+
+    def register_active_node(
+        self,
+        type_key: str,
+        controller_cls: type,
+        requires_internet: bool = False,
+        plugin_id: str = "",
+    ) -> None:
+        """Register an ActiveController for *type_key*.
+
+        :param type_key: Entity type key the controller manages.
+        :param controller_cls: A subclass of ``ActiveController``.
+        :param requires_internet: True if the controller makes network calls.
+        :param plugin_id: Owner plugin (for cleanup on hot-reload).
+        """
+        self._active_controllers[type_key] = {
+            "controller": controller_cls(),
+            "requires_internet": requires_internet,
+            "plugin_id": plugin_id,
+            "timer": None,  # QTimer injected by PluginControllerManager
+        }
+
+    def get_active_controller(self, type_key: str) -> Optional[dict]:
+        """Return the controller meta-dict for *type_key*, or None."""
+        return self._active_controllers.get(type_key)
+
+    def remove_active_controllers_by_plugin(self, plugin_id: str) -> None:
+        """Stop timers and remove all controllers belonging to *plugin_id*."""
+        for key, meta in list(self._active_controllers.items()):
+            if meta.get("plugin_id") == plugin_id:
+                timer = meta.get("timer")
+                if timer is not None:
+                    try:
+                        timer.stop()
+                    except Exception:
+                        pass
+                self._active_controllers.pop(key, None)
 
     def validate_relation(self, relation_type: str, source_type: str, target_type: str) -> bool:
         return self.get_relation_blueprint(relation_type).allows(source_type, target_type)

@@ -12,11 +12,25 @@ from core.utils.json_utils import extract_and_heal_json
 class MasterActionRunner(QThread):
     progress_update = Signal(str)
     step_complete = Signal(str, str, dict)
-    action_complete = Signal(dict)   
+    action_complete = Signal(dict)
     error = Signal(str)
     step_started = Signal(str)
     state_snapshot = Signal(str, str)
     user_input_requested = Signal(str, dict)
+
+    # Class-level registry of plugin-contributed step types.
+    # Persists across runner instances (each workflow run creates a new instance).
+    _plugin_step_handlers: dict = {}
+
+    @classmethod
+    def register_plugin_step_handler(cls, step_type: str, handler_cls: type) -> None:
+        """Register a CustomExecutionStep subclass as a handler for *step_type*."""
+        cls._plugin_step_handlers[step_type] = handler_cls
+
+    @classmethod
+    def unregister_plugin_step_handler(cls, step_type: str) -> None:
+        """Remove a plugin step handler (called during plugin unload)."""
+        cls._plugin_step_handlers.pop(step_type, None)
 
     def __init__(
         self,
@@ -52,7 +66,7 @@ class MasterActionRunner(QThread):
         self.step_handlers = self._build_step_handlers()
 
     def _build_step_handlers(self):
-        return {
+        handlers = {
             "LLM_QUERY": lambda step, inputs, model: self._run_llm(step, inputs, model),
             "RAG_SEARCH": lambda step, inputs, model: self._run_rag(step, inputs),
             "FOREACH": lambda step, inputs, model: self._run_foreach(step, inputs),
@@ -60,13 +74,33 @@ class MasterActionRunner(QThread):
             "USER_INPUT": lambda step, inputs, model: self._run_user_input(step, inputs),
             "BRANCH": lambda step, inputs, model: self._run_branch(step, inputs),
             "DATABASE_WRITE": lambda step, inputs, model: self._run_db_write(step, inputs),
-            "GRAPH_VALIDATOR": lambda step, inputs, model: self._run_graph_validator(step, inputs), # NEW
+            "GRAPH_VALIDATOR": lambda step, inputs, model: self._run_graph_validator(step, inputs),
             "ANALYSIS_CONTRACT": lambda step, inputs, model: self._run_analysis_contract(step, inputs),
             "DOCUMENT_CHUNK": lambda step, inputs, model: self._run_document_chunk(step, inputs),
             "ANALYSIS_COMPACT": lambda step, inputs, model: self._run_analysis_compact(step, inputs),
             "ANALYSIS_FINALIZE": lambda step, inputs, model: self._run_analysis_finalize(step, inputs),
             "ANALYSIS_SEND_TO_WORKSPACE": lambda step, inputs, model: self._run_analysis_send_to_workspace(step, inputs),
         }
+        # Merge plugin-contributed step handlers
+        runner = self
+        for step_type, handler_cls in self.__class__._plugin_step_handlers.items():
+            def _make_plugin_handler(cls=handler_cls):
+                instance = cls()
+                def _handler(step, inputs, model):
+                    from core.plugins.plugin_step_protocol import StepContext
+                    abort_fn = None
+                    if runner.job is not None:
+                        abort_fn = runner.job.abort_event.is_set
+                    ctx = StepContext(
+                        project_manager=runner.project_manager,
+                        llm_manager=runner.llm_manager,
+                        state=runner.state,
+                        abort_check=abort_fn,
+                    )
+                    return instance.execute(ctx, inputs)
+                return _handler
+            handlers[step_type] = _make_plugin_handler()
+        return handlers
 
     def register_step_handler(self, step_type: str, handler):
         """Allow future workflow/plugin step types to attach execution without editing the runner dispatch ladder."""

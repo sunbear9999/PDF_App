@@ -175,7 +175,10 @@ class MainToolbar(QToolBar):
             plugin_menu.addAction("No plugins loaded").setEnabled(False)
         else:
             for plugin, api in loaded:
-                action = plugin_menu.addAction(f"{getattr(plugin, 'name', plugin.plugin_id)} v{getattr(plugin, 'version', '?')}")
+                label = f"{getattr(plugin, 'name', plugin.plugin_id)} v{getattr(plugin, 'version', '?')}"
+                if getattr(plugin, "requires_internet", False):
+                    label = f"[internet] {label}"
+                action = plugin_menu.addAction(label)
                 action.setEnabled(False)
 
         if settings_plugins:
@@ -228,6 +231,8 @@ class MainToolbar(QToolBar):
                 btn.setToolTip(spec.tooltip)
                 if spec.callback:
                     btn.clicked.connect(spec.callback)
+                if getattr(spec, "plugin_id", ""):
+                    btn.setProperty("papyrus_plugin_id", spec.plugin_id)
                 self.addWidget(btn)
 
     # ==========================================

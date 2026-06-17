@@ -22,6 +22,7 @@ class PluginDockSpec:
     area: str = "right"
     is_singleton: bool = True
     factory: Optional[Callable[[Any], Any]] = None
+    plugin_id: str = ""
 
 
 @runtime_checkable
@@ -49,6 +50,7 @@ class PapyrusPlugin(Protocol):
     name: str
     version: str
     dependencies: List[str]  # list of plugin_ids this plugin requires
+    requires_internet: bool   # True if the plugin makes network calls (default False)
 
     def on_load(self, api: "PapyrusAPI") -> None:
         """

@@ -10,7 +10,7 @@ from .tabs.chat_tab import ChatTab
 from .tabs.research_agent_tab import ResearchAgentTab
 from .tabs.brainstorm_tab import BrainstormTab
 from .tabs.search_tab import SearchTab
-from .tabs.anaylsis_tab import AnalysisTab
+from .tabs.analysis_tab import AnalysisTab
 from .components.note_bubble import NoteBubbleWidget
 from gui.components.process_monitor import ProcessMonitorWidget
 import json
@@ -66,6 +66,7 @@ class UnifiedResearchDock(QDockWidget):
 
         self._build_sidebar()
         self._build_core_area()
+        self._inject_plugin_tabs()
 
         # --- NEW: Subscribe to Global Events ---
         self.bus = EventBus.get_instance()
@@ -163,6 +164,46 @@ class UnifiedResearchDock(QDockWidget):
             self.stacked_widget.addWidget(tab)
         core_layout.addWidget(self.stacked_widget)
         self.main_layout.addWidget(core_widget)
+
+    def _inject_plugin_tabs(self) -> None:
+        """Inject research tabs contributed by plugins via PluginExtensionRegistry."""
+        app_context = getattr(self.main_window, "app_context", None)
+        registry = getattr(app_context, "plugin_extension_registry", None)
+        if not registry:
+            return
+        sidebar_layout = self.sidebar.layout()
+        for spec in registry.get_research_tabs():
+            try:
+                widget = spec.factory(app_context) if spec.factory else None
+                if widget is None:
+                    print(f"[PluginTab] Warning: factory for '{spec.tab_id}' returned None — tab skipped")
+                    continue
+                tab_idx = self.stacked_widget.count()
+                self.stacked_widget.addWidget(widget)
+
+                # Sidebar nav button — prefer spec.icon, else first word of label
+                icon_text = spec.icon if spec.icon else spec.label.split()[0]
+                btn = QPushButton(icon_text)
+                btn.setCheckable(True)
+                btn.setFixedSize(40, 60)
+                btn.setToolTip(spec.label)
+                btn.setStyleSheet(
+                    "QPushButton { border: none; background: transparent; font-size: 10px;"
+                    " font-weight: bold; color: #888; }"
+                    " QPushButton:checked { color: #b366ff; }"
+                )
+                btn.clicked.connect(lambda checked, idx=tab_idx: self.stacked_widget.setCurrentIndex(idx))
+                self.nav_group.addButton(btn, tab_idx)
+                # Insert before the stretch at the bottom of the sidebar
+                sidebar_layout.insertWidget(sidebar_layout.count() - 1, btn)
+
+                # Register with AI output router if this tab has a target_id
+                if spec.target_id and app_context and getattr(app_context, "ui_router", None):
+                    app_context.ui_router.register_target(spec.target_id, widget)
+
+            except Exception as exc:
+                print(f"[PluginTab] Failed to inject tab '{spec.tab_id}': {exc}")
+
     def load_tab_history(self, tab_widget, tab_id):
         """Universally rebuilds chat UI for any tab from the SQLite history."""
         if not self.project_manager: return

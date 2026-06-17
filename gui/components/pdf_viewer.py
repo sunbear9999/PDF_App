@@ -392,6 +392,8 @@ class PDFViewer(QGraphicsView):
 
 
     def load_document(self, doc):
+        if doc is None:
+            return
         if self.worker and self.worker.isRunning():
             self.worker.stop()
             self.worker.wait()

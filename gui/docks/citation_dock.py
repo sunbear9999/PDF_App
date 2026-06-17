@@ -29,9 +29,12 @@ class CitationDock(QWidget):
         toolbar.addStretch()
 
         self.btn_refresh = QPushButton("🔄 Refresh Data")
-        elf.btn_refresh.clicked.connect(lambda: self.bus.citation_action_requested.emit(CitationIntent.REFRESH_TABLE, CitationPayload()))
+        self.btn_refresh.clicked.connect(lambda: self.bus.citation_action_requested.emit(CitationIntent.REFRESH_TABLE, CitationPayload()))
         toolbar.addWidget(self.btn_refresh)
         layout.addLayout(toolbar)
+
+        # Plugin buttons are injected here by DockManager after construction
+        self._plugin_toolbar_layout = toolbar
 
         # Expanded columns for accuracy
         self.table = QTableWidget(0, 8)
@@ -62,7 +65,7 @@ class CitationDock(QWidget):
             chk_item.setData(Qt.ItemDataRole.UserRole, doc_path)
             self.table.setItem(row, 0, chk_item)
 
-            file_item = QTableWidgetItem(os.path.basename(doc_path))
+            file_item = QTableWidgetItem(os.path.basename(doc_path) if doc_path else "")
             file_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
             self.table.setItem(row, 1, file_item)
 
