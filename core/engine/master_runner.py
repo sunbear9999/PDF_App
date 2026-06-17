@@ -12,7 +12,7 @@ from core.utils.json_utils import extract_and_heal_json
 class MasterActionRunner(QThread):
     progress_update = Signal(str)
     step_complete = Signal(str, str, dict)
-    action_complete = Signal(dict)
+    action_complete = Signal(dict)   
     error = Signal(str)
     step_started = Signal(str)
     state_snapshot = Signal(str, str)
@@ -23,14 +23,13 @@ class MasterActionRunner(QThread):
         blueprint: AIActionBlueprint,
         initial_state: dict,
         *,
-        llm_manager,
-        prompt_manager,
+        llm_manager=None,
+        prompt_manager=None,
         step_manager=None,
         process_registry=None,
         project_manager=None,
         ontology_registry=None,
         blueprint_manager=None,
-        extra_step_handlers=None,
     ):
         super().__init__()
         self.llm_manager = llm_manager
@@ -51,8 +50,6 @@ class MasterActionRunner(QThread):
         self._wait_condition = QWaitCondition()
         self._user_response = None
         self.step_handlers = self._build_step_handlers()
-        if extra_step_handlers:
-            self.step_handlers.update(extra_step_handlers)
 
     def _build_step_handlers(self):
         return {
@@ -172,15 +169,7 @@ class MasterActionRunner(QThread):
 
     def _run_python(self, step, inputs):
         script = inputs.get('script', '') 
-        
-        # THE FIX: Expose analysis_api so users can call graph normalization, 
-        # chunking, and schema contracts in their own custom Python tools.
-        local_scope = {
-            "state": self.state.copy(), 
-            "result": None,
-            "analysis_api": self._analysis_runtime() 
-        }
-        
+        local_scope = {"state": self.state.copy(), "result": None, "analysis_api": self._analysis_runtime()}
         try:
             exec(script, {}, local_scope)
             return local_scope.get("result", "")
@@ -188,44 +177,13 @@ class MasterActionRunner(QThread):
             self.error.emit(f"Python Execution Error: {e}")
             return f"Script Execution Error: {e}"
 
-    def _run_branch(self, step, inputs):
-        logic = inputs.get('logic', 'False')
-        try:
-            passed = eval(logic, {}, {"state": self.state})
-            branch_steps = step.if_true if passed else step.if_false
-            if branch_steps:
-                self._execute_step_list(branch_steps)
-            return passed
-        except Exception as e:
-            self.error.emit(f"Branch Logic Error: {e}")
-            return False
-
-    def _run_db_write(self, step, inputs):
-        table_name = inputs.get('table')
-        payload = inputs.get('payload', {})
-        pm = self.project_manager
-
-        if not pm or not pm.project_filepath or not table_name or not payload:
-            return "Failed: Missing DB Context or Payload"
-
-        try:
-            conn = sqlite3.connect(pm.project_filepath, timeout=10.0)
-            cursor = conn.cursor()
-            columns = ', '.join(payload.keys())
-            placeholders = ', '.join(['?'] * len(payload))
-            values = tuple(payload.values())
-            query = f"INSERT OR REPLACE INTO {table_name} ({columns}) VALUES ({placeholders})"
-            cursor.execute(query, values)
-            conn.commit()
-            conn.close()
-            return f"Success: Wrote to {table_name}"
-        except Exception as e:
-            self.error.emit(f"Database Write Error: {e}")
-            return f"DB Error: {e}"
-
     def _analysis_runtime(self):
         from core.engine.analysis_runtime import AnalysisRuntime
-        return AnalysisRuntime(self.project_manager, self.prompt_manager, self.ontology_registry)
+        return AnalysisRuntime(
+            self.project_manager,
+            self.prompt_manager,
+            self.ontology_registry,
+        )
 
     def _run_analysis_contract(self, step, inputs):
         runtime = self._analysis_runtime()
@@ -304,15 +262,7 @@ class MasterActionRunner(QThread):
         result = inputs.get("result") or self.state.get("analysis_result") or {}
         workspace_id = int(inputs.get("workspace_id") or self.state.get("analysis_workspace_id") or 1)
         summary = runtime.send_to_workspace(result, workspace_id)
-        try:
-            from core.events.event_bus import EventBus
-            from core.events.domains.analysis_events import AnalysisEvent, AnalysisPayload
-            EventBus.get_instance().analysis_result_changed.emit(
-                AnalysisEvent.SENT_TO_WORKSPACE,
-                AnalysisPayload(doc_path=result.get("doc_path"), template_id=result.get("template_id"), run_id=result.get("run_id"), workspace_id=workspace_id, result=summary),
-            )
-        except Exception:
-            pass
+        self._emit_analysis_event("SENT_TO_WORKSPACE", summary, result.get("doc_path"), result.get("template_id"), result.get("run_id"), {})
         try:
             from core.events.event_bus import EventBus
             from core.events.domains.workspace_events import WorkspaceEvent, WorkspaceEventPayload
@@ -331,10 +281,51 @@ class MasterActionRunner(QThread):
             event = getattr(AnalysisEvent, event_name)
             EventBus.get_instance().analysis_result_changed.emit(
                 event,
-                AnalysisPayload(doc_path=doc_path, template_id=template_id, run_id=run_id, template=template or {}, result=result if isinstance(result, dict) else {"value": result}),
+                AnalysisPayload(
+                    doc_path=doc_path,
+                    template_id=template_id,
+                    run_id=run_id,
+                    template=template or {},
+                    result=result if isinstance(result, dict) else {"value": result},
+                ),
             )
         except Exception:
             pass
+
+    def _run_branch(self, step, inputs):
+        logic = inputs.get('logic', 'False')
+        try:
+            passed = eval(logic, {}, {"state": self.state})
+            branch_steps = step.if_true if passed else step.if_false
+            if branch_steps:
+                self._execute_step_list(branch_steps)
+            return passed
+        except Exception as e:
+            self.error.emit(f"Branch Logic Error: {e}")
+            return False
+
+    def _run_db_write(self, step, inputs):
+        table_name = inputs.get('table')
+        payload = inputs.get('payload', {})
+        pm = self.project_manager
+
+        if not pm or not pm.project_filepath or not table_name or not payload:
+            return "Failed: Missing DB Context or Payload"
+
+        try:
+            conn = sqlite3.connect(pm.project_filepath, timeout=10.0)
+            cursor = conn.cursor()
+            columns = ', '.join(payload.keys())
+            placeholders = ', '.join(['?'] * len(payload))
+            values = tuple(payload.values())
+            query = f"INSERT OR REPLACE INTO {table_name} ({columns}) VALUES ({placeholders})"
+            cursor.execute(query, values)
+            conn.commit()
+            conn.close()
+            return f"Success: Wrote to {table_name}"
+        except Exception as e:
+            self.error.emit(f"Database Write Error: {e}")
+            return f"DB Error: {e}"
 
     def _run_foreach(self, step, inputs):
         target_list_raw = inputs.get('list', [])
@@ -424,7 +415,8 @@ class MasterActionRunner(QThread):
                         chunk_norm = runtime.normalize_graph_object(parsed_res if isinstance(parsed_res, dict) else {}, f"chunk{idx}", contract)
                     from core.events.event_bus import EventBus
                     from core.events.domains.analysis_events import AnalysisEvent, AnalysisPayload
-                    EventBus.get_instance().analysis_result_changed.emit(
+                    bus = EventBus.get_instance()
+                    bus.analysis_result_changed.emit(
                         AnalysisEvent.CHUNK_RESULT,
                         AnalysisPayload(
                             doc_path=self.state.get("analysis_doc_path"),
@@ -438,7 +430,7 @@ class MasterActionRunner(QThread):
                             },
                         ),
                     )
-                    EventBus.get_instance().analysis_result_changed.emit(
+                    bus.analysis_result_changed.emit(
                         AnalysisEvent.PROGRESS,
                         AnalysisPayload(
                             doc_path=self.state.get("analysis_doc_path"),
@@ -515,7 +507,16 @@ class MasterActionRunner(QThread):
         # THE FIX: Ensure we cleanly resolve variables in the composed system prompt
         system_prompt = StateResolver.resolve_val(system_prompt, self.state, self.prompt_manager)
 
-        options = self._resolve_llm_options(step)
+        options = {"temperature": 0.7, "num_predict": 2048, "json_mode": False}
+        options.update(getattr(step, 'llm_options', {}))
+        options = StateResolver.resolve_val(options, self.state, self.prompt_manager)
+        for numeric_key in ("temperature", "num_predict", "num_ctx"):
+            if numeric_key in options and options[numeric_key] not in (None, ""):
+                try:
+                    options[numeric_key] = float(options[numeric_key]) if numeric_key == "temperature" else int(options[numeric_key])
+                except Exception:
+                    pass
+        if options["num_predict"] <= 0: options["num_predict"] = 2048
         
         import json
         if getattr(step, 'output_schema', None):
@@ -524,12 +525,10 @@ class MasterActionRunner(QThread):
             json_enforcer = self.prompt_manager.get_prompt("JSON Schema Enforcer")
             system_prompt += "\n\n" + json_enforcer.replace("{schema_str}", schema_str)
         elif options.get("json_mode") and "JSON" not in system_prompt:
-             system_prompt += "\n\n" + self.prompt_manager.get_prompt("JSON Mode Enforcer")
+             system_prompt += "\n\nCRITICAL: Output ONLY valid JSON. No markdown blocks, no explanations."
 
-        query_text = StateResolver.resolve_val(inputs.get('query', ''), self.state, self.prompt_manager)
-        self._record_llm_prompt_trace(step, system_prompt, query_text, options, resolved_model)
         raw_result = self.llm_manager.query(
-            question=query_text, 
+            question=inputs.get('query', ''), 
             selected_model=resolved_model,
             custom_system_prompt=system_prompt, 
             abort_event=self.job.abort_event if self.job else None,
@@ -546,82 +545,17 @@ class MasterActionRunner(QThread):
             raise ConnectionError(f"Engine Failed: {raw_result.strip()}")
         
         if getattr(step, 'output_schema', None):
+            # THE FIX 3: Use our Phase 1 utility to automatically repair truncated JSON arrays!
             success, parsed = extract_and_heal_json(raw_result)
             if success:
                 if isinstance(parsed, dict) and "final_output" in parsed:
                     return json.dumps(parsed["final_output"])
-                # Handle cases where the LLM wrapped the desired array in a dict key
-                if isinstance(parsed, dict) and len(parsed) == 1:
-                    first_key = list(parsed.keys())[0]
-                    if isinstance(parsed[first_key], (list, dict)):
-                        return json.dumps(parsed[first_key])
                 return json.dumps(parsed)
             else:
                 print("[Master Runner] JSON Healer failed. Returning raw text fallback.")
-                return raw_result.strip("` \n").removeprefix("json\n")
+                return parsed 
                 
         return raw_result
-
-    def _record_llm_prompt_trace(self, step, system_prompt: str, query_text: str, options: dict, resolved_model):
-        step_id = getattr(step, "step_id", "")
-        if step_id not in {"analyze_chunk_graph", "argument_synthesis_pass", "master_diagram_pass"}:
-            return
-        trace = self.state.setdefault("llm_prompt_trace", [])
-        item = self.state.get("item")
-        page_range = item.get("page_range") if isinstance(item, dict) else None
-        trace.append({
-            "step": step_id,
-            "page_range": page_range,
-            "model": resolved_model,
-            "options": dict(options or {}),
-            "system_prompt": system_prompt,
-            "query": query_text,
-        })
-
-    def _resolve_llm_options(self, step) -> dict:
-        options = {"temperature": 0.7, "num_predict": 2048, "num_ctx": 16384, "json_mode": False}
-        raw_options = getattr(step, "llm_options", {}) or {}
-        resolved_options = StateResolver.resolve_val(raw_options, self.state, self.prompt_manager)
-        if isinstance(resolved_options, dict):
-            options.update(resolved_options)
-
-        options["num_predict"] = self._coerce_int_option(options.get("num_predict"), 2048, minimum=1)
-        options["num_ctx"] = self._coerce_int_option(options.get("num_ctx"), 16384, minimum=1)
-        options["temperature"] = self._coerce_float_option(options.get("temperature"), 0.7, minimum=0.0)
-        options["json_mode"] = self._coerce_bool_option(options.get("json_mode"), False)
-        return options
-
-    @staticmethod
-    def _coerce_int_option(value, default: int, minimum=None) -> int:
-        try:
-            coerced = int(float(value))
-        except (TypeError, ValueError):
-            coerced = default
-        if minimum is not None and coerced < minimum:
-            return default
-        return coerced
-
-    @staticmethod
-    def _coerce_float_option(value, default: float, minimum=None) -> float:
-        try:
-            coerced = float(value)
-        except (TypeError, ValueError):
-            coerced = default
-        if minimum is not None and coerced < minimum:
-            return default
-        return coerced
-
-    @staticmethod
-    def _coerce_bool_option(value, default: bool = False) -> bool:
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            normalized = value.strip().lower()
-            if normalized in {"1", "true", "yes", "on"}:
-                return True
-            if normalized in {"0", "false", "no", "off"}:
-                return False
-        return default if value in (None, "") else bool(value)
 
     def _has_citation_source(self, step) -> bool:
         source_key = getattr(step, "citation_source_key", None)
@@ -802,7 +736,7 @@ class MasterActionRunner(QThread):
                 src_type = valid_nodes[e_src]["type"]
                 tgt_type = valid_nodes[e_tgt]["type"]
 
-                # Check the ontology registry, not hardcoded strings
+                # Check the global registry, not hardcoded strings
                 if self.ontology_registry:
                     rel_bp = self.ontology_registry.get_relation_blueprint(e_type)
 

@@ -66,6 +66,19 @@ class MainToolbar(QToolBar):
         other_menu.addAction("📚 Citations").triggered.connect(lambda c=False: mw.dock_manager.spawn("citations"))
         other_menu.addAction("👁️ OCR Scanner").triggered.connect(lambda c=False: mw.dock_manager.spawn("ocrs"))
         other_menu.addAction("🔊 Audio (TTS)").triggered.connect(lambda c=False: mw.dock_manager.spawn("audios"))
+
+        # Plugin-contributed docks
+        registry = getattr(getattr(mw, "app_context", None), "plugin_extension_registry", None)
+        if registry:
+            plugin_docks = registry.get_extra_docks()
+            if plugin_docks:
+                other_menu.addSeparator()
+                for spec in plugin_docks:
+                    did = spec.id
+                    other_menu.addAction(spec.menu_name).triggered.connect(
+                        lambda c=False, d=did: mw.dock_manager.spawn(d)
+                    )
+
         self.btn_other_tools.setMenu(other_menu)
         self.addWidget(self.btn_other_tools)
 
@@ -105,6 +118,9 @@ class MainToolbar(QToolBar):
         self.addWidget(self.btn_layouts)
         self._refresh_layout_templates_menu()
 
+        # Plugins Menu
+        self._build_plugins_menu()
+
         # Theme Selector
         theme_widget = QWidget()
         theme_layout = QHBoxLayout(theme_widget)
@@ -131,6 +147,88 @@ class MainToolbar(QToolBar):
         mw.btn_fullscreen.clicked.connect(mw.toggle_full_screen)
         self.addWidget(mw.btn_fullscreen)
 
+        self._inject_plugin_buttons()
+
+    def _build_plugins_menu(self) -> None:
+        mw = self.main_window
+        core = getattr(mw, "core", None)
+        loaded = getattr(core, "_loaded_plugins", [])
+        registry = getattr(getattr(mw, "app_context", None), "plugin_extension_registry", None)
+
+        # Collect plugin-contributed menu items for the "Plugins" menu
+        plugin_menu_items = []
+        if registry:
+            for spec in sorted(registry.get_menu_items("Plugins"), key=lambda s: s.position):
+                plugin_menu_items.append(spec)
+
+        # Collect plugins with settings schemas
+        settings_plugins = [(p, api) for p, api in loaded if getattr(p, "settings_schema", None)]
+
+        if not loaded and not plugin_menu_items:
+            return  # No plugins at all — skip the button
+
+        self.btn_plugins = QPushButton()
+        self._configure_hover_expand(self.btn_plugins, "🔌", "Plugins", expanded_width=110, collapsed_width=60)
+        plugin_menu = QMenu(self)
+
+        if not loaded:
+            plugin_menu.addAction("No plugins loaded").setEnabled(False)
+        else:
+            for plugin, api in loaded:
+                action = plugin_menu.addAction(f"{getattr(plugin, 'name', plugin.plugin_id)} v{getattr(plugin, 'version', '?')}")
+                action.setEnabled(False)
+
+        if settings_plugins:
+            plugin_menu.addSeparator()
+            for plugin, api in settings_plugins:
+                name = getattr(plugin, "name", plugin.plugin_id)
+                plugin_menu.addAction(f"⚙️ Settings: {name}").triggered.connect(
+                    lambda checked=False, p=plugin, a=api: self._open_plugin_settings(p, a)
+                )
+
+        if plugin_menu_items:
+            plugin_menu.addSeparator()
+            for spec in plugin_menu_items:
+                if spec.separator_before:
+                    plugin_menu.addSeparator()
+                action = plugin_menu.addAction(f"{spec.icon} {spec.label}".strip() if spec.icon else spec.label)
+                if spec.callback:
+                    action.triggered.connect(spec.callback)
+
+        self.btn_plugins.setMenu(plugin_menu)
+        self.addWidget(self.btn_plugins)
+
+    def _open_plugin_settings(self, plugin, api) -> None:
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QDialogButtonBox
+        from gui.components.plugin_widgets import PluginForm
+        schema = getattr(plugin, "settings_schema", [])
+        dlg = QDialog(self.main_window)
+        dlg.setWindowTitle(f"Settings — {getattr(plugin, 'name', plugin.plugin_id)}")
+        layout = QVBoxLayout(dlg)
+        form = PluginForm(schema, theme=getattr(self.main_window.theme_manager, "get_theme", lambda: {})())
+        form.set_values({k: api.config.get(k) for field in schema for k in [field["key"]] if api.config.get(k) is not None})
+        layout.addWidget(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+        if dlg.exec():
+            for key, value in form.get_values().items():
+                api.config.set(key, value)
+
+    def _inject_plugin_buttons(self) -> None:
+        """Inject MainToolbarButtonSpec entries registered by plugins."""
+        registry = getattr(getattr(self.main_window, "app_context", None), "plugin_extension_registry", None)
+        if not registry:
+            return
+        for position in ("left", "center", "right"):
+            for spec in sorted(registry.get_main_toolbar_buttons(position), key=lambda s: s.priority):
+                label = f"{spec.icon} {spec.label}".strip() if spec.icon else spec.label
+                btn = QPushButton(label)
+                btn.setToolTip(spec.tooltip)
+                if spec.callback:
+                    btn.clicked.connect(spec.callback)
+                self.addWidget(btn)
 
     # ==========================================
     # --- DECOUPLED EVENT BUS HANDLERS ---

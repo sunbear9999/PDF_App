@@ -13,7 +13,7 @@ class DatabaseSchema(BaseDB):
             if self.manager._conn:
                 self.manager._conn.close()
             
-            self.manager._conn = sqlite3.connect(self.manager.project_filepath)
+            self.manager._conn = sqlite3.connect(self.manager.project_filepath, check_same_thread=False)
             self.manager._conn.execute("PRAGMA foreign_keys = ON")
             cursor = self.manager._conn.cursor()
             

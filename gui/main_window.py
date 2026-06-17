@@ -1,45 +1,23 @@
 # gui/main_window.py
 import os
 import sys
-import uuid
-import fitz
-import shutil
-from PySide6.QtWidgets import (QMainWindow, QSizePolicy, QWidget, QHBoxLayout, QVBoxLayout,
-                             QPushButton, QLabel, QStackedWidget,
-                             QFileDialog, QFrame, QButtonGroup, QMessageBox, QComboBox, QMenu,
-                             QApplication, QDockWidget, QListWidget, QListWidgetItem, QTextEdit,QInputDialog) # <-- Added Dock, List, and TextEdit
-from PySide6.QtGui import QColor, QShortcut, QKeySequence
-from PySide6.QtCore import Qt, QSettings, QTimer, QThread, QEvent
+import json
+from PySide6.QtWidgets import (QMainWindow, QApplication, QFileDialog, QMessageBox,
+                               QWidget, QVBoxLayout)
+from PySide6.QtGui import QShortcut, QKeySequence
+from PySide6.QtCore import Qt, QSettings, QTimer
 
 from core.engine.ui_router import BlueprintUIRouter
-from core.project_manager import ProjectManager
-from gui.components.dialogs.extract_pages_dialog import ExtractPagesDialog
 from gui.components.pdf_viewer import PDFViewer
 from gui.components.process_monitor import ProcessMonitorWidget
-from gui.docks.ocr_dock import OCRTab
-from gui.docks.tts_dock import TTSTab
-from gui.docks.notes_dock import NotesTab
 from gui.theme.theme import ThemeManager
 from gui.components.help_dialog import HelpDialog
 from gui.components.dialogs.prompt_editor_dialog import PromptEditorDialog
-from gui.components.dialogs.tag_manager_dialog import TagManagerDialog, TagAssignmentDialog
-from core.prompt_manager import PromptManager
-from core.dictionary_manager import DictionaryManager
-from core.citation_manager import CitationManager
-from gui.docks.citation_dock import CitationDock
-from gui.docks.essay_dock import EssayTab
-from gui.components.workspace_view import WorkspaceView
-from core.engine.process_manager import ProcessRegistry
+from gui.components.dialogs.tag_manager_dialog import TagManagerDialog
 from gui.components.universal_overlay import UniversalInternalOverlay
-from core.engine.blueprint_manager import BlueprintManager
-from core.engine.step_manager import StepManager
 from gui.managers.layout_manager import LayoutManager
-from core.events.event_bus import EventBus
 from gui.components.main_toolbar import MainToolbar
-from core.events.domains.document_events import AnnotationIntent, AnnotationPayload, DocumentIntent, DocumentPayload
-from core.events.domains.project_events import ProjectEvent, ProjectEventPayload, ProjectIntent, ProjectPayload
-from core.events.domains.workspace_events import WorkspaceEvent, WorkspaceEventPayload
-from core.services.document_ingestion_service import DocumentIngestionService
+from core.events.domains.project_events import ProjectIntent, ProjectPayload
 class MainWindow(QMainWindow):
     # ADD `core` to the signature
     def __init__(self, core):
@@ -74,22 +52,25 @@ class MainWindow(QMainWindow):
         self.workspace_service = core.workspace_service
         self.workspace_graph_service = core.workspace_graph_service
 
-        # Build the AppContext facade used by docks and plugins
+        # --- IMPORTANT LEGACY HOOK ---
+        # Keep this for now so the ProjectManager can still warn the Viewer before saving
+        self.project_manager.main_window = self
+
+        # Build AppContext early so dock registration and MainToolbar can access it
         from gui.app_context import AppContext
         self.app_context = AppContext.from_core(core)
-
-        # Wire the viewer halt callback so ProjectManager can stop rendering before saving
-        self.project_manager._halt_viewer_callback = self._halt_pdf_viewer
 
         # 2. Setup the GUI Managers
         from gui.managers.dock_manager import DockManager
         self.dock_manager = DockManager(self)
         self.layout_manager = LayoutManager(self)
-        from gui.managers.dock_registry import register_default_docks
+        from gui.managers.dock_registry import register_default_docks, register_plugin_docks
         register_default_docks(self.dock_manager, self)
+        register_plugin_docks(self.dock_manager, self.app_context)
 
-        # 3. Initialize GUI-dependent services locally (We will decouple these later)
-        from core.services.workspace_services import WorkspaceAnnotationService, WorkspaceAIService
+        # 3. Initialize GUI-dependent services locally
+        from core.services.gui_bridge.workspace_annotation_service import WorkspaceAnnotationService
+        from core.services.gui_bridge.workspace_ai_service import WorkspaceAIService
         self.workspace_annotation_service = WorkspaceAnnotationService(self, self.bus)
         self.workspace_ai_service = WorkspaceAIService(
             self, self.workspace_service, self.workspace_graph_service,
@@ -99,33 +80,20 @@ class MainWindow(QMainWindow):
         )
         self.workspace_ai_service.error.connect(lambda msg: QMessageBox.warning(self, "AI Error", msg))
 
-        from core.services.ai_bootstrap_service import AIBootstrapService
+        from core.services.gui_bridge.ai_bootstrap_service import AIBootstrapService
         self.ai_bootstrap_service = AIBootstrapService(self)
-        self.document_ingestion_service = DocumentIngestionService(self.shared_llm_manager, self)
-        # 4. Connect to global events
-        self.bus.project_loaded.connect(self._handle_project_event_ui_update)
-        # 1. INITIALIZE VIEWER EXPLICITLY ONCE
-        def get_resource_path(relative_path):
-            if hasattr(sys, '_MEIPASS'):
-                # PyInstaller execution: use the temporary extracted folder
-                return os.path.join(sys._MEIPASS, relative_path)
-            # Normal script execution: use the project root
-            root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-            return os.path.join(root_dir, relative_path)
+
         self.viewer = PDFViewer()
-
-
-
 
 
         # 3. CONFIGURE DOCKS
         self.setDockOptions(
             QMainWindow.DockOption.AllowNestedDocks |
             QMainWindow.DockOption.AnimatedDocks |
-            QMainWindow.DockOption.AllowTabbedDocks
+            QMainWindow.DockOption.AllowTabbedDocks |
+            QMainWindow.DockOption.GroupedDragging
         )
         self.setDockNestingEnabled(True)
-        self.blueprint_manager = BlueprintManager(self.blueprint_registry)
         # 4. SET CENTRAL WIDGET PROPERLY
         self.central_wrapper = QWidget()
         self.central_layout = QVBoxLayout(self.central_wrapper)
@@ -138,8 +106,8 @@ class MainWindow(QMainWindow):
         self.process_monitor = ProcessMonitorWidget(self.process_registry, self.theme_manager.get_theme())
         self.top_toolbar = MainToolbar(self)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.top_toolbar)
-        self._build_ocr_banner()
-        self._build_workspace()
+        from gui.managers.workspace_builder import WorkspaceBuilder
+        WorkspaceBuilder(self).build()
         self._setup_shortcuts()
 
         # Connect Theme Manager
@@ -150,6 +118,9 @@ class MainWindow(QMainWindow):
         self.autosave_timer = QTimer(self)
         self.autosave_timer.timeout.connect(lambda: self.bus.project_action_requested.emit(ProjectIntent.SAVE, ProjectPayload()))
         self.autosave_timer.start(5 * 60 * 1000)
+
+        # Unload plugins cleanly on exit
+        QApplication.instance().aboutToQuit.connect(self.core._unload_plugins)
 
 
         if self.settings.value("show_help_on_startup", True, type=bool):
@@ -162,6 +133,21 @@ class MainWindow(QMainWindow):
         self.ui_router = BlueprintUIRouter(self)
         self.ui_router.register_target("floating", self.universal_overlay)
 
+        # Wire GUI-only references into AppContext so docks/tabs don't need MainWindow
+        self.app_context.ui_router = self.ui_router
+        self.app_context.theme_manager = self.theme_manager
+        self.app_context.viewer = self.viewer
+
+        # Register any AI renderers contributed by plugins
+        if self.app_context.plugin_extension_registry:
+            from gui.components.base.ai_output_factory import AIOutputWidgetFactory
+            for payload_type, spec in self.app_context.plugin_extension_registry.get_ai_renderers().items():
+                AIOutputWidgetFactory.register(payload_type, spec.factory)
+
+        # Wire UIEventCoordinator (replaces direct bus connections from MainWindow)
+        from gui.managers.ui_event_coordinator import UIEventCoordinator
+        self._ui_coordinator = UIEventCoordinator(self, self.app_context, parent=self)
+
         # Wire GUI-dependent pieces into the services that now live in PapyrusCore
         self.workflow_runner_service = core.workflow_runner_service
         self.workflow_runner_service.set_ui_router(self.ui_router)
@@ -171,102 +157,26 @@ class MainWindow(QMainWindow):
 
         if hasattr(self, "workspace_ai_service"):
             self.workspace_ai_service.workflow_runner_service = self.workflow_runner_service
-        self.bus.project_loaded.connect(self._refresh_research_agent_from_project_event)
-        self.bus.document_action_requested.connect(self._handle_doc_ui_requests)
-        self.bus.annotation_action_requested.connect(self._handle_annot_ui_requests)
-        self.bus.project_action_requested.connect(self._handle_project_ui_requests)
-        self.bus.project_action_requested.connect(self._handle_project_intents)
-        self.bus.active_model_changed.connect(self._handle_active_model_changed)
         self.bus.status_message_requested.connect(
             lambda msg, duration=3000: self.statusBar().showMessage(msg, duration)
         )
-    def _handle_project_intents(self, intent: ProjectIntent, payload: ProjectPayload):
-        if intent == ProjectIntent.FLUSH_UI_STATES:
-            # 1. Ask LayoutManager to save the physical dock arrangement
-            if hasattr(self, 'layout_manager'):
-                self.layout_manager.save_current_session()
 
-            # 2. Save pure Window layout bytes
-            try:
-                state_bytes = self.saveState().toBase64().data().decode('utf-8')
-                counts = self.layout_manager.get_current_dock_counts()
-                import json
-                self.project_manager.set_metadata("window_layout_state", state_bytes)
-                self.project_manager.set_metadata("open_docks_count", json.dumps(counts))
-                self.project_manager.set_metadata("dock_layout_version", self.layout_manager.LAYOUT_VERSION)
-            except Exception: pass
-        elif intent == ProjectIntent.SAVE_COMPLETED:
-            self._show_save_indicator()
+        # Plugin keyboard shortcuts
+        from gui.managers.shortcut_manager import ShortcutManager
+        self._shortcut_manager = ShortcutManager(self)
+        self._shortcut_manager.register_plugin_shortcuts()
 
-    def _handle_active_model_changed(self, event, payload):
-        if event != WorkspaceEvent.ACTIVE_MODEL_CHANGED:
-            return
-        model_name = payload.get("model_name") if hasattr(payload, "get") else None
-        if not model_name:
-            return
-        self.active_ai_model = model_name
-        try:
-            settings = json.loads(self.project_manager.get_metadata("global_ai_settings", "{}"))
-            settings["selected_model"] = model_name
-            self.project_manager.set_metadata("global_ai_settings", json.dumps(settings))
-        except Exception:
-            pass
+        # Toast notifications for api.notify()
+        from gui.components.toast_manager import ToastManager
+        self._toast_manager = ToastManager(self)
+        self.bus.plugin_notification_requested.connect(self._toast_manager._on_notification)
 
-    def _handle_project_ui_requests(self, action: ProjectIntent, payload: ProjectPayload):
-        if action == ProjectIntent.EXPORT_LOG_RESULT:
-            from PySide6.QtWidgets import QMessageBox
-            success = payload.get("success")
-            if success:
-                QMessageBox.information(self, "Success", f"LLM Log successfully exported to:\n{payload.get('path')}")
-            else:
-                QMessageBox.warning(self, "Error", payload.get("msg", "Failed to generate the report."))
-
-    def _handle_doc_ui_requests(self, intent: DocumentIntent, payload: DocumentPayload):
-        if intent == DocumentIntent.SHOW_OCR_BANNER:
-            if hasattr(self, 'ocr_banner'):
-                self.ocr_banner.show()
-        elif intent == DocumentIntent.FIND_SIMILAR:
-            viewer = getattr(self, 'viewer', None)
-            if viewer and payload.text:
-                viewer.annot_manager.trigger_similar_context(payload.text)
-        elif intent == DocumentIntent.FIND_TEXT:
-            viewer = getattr(self, 'viewer', None)
-            if viewer and payload.text:
-                if not viewer.search_bar.isVisible():
-                    viewer.annot_manager.toggle_search()
-                viewer.search_bar.search_input.setText(payload.text)
-                viewer.execute_search(payload.text, "Current Document", False)
-    def _handle_annot_ui_requests(self, action: AnnotationIntent, payload: AnnotationPayload):
-        if action == AnnotationIntent.EDIT_POPUP:
-            annot_id = payload.get("annot_id")
-            page_num = payload.get("page_num")
-            pdf_path = payload.get("pdf_path")
-            target_annot = payload.get("target_annot")
-
-            # Close existing popup if one is open
-            if hasattr(self, 'quick_note_popup') and self.quick_note_popup:
-                try: self.quick_note_popup.close()
-                except RuntimeError: pass
-
-            from gui.components.dialogs.quick_note_dialog import QuickNoteDialog
-            self.quick_note_popup = QuickNoteDialog(
-                target_annot, annot_id, page_num, pdf_path,
-                self.theme_manager.get_theme(), self
-            )
-            self.quick_note_popup.show()
-        elif action == AnnotationIntent.JUMP_TO_PAGE:
-            page_num = payload.get("page_num")
-            if page_num is not None and hasattr(self, "viewer"):
-                self.viewer.jump_to_page(page_num)
-        elif action == AnnotationIntent.FORCE_REDRAW:
-            page_num = payload.get("page_num")
-            pdf_path = payload.get("pdf_path")
-            if (
-                page_num is not None
-                and hasattr(self, "viewer")
-                and (not pdf_path or pdf_path == getattr(self, "current_file_path", None))
-            ):
-                self.viewer.reload_page(page_num)
+        # Ctrl+P command palette
+        from gui.components.command_palette import CommandPalette
+        self._command_palette = CommandPalette(self)
+        QShortcut(QKeySequence("Ctrl+P"), self).activated.connect(
+            self._command_palette.show_palette
+        )
 
 
     def _halt_pdf_viewer(self, path):
@@ -279,18 +189,6 @@ class MainWindow(QMainWindow):
                     viewer.worker.wait()
                 return viewer
         return None
-
-    def execute_ai_blueprint(self, blueprint, initial_state, is_express=False):
-        """
-        Legacy shim: workflow execution is owned by WorkflowRunnerService.
-        """
-        return self.workflow_runner_service.run_blueprint(blueprint, initial_state, is_express=is_express)
-
-    def prepare_ai_runner(self, blueprint, initial_state, is_express=False):
-        return self.workflow_runner_service.prepare_runner(blueprint, initial_state)
-
-    def enqueue_ai_runner(self, runner, is_express=False):
-        return self.workflow_runner_service.start_runner(runner, is_express=is_express)
 
     def _get_active_ai_model(self):
         if getattr(self, "active_ai_model", None):
@@ -323,68 +221,6 @@ class MainWindow(QMainWindow):
             if hasattr(self, 'layout_manager'):
                 self.layout_manager.restore_last_session()
 
-    def _handle_project_event_ui_update(self, event: ProjectEvent, payload: ProjectEventPayload):
-        if event == ProjectEvent.LOADED:
-            self.active_ai_model = self._load_active_ai_model()
-            self.bus.active_model_changed.emit(
-                WorkspaceEvent.ACTIVE_MODEL_CHANGED,
-                WorkspaceEventPayload(model_name=self.active_ai_model),
-            )
-            self._on_project_loaded_ui_update()
-
-    def _refresh_research_agent_from_project_event(self, event: ProjectEvent, payload: ProjectEventPayload):
-        if event == ProjectEvent.LOADED:
-            self.research_agent_service.refresh_from_project()
-
-    def _on_project_loaded_ui_update(self):
-        """Called blindly when the background service finishes loading a project DB."""
-        self.setWindowTitle(f"Papyrus - {self.project_manager.project_name}")
-
-        if hasattr(self, 'doc_explorer'):
-            self.doc_explorer.refresh_list()
-            self.doc_explorer.refresh_tag_filter()
-
-        # --- UI Restoration (Moved from the deleted _load_project) ---
-        self.setUpdatesEnabled(False)
-        try:
-            state_str = self.project_manager.get_metadata("window_layout_state")
-            dock_info = self.project_manager.get_metadata("open_docks_count")
-            layout_version = self.project_manager.get_metadata("dock_layout_version")
-
-            if state_str and dock_info and layout_version == self.layout_manager.LAYOUT_VERSION:
-                import json
-                try: self.layout_manager._apply_state(state_str, json.loads(dock_info))
-                except Exception: pass
-            else:
-                self.layout_manager.apply_factory_default()
-
-            # Restore Scratchpads
-            text_data = self.project_manager.get_metadata("scratchpad_texts")
-            if text_data:
-                import json
-                try:
-                    saved_texts = json.loads(text_data)
-                    for i, editor in enumerate(self.dock_manager.get_inner_widgets("scratchpads")):
-                        if i < len(saved_texts): editor.setPlainText(saved_texts[i])
-                except Exception: pass
-
-            # Refresh Research Docks
-            for r in self.dock_manager.get_instances("research"):
-                if hasattr(r, 'refresh_project_ui'): r.refresh_project_ui()
-
-            # 🔥 FIX: Tell the bus to open the first PDF instead of calling switch_to_pdf!
-            sources = self.project_manager.list_source_entities() if hasattr(self.project_manager, "list_source_entities") else []
-            sources = [s for s in sources if not s.state.get("is_removed")]
-            if sources:
-                first_source = sources[0]
-                self.bus.document_action_requested.emit(
-                    DocumentIntent.OPEN,
-                    DocumentPayload(source_id=first_source.id, path=first_source.properties.get("path") or first_source.origin_id),
-                )
-            elif self.project_manager.pdfs:
-                self.bus.document_action_requested.emit(DocumentIntent.OPEN, DocumentPayload(path=self.project_manager.pdfs[0]))
-        finally:
-            self.setUpdatesEnabled(True)
     def show_help_window(self,initial_tab_index=0):
         # We keep a reference to it so it doesn't get garbage collected
         self.help_dialog = HelpDialog(self,initial_tab_index=initial_tab_index)
@@ -475,39 +311,24 @@ class MainWindow(QMainWindow):
         self.theme_manager.set_theme(theme_name)
 
     def update_theme(self, theme):
-        self.bus.theme_changed.emit(None, theme)
         self.top_toolbar.setStyleSheet(f"background-color: {theme['bg_panel']}; border-bottom: 1px solid {theme['border']};")
-        self.ocr_banner.setStyleSheet(f"background-color: {theme['warning']}; border-bottom: 1px solid {theme['border']};")
-        self.lbl_ocr_banner.setStyleSheet(f"font-weight: bold; color: #1e1e1e; border: none;")
-
-        # Iterate over registry instances safely
-        for dock_id, inst_list in self.dock_manager.instances.items():
-            alive_docks = []
-            for dock in inst_list:
-                try:
-                    _ = dock.objectName() # Touch to check if C++ object is alive
-                    if dock_id == "scratchpads" and dock.widget():
-                        dock.widget().setStyleSheet(f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: none;")
-                    else:
-                        inner = dock.widget()
-                        if inner and hasattr(inner, 'update_theme'):
-                            inner.update_theme(theme)
-                        elif hasattr(dock, 'update_theme'):
-                            dock.update_theme(theme)
-                    alive_docks.append(dock)
-                except RuntimeError:
-                    pass
-            self.dock_manager.instances[dock_id] = alive_docks
-
+        if hasattr(self, "ocr_banner"):
+            self.ocr_banner.setStyleSheet(f"background-color: {theme['warning']}; border-bottom: 1px solid {theme['border']};")
+            self.lbl_ocr_banner.setStyleSheet("font-weight: bold; color: #1e1e1e; border: none;")
+        self.dock_manager.broadcast_theme(theme)
         if hasattr(self.viewer, "update_theme"):
-            try: self.viewer.update_theme(theme)
-            except RuntimeError: pass
-
-        if hasattr(self, 'process_monitor'):
+            try:
+                self.viewer.update_theme(theme)
+            except RuntimeError:
+                pass
+        if hasattr(self, "process_monitor"):
             self.process_monitor.set_theme(theme)
-
         from gui.theme.global_styles import get_global_stylesheet
         self.setStyleSheet(get_global_stylesheet(theme))
+        if hasattr(self, "_toast_manager"):
+            self._toast_manager.update_theme(theme)
+        if hasattr(self, "_command_palette"):
+            self._command_palette.update_theme(theme)
 
     def broadcast_note_added(self):
         self._mark_current_dirty()
@@ -529,123 +350,6 @@ class MainWindow(QMainWindow):
         if self.current_file_path:
             self.project_manager.mark_dirty(self.current_file_path)
 
-    def _build_ocr_banner(self):
-        # 🔥 FIX: Parent it directly to the PDF Viewer so it acts as a floating overlay!
-        self.ocr_banner = QFrame(self.viewer)
-        self.ocr_banner.setFixedHeight(45)
-
-        # Give it a slight drop shadow and rounded edges
-        self.ocr_banner.setObjectName("OCRBanner")
-
-        banner_layout = QHBoxLayout(self.ocr_banner)
-        banner_layout.setContentsMargins(15, 0, 15, 0)
-
-        self.lbl_ocr_banner = QLabel("⚠️ Scanned document detected. Run OCR?")
-        banner_layout.addWidget(self.lbl_ocr_banner)
-        banner_layout.addStretch()
-
-        btn_run = QPushButton("Run OCR")
-        btn_run.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_run.clicked.connect(self._trigger_auto_ocr)
-        banner_layout.addWidget(btn_run)
-
-        btn_dismiss = QPushButton("✖")
-        btn_dismiss.setFixedSize(24, 24)
-        btn_dismiss.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_dismiss.clicked.connect(self.ocr_banner.hide)
-        banner_layout.addWidget(btn_dismiss)
-
-        self.ocr_banner.hide()
-
-        # Create a dynamic hook so it stays centered at the top of the PDF Viewer when resized
-        original_resize = self.viewer.resizeEvent
-        def dynamic_resize(event):
-            original_resize(event)
-            banner_width = min(500, self.viewer.width() - 40)
-            self.ocr_banner.setGeometry(
-                (self.viewer.width() - banner_width) // 2,
-                15, # 15px from the top of the viewer
-                banner_width,
-                45
-            )
-        self.viewer.resizeEvent = dynamic_resize
-    def _build_workspace(self):
-        # 1. Anchor: NEW Modular Document Explorer Dock
-        self.doc_dock = QDockWidget("📁 Document Explorer", self)
-        self.doc_dock.setObjectName("DocExplorerDock")
-        self.dock_manager.configure_dock(self.doc_dock, closable=False)
-
-        from gui.components.document_explorer import DocumentExplorer
-        self.doc_explorer = DocumentExplorer(self)
-
-        # We still need the Add PDF button at the bottom
-        from PySide6.QtWidgets import QWidget, QVBoxLayout, QPushButton
-        doc_container = QWidget()
-        doc_layout = QVBoxLayout(doc_container)
-        doc_layout.setContentsMargins(0, 0, 0, 0)
-        doc_layout.setSpacing(0)
-        doc_layout.addWidget(self.doc_explorer)
-
-        self.btn_add_pdf_dock = QPushButton("➕ Add PDF to Project")
-        # --- FIX: Stop calling self._add_pdf directly ---
-        self.btn_add_pdf_dock.clicked.connect(
-            lambda: self.bus.document_action_requested.emit(
-                DocumentIntent.ADD_FILES,
-                DocumentPayload(paths=QFileDialog.getOpenFileNames(self, "Add PDFs", "", "PDF Files (*.pdf)")[0])
-            )
-        )
-        self.btn_add_pdf_dock.setStyleSheet("padding: 10px; font-weight: bold; border: none; border-top: 1px solid #444;")
-        doc_layout.addWidget(self.btn_add_pdf_dock)
-
-        self.doc_dock.setWidget(doc_container)
-        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.doc_dock)
-
-        # 2. Anchor: PDF Viewer Dock
-        self.pdf_dock = QDockWidget("📄 PDF Viewer", self)
-        self.pdf_dock.setObjectName("PDFViewerDock")
-        self.pdf_dock.setWidget(self.viewer)
-        self.dock_manager.configure_dock(self.pdf_dock, closable=False)
-        title_bar = QWidget()
-        title_layout = QHBoxLayout(title_bar)
-        title_layout.setContentsMargins(10, 0, 10, 0)
-
-        lbl_title = QLabel("📄 PDF Viewer")
-        lbl_title.setStyleSheet("font-weight: bold; background: transparent;")
-        title_layout.addWidget(lbl_title)
-
-        title_layout.addStretch()
-
-        btn_zoom_out = QPushButton("➖")
-        btn_zoom_reset = QPushButton("Fit Width")
-        btn_zoom_in = QPushButton("➕")
-        btn_focus = QPushButton("🎯 Focus")
-        btn_rotate = QPushButton("🔃 Rotate") # <-- NEW BUTTON
-
-        btn_zoom_out.clicked.connect(self.viewer.zoom_out)
-        btn_zoom_reset.clicked.connect(self.viewer.zoom_reset)
-        btn_zoom_in.clicked.connect(self.viewer.zoom_in)
-        btn_focus.clicked.connect(self.viewer.sharpen_focus)
-        btn_rotate.clicked.connect(self.viewer.rotate_view) # <-- CONNECT NEW BUTTON
-
-        btn_zoom_out.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_zoom_reset.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_zoom_in.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_focus.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_rotate.setCursor(Qt.CursorShape.PointingHandCursor)
-
-        header_btn_style = """
-            QPushButton { background: transparent; border: none; padding: 4px 8px; }
-            QPushButton:hover { background: rgba(128, 128, 128, 0.3); border-radius: 4px; }
-        """
-        for btn in [btn_zoom_out, btn_zoom_reset, btn_zoom_in, btn_focus, btn_rotate]:
-            btn.setStyleSheet(header_btn_style)
-            title_layout.addWidget(btn)
-
-        title_layout.addStretch()
-        self.pdf_dock.setTitleBarWidget(title_bar)
-        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.pdf_dock)
-
-        self.splitDockWidget(self.doc_dock, self.pdf_dock, Qt.Orientation.Horizontal)
 
     def closeEvent(self, event):
         """Intercepts the window closing to check for unsaved changes, save session state, and clean up threads."""
@@ -706,19 +410,4 @@ class MainWindow(QMainWindow):
         self.ocr_banner.hide()
         self.dock_manager.spawn("ocrs")
     def toggle_tool_panel(self, tool_name, checked):
-        """Dynamically toggles tools without hardcoded mappings!"""
-        # (Optional) Handle your left-side document list manually if it's not a registered plugin
-        if tool_name == "Documents" and hasattr(self, 'doc_dock'):
-            self.doc_dock.setVisible(checked)
-            if checked: self.doc_dock.raise_()
-            return
-
-        # Handle all registered plugin docks
-        for dock_id, defn in self.dock_manager.registry.items():
-            if defn.menu_name == tool_name or defn.id == tool_name:
-                if checked:
-                    self.dock_manager.spawn(dock_id)
-                else:
-                    for dock in self.dock_manager.get_instances(dock_id):
-                        dock.close()
-                return
+        self.dock_manager.toggle_by_menu_name(tool_name, checked)
