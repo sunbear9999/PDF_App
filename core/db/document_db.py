@@ -64,32 +64,124 @@ class DocumentDB(BaseDB):
     def upsert_citation(self, citation_data):
         if not self._conn: return
         try:
+            self._ensure_citation_columns()
+            normalized = self._normalize_citation_data(citation_data or {})
             self._conn.execute("""
-                INSERT INTO citations (doc_id, title, authors, year, journal, doi) VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO citations (
+                    doc_id, title, authors, year, journal, doi, vol_issue,
+                    publisher, url, item_type, fields_json, source_provider,
+                    source_item_key, source_updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(doc_id) DO UPDATE SET
                     title = excluded.title, authors = excluded.authors, year = excluded.year,
-                    journal = excluded.journal, doi = excluded.doi
+                    journal = excluded.journal, doi = excluded.doi, vol_issue = excluded.vol_issue,
+                    publisher = excluded.publisher, url = excluded.url, item_type = excluded.item_type,
+                    fields_json = excluded.fields_json, source_provider = excluded.source_provider,
+                    source_item_key = excluded.source_item_key, source_updated_at = excluded.source_updated_at
             """, (
-                citation_data.get("doc_id"), citation_data.get("title", ""),
-                citation_data.get("authors", ""), citation_data.get("year", ""),
-                citation_data.get("journal", ""), citation_data.get("doi", "")
+                normalized.get("doc_id"), normalized.get("title", ""),
+                normalized.get("authors", ""), normalized.get("year", ""),
+                normalized.get("journal", ""), normalized.get("doi", ""),
+                normalized.get("vol_issue", ""), normalized.get("publisher", ""),
+                normalized.get("url", ""), normalized.get("item_type", ""),
+                normalized.get("fields_json", "{}"), normalized.get("source_provider", ""),
+                normalized.get("source_item_key", ""), normalized.get("source_updated_at", ""),
             ))
             self._conn.commit()
         except sqlite3.Error as e:
-            print(f"Error saving citation for {citation_data.get('doc_id')}: {e}")
+            print(f"Error saving citation for {(citation_data or {}).get('doc_id')}: {e}")
 
     def get_citation(self, doc_id):
         if not self._conn: return {}
         try:
+            self._ensure_citation_columns()
             cursor = self._conn.cursor()
-            cursor.execute("SELECT title, authors, year, journal, doi FROM citations WHERE doc_id = ?", (doc_id,))
+            cursor.execute("""
+                SELECT title, authors, year, journal, doi, vol_issue, publisher,
+                       url, item_type, fields_json, source_provider, source_item_key,
+                       source_updated_at
+                FROM citations WHERE doc_id = ?
+            """, (doc_id,))
             row = cursor.fetchone()
             if row:
-                return {"doc_id": doc_id, "title": row[0], "authors": row[1], "year": row[2], "journal": row[3], "doi": row[4]}
+                fields = {}
+                if row[9]:
+                    try:
+                        fields = json.loads(row[9]) if isinstance(row[9], str) else {}
+                    except json.JSONDecodeError:
+                        fields = {}
+                data = {
+                    "doc_id": doc_id,
+                    "title": row[0] or "",
+                    "authors": row[1] or "",
+                    "year": row[2] or "",
+                    "journal": row[3] or "",
+                    "doi": row[4] or "",
+                    "vol_issue": row[5] or "",
+                    "publisher": row[6] or "",
+                    "url": row[7] or "",
+                    "item_type": row[8] or "",
+                    "fields": fields,
+                    "source_provider": row[10] or "",
+                    "source_item_key": row[11] or "",
+                    "source_updated_at": row[12] or "",
+                }
+                for key, value in fields.items():
+                    data.setdefault(key, value)
+                return data
             return {}
         except sqlite3.Error as e:
             print(f"Error reading citation for {doc_id}: {e}")
             return {}
+
+    def _ensure_citation_columns(self):
+        cursor = self._conn.cursor()
+        cursor.execute('''CREATE TABLE IF NOT EXISTS citations (
+            doc_id TEXT PRIMARY KEY, title TEXT, authors TEXT,
+            year TEXT, journal TEXT, doi TEXT
+        )''')
+        cursor.execute("PRAGMA table_info(citations)")
+        existing = {col[1] for col in cursor.fetchall()}
+        for col_name, col_type in {
+            "vol_issue": "TEXT",
+            "publisher": "TEXT",
+            "url": "TEXT",
+            "item_type": "TEXT",
+            "fields_json": "TEXT",
+            "source_provider": "TEXT",
+            "source_item_key": "TEXT",
+            "source_updated_at": "TEXT",
+        }.items():
+            if col_name not in existing:
+                cursor.execute(f"ALTER TABLE citations ADD COLUMN {col_name} {col_type}")
+
+    def _normalize_citation_data(self, citation_data):
+        canonical = {
+            "doc_id", "title", "authors", "year", "journal", "doi", "vol_issue",
+            "publisher", "url", "item_type", "fields", "fields_json",
+            "source", "source_provider", "source_item_key", "source_updated_at",
+        }
+        fields = {}
+        raw_fields = citation_data.get("fields")
+        if isinstance(raw_fields, dict):
+            fields.update(raw_fields)
+        raw_fields_json = citation_data.get("fields_json")
+        if isinstance(raw_fields_json, str) and raw_fields_json.strip():
+            try:
+                decoded = json.loads(raw_fields_json)
+                if isinstance(decoded, dict):
+                    fields.update(decoded)
+            except json.JSONDecodeError:
+                pass
+        for key, value in citation_data.items():
+            if key not in canonical:
+                fields[key] = value
+        normalized = dict(citation_data)
+        normalized["source_provider"] = (
+            citation_data.get("source_provider") or citation_data.get("source") or ""
+        )
+        normalized["fields_json"] = json.dumps(fields, ensure_ascii=False, sort_keys=True)
+        return normalized
 
     def ensure_default_templates(self):
         existing = self.get_analysis_templates()

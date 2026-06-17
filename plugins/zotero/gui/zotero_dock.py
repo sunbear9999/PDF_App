@@ -224,28 +224,19 @@ class ZoteroDock(BaseDock):
     # ------------------------------------------------------------------
 
     def _on_import_item(self, item: Dict):
-        """Import a Zotero item into the project's citation table."""
-        cit = self._formatter.to_citation_dict(item)
-        # Emit UPDATE_ENTRY to save into the project DB
-        self.bus.citation_action_requested.emit(
-            CitationIntent.UPDATE_ENTRY,
-            CitationPayload(data=cit),
-        )
-
-        # If there's a local PDF attachment, offer to open it in the viewer
-        attachments = self._db.get_attachments(item["item_id"])
-        local_pdfs = [a for a in attachments if a.get("local_path")]
-        if local_pdfs:
-            ans = QMessageBox.question(
-                self,
-                "Open PDF?",
-                f"Found attached PDF:\n{local_pdfs[0]['local_path']}\n\nAdd it to the project?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        """Open project-scoped matching instead of creating a Zotero-only row."""
+        try:
+            from .sync_dialog import ZoteroSyncDialog
+            dialog = ZoteroSyncDialog(
+                db=self._db,
+                formatter=self._formatter,
+                project_manager=getattr(self.app_context, "project_manager", None),
+                parent=self,
             )
-            if ans == QMessageBox.StandardButton.Yes:
-                self._open_pdf_in_viewer(local_pdfs[0]["local_path"])
-
-        self._status_lbl.setText(f"✓ Imported: {item.get('title', '')[:50]}")
+            dialog.exec()
+            self._status_lbl.setText("Use sync to match Zotero metadata to project PDFs")
+        except Exception as exc:
+            QMessageBox.warning(self, "Zotero Sync", f"Could not open sync dialog: {exc}")
 
     def _on_open_pdf(self, local_path: str):
         self._open_pdf_in_viewer(local_path)

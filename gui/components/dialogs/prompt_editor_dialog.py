@@ -3,10 +3,10 @@ from PySide6.QtWidgets import (
     QTextEdit, QVBoxLayout, QTreeWidget, QTreeWidgetItem, QSplitter,
     QWidget, QInputDialog, QSizePolicy, QComboBox
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from core.events.domains.metadata_events import PromptIntent, PromptPayload
 class PromptEditorDialog(QDialog):
-    def __init__(self, prompt_manager, parent=None):
+    def __init__(self, prompt_manager, parent=None, trace_id=None, trace_record=None):
         super().__init__(parent)
         self.prompt_manager = prompt_manager
         self.blueprint_manager = getattr(parent, 'blueprint_manager', None)
@@ -133,10 +133,15 @@ class PromptEditorDialog(QDialog):
 
         self.current_prompt_key = None
         self._all_blueprints_cache = {}
+        self._blueprint_ids_by_label = {}
+        self.trace_record = trace_record
+        self.trace_id = trace_id
 
         self._apply_theme()
         self._load_blueprint_dropdown()
         self._populate_tree()
+        if self.trace_id or self.trace_record:
+            QTimer.singleShot(0, self.open_trace)
 
     def _apply_theme(self):
         self.setStyleSheet(f"""
@@ -184,12 +189,15 @@ class PromptEditorDialog(QDialog):
         self.blueprint_combo.blockSignals(True)
         self.blueprint_combo.clear()
         self._all_blueprints_cache = {}
+        self._blueprint_ids_by_label = {}
 
         for item in self.prompt_service.list_blueprints():
             self._all_blueprints_cache[item["label"]] = item["blueprint"]
+            self._blueprint_ids_by_label[item["label"]] = item.get("id")
 
         if self._all_blueprints_cache:
-            self.blueprint_combo.addItems(sorted(self._all_blueprints_cache.keys()))
+            for label in sorted(self._all_blueprints_cache.keys()):
+                self.blueprint_combo.addItem(label, self._blueprint_ids_by_label.get(label))
         else:
             self.blueprint_combo.addItem("No blueprints available.")
 
@@ -239,6 +247,8 @@ class PromptEditorDialog(QDialog):
         blueprint = self._all_blueprints_cache.get(bp_name)
         if not blueprint: return
 
+        self._populate_run_trace_tree()
+
         prompt_usage = self.prompt_service.get_blueprint_prompt_usage(blueprint)
 
         global_node = QTreeWidgetItem(self.tree, ["🌐 Master Runner (Global Context Injections)"])
@@ -270,6 +280,58 @@ class PromptEditorDialog(QDialog):
                 prompt_node = QTreeWidgetItem(step_node, [f"⚡ {p_key} (Auto-Injected)"])
                 prompt_node.setData(0, Qt.ItemDataRole.UserRole, p_key)
                 prompt_node.setForeground(0, Qt.GlobalColor.yellow)
+
+    def _populate_run_trace_tree(self):
+        trace = self._trace_as_dict()
+        if not trace:
+            return
+        trace_node = QTreeWidgetItem(self.tree, [f"Run Trace: {trace.get('blueprint_name') or 'AI Action'}"])
+        trace_node.setFlags(trace_node.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+        trace_node.setExpanded(True)
+        meta = QTreeWidgetItem(trace_node, ["Run metadata"])
+        meta.setData(0, Qt.ItemDataRole.UserRole, {
+            "preview": True,
+            "title": "Run metadata",
+            "content": self._format_trace_metadata(trace),
+        })
+        meta.setForeground(0, Qt.GlobalColor.cyan)
+
+        calls = trace.get("calls") or []
+        if not calls:
+            empty = QTreeWidgetItem(trace_node, ["No LLM calls were recorded for this run"])
+            empty.setFlags(empty.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            return
+
+        for idx, call in enumerate(calls, 1):
+            call_node = QTreeWidgetItem(trace_node, [
+                f"LLM Call {idx}: {call.get('step_id', 'Unknown Step')} ({call.get('model', 'model unknown')})"
+            ])
+            call_node.setFlags(call_node.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            call_node.setExpanded(idx == 1)
+
+            system_item = QTreeWidgetItem(call_node, ["Exact rendered system prompt"])
+            system_item.setData(0, Qt.ItemDataRole.UserRole, {
+                "preview": True,
+                "title": f"{call.get('step_id', 'Step')} system prompt",
+                "content": call.get("system_prompt", ""),
+            })
+            system_item.setForeground(0, Qt.GlobalColor.cyan)
+
+            query_item = QTreeWidgetItem(call_node, ["Exact user/query prompt"])
+            query_item.setData(0, Qt.ItemDataRole.UserRole, {
+                "preview": True,
+                "title": f"{call.get('step_id', 'Step')} query",
+                "content": call.get("query", ""),
+            })
+            query_item.setForeground(0, Qt.GlobalColor.cyan)
+
+            details_item = QTreeWidgetItem(call_node, ["Prompt keys, injections, and options"])
+            details_item.setData(0, Qt.ItemDataRole.UserRole, {
+                "preview": True,
+                "title": f"{call.get('step_id', 'Step')} trace details",
+                "content": self._format_trace_call_details(call),
+            })
+            details_item.setForeground(0, Qt.GlobalColor.cyan)
     
     def _populate_analysis_mode_tree(self):
         project_manager = getattr(self.parent(), "project_manager", None)
@@ -333,6 +395,80 @@ class PromptEditorDialog(QDialog):
             self.btn_delete.setEnabled(not self.prompt_service.is_core_prompt(prompt_key))
             self.save_button.setEnabled(True)
             self.restore_button.setEnabled(True)
+
+    def open_trace(self):
+        trace = self._trace_as_dict()
+        if not trace and self.trace_id:
+            pm = getattr(self.parent(), "project_manager", None)
+            if pm and hasattr(pm, "get_prompt_trace"):
+                trace = pm.get_prompt_trace(self.trace_id)
+        if not trace:
+            return
+        self.trace_record = trace
+        self.trace_id = trace.get("trace_id", self.trace_id)
+        self.view_mode_combo.setCurrentIndex(1)
+        self._select_trace_blueprint(trace)
+        self._populate_tree()
+        self._select_first_trace_preview()
+
+    def _trace_as_dict(self):
+        if not self.trace_record:
+            return None
+        if isinstance(self.trace_record, dict):
+            return self.trace_record
+        if hasattr(self.trace_record, "as_dict"):
+            return self.trace_record.as_dict()
+        return None
+
+    def _select_trace_blueprint(self, trace):
+        blueprint_id = trace.get("blueprint_id")
+        blueprint_name = trace.get("blueprint_name")
+        for idx in range(self.blueprint_combo.count()):
+            if blueprint_id and self.blueprint_combo.itemData(idx) == blueprint_id:
+                self.blueprint_combo.setCurrentIndex(idx)
+                return
+        if blueprint_name:
+            for idx in range(self.blueprint_combo.count()):
+                label = self.blueprint_combo.itemText(idx)
+                if blueprint_name == label or blueprint_name in label or label in blueprint_name:
+                    self.blueprint_combo.setCurrentIndex(idx)
+                    return
+
+    def _select_first_trace_preview(self):
+        root = self.tree.topLevelItem(0)
+        if not root or not root.text(0).startswith("Run Trace"):
+            return
+        if root.childCount() > 1:
+            call_node = root.child(1)
+            if call_node and call_node.childCount():
+                self.tree.setCurrentItem(call_node.child(0))
+                return
+        if root.childCount():
+            self.tree.setCurrentItem(root.child(0))
+
+    def _format_trace_metadata(self, trace):
+        return (
+            f"Trace ID: {trace.get('trace_id')}\n"
+            f"Job ID: {trace.get('job_id')}\n"
+            f"Blueprint ID: {trace.get('blueprint_id')}\n"
+            f"Blueprint Name: {trace.get('blueprint_name')}\n"
+            f"Target: {trace.get('target_id')}\n"
+            f"Created: {trace.get('created_at')}\n"
+            f"LLM Calls: {len(trace.get('calls') or [])}"
+        )
+
+    def _format_trace_call_details(self, call):
+        import json
+        return (
+            f"Step ID: {call.get('step_id')}\n"
+            f"Step Type: {call.get('step_type')}\n"
+            f"Model: {call.get('model')}\n"
+            f"Prompt Key: {call.get('prompt_key')}\n"
+            f"Explicit Prompt Keys: {', '.join(call.get('explicit_prompt_keys') or []) or '(none)'}\n"
+            f"Implicit Prompt Keys: {', '.join(call.get('implicit_prompt_keys') or []) or '(none)'}\n"
+            f"Timestamp: {call.get('timestamp')}\n\n"
+            f"LLM Options:\n{json.dumps(call.get('llm_options') or {}, indent=2)}"
+        )
 
     def _on_new_prompt(self):
         name, ok = QInputDialog.getText(self, "New Custom Prompt", "Enter a unique name for this prompt:")

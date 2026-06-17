@@ -6,6 +6,7 @@ from core.engine.action_model import AIActionBlueprint
 from core.events.event_bus import EventBus
 from core.events.domains.workflow_events import WorkflowIntent, WorkflowPayload
 from gui.docks.unified_research.components.chat_streamer import ChatMessageWidget
+from gui.docks.unified_research.components.history_renderer import ChatHistoryRenderer
 
 class BaseTab(QWidget):
     def __init__(self, main_window, target_id=None, parent=None):
@@ -69,12 +70,21 @@ class BaseTab(QWidget):
             self._active_stream_widget = None
             return
 
+        if payload_type == "prompt_trace_available":
+            widget = self._active_stream_widget
+            trace_id = payload.get("trace_id")
+            if widget and trace_id and hasattr(widget, "set_prompt_trace"):
+                widget.set_prompt_trace(trace_id)
+            return
+
         if payload_type == "citation_cards":
             items = self._coerce_items(payload.get("items", []))
             widget = self._active_stream_widget
             if widget is None:
                 widget = ChatMessageWidget("AI Agent", theme=self.theme)
                 self.receive_ai_widget(widget)
+            if payload.get("trace_id") and hasattr(widget, "set_prompt_trace"):
+                widget.set_prompt_trace(payload.get("trace_id"))
             for item in items:
                 if isinstance(item, dict):
                     widget.add_bubble(
@@ -161,34 +171,7 @@ class BaseTab(QWidget):
         if self.chat_layout.count() > 1: return 
 
         history = self.project_manager.get_chat_history(self.target_id)
-        for msg in history:
-            is_user = (msg['role'] == "user")
-            sender = "You" if is_user else "AI Agent"
-            
-            if msg["ui_format"] == "chat_widgets":
-                try:
-                    items = json.loads(msg["content"])
-                    if isinstance(items, dict):
-                        for val in items.values():
-                            if isinstance(val, list): items = val; break
-                        if isinstance(items, dict): items = [items] 
-                    
-                    widget = ChatMessageWidget(sender, theme=self.theme, is_user=is_user)
-                    for item in items:
-                        if isinstance(item, dict):
-                            widget.add_bubble(
-                                doc_name=item.get("doc_name", "Unknown Document"),
-                                quote=item.get("quote", item.get("text", "")),
-                                note=item.get("note", item.get("reason", ""))
-                            )
-                    self.receive_ai_widget(widget)
-                except Exception: pass
-            else:
-                widget = ChatMessageWidget(sender, theme=self.theme, is_user=is_user)
-                widget.append_chunk(msg['content'])
-                if not is_user and hasattr(widget, 'hide_status'):
-                    widget.hide_status()
-                self.receive_ai_widget(widget)
+        ChatHistoryRenderer(self, theme=self.theme).render(history)
 
     def send_to_pipeline(self, blueprint: AIActionBlueprint, variables: dict, output_workspace: bool = False):
         initial_state = {**variables}

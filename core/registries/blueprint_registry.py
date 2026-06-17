@@ -29,7 +29,11 @@ class BlueprintDefinition:
     def create(self, *args, **kwargs) -> AIActionBlueprint:
         blueprint = self.factory(*args, **kwargs)
         blueprint.name = blueprint.name or self.label
-        return copy.deepcopy(blueprint)
+        copied = copy.deepcopy(blueprint)
+        setattr(copied, "_registry_id", self.id)
+        setattr(copied, "_registry_label", self.label)
+        setattr(copied, "_plugin_id", self.plugin_id)
+        return copied
 
     def as_agent_tool(self) -> Dict[str, Any]:
         return {

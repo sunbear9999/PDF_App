@@ -28,6 +28,7 @@ class ZoteroFormatter:
         vol_issue = f"{vol}({issue})" if vol and issue else vol or issue or ""
         journal = item.get("publicationTitle") or item.get("publisher", "")
 
+        fields = self._full_fields(item)
         return {
             "doc_id": item.get("doc_id", f"zotero:{item.get('item_id', '')}"),
             "title": item.get("title", ""),
@@ -39,8 +40,26 @@ class ZoteroFormatter:
             "url": item.get("url", ""),
             "publisher": item.get("publisher", ""),
             "item_type": item.get("item_type", ""),
+            "source_provider": "zotero",
+            "source_item_key": item.get("key", "") or str(item.get("item_id", "")),
+            "source_updated_at": item.get("dateModified", "") or fields.get("dateModified", ""),
+            "fields": fields,
             "source": "zotero",
         }
+
+    def _full_fields(self, item: Dict) -> Dict:
+        fields = dict(item.get("fields") or {})
+        for key in (
+            "item_id", "item_type", "key", "date", "year", "publicationTitle",
+            "publisher", "volume", "issue", "pages", "DOI", "url", "ISBN",
+            "ISSN", "abstractNote", "place", "edition", "series", "language",
+            "creators", "authors_display", "dateAdded", "dateModified",
+            "accessDate",
+        ):
+            value = item.get(key)
+            if value not in (None, "", [], {}):
+                fields.setdefault(key, value)
+        return fields
 
     # ------------------------------------------------------------------
     # BibTeX export

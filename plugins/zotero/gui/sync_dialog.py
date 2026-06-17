@@ -88,10 +88,28 @@ def _filename_similarity(pdf_path: str, zotero_item: dict) -> float:
     return score
 
 
+def _doi_similarity(project_citation: dict, zotero_item: dict) -> float:
+    left = (project_citation or {}).get("doi") or (project_citation or {}).get("DOI")
+    right = zotero_item.get("DOI") or (zotero_item.get("fields") or {}).get("DOI")
+    if left and right and str(left).strip().lower() == str(right).strip().lower():
+        return 1.0
+    return 0.0
+
+
+def _provenance_similarity(project_citation: dict, zotero_item: dict) -> float:
+    key = (project_citation or {}).get("source_item_key")
+    if key and key == zotero_item.get("key"):
+        return 1.0
+    fields = (project_citation or {}).get("fields") or {}
+    if fields.get("key") and fields.get("key") == zotero_item.get("key"):
+        return 1.0
+    return 0.0
+
+
 AUTO_MATCH_THRESHOLD = 0.45
 
 
-def _auto_match(pdf_paths: List[str], zotero_items: List[dict]) -> Dict[str, Optional[dict]]:
+def _auto_match(pdf_paths: List[str], zotero_items: List[dict], project_manager=None) -> Dict[str, Optional[dict]]:
     """
     Return a dict mapping pdf_path → best_zotero_item (or None).
     Only assigns when similarity is above AUTO_MATCH_THRESHOLD.
@@ -100,8 +118,14 @@ def _auto_match(pdf_paths: List[str], zotero_items: List[dict]) -> Dict[str, Opt
     for pdf in pdf_paths:
         best_item = None
         best_score = 0.0
+        project_citation = project_manager.get_citation(pdf) if project_manager else {}
         for item in zotero_items:
-            score = _filename_similarity(pdf, item)
+            score = max(
+                _provenance_similarity(project_citation, item),
+                _doi_similarity(project_citation, item),
+                _filename_similarity(pdf, item),
+                _title_similarity((project_citation or {}).get("title", ""), item.get("title", "")),
+            )
             if score > best_score:
                 best_score = score
                 best_item = item
@@ -132,6 +156,8 @@ class ZoteroSyncDialog(QDialog):
         db: "ZoteroDB",
         formatter: "ZoteroFormatter",
         project_manager: Optional["ProjectManager"] = None,
+        initial_pdf_paths: Optional[List[str]] = None,
+        outbound_adapter=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -140,6 +166,8 @@ class ZoteroSyncDialog(QDialog):
         self._db = db
         self._formatter = formatter
         self._pm = project_manager
+        self._initial_pdf_paths = list(initial_pdf_paths or [])
+        self._outbound_adapter = outbound_adapter
         self._zotero_items: List[dict] = []
         self._assignments: Dict[str, dict] = {}  # pdf_path → zotero item
         self._selected_pdf: Optional[str] = None
@@ -164,6 +192,15 @@ class ZoteroSyncDialog(QDialog):
         )
         header.setWordWrap(True)
         root.addWidget(header)
+
+        if self._outbound_adapter is not None and not self._outbound_adapter.can_write():
+            readonly = QLabel(
+                "Sync to Zotero is unavailable with the local API; "
+                "metadata import/copy is available."
+            )
+            readonly.setWordWrap(True)
+            readonly.setObjectName("zoteroReadOnlyNotice")
+            root.addWidget(readonly)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
@@ -236,7 +273,10 @@ class ZoteroSyncDialog(QDialog):
         if not self._pm:
             self._pdf_list.addItem(QListWidgetItem("(No project open)"))
             return
-        for path in self._pm.pdfs:
+        allowed = set(self._pm.pdfs)
+        selected = [path for path in self._initial_pdf_paths if path in allowed]
+        paths = selected or list(self._pm.pdfs)
+        for path in paths:
             item = QListWidgetItem(os.path.basename(path))
             item.setData(Qt.ItemDataRole.UserRole, path)
             item.setToolTip(path)
@@ -299,7 +339,11 @@ class ZoteroSyncDialog(QDialog):
     def _do_auto_match(self):
         if not self._pm or not self._zotero_items:
             return
-        matches = _auto_match(self._pm.pdfs, self._zotero_items)
+        pdf_paths = [
+            self._pdf_list.item(i).data(Qt.ItemDataRole.UserRole)
+            for i in range(self._pdf_list.count())
+        ]
+        matches = _auto_match(pdf_paths, self._zotero_items, self._pm)
         changed = 0
         for pdf, zitem in matches.items():
             if zitem is not None and pdf not in self._assignments:

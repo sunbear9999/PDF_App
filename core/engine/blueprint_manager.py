@@ -62,13 +62,19 @@ class BlueprintManager:
         """Fetches the user-edited blueprint. If none exists, runs the fallback."""
         if key_name in self.blueprints:
             # Deep copy ensures the engine state doesn't mutate saved persistent templates!
-            return copy.deepcopy(self.blueprints[key_name])
+            blueprint = copy.deepcopy(self.blueprints[key_name])
+            setattr(blueprint, "_registry_id", key_name)
+            setattr(blueprint, "_registry_label", getattr(blueprint, "name", key_name) or key_name)
+            return blueprint
 
         # Call factory fallback initialization
         fallback_blueprint = fallback_func(*args, **kwargs)
         if fallback_blueprint:
             fallback_blueprint.name = key_name
-            return copy.deepcopy(fallback_blueprint)
+            blueprint = copy.deepcopy(fallback_blueprint)
+            setattr(blueprint, "_registry_id", key_name)
+            setattr(blueprint, "_registry_label", key_name)
+            return blueprint
 
         if self.registry:
             registered = self.registry.create(key_name, *args, **kwargs)

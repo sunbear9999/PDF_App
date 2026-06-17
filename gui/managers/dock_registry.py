@@ -39,7 +39,7 @@ def register_default_docks(dock_manager, window_ref):
     def make_citations(w):
         dock = QDockWidget("📚 Citation Manager", w)
         from gui.docks.citation_dock import CitationDock
-        dock.setWidget(CitationDock())
+        dock.setWidget(CitationDock(getattr(w, "app_context", None)))
         return dock
 
     def make_ocr(w):

@@ -7,6 +7,7 @@ class ProcessMonitorPopup(QFrame):
         super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
         self.registry = registry
         self.theme = theme
+        self.main_window = parent
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
         self.setMinimumWidth(340)
         self.setMaximumWidth(400)
@@ -52,9 +53,11 @@ class ProcessMonitorPopup(QFrame):
             if item.widget(): item.widget().deleteLater()
                 
         active = self.registry.active_job
+        express = getattr(self.registry, "express_jobs", [])
         queue = self.registry.pending_queue
+        recent = getattr(self.registry, "recent_jobs", [])
         
-        if not active and not queue:
+        if not active and not express and not queue and not recent:
             lbl = QLabel("<i>No active processes.</i>")
             if self.theme: lbl.setStyleSheet(f"color: {self.theme.get('text_muted', '#aaa')};")
             self.content_layout.addWidget(lbl)
@@ -65,6 +68,13 @@ class ProcessMonitorPopup(QFrame):
             if self.theme: lbl_active.setStyleSheet(f"color: {self.theme.get('text_main', '#fff')};")
             self.content_layout.addWidget(lbl_active)
             self.content_layout.addWidget(self._create_job_widget(active, is_active=True))
+
+        if express:
+            lbl_express = QLabel("<b>Express:</b>")
+            if self.theme: lbl_express.setStyleSheet(f"color: {self.theme.get('text_main', '#fff')};")
+            self.content_layout.addWidget(lbl_express)
+            for job in express:
+                self.content_layout.addWidget(self._create_job_widget(job, is_active=True))
             
         if queue:
             sep = QFrame()
@@ -79,7 +89,19 @@ class ProcessMonitorPopup(QFrame):
             for idx, job in enumerate(queue):
                 self.content_layout.addWidget(self._create_job_widget(job, is_active=False, idx=idx, total=len(queue)))
 
-    def _create_job_widget(self, job, is_active=False, idx=0, total=0):
+        if recent:
+            sep = QFrame()
+            sep.setFrameShape(QFrame.Shape.HLine)
+            if self.theme: sep.setStyleSheet(f"background-color: {self.theme.get('border', '#444')};")
+            self.content_layout.addWidget(sep)
+
+            lbl_recent = QLabel("<b>Recent Traces:</b>")
+            if self.theme: lbl_recent.setStyleSheet(f"color: {self.theme.get('text_main', '#fff')};")
+            self.content_layout.addWidget(lbl_recent)
+            for job in recent:
+                self.content_layout.addWidget(self._create_job_widget(job, is_active=False, is_recent=True))
+
+    def _create_job_widget(self, job, is_active=False, idx=0, total=0, is_recent=False):
         w = QWidget()
         lyt = QHBoxLayout(w)
         lyt.setContentsMargins(4, 4, 4, 4)
@@ -96,7 +118,7 @@ class ProcessMonitorPopup(QFrame):
         info_lyt.addWidget(status_lbl)
         lyt.addLayout(info_lyt, 1)
         
-        if not is_active:
+        if not is_active and not is_recent:
             btn_up = QPushButton("▲")
             btn_up.setFixedSize(24, 24)
             btn_up.setEnabled(idx > 0)
@@ -114,20 +136,28 @@ class ProcessMonitorPopup(QFrame):
             
             lyt.addWidget(btn_up)
             lyt.addWidget(btn_down)
+
+        trace_id = getattr(job, "trace_id", None) or getattr(getattr(job, "runner", None), "trace_id", None)
+        if trace_id:
+            from gui.components.prompt_trace_button import PromptTraceButton
+            trace_record = getattr(getattr(job, "runner", None), "prompt_trace", None)
+            btn_trace = PromptTraceButton(trace_id=trace_id, trace_record=trace_record, main_window=self.main_window, theme=self.theme, parent=w)
+            lyt.addWidget(btn_trace)
             
-        btn_stop = QPushButton("✖")
-        btn_stop.setFixedSize(24, 24)
-        btn_stop.setToolTip("Cancel Action")
-        if self.theme: btn_stop.setStyleSheet(f"background-color: {self.theme.get('error', '#ff4444')}; color: white; border: none; border-radius: 4px; font-weight:bold;")
-        btn_stop.clicked.connect(lambda _, j=job.id: self.registry.cancel_job(j))
-        lyt.addWidget(btn_stop)
+        if not is_recent:
+            btn_stop = QPushButton("✖")
+            btn_stop.setFixedSize(24, 24)
+            btn_stop.setToolTip("Cancel Action")
+            if self.theme: btn_stop.setStyleSheet(f"background-color: {self.theme.get('error', '#ff4444')}; color: white; border: none; border-radius: 4px; font-weight:bold;")
+            btn_stop.clicked.connect(lambda _, j=job.id: self.registry.cancel_job(j))
+            lyt.addWidget(btn_stop)
         
         return w
 
 
 class ProcessMonitorWidget(QPushButton):
     """The visible button on the main toolbar that dynamically scales and opens the popup."""
-    def __init__(self, registry, theme=None):
+    def __init__(self, registry, theme=None, parent=None):
         super().__init__()
         self.registry = registry
         self.theme = theme
@@ -138,7 +168,7 @@ class ProcessMonitorWidget(QPushButton):
         self.registry.job_removed.connect(self._update_ui)
         self.registry.queue_updated.connect(self._update_ui)
         
-        self.popup = ProcessMonitorPopup(registry, theme, self.window())
+        self.popup = ProcessMonitorPopup(registry, theme, parent or self.window())
         self.clicked.connect(self._toggle_popup)
         self._update_ui()
 
@@ -150,8 +180,9 @@ class ProcessMonitorWidget(QPushButton):
 
     def _update_ui(self):
         active = 1 if self.registry.active_job else 0
+        express = len(getattr(self.registry, "express_jobs", []))
         queued = len(self.registry.pending_queue)
-        total = active + queued
+        total = active + express + queued
         
         if total == 0:
             self.setText("🟢 Idle")
@@ -166,7 +197,8 @@ class ProcessMonitorWidget(QPushButton):
                 QPushButton#ProcessTrackerDropdown:hover {{ background-color: rgba(76, 175, 80, 0.1); }}
             """)
         else:
-            txt = f"🔴 {active} Running"
+            running = active + express
+            txt = f"🔴 {running} Running"
             if queued > 0: txt += f" ({queued} Queued)"
             self.setText(txt)
             self.setStyleSheet(f"""

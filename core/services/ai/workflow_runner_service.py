@@ -57,6 +57,8 @@ class WorkflowRunnerService(QObject):
                 job_name=payload.job_name,
                 job_type=payload.job_type,
                 request_id=payload.job_id,
+                target_id=payload.target_id,
+                blueprint_id=getattr(payload, "blueprint_id", None),
             )
         elif intent == WorkflowIntent.ABORT_WORKFLOW:
             self._abort_active_workflow()
@@ -64,6 +66,11 @@ class WorkflowRunnerService(QObject):
     def run_blueprint(self, blueprint, initial_state: Optional[dict] = None, request_id: Optional[str] = None, **kwargs):
         runner = self.prepare_runner(blueprint, initial_state or {})
         runner.workflow_request_id = request_id
+        runner.target_id = kwargs.pop("target_id", None) or getattr(runner, "target_id", None)
+        runner.blueprint_id = kwargs.pop("blueprint_id", None) or getattr(runner, "blueprint_id", None)
+        if hasattr(runner, "prompt_trace"):
+            runner.prompt_trace.target_id = runner.target_id
+            runner.prompt_trace.blueprint_id = runner.blueprint_id
         self.start_runner(runner, **kwargs)
         return runner
 
@@ -101,9 +108,33 @@ class WorkflowRunnerService(QObject):
         )
         if self.process_registry:
             self.process_registry.enqueue_runner(runner, resolved_job_name, resolved_job_type, is_express=is_express)
+            job = getattr(runner, "job", None)
+            if job:
+                job.trace_id = getattr(runner, "trace_id", None)
+                job.target_id = getattr(runner, "target_id", None)
+                job.blueprint_id = getattr(runner, "blueprint_id", None) or getattr(blueprint, "_registry_id", None)
         else:
             runner.start()
         return runner
+
+    def _persist_prompt_trace(self, runner):
+        trace = getattr(runner, "prompt_trace", None)
+        if not trace or not getattr(trace, "calls", None):
+            return None
+        trace.trace_id = getattr(runner, "trace_id", None) or trace.trace_id
+        trace.job_id = getattr(runner, "workflow_request_id", None) or trace.job_id
+        trace.blueprint_id = getattr(runner, "blueprint_id", None) or trace.blueprint_id
+        trace.target_id = getattr(runner, "target_id", None) or trace.target_id
+        blueprint = getattr(runner, "blueprint", None)
+        trace.blueprint_name = getattr(blueprint, "name", trace.blueprint_name)
+        pm = self.project_manager
+        trace_id = pm.save_prompt_trace(trace) if pm and hasattr(pm, "save_prompt_trace") else None
+        if trace_id:
+            runner.trace_id = trace_id
+            job = getattr(runner, "job", None)
+            if job:
+                job.trace_id = trace_id
+        return trace_id
 
     def _attach_runner(self, runner):
         if self.ui_router:
@@ -133,16 +164,10 @@ class WorkflowRunnerService(QObject):
             )
         )
         runner.action_complete.connect(
-            lambda final_state, r=runner: self.bus.workflow_state_changed.emit(
-                WorkflowEvent.COMPLETED,
-                WorkflowPayload(blueprint=getattr(r, "blueprint", None), job_id=getattr(r, "workflow_request_id", None), initial_state=final_state, runner=r),
-            )
+            lambda final_state, r=runner: self._emit_completion(r, final_state)
         )
         runner.error.connect(
-            lambda err, r=runner: self.bus.workflow_state_changed.emit(
-                WorkflowEvent.FAILED,
-                WorkflowPayload(blueprint=getattr(r, "blueprint", None), job_id=getattr(r, "workflow_request_id", None), errors=str(err), runner=r),
-            )
+            lambda err, r=runner: self._emit_failure(r, err)
         )
         if hasattr(runner, "user_input_requested"):
             runner.user_input_requested.connect(
@@ -151,6 +176,47 @@ class WorkflowRunnerService(QObject):
                     WorkflowPayload(blueprint=getattr(r, "blueprint", None), job_id=getattr(r, "workflow_request_id", None), data={"step_id": step_id, "expected_inputs": expected}, runner=r),
                 )
             )
+
+    def _trace_payload_data(self, runner):
+        return {
+            "trace_id": getattr(runner, "trace_id", None),
+            "blueprint_id": getattr(runner, "blueprint_id", None),
+            "target_id": getattr(runner, "target_id", None),
+        }
+
+    def _emit_completion(self, runner, final_state):
+        trace_id = self._persist_prompt_trace(runner)
+        data = self._trace_payload_data(runner)
+        if trace_id:
+            self.bus.ui_render_requested.emit("*", {"type": "prompt_trace_available", **data})
+        self.bus.workflow_state_changed.emit(
+            WorkflowEvent.COMPLETED,
+            WorkflowPayload(
+                blueprint=getattr(runner, "blueprint", None),
+                job_id=getattr(runner, "workflow_request_id", None),
+                initial_state=final_state,
+                data=data,
+                target_id=getattr(runner, "target_id", None),
+                runner=runner,
+            ),
+        )
+
+    def _emit_failure(self, runner, err):
+        trace_id = self._persist_prompt_trace(runner)
+        data = self._trace_payload_data(runner)
+        if trace_id:
+            self.bus.ui_render_requested.emit("*", {"type": "prompt_trace_available", **data})
+        self.bus.workflow_state_changed.emit(
+            WorkflowEvent.FAILED,
+            WorkflowPayload(
+                blueprint=getattr(runner, "blueprint", None),
+                job_id=getattr(runner, "workflow_request_id", None),
+                errors=str(err),
+                data=data,
+                target_id=getattr(runner, "target_id", None),
+                runner=runner,
+            ),
+        )
 
     def _abort_active_workflow(self):
         registry = self.process_registry

@@ -1,115 +1,33 @@
 import re
 import urllib.request
 import json
+from core.citation_formatter import CitationFormatter
 
 class CitationManager:
     def __init__(self, project_manager):
         self.pm = project_manager
         self.current_style = "APA"
+        self.formatter = CitationFormatter(self.current_style)
 
     def set_style(self, style):
         self.current_style = style
+        self.formatter.set_style(style)
 
     def _parse_authors(self, raw_authors):
         """Intelligently parses messy author strings into standardized (Last, First) tuples."""
-        if not raw_authors or raw_authors.lower() in ["unknown", "n/a"]:
-            return []
-            
-        # Split by common delimiters
-        raw_list = [a.strip() for a in re.split(r'[;,&]| and ', raw_authors) if a.strip()]
-        parsed = []
-        
-        for author in raw_list:
-            if ',' in author:
-                # Assume "Last, First"
-                parts = author.split(',', 1)
-                parsed.append((parts[0].strip(), parts[1].strip()))
-            else:
-                # Assume "First Last"
-                parts = author.split()
-                if len(parts) > 1:
-                    parsed.append((parts[-1], " ".join(parts[:-1])))
-                else:
-                    parsed.append((parts[0], ""))
-        return parsed
+        return self.formatter.parse_authors(raw_authors)
 
     def format_in_text(self, doc_id, page_num):
         data = self.pm.get_citation(doc_id)
-        if not data: return f"(Unknown, Page {page_num + 1})"
-
-        authors = self._parse_authors(data.get("authors", ""))
-        year = data.get("year", "n.d.")
-        page = page_num + 1 if page_num is not None else ""
-
-        if not authors:
-            author_text = data.get("title", "Unknown Source")[:15] + "..."
-        elif len(authors) == 1:
-            author_text = authors[0][0]
-        elif len(authors) == 2:
-            author_text = f"{authors[0][0]} & {authors[1][0]}" if self.current_style == "APA" else f"{authors[0][0]} and {authors[1][0]}"
-        else:
-            author_text = f"{authors[0][0]} et al."
-
-        if self.current_style == "APA":
-            return f"({author_text}, {year}, p. {page})" if page else f"({author_text}, {year})"
-        elif self.current_style == "MLA":
-            return f"({author_text} {page})" if page else f"({author_text})"
-        elif self.current_style == "Chicago":
-            return f"({author_text} {year}, {page})" if page else f"({author_text} {year})"
-        return ""
+        return self.formatter.format_in_text(data, page_num)
 
     def format_works_cited(self, doc_ids):
-        works = []
-        for doc_id in doc_ids:
-            data = self.pm.get_citation(doc_id)
-            if not data: continue
-            
-            authors = self._parse_authors(data.get("authors", ""))
-            year = data.get("year", "n.d.")
-            title = data.get("title", "Untitled Document")
-            journal = data.get("journal", "")
-            vol_issue = data.get("vol_issue", "")
-            publisher = data.get("publisher", "")
-            doi_url = data.get("doi", "")
-            
-            # Format Authors
-            if not authors:
-                auth_str = "Unknown Author."
-            else:
-                if self.current_style in ["APA", "Chicago"]:
-                    formatted = [f"{last}, {first[0]}." if first else last for last, first in authors]
-                else: # MLA
-                    formatted = [f"{last}, {first}" for last, first in authors]
-                
-                if len(formatted) == 1: auth_str = formatted[0]
-                elif len(formatted) == 2: auth_str = f"{formatted[0]}, and {formatted[1]}"
-                else: auth_str = f"{formatted[0]}, et al."
-            
-            if not auth_str.endswith('.'): auth_str += "."
+        return self.formatter.format_entries(
+            self.pm.get_citation(doc_id) for doc_id in doc_ids
+        )
 
-            # Construct Citation
-            if self.current_style == "APA":
-                cit = f"{auth_str} ({year}). {title}. "
-                if journal: cit += f"*{journal}*, {vol_issue}. "
-                elif publisher: cit += f"{publisher}. "
-                if doi_url: cit += doi_url
-                works.append(cit.strip())
-                
-            elif self.current_style == "MLA":
-                cit = f"{auth_str} \"{title}.\" "
-                if journal: cit += f"*{journal}*, {vol_issue}, {year}. "
-                elif publisher: cit += f"{publisher}, {year}. "
-                if doi_url: cit += doi_url
-                works.append(cit.strip())
-                
-            elif self.current_style == "Chicago":
-                cit = f"{auth_str} \"{title}.\" "
-                if journal: cit += f"*{journal}* {vol_issue} ({year}). "
-                elif publisher: cit += f"{publisher}, {year}. "
-                if doi_url: cit += doi_url
-                works.append(cit.strip())
-                
-        return sorted(works)
+    def format_entry(self, citation_data):
+        return self.formatter.format_entry(citation_data or {})
 
     def extract_metadata(self, doc_path):
         """Extracts metadata locally, falls back to CrossRef if online."""

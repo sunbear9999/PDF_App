@@ -26,6 +26,7 @@ class WorkflowPayload(BasePayload):
     job_id: Optional[str] = None
     errors: Optional[str] = None
     target_id: Optional[str] = None
+    blueprint_id: Optional[str] = None
     job_name: Optional[str] = None
     job_type: Optional[str] = None
     is_express: bool = False

@@ -457,11 +457,14 @@ class ProjectManager:
     def get_docs_for_tag(self, tag_id): return self.db_tags.get_docs_for_tag(tag_id)
 
     # --- AI & Logging ---
-    def save_chat_message(self, tab_name, role, content, ui_format="live_stream"): return self.db_ai.save_chat_message(tab_name, role, content, ui_format)
+    def save_chat_message(self, tab_name, role, content, ui_format="live_stream", trace_id=None, ui_payload=None): return self.db_ai.save_chat_message(tab_name, role, content, ui_format, trace_id, ui_payload)
     def get_chat_history(self, tab_name): return self.db_ai.get_chat_history(tab_name)
     def clear_chat_history(self, tab_name): return self.db_ai.clear_chat_history(tab_name)
     def log_ai_interaction(self, prompt, response, model): return self.db_ai.log_ai_interaction(prompt, response, model)
     def log_ai_interaction_threadsafe(self, prompt, response, model): return self.db_ai.log_ai_interaction_threadsafe(prompt, response, model)
+    def save_prompt_trace(self, trace_record): return self.db_ai.save_prompt_trace(trace_record)
+    def get_prompt_trace(self, trace_id): return self.db_ai.get_prompt_trace(trace_id)
+    def get_prompt_trace_for_job(self, job_id): return self.db_ai.get_prompt_trace_for_job(job_id)
     def generate_llm_log(self, export_path): return self.db_ai.generate_llm_log(export_path)
 
     # --- Documents, Essays, Templates & Meta ---

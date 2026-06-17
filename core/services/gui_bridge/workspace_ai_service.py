@@ -122,6 +122,9 @@ class WorkspaceAIService(QObject):
             return False, "Workflow runner service is not configured."
 
         runner = self.workflow_runner_service.prepare_runner(runtime_blueprint, initial_state)
+        runner.target_id = "workspace"
+        if hasattr(runner, "prompt_trace"):
+            runner.prompt_trace.target_id = "workspace"
 
         def _handle_completion(state):
             if not runtime_blueprint.steps:

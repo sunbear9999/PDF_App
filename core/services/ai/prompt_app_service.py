@@ -1,19 +1,10 @@
 import copy
-import re
-
 from PySide6.QtCore import QObject
 from core.events.event_bus import EventBus
-from core.models.prompt_models import BlueprintPromptUsage
+from core.models.prompt_models import ANALYSIS_STATE_PROMPTS, collect_step_prompt_usage
 from core.events.domains.metadata_events import PromptIntent, PromptPayload
 class PromptAppService(QObject):
-    ANALYSIS_STATE_PROMPTS = {
-        "{analysis_chunk_system_prompt}": ["Graph Analysis Chunk Observations System"],
-        "{analysis_synthesis_system_prompt}": ["Graph Analysis Synthesis System"],
-        "{analysis_master_system_prompt}": ["Graph Analysis Master System", "Graph Analysis Compact Output Contract", "Graph Analysis Argument Chain Directive"],
-        "{analysis_chunk_query_prompt}": ["Graph Analysis Chunk Observations Query"],
-        "{analysis_synthesis_query_prompt}": ["Graph Analysis Synthesis Query"],
-        "{analysis_master_query_prompt}": ["Graph Analysis Master Query"],
-    }
+    ANALYSIS_STATE_PROMPTS = ANALYSIS_STATE_PROMPTS
 
     def __init__(self, prompt_manager, blueprint_manager=None, blueprint_registry=None, step_manager=None):
         super().__init__()
@@ -181,53 +172,7 @@ class PromptAppService(QObject):
         return rendered.replace("{argument_synthesis}", "[plain-text synthesis produced by argument_synthesis_pass]")
 
     def _extract_step_prompts(self, step) -> list:
-        explicit = set()
-        implicit = set()
-
-        prompt_key = getattr(step, "prompt_key", None)
-        if prompt_key:
-            if prompt_key == "{chat_persona}":
-                explicit.update(["General Assistant", "RAG Agent Mode"])
-            elif "{" not in str(prompt_key):
-                explicit.add(prompt_key)
-
-        texts_to_scan = [getattr(step, "system_prompt", "")]
-        if isinstance(getattr(step, "inputs", None), dict):
-            texts_to_scan.extend([str(value) for value in step.inputs.values()])
-
-        for text in texts_to_scan:
-            if text:
-                explicit.update(re.findall(r"\{prompt:(.*?)\}", text))
-                for state_token, prompt_keys in self.ANALYSIS_STATE_PROMPTS.items():
-                    if state_token in text:
-                        explicit.update(prompt_keys)
-
-        if getattr(step, "step_type", "") == "LLM_QUERY":
-            opts = getattr(step, "llm_options", {}) or {}
-            if getattr(step, "output_schema", None) or opts.get("json_mode"):
-                implicit.add("JSON Schema Enforcer")
-
-            ui_fmt = getattr(step, "ui_format", "")
-            if ui_fmt == "chat_widgets":
-                implicit.add("Format Enforcer - Chat Widgets")
-            elif ui_fmt == "data_table":
-                implicit.add("Format Enforcer - Data Table")
-            elif ui_fmt == "card_grid":
-                implicit.add("Format Enforcer - Card Grid")
-
-            if getattr(step, "inline_citations", False):
-                implicit.add("Inline Citation Directive")
-
-            req_context = getattr(step, "required_context", [])
-            if "manifest" in req_context:
-                implicit.add("Manifest Update Directive")
-                implicit.add("Context Inject - Manifest")
-            if "workspace" in req_context:
-                implicit.add("Context Inject - Workspace")
-            if "selected_nodes" in req_context:
-                implicit.add("Context Inject - Selected")
-            if "analyses" in req_context:
-                implicit.add("Context Inject - Analyses")
+        usage = collect_step_prompt_usage(step)
 
         sub_steps_data = []
         if getattr(step, "step_type", "") == "FOREACH":
@@ -241,13 +186,8 @@ class PromptAppService(QObject):
                 sub_steps_data.extend(self._extract_step_prompts(self._resolve_library_step(branch_step)))
 
         result = []
-        if explicit or implicit:
-            result.append(BlueprintPromptUsage(
-                step_id=getattr(step, "step_id", "Unknown Step"),
-                step_type=getattr(step, "step_type", "UNKNOWN"),
-                explicit=sorted(explicit),
-                implicit=sorted(implicit),
-            ))
+        if usage.explicit or usage.implicit:
+            result.append(usage)
         return result + sub_steps_data
 
     def _resolve_library_step(self, step):

@@ -1,5 +1,5 @@
 # gui/docks/unified_research/components/chat_streamer.py
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QPushButton, QTextBrowser, QLabel
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTextBrowser, QLabel
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QCursor
 from gui.docks.unified_research.components.note_bubble import NoteBubbleWidget
@@ -18,8 +18,18 @@ class ChatMessageWidget(QWidget):
         # 2. Shrink the gap between the sender name and the message text
         self.layout.setSpacing(2)
 
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
         lbl_sender = QLabel(f"<b>{sender_name}</b>")
-        self.layout.addWidget(lbl_sender)
+        header_layout.addWidget(lbl_sender)
+        header_layout.addStretch()
+        self.trace_button = None
+        if not is_user:
+            from gui.components.prompt_trace_button import PromptTraceButton
+            self.trace_button = PromptTraceButton(theme=self.theme, parent=self)
+            self.trace_button.hide()
+            header_layout.addWidget(self.trace_button)
+        self.layout.addLayout(header_layout)
 
         if is_user:
             # BUG FIX 1: Use a standard Label for the user. It never fails to size correctly.
@@ -57,6 +67,12 @@ class ChatMessageWidget(QWidget):
 
         if theme:
             self.update_theme(theme)
+
+    def set_prompt_trace(self, trace_id):
+        if self.trace_button:
+            self.trace_button.theme = self.theme or {}
+            self.trace_button.main_window = self.window()
+            self.trace_button.set_trace_id(trace_id)
 
     def update_status(self, text):
         if hasattr(self, 'lbl_status'):
@@ -152,6 +168,9 @@ class ChatMessageWidget(QWidget):
             self.thought_browser.setStyleSheet(f"background-color: rgba(0,0,0,0.1); color: {muted_col}; border: 1px solid {theme.get('border', '#444')}; border-radius: 4px;")
             self.main_browser.setStyleSheet(f"background: transparent; color: {text_col}; border: none; font-size: 14px;")
             self.lbl_status.setStyleSheet(f"color: {theme.get('accent', '#b366ff')}; font-size: 12px; font-weight: bold;")
+            if self.trace_button:
+                self.trace_button.theme = theme
+                self.trace_button.apply_theme()
         
         for i in range(self.bubbles_layout.count()):
             widget = self.bubbles_layout.itemAt(i).widget()

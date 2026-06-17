@@ -1,5 +1,5 @@
 from PySide6.QtCore import QObject
-from core.utils.citation_utils import extract_inline_citations, strip_inline_citation_block
+from core.engine.ui_payloads import RESTORABLE_UI_FORMATS, build_ui_payloads, serialize_payloads
 from core.utils.json_utils import extract_and_heal_json, extract_json_from_tags
 from core.utils.state_resolver import StateResolver
 from core.events.event_bus import EventBus
@@ -101,6 +101,7 @@ class BlueprintUIRouter(QObject):
 
         ui_format = getattr(step, 'ui_format', 'silent') if step else 'silent'
         target_id = getattr(step, 'ui_target', 'floating') if step else 'floating'
+        trace_id = getattr(runner, "trace_id", None)
         # 2. Pure-Python Manifest Update (No raw pattern matching)
         success, manifest_data = extract_json_from_tags(result_str, "UPDATE_MANIFEST")
         if success and isinstance(manifest_data, dict):
@@ -119,52 +120,21 @@ class BlueprintUIRouter(QObject):
             if getattr(runner.blueprint, 'name', '') == "Document Analysis" and self.get_target("analysis_tab"):
                 self._dispatch("analysis_tab", {"type": "status", "text": "✅ Full Document Analysis Complete."})
 
-        if ui_format == "nested_outline":
-            title = getattr(step, 'ui_title', 'AI Analysis')
-            if state_snapshot:
+        presentation_payloads = []
+        if ui_format in RESTORABLE_UI_FORMATS:
+            title = getattr(step, 'ui_title', 'AI Analysis') if step else 'AI Analysis'
+            if ui_format == "nested_outline" and state_snapshot:
                 state_dict = json.loads(state_snapshot) if isinstance(state_snapshot, str) else state_snapshot
                 title = StateResolver.safe_format(title, state_dict)
-
-            success, parsed_data = extract_and_heal_json(result_str)
-            if success and isinstance(parsed_data, list):
-                for i, item in enumerate(parsed_data):
-                    item_str = json.dumps(item)
-                    self._dispatch(target_id, {
-                        "type": "outline",
-                        "title": f"{title} (Part {i+1})",
-                        "content": item_str,
-                        "raw_ai_data": item_str,
-                    })
-            else:
-                self._dispatch(target_id, {
-                    "type": "outline",
-                    "title": title,
-                    "content": result_str,
-                    "raw_ai_data": result_str,
-                })
-
-        elif ui_format == "data_table":
-            self._dispatch(target_id, {"type": "data_table", "content": result_str})
-
-        elif ui_format == "card_grid":
-            self._dispatch(target_id, {"type": "card_grid", "content": result_str})
-
-        elif ui_format == "search_terms":
-            success, items = extract_and_heal_json(result_str)
-            self._dispatch(target_id, {
-                "type": "search_terms",
-                "items": items if success else result_str,
-                "success": success,
-            })
-
-        elif ui_format == "chat_widgets":
-            success, items = extract_and_heal_json(result_str)
-            if success:
-                if isinstance(items, dict):
-                    for val in items.values():
-                        if isinstance(val, list): items = val; break
-                    if isinstance(items, dict): items = [items] 
-                self._dispatch(target_id, {"type": "citation_cards", "items": items})
+            presentation_payloads = build_ui_payloads(
+                ui_format,
+                result_str,
+                step=step,
+                trace_id=trace_id,
+                title=title,
+            )
+            for payload in presentation_payloads:
+                self._dispatch(target_id, payload)
 
         elif ui_format == "workspace_graph":
             from core.events.event_bus import EventBus
@@ -188,16 +158,14 @@ class BlueprintUIRouter(QObject):
 
             self._dispatch(target_id, {"type": "status", "text": "❌ No relevant context found."})
 
-        elif ui_format == "live_stream" and getattr(step, "inline_citations", False):
-            clean_text = strip_inline_citation_block(result_str)
-            if clean_text != result_str:
-                self._dispatch(target_id, {"type": "replace_stream_text", "text": clean_text})
-            success, citations = extract_inline_citations(result_str)
-            if success:
-                self._dispatch(target_id, {"type": "citation_cards", "items": citations})
-
         # --- FIX 1: Immediately drop the active widget status when a live stream finishes ---
-        if ui_format in ["live_stream", "chat_widgets"]:
+        if ui_format in ["live_stream", "chat_widgets"] and not presentation_payloads:
+            if trace_id:
+                self._dispatch(target_id, {
+                    "type": "prompt_trace_available",
+                    "trace_id": trace_id,
+                    "blueprint_id": getattr(runner, "blueprint_id", None),
+                })
             self._dispatch(target_id, {"type": "hide_status"})
 
         # --- FIX 2: Broadcast completion to ALL targets so no tab gets stuck waiting ---
@@ -207,9 +175,17 @@ class BlueprintUIRouter(QObject):
             # Notify any bus-subscribed tabs that haven't registered directly
             self.bus.ui_render_requested.emit("*", {"type": "hide_status"})
                 
-        if target_id in ["chat_dock", "brainstorm_dock"] and ui_format in ["live_stream", "chat_widgets"]:
+        if target_id and ui_format in RESTORABLE_UI_FORMATS:
             pm = self._project_manager
-            if pm: pm.save_chat_message(target_id, "ai", result_str, ui_format)
+            if pm:
+                pm.save_chat_message(
+                    target_id,
+                    "ai",
+                    result_str,
+                    ui_format,
+                    trace_id,
+                    serialize_payloads(presentation_payloads),
+                )
 
     def _handle_error(self, err_msg):
         runner = self._get_runner()

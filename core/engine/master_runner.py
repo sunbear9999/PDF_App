@@ -3,9 +3,11 @@ import traceback
 import json
 import sqlite3
 import re
+import uuid
 from PySide6.QtCore import QMutex, QThread, QWaitCondition, Signal, Qt
 from core.engine.action_model import AIActionBlueprint, ActionStep
 from core.events.domains.workflow_events import WorkflowIntent, WorkflowPayload
+from core.models.prompt_models import PromptTraceCall, PromptTraceRecord, collect_step_prompt_usage
 from core.utils.state_resolver import StateResolver
 from core.utils.json_utils import extract_and_heal_json
 
@@ -58,6 +60,15 @@ class MasterActionRunner(QThread):
         self.blueprint = copy.deepcopy(blueprint)
         self.state = initial_state.copy()
         self.job = None
+        self.blueprint_id = getattr(self.blueprint, "_registry_id", None)
+        self.target_id = self.state.get("target_id")
+        self.trace_id = str(uuid.uuid4())
+        self.prompt_trace = PromptTraceRecord(
+            trace_id=self.trace_id,
+            blueprint_id=self.blueprint_id,
+            blueprint_name=getattr(self.blueprint, "name", ""),
+            target_id=self.target_id,
+        )
         self.current_executing_step = None
         self.resolved_step_specs = {}
         self._pause_mutex = QMutex()
@@ -561,6 +572,8 @@ class MasterActionRunner(QThread):
         elif options.get("json_mode") and "JSON" not in system_prompt:
              system_prompt += "\n\nCRITICAL: Output ONLY valid JSON. No markdown blocks, no explanations."
 
+        self._record_prompt_trace(step, inputs, resolved_model, system_prompt, options)
+
         raw_result = self.llm_manager.query(
             question=inputs.get('query', ''), 
             selected_model=resolved_model,
@@ -590,6 +603,29 @@ class MasterActionRunner(QThread):
                 return parsed 
                 
         return raw_result
+
+    def _record_prompt_trace(self, step, inputs, resolved_model, system_prompt, options):
+        try:
+            usage = collect_step_prompt_usage(step)
+            self.prompt_trace.blueprint_id = self.blueprint_id or getattr(self.blueprint, "_registry_id", None)
+            self.prompt_trace.blueprint_name = getattr(self.blueprint, "name", self.prompt_trace.blueprint_name)
+            self.prompt_trace.target_id = self.target_id
+            self.prompt_trace.job_id = getattr(self, "workflow_request_id", None) or (self.job.id if self.job else None)
+            self.prompt_trace.trace_id = self.trace_id
+            self.prompt_trace.calls.append(PromptTraceCall(
+                step_id=getattr(step, "step_id", ""),
+                step_type=getattr(step, "step_type", ""),
+                model=str(resolved_model or ""),
+                query=str(inputs.get("query", "")),
+                system_prompt=str(system_prompt or ""),
+                prompt_key=getattr(step, "prompt_key", None),
+                explicit_prompt_keys=usage.explicit,
+                implicit_prompt_keys=usage.implicit,
+                llm_options=dict(options or {}),
+            ))
+            self.state["llm_prompt_trace"] = [call.as_dict() for call in self.prompt_trace.calls]
+        except Exception as exc:
+            print(f"[Prompt Trace] Failed to record prompt trace: {exc}")
 
     def _has_citation_source(self, step) -> bool:
         source_key = getattr(step, "citation_source_key", None)

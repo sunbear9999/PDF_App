@@ -103,7 +103,7 @@ class MainWindow(QMainWindow):
 
 
         # 6. BUILD UI
-        self.process_monitor = ProcessMonitorWidget(self.process_registry, self.theme_manager.get_theme())
+        self.process_monitor = ProcessMonitorWidget(self.process_registry, self.theme_manager.get_theme(), self)
         self.top_toolbar = MainToolbar(self)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.top_toolbar)
         from gui.managers.workspace_builder import WorkspaceBuilder

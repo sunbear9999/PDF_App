@@ -164,8 +164,8 @@ class ZoteroResearchTab(QWidget):
         action_bar = QHBoxLayout()
         action_bar.setContentsMargins(8, 4, 8, 8)
 
-        self._import_btn = QPushButton("⬇ Import to Citations")
-        self._import_btn.setToolTip("Add this item's metadata to the Citation Manager")
+        self._import_btn = QPushButton("Match to Project PDF")
+        self._import_btn.setToolTip("Use Zotero sync to replace metadata for a project PDF")
         self._import_btn.setEnabled(False)
         self._import_btn.clicked.connect(self._on_import)
         action_bar.addWidget(self._import_btn, 2)
@@ -319,12 +319,18 @@ class ZoteroResearchTab(QWidget):
         item = self._selected
         if not item:
             return
-        cit = self._formatter.to_citation_dict(item)
-        self._bus.citation_action_requested.emit(
-            CitationIntent.UPDATE_ENTRY,
-            CitationPayload(data=cit),
-        )
-        self._status_lbl.setText(f"✓ Imported: {item.get('title', '')[:50]}")
+        try:
+            from .sync_dialog import ZoteroSyncDialog
+            dialog = ZoteroSyncDialog(
+                db=self._db,
+                formatter=self._formatter,
+                project_manager=getattr(self._ctx, "project_manager", None),
+                parent=self,
+            )
+            dialog.exec()
+        except Exception as exc:
+            print(f"[ZoteroTab] Could not open sync dialog: {exc}")
+        self._status_lbl.setText("Use sync to match Zotero metadata to project PDFs")
 
     def _on_copy_bibtex(self):
         item = self._selected

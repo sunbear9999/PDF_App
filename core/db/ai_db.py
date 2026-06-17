@@ -1,15 +1,32 @@
 # core/db/ai_db.py
+import json
 import sqlite3
+import uuid
 from core.db.base_db import BaseDB
+from core.models.prompt_models import PromptTraceRecord
 
 class AIDB(BaseDB):
-    def save_chat_message(self, tab_name, role, content, ui_format="live_stream"):
+    def save_chat_message(self, tab_name, role, content, ui_format="live_stream", trace_id=None, ui_payload=None):
         if not self._conn: return
         try:
-            self._conn.execute(
-                "INSERT INTO chat_messages (tab_name, role, content, ui_format) VALUES (?, ?, ?, ?)",
-                (tab_name, role, content, ui_format)
-            )
+            cursor = self._conn.cursor()
+            cursor.execute("PRAGMA table_info(chat_messages)")
+            columns = [col[1] for col in cursor.fetchall()]
+            if "ui_payload" in columns:
+                self._conn.execute(
+                    "INSERT INTO chat_messages (tab_name, role, content, ui_format, trace_id, ui_payload) VALUES (?, ?, ?, ?, ?, ?)",
+                    (tab_name, role, content, ui_format, trace_id, ui_payload)
+                )
+            elif "trace_id" in columns:
+                self._conn.execute(
+                    "INSERT INTO chat_messages (tab_name, role, content, ui_format, trace_id) VALUES (?, ?, ?, ?, ?)",
+                    (tab_name, role, content, ui_format, trace_id)
+                )
+            else:
+                self._conn.execute(
+                    "INSERT INTO chat_messages (tab_name, role, content, ui_format) VALUES (?, ?, ?, ?)",
+                    (tab_name, role, content, ui_format)
+                )
             self._conn.commit()
         except sqlite3.Error as e:
             print(f"Error saving chat message: {e}")
@@ -18,8 +35,36 @@ class AIDB(BaseDB):
         if not self._conn: return []
         try:
             cursor = self._conn.cursor()
-            cursor.execute("SELECT role, content, ui_format FROM chat_messages WHERE tab_name = ? ORDER BY timestamp ASC", (tab_name,))
-            return [{"role": row[0], "content": row[1], "ui_format": row[2]} for row in cursor.fetchall()]
+            cursor.execute("PRAGMA table_info(chat_messages)")
+            columns = [col[1] for col in cursor.fetchall()]
+            has_trace = "trace_id" in columns
+            has_payload = "ui_payload" in columns
+            select_cols = ["role", "content", "ui_format"]
+            if has_trace:
+                select_cols.append("trace_id")
+            if has_payload:
+                select_cols.append("ui_payload")
+            cursor.execute(
+                f"SELECT {', '.join(select_cols)} FROM chat_messages WHERE tab_name = ? ORDER BY timestamp ASC, id ASC",
+                (tab_name,),
+            )
+            history = []
+            for row in cursor.fetchall():
+                item = {
+                    "role": row[0],
+                    "content": row[1],
+                    "ui_format": row[2],
+                    "trace_id": None,
+                    "ui_payload": None,
+                }
+                offset = 3
+                if has_trace:
+                    item["trace_id"] = row[offset]
+                    offset += 1
+                if has_payload:
+                    item["ui_payload"] = row[offset]
+                history.append(item)
+            return history
         except sqlite3.Error as e:
             print(f"Error fetching chat history: {e}")
             return []
@@ -27,7 +72,9 @@ class AIDB(BaseDB):
     def clear_chat_history(self, tab_name):
         if not self._conn: return
         try:
-            self._conn.execute("DELETE FROM chat_messages WHERE tab_name = ?", (tab_name,))
+            self._conn.execute(
+                "DELETE FROM chat_messages WHERE tab_name = ?", (tab_name,)
+            )
             self._conn.commit()
         except sqlite3.Error as e:
             print(f"Error clearing chat history: {e}")
@@ -49,6 +96,69 @@ class AIDB(BaseDB):
             conn.close()
         except sqlite3.Error as e:
             print(f"Failed to log AI interaction in background: {e}")
+
+    def save_prompt_trace(self, trace_record):
+        if not self._conn:
+            return None
+        try:
+            if isinstance(trace_record, dict):
+                record = PromptTraceRecord.from_dict(trace_record)
+            else:
+                record = trace_record
+            if not record.calls:
+                return None
+            if not record.trace_id:
+                record.trace_id = str(uuid.uuid4())
+            data = record.as_dict()
+            self._conn.execute(
+                """
+                INSERT OR REPLACE INTO ai_prompt_traces
+                (trace_id, job_id, blueprint_id, blueprint_name, target_id, created_at, trace_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.trace_id,
+                    record.job_id,
+                    record.blueprint_id,
+                    record.blueprint_name,
+                    record.target_id,
+                    record.created_at,
+                    json.dumps(data),
+                ),
+            )
+            self._conn.commit()
+            return record.trace_id
+        except sqlite3.Error as e:
+            print(f"Failed to save prompt trace: {e}")
+            return None
+
+    def get_prompt_trace(self, trace_id):
+        if not self._conn or not trace_id:
+            return None
+        try:
+            cursor = self._conn.cursor()
+            cursor.execute("SELECT trace_json FROM ai_prompt_traces WHERE trace_id = ?", (trace_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return json.loads(row[0])
+        except (sqlite3.Error, json.JSONDecodeError) as e:
+            print(f"Failed to fetch prompt trace: {e}")
+            return None
+
+    def get_prompt_trace_for_job(self, job_id):
+        if not self._conn or not job_id:
+            return None
+        try:
+            cursor = self._conn.cursor()
+            cursor.execute("SELECT trace_json FROM ai_prompt_traces WHERE job_id = ? ORDER BY created_at DESC LIMIT 1", (job_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return json.loads(row[0])
+        except (sqlite3.Error, json.JSONDecodeError) as e:
+            print(f"Failed to fetch prompt trace for job: {e}")
+            return None
 
     def generate_llm_log(self, export_path):
         if not self._conn: return False

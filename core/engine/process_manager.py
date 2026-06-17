@@ -12,6 +12,11 @@ class LLMJob:
         self.is_express = False  # <-- NEW FLAG
         self.abort_event = threading.Event()
         self.runner = runner
+        blueprint = getattr(runner, "blueprint", None)
+        self.blueprint_id = getattr(runner, "blueprint_id", None) or getattr(blueprint, "_registry_id", None)
+        self.blueprint_name = getattr(blueprint, "name", job_name)
+        self.target_id = getattr(runner, "target_id", None)
+        self.trace_id = getattr(runner, "trace_id", None)
 
     def kill(self):
         self.abort_event.set()
@@ -28,12 +33,16 @@ class ProcessRegistry(QObject):
         self.active_job = None
         self.pending_queue = []
         self.express_jobs = []  # <-- NEW TRACKER FOR CONCURRENT JOBS
+        self.recent_jobs = []
 
     def enqueue_runner(self, runner, job_name, job_type="Agent", is_express=False):
         """Takes an instantiated MasterActionRunner, assigns it a job, and queues or runs it."""
         job = LLMJob(job_name, runner, job_type)
         job.is_express = is_express
         runner.job = job 
+        runner.workflow_request_id = getattr(runner, "workflow_request_id", None) or job.id
+        if not getattr(runner, "trace_id", None):
+            runner.trace_id = None
         
         if is_express:
             job.status = "Running (Express)..."
@@ -79,6 +88,7 @@ class ProcessRegistry(QObject):
 
     def complete_job(self, job_id):
         if self.active_job and self.active_job.id == job_id:
+            self._remember_recent_job(self.active_job)
             self.active_job = None
             self.job_removed.emit(job_id)
             self._process_next()
@@ -87,9 +97,21 @@ class ProcessRegistry(QObject):
         # Clean up completed express jobs
         for i, job in enumerate(self.express_jobs):
             if job.id == job_id:
+                self._remember_recent_job(job)
                 self.express_jobs.pop(i)
                 self.job_removed.emit(job_id)
                 break
+
+    def _remember_recent_job(self, job):
+        if not job:
+            return
+        trace_id = getattr(job, "trace_id", None) or getattr(getattr(job, "runner", None), "trace_id", None)
+        if not trace_id:
+            return
+        job.trace_id = trace_id
+        job.status = "Completed"
+        self.recent_jobs.insert(0, job)
+        self.recent_jobs = self.recent_jobs[:10]
 
     def cancel_job(self, job_id):
         if self.active_job and self.active_job.id == job_id:

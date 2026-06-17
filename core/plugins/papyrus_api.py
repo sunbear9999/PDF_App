@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from core.services.ai.research_agent_service import ResearchAgentService
     from core.services.ai.prompt_app_service import PromptAppService
     from core.services.reference.citation_app_service import CitationAppService
+    from core.citation_manager import CitationManager
 
 
 class PluginDependencyError(RuntimeError):
@@ -234,6 +235,11 @@ class PapyrusAPI:
     def citation_service(self) -> "CitationAppService":
         """Citation app service — use register_provider() to contribute citation entries."""
         return self._core.citation_app_service
+
+    @property
+    def citation_manager(self) -> "CitationManager":
+        """Citation formatting and metadata helpers."""
+        return self._core.citation_manager
 
     # ----------------------------------------------------------------
     # Section B2: Database and task namespaces

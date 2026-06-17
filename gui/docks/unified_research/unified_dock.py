@@ -11,11 +11,10 @@ from .tabs.research_agent_tab import ResearchAgentTab
 from .tabs.brainstorm_tab import BrainstormTab
 from .tabs.search_tab import SearchTab
 from .tabs.analysis_tab import AnalysisTab
-from .components.note_bubble import NoteBubbleWidget
 from gui.components.process_monitor import ProcessMonitorWidget
 import json
 from gui.docks.unified_research.components.manifest_bubble import ProjectBriefDialog
-from gui.docks.unified_research.components.chat_streamer import ChatMessageWidget
+from gui.docks.unified_research.components.history_renderer import ChatHistoryRenderer
 from core.events.event_bus import EventBus
 from core.events.domains.document_events import DocumentEvent, DocumentEventPayload
 from core.events.domains.workspace_events import WorkspaceEvent, WorkspaceEventPayload
@@ -208,43 +207,8 @@ class UnifiedResearchDock(QDockWidget):
         """Universally rebuilds chat UI for any tab from the SQLite history."""
         if not self.project_manager: return
 
-        # 1. Clear existing UI (leaving the bottom stretch)
-
-
-        # 2. Fetch and build
         history = self.project_manager.get_chat_history(tab_id)
-        for msg in history:
-            is_user = (msg["role"] == "user")
-            name = "You" if is_user else "AI Agent"
-
-            if msg["ui_format"] == "chat_widgets":
-                try:
-                    items = json.loads(msg["content"])
-                    if isinstance(items, dict):
-                        for val in items.values():
-                            if isinstance(val, list): items = val; break
-                        if isinstance(items, dict): items = [items]
-
-                    widget = ChatMessageWidget(name, theme=self.theme, is_user=is_user)
-                    for item in items:
-                        if isinstance(item, dict):
-                            widget.add_bubble(
-                                doc_name=item.get("doc_name", "Unknown Document"),
-                                quote=item.get("quote", item.get("text", "")),
-                                note=item.get("note", item.get("reason", ""))
-                            )
-                    if hasattr(tab_widget, 'add_message_widget'): tab_widget.add_message_widget(widget)
-                except Exception as e:
-                    print(f"Failed to rebuild chat widget: {e}")
-            else:
-                widget = ChatMessageWidget(name, theme=self.theme, is_user=is_user)
-                widget.append_chunk(msg["content"])
-                if hasattr(tab_widget, 'add_message_widget'): tab_widget.add_message_widget(widget)
-
-        # 3. Universal Scroll to Bottom
-        if hasattr(tab_widget, 'scroll_area'):
-            scrollbar = tab_widget.scroll_area.verticalScrollBar()
-            QTimer.singleShot(50, lambda: scrollbar.setValue(scrollbar.maximum()))
+        ChatHistoryRenderer(tab_widget, theme=self.theme).render(history)
 
     def clear_tab_history(self, tab_widget, tab_id):
         """Universally wipes SQLite history and clears the UI for a specific tab."""

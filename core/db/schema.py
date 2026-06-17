@@ -85,6 +85,24 @@ class DatabaseSchema(BaseDB):
                 doc_id TEXT PRIMARY KEY, title TEXT, authors TEXT,
                 year TEXT, journal TEXT, doi TEXT
             )''')
+            cursor.execute("PRAGMA table_info(citations)")
+            citation_columns = [col[1] for col in cursor.fetchall()]
+            citation_migrations = {
+                "vol_issue": "TEXT",
+                "publisher": "TEXT",
+                "url": "TEXT",
+                "item_type": "TEXT",
+                "fields_json": "TEXT",
+                "source_provider": "TEXT",
+                "source_item_key": "TEXT",
+                "source_updated_at": "TEXT",
+            }
+            for col_name, col_type in citation_migrations.items():
+                if col_name not in citation_columns:
+                    try:
+                        cursor.execute(f"ALTER TABLE citations ADD COLUMN {col_name} {col_type}")
+                    except sqlite3.OperationalError:
+                        pass
             
             # Analysis
             cursor.execute('''CREATE TABLE IF NOT EXISTS analysis_templates (
@@ -121,7 +139,26 @@ class DatabaseSchema(BaseDB):
             
             cursor.execute('''CREATE TABLE IF NOT EXISTS chat_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, tab_name TEXT, role TEXT, content TEXT,
-                ui_format TEXT DEFAULT 'live_stream', timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                ui_format TEXT DEFAULT 'live_stream', timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                trace_id TEXT
+            )''')
+            cursor.execute("PRAGMA table_info(chat_messages)")
+            chat_columns = [col[1] for col in cursor.fetchall()]
+            if "trace_id" not in chat_columns:
+                try: cursor.execute("ALTER TABLE chat_messages ADD COLUMN trace_id TEXT")
+                except sqlite3.OperationalError: pass
+            if "ui_payload" not in chat_columns:
+                try: cursor.execute("ALTER TABLE chat_messages ADD COLUMN ui_payload TEXT")
+                except sqlite3.OperationalError: pass
+
+            cursor.execute('''CREATE TABLE IF NOT EXISTS ai_prompt_traces (
+                trace_id TEXT PRIMARY KEY,
+                job_id TEXT,
+                blueprint_id TEXT,
+                blueprint_name TEXT,
+                target_id TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                trace_json TEXT NOT NULL
             )''')
             
             # Plugin-contributed tables (CREATE TABLE IF NOT EXISTS; idempotent)
