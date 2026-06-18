@@ -162,6 +162,7 @@ class ResearchAgentService(QObject):
             self._start_runner(runner)
 
     def _handle_planner_complete(self, state: Dict[str, Any]):
+        self._active_planner_runner = None
         raw_plan = state.get("agent_plan", "")
         plan = self._parse_plan(raw_plan)
         if not plan:
@@ -252,6 +253,7 @@ class ResearchAgentService(QObject):
             self._start_runner(runner)
 
     def _handle_tool_complete(self, tool_run: ResearchAgentToolRun, state: Dict[str, Any]):
+        self._active_tool_runner = None
         summary = self._summarize_tool_state(tool_run.blueprint_id, state)
         tool_run.complete(summary)
         if self.session:
@@ -261,6 +263,7 @@ class ResearchAgentService(QObject):
             self.plan_next()
 
     def _handle_tool_error(self, tool_run: ResearchAgentToolRun, message: str):
+        self._active_tool_runner = None
         tool_run.fail(message)
         if self.session:
             self.session.status = "error"

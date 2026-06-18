@@ -15,17 +15,16 @@ class SearchAPI:
             doc_path = next((p for p in project_manager.pdfs if doc_name in os.path.basename(p)), None)
             if not doc_path: continue
             try:
-                doc = fitz.open(doc_path)
-                for page_num in range(len(doc)):
-                    text = doc.load_page(page_num).get_text("text").replace('\n', ' ')
-                    sentences = re.split(r'(?<=[.!?]) +', text)
-                    for i, sentence in enumerate(sentences):
-                        if citation_pattern.search(sentence) and len(sentence) > 20:
-                            context_text = ""
-                            if i > 0: context_text += sentences[i-1].strip() + " "
-                            context_text += sentence.strip()
-                            all_citations.append({"doc": doc_name, "text": context_text})
-                doc.close()
+                with fitz.open(doc_path) as doc:
+                    for page_num in range(len(doc)):
+                        text = doc.load_page(page_num).get_text("text").replace('\n', ' ')
+                        sentences = re.split(r'(?<=[.!?]) +', text)
+                        for i, sentence in enumerate(sentences):
+                            if citation_pattern.search(sentence) and len(sentence) > 20:
+                                context_text = ""
+                                if i > 0: context_text += sentences[i-1].strip() + " "
+                                context_text += sentence.strip()
+                                all_citations.append({"doc": doc_name, "text": context_text})
             except Exception: pass
             
         if not all_citations: return []

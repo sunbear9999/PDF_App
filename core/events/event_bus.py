@@ -59,6 +59,10 @@ class EventBus(QObject):
     tts_status_updated = Signal(object, object)
     tts_text_extracted = Signal(object, object)
     ocr_status_updated = Signal(object, object)
+    # --- Data Dock Domain ---
+    data_dock_action_requested = Signal(object, object)
+    data_dock_state_changed = Signal(object, object)
+    pdf_data_selection_ready = Signal(object, object)
     # --- Dictionary Domain ---
     dictionary_action_requested = Signal(object, object)
     dictionary_results_ready = Signal(object, object)
@@ -105,6 +109,13 @@ class EventBus(QObject):
     plugin_notification_requested = Signal(str, str, int)  # message, level, duration_ms
     plugin_loaded = Signal(str)    # plugin_id
     plugin_unloaded = Signal(str)  # plugin_id
+
+    # --- Help / Tutorial Domain ---
+    help_action_requested = Signal(object, object)  # HelpIntent, HelpPayload
+    help_event_occurred = Signal(object, object)    # HelpEvent, HelpEventPayload
+
+    # --- Pack Import/Export Domain ---
+    pack_action_requested = Signal(object, object)  # PackIntent, PackPayload
 
     # --- UI Render Domain ---
     # Emitted by BlueprintUIRouter to dispatch AI output to tabs without direct method calls.

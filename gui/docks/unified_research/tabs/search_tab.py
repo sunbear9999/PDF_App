@@ -8,6 +8,7 @@ from PySide6.QtGui import QCursor, QDesktopServices
 
 from core.api.search_api import SearchAPI
 from gui.docks.unified_research.tabs.base_tab import BaseTab
+from gui.utils.document_helpers import active_pdf_names, active_pdf_paths
 from gui.docks.unified_research.components.universal_search_components import UniversalSearchBar, ReusableCitationCard, ReusableTermCard
 
 class AsyncCitationWorker(QThread):
@@ -190,7 +191,7 @@ class SearchTab(BaseTab):
         self.status_lbl.setText("⏳ Initializing AI Engine...")
 
         if self.chk_advanced.isChecked():
-            allowed_docs = [os.path.basename(p) for p in self.project_manager.pdfs]
+            allowed_docs = active_pdf_names(self.project_manager)
             self.math_worker = AsyncCitationWorker(goal, allowed_docs, self.project_manager, self.llm_manager, parent=self)
             self.math_worker.citation_received.connect(self._add_citation_card)
             self.math_worker.start()
@@ -203,7 +204,7 @@ class SearchTab(BaseTab):
 
     def _jump_to_source(self, doc_name, text):
         pm = self.project_manager
-        target_path = next((p for p in pm.pdfs if doc_name in os.path.basename(p)), None)
+        target_path = next((p for p in active_pdf_paths(pm) if doc_name in os.path.basename(p)), None)
         if target_path:
             from core.events.domains.document_events import DocumentIntent, DocumentPayload
             bus = EventBus.get_instance()

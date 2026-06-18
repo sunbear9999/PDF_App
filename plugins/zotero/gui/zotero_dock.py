@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 
 from gui.components.base.core import BaseDock
 from core.events.domains.tool_events import CitationIntent, CitationPayload
+from gui.managers.dialog_manager import exec_as_modal, get_for_widget
 
 from .collection_tree import CollectionTree
 from .item_table import ItemTable
@@ -86,6 +87,24 @@ class ZoteroDock(BaseDock):
         self._theme: dict = {}
         self._build_ui()
         self._load_library()
+
+    def closeEvent(self, event):
+        self._stop_worker()
+        super().closeEvent(event)
+
+    def _stop_worker(self):
+        worker = self._worker
+        if not worker:
+            return
+        try:
+            if worker.isRunning():
+                worker.requestInterruption()
+                if not worker.wait(1500):
+                    worker.terminate()
+                    worker.wait(1500)
+        except RuntimeError:
+            pass
+        self._worker = None
 
     # ------------------------------------------------------------------
     # UI construction
@@ -168,11 +187,16 @@ class ZoteroDock(BaseDock):
         self._status_lbl.setText("Loading…")
 
         if self._worker and self._worker.isRunning():
-            self._worker.terminate()
+            self._stop_worker()
 
         self._worker = _LoadWorker(self._db, self._active_collection, self._active_tag)
         self._worker.finished.connect(self._on_load_finished)
+        self._worker.finished.connect(lambda *_: self._clear_worker_ref())
+        self._worker.finished.connect(self._worker.deleteLater)
         self._worker.start()
+
+    def _clear_worker_ref(self):
+        self._worker = None
 
     def _on_load_finished(self, collections: list, tags: list, items: list):
         self.refresh_btn.setEnabled(True)
@@ -233,7 +257,11 @@ class ZoteroDock(BaseDock):
                 project_manager=getattr(self.app_context, "project_manager", None),
                 parent=self,
             )
-            dialog.exec()
+            dm = getattr(self.app_context, "dialog_manager", None) or get_for_widget(self)
+            if dm:
+                dm.show_instance(dialog)
+            else:
+                exec_as_modal(dialog)
             self._status_lbl.setText("Use sync to match Zotero metadata to project PDFs")
         except Exception as exc:
             QMessageBox.warning(self, "Zotero Sync", f"Could not open sync dialog: {exc}")

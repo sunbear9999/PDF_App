@@ -644,6 +644,27 @@ class Node(QGraphicsRectItem):
         self.bus.workspace_action_requested.emit(WorkspaceIntent.NODE_PRESSED, WorkspacePayload(node_id=self.node_id))
         super().mousePressEvent(event)
 
+    def mouseDoubleClickEvent(self, event):
+        if self.node_type_id in {"workspace.node.data", "workspace.node.chart"}:
+            try:
+                from core.events.domains.data_dock_events import DataDockIntent, DataDockPayload
+                dock_payload = (self.entity_properties.get("data_dock") or {})
+                dataset_id = dock_payload.get("dataset_id")
+                snapshot = dock_payload.get("snapshot")
+                main_window = self.scene().views()[0].window() if self.scene() and self.scene().views() else None
+                if main_window and hasattr(main_window, "dock_manager"):
+                    main_window.dock_manager.spawn("data_dock")
+                self.bus.data_dock_action_requested.emit(
+                    DataDockIntent.LOAD_DATASET,
+                    DataDockPayload(dataset_id=dataset_id, node_id=self.node_id, extra={"snapshot": snapshot}),
+                )
+                if event:
+                    event.accept()
+                return
+            except Exception:
+                pass
+        super().mouseDoubleClickEvent(event)
+
     def trigger_jump(self):
         self.bus.workspace_action_requested.emit(WorkspaceIntent.NODE_JUMP_REQUEST, WorkspacePayload(node_id=self.node_id))
 

@@ -151,6 +151,27 @@ class AnnotationManager(QObject):
                 lo, hi = sorted([self.start_word_idx, end_word_idx])
                 self.selected_words = self.page_words[lo:hi+1]
 
+                # Notify plugins that subscribed via api.on_text_selected()
+                if self.selected_words:
+                    try:
+                        from core.events.domains.document_events import DocumentPayload
+                        text = " ".join(w[4] for w in self.selected_words)
+                        doc_path = getattr(self.viewer, "current_pdf_path", "") or getattr(self.viewer, "pdf_path", "") or ""
+                        payload = DocumentPayload(
+                            path=doc_path,
+                            text=text,
+                            context={
+                                "page_num": self.current_page_idx,
+                                "doc_path": doc_path,
+                                "pdf_path": doc_path,
+                                "rects": [list(w[:4]) for w in self.selected_words],
+                                "words": [list(w[:5]) for w in self.selected_words],
+                            },
+                        )
+                        self.bus.document_text_selected.emit(None, payload)
+                    except Exception:
+                        pass
+
    # gui/components/annotation_manager.py -> AnnotationManager class
     def show_context_menu(self, global_pos):
         menu = QMenu(self.viewer)
@@ -227,8 +248,35 @@ class AnnotationManager(QObject):
         cite_action = menu.addAction("📋 Copy In-Text Citation")
         cite_action.triggered.connect(self.copy_in_text_citation)
 
+        data_action = menu.addAction("▦ Send to Data Dock")
+        data_action.triggered.connect(lambda: self.send_selection_to_data_dock(extracted_text))
+
         self._inject_plugin_items(menu, extracted_text)
         menu.exec(global_pos)
+
+    def send_selection_to_data_dock(self, selected_text: str):
+        from core.events.domains.data_dock_events import DataDockIntent, DataDockPayload
+        doc_path = getattr(self.viewer, "current_pdf_path", "") or getattr(self.viewer, "pdf_path", "") or ""
+        payload = DocumentPayload(
+            path=doc_path,
+            text=selected_text,
+            context={
+                "page_num": self.current_page_idx,
+                "doc_path": doc_path,
+                "pdf_path": doc_path,
+                "rects": [list(w[:4]) for w in self.selected_words],
+                "words": [list(w[:5]) for w in self.selected_words],
+            },
+        )
+        self.bus.pdf_data_selection_ready.emit(None, payload)
+        main_window = self.viewer.window()
+        if main_window and hasattr(main_window, "dock_manager"):
+            main_window.dock_manager.spawn("data_dock")
+        self.bus.data_dock_action_requested.emit(
+            DataDockIntent.LOAD_SELECTION,
+            DataDockPayload(selection=payload),
+        )
+        self.clear_selection()
 
     def _inject_plugin_items(self, menu, selected_text: str = "") -> None:
         """Append plugin-registered PDF context menu actions to an existing menu."""
@@ -296,8 +344,8 @@ class AnnotationManager(QObject):
 
         allowed_docs = []
         if hasattr(main_window, 'project_manager') and main_window.project_manager:
-            import os
-            allowed_docs = [os.path.basename(p) for p in main_window.project_manager.pdfs]
+            from gui.utils.document_helpers import active_pdf_names
+            allowed_docs = active_pdf_names(main_window.project_manager)
 
         if action_type == "reword":
             blueprint = DefaultBlueprints.get_reword_blueprint(text)
@@ -346,27 +394,64 @@ class AnnotationManager(QObject):
         self.clear_selection()
 
     def apply_highlight(self, color_tuple):
-        if not self.selected_words: return
+        if not self.selected_words:
+            return
 
         extracted_text = " ".join(w[4] for w in self.selected_words)
-        text, ok = QInputDialog.getText(self.viewer, "Add Note", "Enter a note for this highlight (Optional):")
+        # Capture selection state; clear_selection() is called via the dialog's
+        # finished signal so the visual indicator persists until the user responds.
+        selected_words = list(self.selected_words)
+        current_page = self.current_page_idx
 
-        if ok:
-            main_window = self.viewer.window()
-            pdf_path = getattr(self.viewer, "pdf_path", None) or getattr(main_window, "current_file_path", None)
+        def _commit(note_text: str) -> None:
+            pdf_path = getattr(self.viewer, "pdf_path", None) or getattr(
+                self.viewer.window(), "current_file_path", None
+            )
             self.bus.document_action_requested.emit(
                 DocumentIntent.CREATE_HIGHLIGHT,
                 DocumentPayload(
                     path=pdf_path,
-                    page_num=self.current_page_idx,
-                    rects=[list(w[:4]) for w in self.selected_words],
+                    page_num=current_page,
+                    rects=[list(w[:4]) for w in selected_words],
                     text=extracted_text,
-                    note=text if text else "",
+                    note=note_text,
                     color=color_tuple,
                 ),
             )
 
-        self.clear_selection()
+        from gui.managers.dialog_manager import get_for_widget
+        dm = get_for_widget(self.viewer)
+        if dm:
+            from PySide6.QtWidgets import (
+                QDialog, QHBoxLayout, QLabel, QLineEdit,
+                QPushButton, QVBoxLayout,
+            )
+            dialog = QDialog()
+            dialog.setWindowTitle("Add Note")
+            layout = QVBoxLayout(dialog)
+            layout.addWidget(QLabel("Enter a note for this highlight (Optional):"))
+            text_field = QLineEdit()
+            layout.addWidget(text_field)
+            btn_row = QHBoxLayout()
+            ok_btn = QPushButton("OK")
+            cancel_btn = QPushButton("Cancel")
+            ok_btn.setDefault(True)
+            ok_btn.clicked.connect(dialog.accept)
+            cancel_btn.clicked.connect(dialog.reject)
+            btn_row.addWidget(cancel_btn)
+            btn_row.addWidget(ok_btn)
+            layout.addLayout(btn_row)
+
+            dialog.accepted.connect(lambda: _commit(text_field.text()))
+            dialog.finished.connect(lambda _: self.clear_selection())
+            dm.show_instance(dialog)
+        else:
+            text, ok = QInputDialog.getText(
+                self.viewer, "Add Note", "Enter a note for this highlight (Optional):"
+            )
+            if ok:
+                _commit(text)
+            self.clear_selection()
 
     def ask_ai_about_selection(self):
         if not self.selected_words: return

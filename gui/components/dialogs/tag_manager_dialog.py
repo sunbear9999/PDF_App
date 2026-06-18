@@ -9,10 +9,12 @@ from PySide6.QtWidgets import (
 )
 from core.events.event_bus import EventBus
 from core.events.domains.metadata_events import TagEvent, TagEventPayload, TagIntent, TagPayload
+from gui.managers.dialog_manager import exec_as_modal, get_for_widget
 
 class MassAssignDialog(QDialog):
     def __init__(self, tag_id, tag_name, all_pdfs, assigned_docs, parent=None):
         super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.tag_id = tag_id
         self.bus = EventBus.get_instance()
         self.setWindowTitle(f"Mass Assign Tag: {tag_name}")
@@ -58,6 +60,7 @@ class MassAssignDialog(QDialog):
 class TagManagerDialog(QDialog):
     def __init__(self, parent=None): # REMOVED PM
         super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.bus = EventBus.get_instance()
         self.tag_service = getattr(parent, "tag_app_service", None)
         self.selected_color = "#4CAF50"
@@ -166,9 +169,14 @@ class TagManagerDialog(QDialog):
     def open_mass_assign_dialog(self):
         item = self.tag_list.currentItem()
         if not item: return
-        dialog = MassAssignDialog(item.data(Qt.ItemDataRole.UserRole), item.text().strip(), self.all_pdfs_cache, getattr(self, '_cached_assigned_docs', []), self)
-        if dialog.exec():
-            self.update_tag_details()
+        dialog = MassAssignDialog(item.data(Qt.ItemDataRole.UserRole), item.text().strip(), self.all_pdfs_cache, getattr(self, "_cached_assigned_docs", []), self)
+        dialog.accepted.connect(self.update_tag_details)
+        dm = get_for_widget(self)
+        if dm:
+            dm.show_instance(dialog)
+        else:
+            if exec_as_modal(dialog):
+                self.update_tag_details()
 
     def add_tag(self):
         name = self.tag_name_input.text().strip()
@@ -185,6 +193,7 @@ class TagManagerDialog(QDialog):
 class TagAssignmentDialog(QDialog):
     def __init__(self, target_id, target_type, parent=None): # REMOVED PM
         super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.bus = EventBus.get_instance()
         self.target_id = target_id
         self.target_type = target_type

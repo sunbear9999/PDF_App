@@ -1,4 +1,5 @@
 from PySide6.QtWidgets import QApplication, QPushButton
+from gui.managers.dialog_manager import exec_as_modal, get_for_widget
 
 
 class PromptTraceButton(QPushButton):
@@ -67,4 +68,8 @@ class PromptTraceButton(QPushButton):
             trace_id=self.trace_id,
             trace_record=self.trace_record,
         )
-        dialog.exec()
+        dm = get_for_widget(self)
+        if dm:
+            dm.show_instance(dialog)
+        else:
+            exec_as_modal(dialog)

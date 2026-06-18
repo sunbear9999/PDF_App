@@ -8,6 +8,7 @@ from PySide6.QtGui import QCursor
 class WorkspaceReviewDialog(QDialog):
     def __init__(self, ai_json_str, theme=None, parent=None):
         super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setWindowTitle("🛡️ Review AI Changes")
         self.setMinimumSize(400, 300)
         self.theme = theme

@@ -3,18 +3,22 @@ import os
 import json
 import hashlib
 import re
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, 
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
                              QComboBox, QFrame, QScrollArea, QTabWidget, QButtonGroup, QStackedWidget, QMessageBox, QInputDialog, QDialog, QTextEdit, QToolButton)
 from PySide6.QtCore import Qt, QTimer, Signal
+from gui.managers.dialog_manager import exec_as_modal, get_for_widget
 from PySide6.QtGui import QCursor
 
 from core.events.event_bus import EventBus
 from core.events.domains.analysis_events import AnalysisEvent, AnalysisPayload
+from core.events.domains.document_events import DocumentEvent
+from core.events.domains.project_events import ProjectEvent
 from core.events.domains.workflow_events import WorkflowIntent, WorkflowPayload
 from core.engine.default_blueprints import DefaultBlueprints
 from gui.docks.unified_research.tabs.base_tab import BaseTab
 from gui.docks.unified_research.components.template_editor import TemplateEditorDialog
 from gui.docks.unified_research.components.note_bubble import NoteBubbleWidget
+from gui.utils.document_helpers import active_pdf_paths
 
 
 class AnalysisResultCard(QFrame):
@@ -82,7 +86,11 @@ class AnalysisResultCard(QFrame):
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(dlg.accept)
         layout.addWidget(close_btn)
-        dlg.exec()
+        dm = get_for_widget(self)
+        if dm:
+            dm.show_instance(dlg)
+        else:
+            exec_as_modal(dlg)
 
 
 class AnalysisChunkCard(QFrame):
@@ -211,6 +219,10 @@ class AnalysisTab(BaseTab):
         
         self.bus.workflow_action_requested.connect(self._handle_workflow_action)
         self.bus.analysis_result_changed.connect(self._handle_analysis_event)
+        self.bus.document_added.connect(self._handle_document_list_event)
+        self.bus.pdf_removed.connect(self._handle_document_list_event)
+        self.bus.pdf_renamed.connect(self._handle_document_list_event)
+        self.bus.project_loaded.connect(self._handle_project_event)
         
         self._build_ui()
         QTimer.singleShot(100, self._refresh_selectors)
@@ -220,6 +232,14 @@ class AnalysisTab(BaseTab):
 
     def _handle_analysis_event(self, event, payload):
         self.ui_signal.emit(event, payload)
+
+    def _handle_document_list_event(self, event, payload):
+        if event in {DocumentEvent.DOCUMENT_ADDED, DocumentEvent.PDF_REMOVED, DocumentEvent.PDF_RENAMED}:
+            QTimer.singleShot(0, self._refresh_selectors)
+
+    def _handle_project_event(self, event, payload):
+        if event == ProjectEvent.LOADED:
+            QTimer.singleShot(0, self._refresh_selectors)
 
     # --- Main Thread Safely Executed Methods (GUI UPDATES GO HERE) ---
     def _safe_workflow_action(self, action, payload):
@@ -463,11 +483,22 @@ class AnalysisTab(BaseTab):
 
     def _refresh_selectors(self):
         if not self.pm: return
+        previous_docs = {
+            self.doc_selector: self.doc_selector.currentData(),
+            self.cmp_doc: self.cmp_doc.currentData(),
+            self.comp_doc1: self.comp_doc1.currentData(),
+            self.comp_doc2: self.comp_doc2.currentData(),
+        }
+        previous_templates = {
+            self.combo_templates: self._get_safe_template_id(self.combo_templates.currentData()),
+            self.cmp_template: self._get_safe_template_id(self.cmp_template.currentData()),
+        }
+
         for cb in [self.doc_selector, self.cmp_doc, self.comp_doc1, self.comp_doc2, self.combo_templates, self.cmp_template]:
             cb.blockSignals(True)
             cb.clear()
 
-        for pdf in self.pm.pdfs:
+        for pdf in active_pdf_paths(self.pm):
             name = os.path.basename(pdf)
             for cb in [self.doc_selector, self.cmp_doc, self.comp_doc1, self.comp_doc2]:
                 cb.addItem(name, pdf)
@@ -479,16 +510,40 @@ class AnalysisTab(BaseTab):
             self.combo_templates.addItem(t_name, t)
             self.cmp_template.addItem(t_name, t_id)
 
+        for cb, previous in previous_docs.items():
+            idx = cb.findData(previous)
+            if idx >= 0:
+                cb.setCurrentIndex(idx)
+
+        for cb, previous in previous_templates.items():
+            for idx in range(cb.count()):
+                if self._get_safe_template_id(cb.itemData(idx)) == previous:
+                    cb.setCurrentIndex(idx)
+                    break
+
         for cb in [self.doc_selector, self.cmp_doc, self.comp_doc1, self.comp_doc2, self.combo_templates, self.cmp_template]:
             cb.blockSignals(False)
+
+        if self.doc_selector.count() == 0:
+            self.status_lbl.setText("No PDFs available for analysis.")
+            self._clear_layout(self.results_layout)
+            self._clear_layout(self.saved_layout)
+            self._clear_layout(self.master_layout)
+            self._clear_layout(self.compare_layout)
+            return
 
         self._load_existing_analysis()
         self._load_run_existing_analysis()
 
     def _open_template_editor(self):
         dlg = TemplateEditorDialog(self.pm, self.theme, self)
-        if dlg.exec():
-            self._refresh_selectors()
+        dlg.accepted.connect(self._refresh_selectors)
+        dm = get_for_widget(self)
+        if dm:
+            dm.show_instance(dlg)
+        else:
+            if exec_as_modal(dlg):
+                self._refresh_selectors()
 
     def _trigger_analysis(self):
         doc_path = self.doc_selector.currentData()

@@ -14,6 +14,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+# Window flags applied to non-modal PapyrusDialog windows.
+# Qt.Tool causes the window manager to:
+#  - skip the window in the taskbar / dock  (X11: _NET_WM_WINDOW_TYPE_UTILITY)
+#  - keep it in front of its transient parent without system-wide always-on-top
+#  - not reveal the desktop panel when the parent is fullscreen (most WMs)
+_DIALOG_MODELESS_FLAGS: Qt.WindowType = (
+    Qt.WindowType.Tool
+    | Qt.WindowType.WindowTitleHint
+    | Qt.WindowType.WindowSystemMenuHint
+    | Qt.WindowType.WindowCloseButtonHint
+)
+
 from gui.base.core import (
     FALLBACK_THEME, SOLARIZED_THEME,
     UnifiedThemedMixin, ThemedMixin as _CoreThemedMixin, ModernThemedMixin,
@@ -170,8 +182,53 @@ class BaseSearchBar(BasePanel):
 
 
 class BaseDialog(QDialog, CompatThemedMixin):
-    def __init__(self, title: str = "", theme: dict | None = None, parent=None):
-        super().__init__(parent)
+    """
+    Base class for all secondary Papyrus windows.
+
+    Differences from plain QDialog
+    --------------------------------
+    * Automatically resolves the nearest QMainWindow as parent so the OS
+      can apply the transient-for hint (prevents orphaned taskbar entries).
+    * Uses Qt.Tool window flags by default: no separate taskbar/dock entry,
+      stays in front of the main window, and does not reveal the desktop
+      panel when the main window is fullscreen (most Linux WMs).
+    * Non-modal by default.  Pass ``modal=True`` to opt into WindowModal
+      blocking (preferred over ApplicationModal).
+    * Sets WA_DeleteOnClose for non-modal instances so the C++ object is
+      freed when the user closes the window.
+
+    Subclasses that call exec() directly (blocking, value-returning dialogs)
+    should pass ``modal=True`` and NOT use WA_DeleteOnClose so they can read
+    dialog state after exec() returns.  Or better, route them through
+    ``app_context.dialog_manager.exec_modal()``.
+    """
+
+    def __init__(
+        self,
+        title: str = "",
+        theme: dict | None = None,
+        parent: QWidget | None = None,
+        *,
+        modal: bool = False,
+        delete_on_close: bool = True,
+    ) -> None:
+        # Resolve the nearest QMainWindow so the OS can apply transient-for.
+        # Import here to avoid circular import at module level.
+        from gui.managers.dialog_manager import resolve_main_window
+        resolved_parent = resolve_main_window(parent)
+        super().__init__(resolved_parent)
+
+        # Apply window flags that prevent a separate taskbar entry.
+        # Modal dialogs get the same flags; modality is controlled separately.
+        self.setWindowFlags(_DIALOG_MODELESS_FLAGS)
+
+        if modal:
+            self.setWindowModality(Qt.WindowModality.WindowModal)
+        else:
+            self.setWindowModality(Qt.WindowModality.NonModal)
+            if delete_on_close:
+                self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+
         self.theme = {**DEFAULT_THEME, **(theme or {})}
         if title:
             self.setWindowTitle(title)

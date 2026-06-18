@@ -3,6 +3,10 @@ import os
 from PySide6.QtWidgets import QWidget, QHBoxLayout, QCheckBox, QComboBox, QLineEdit, QLabel
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QCursor
+from core.events.domains.document_events import DocumentEvent
+from core.events.domains.project_events import ProjectEvent
+from core.events.event_bus import EventBus
+from gui.utils.document_helpers import active_pdf_paths
 
 class DynamicInputWidget(QWidget):
     """
@@ -14,6 +18,8 @@ class DynamicInputWidget(QWidget):
         self.pm = project_manager
         self.expected_inputs = expected_inputs or []
         self.input_widgets = {}
+        self.doc_selector_widgets = []
+        self.bus = EventBus.get_instance()
         
         # Proper spacing and vertical alignment so it blends with the Send button
         self.layout = QHBoxLayout(self)
@@ -22,6 +28,18 @@ class DynamicInputWidget(QWidget):
         self.layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         
         self._build_ui()
+        self.bus.document_added.connect(self._on_document_list_changed)
+        self.bus.pdf_removed.connect(self._on_document_list_changed)
+        self.bus.pdf_renamed.connect(self._on_document_list_changed)
+        self.bus.project_loaded.connect(self._on_project_loaded)
+
+    def _on_document_list_changed(self, event, payload):
+        if event in {DocumentEvent.DOCUMENT_ADDED, DocumentEvent.PDF_REMOVED, DocumentEvent.PDF_RENAMED}:
+            self._refresh_doc_selectors()
+
+    def _on_project_loaded(self, event, payload):
+        if event == ProjectEvent.LOADED:
+            self._refresh_doc_selectors()
 
     def _build_ui(self):
         for inp in self.expected_inputs:
@@ -81,12 +99,11 @@ class DynamicInputWidget(QWidget):
                 self.layout.addWidget(lbl)
                 
                 widget = QComboBox()
-                if self.pm:
-                    for pdf in self.pm.pdfs: 
-                        widget.addItem(os.path.basename(pdf), pdf)
+                self._populate_doc_selector(widget)
                 self._apply_style(widget)
                 self.layout.addWidget(widget)
                 self.input_widgets[key] = widget
+                self.doc_selector_widgets.append(widget)
 
             else: # Default Text Line
                 widget = QLineEdit()
@@ -99,6 +116,24 @@ class DynamicInputWidget(QWidget):
     def _apply_style(self, widget):
         if self.theme:
             widget.setStyleSheet(f"background-color: {self.theme.get('bg_input', '#2b2b2b')}; color: {self.theme.get('text_main', '#fff')}; border: 1px solid {self.theme.get('border', '#444')}; padding: 4px 8px; border-radius: 4px; font-size: 11px;")
+
+    def _populate_doc_selector(self, widget):
+        current = widget.currentData()
+        widget.blockSignals(True)
+        widget.clear()
+        for pdf in active_pdf_paths(self.pm):
+            widget.addItem(os.path.basename(pdf), pdf)
+        idx = widget.findData(current)
+        if idx >= 0:
+            widget.setCurrentIndex(idx)
+        widget.blockSignals(False)
+
+    def _refresh_doc_selectors(self):
+        for widget in list(self.doc_selector_widgets):
+            try:
+                self._populate_doc_selector(widget)
+            except RuntimeError:
+                self.doc_selector_widgets.remove(widget)
 
     def get_values(self) -> dict:
         results = {}

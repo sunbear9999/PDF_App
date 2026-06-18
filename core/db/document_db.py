@@ -91,6 +91,15 @@ class DocumentDB(BaseDB):
         except sqlite3.Error as e:
             print(f"Error saving citation for {(citation_data or {}).get('doc_id')}: {e}")
 
+    def delete_citation(self, doc_id):
+        if not self._conn or not doc_id:
+            return
+        try:
+            self._conn.execute("DELETE FROM citations WHERE doc_id = ?", (doc_id,))
+            self._conn.commit()
+        except Exception as e:
+            print(f"[DocumentDB] Error deleting citation for {doc_id}: {e}")
+
     def get_citation(self, doc_id):
         if not self._conn: return {}
         try:

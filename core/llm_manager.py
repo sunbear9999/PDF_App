@@ -25,6 +25,7 @@ class LocalLLMManager:
         self.ai_enabled = False  # Track if AI is available
         self.prompt_manager = PromptManager()
         self.audit_logger = None
+        self._ollama_proc: "subprocess.Popen | None" = None
         self.ensure_server_running()
 
     def _format_prompt_template(self, tool_name, fallback_template, **kwargs):
@@ -94,20 +95,30 @@ class LocalLLMManager:
         except requests.exceptions.ConnectionError:
             # 3. If it's not running, start it completely invisibly
             if platform.system() == "Windows":
-                subprocess.Popen(
-                    [ollama_cmd, 'serve'], 
-                    stdout=subprocess.DEVNULL, 
-                    stderr=subprocess.DEVNULL, 
+                self._ollama_proc = subprocess.Popen(
+                    [ollama_cmd, 'serve'],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                     creationflags=subprocess.CREATE_NO_WINDOW
                 )
             else:
-                subprocess.Popen(
-                    [ollama_cmd, 'serve'], 
-                    stdout=subprocess.DEVNULL, 
+                self._ollama_proc = subprocess.Popen(
+                    [ollama_cmd, 'serve'],
+                    stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL
                 )
             time.sleep(3) # Give it a second to bind to the port
             self.ai_enabled = True
+
+    def shutdown(self):
+        """Terminate the Ollama subprocess started by this manager, if any."""
+        if self._ollama_proc is not None:
+            self._ollama_proc.terminate()
+            try:
+                self._ollama_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._ollama_proc.kill()
+            self._ollama_proc = None
 
     def set_project_database(self, project_filepath):
         import gc
@@ -267,32 +278,31 @@ class LocalLLMManager:
         for doc_idx, pdf_path in enumerate(pdf_paths):
             doc_name = os.path.basename(pdf_path)
             try:
-                doc = fitz.open(pdf_path)
-                total_pages = len(doc)
-                
-                chunk_counter = 0
-                for page_num in range(total_pages):
-                    page = doc.load_page(page_num)
-                    # Clean the text but don't rely on spaces for chunking
-                    text = page.get_text("text").replace('\n', ' ').strip()
-                    text = re.sub(r'\s+', ' ', text) 
-                    
-                    # Hard character limits (1500 chars is roughly 300 tokens, 100% safe)
-                    char_limit = 1500
-                    overlap = 250
-                    
-                    for i in range(0, len(text), char_limit - overlap):
-                        chunk_id = f"{doc_name}_p{page_num}_c{chunk_counter}"
-                        
-                        if chunk_id not in existing_ids:
-                            chunk_text = text[i:i + char_limit].strip()
-                            if len(chunk_text) > 50: 
-                                chunks.append(chunk_text)
-                                metadatas.append({"doc_name": doc_name, "doc_id": pdf_path, "page": page_num})
-                                ids.append(chunk_id)
-                        chunk_counter += 1
-                doc.close()
-            except Exception as e: 
+                with fitz.open(pdf_path) as doc:
+                    total_pages = len(doc)
+
+                    chunk_counter = 0
+                    for page_num in range(total_pages):
+                        page = doc.load_page(page_num)
+                        # Clean the text but don't rely on spaces for chunking
+                        text = page.get_text("text").replace('\n', ' ').strip()
+                        text = re.sub(r'\s+', ' ', text)
+
+                        # Hard character limits (1500 chars is roughly 300 tokens, 100% safe)
+                        char_limit = 1500
+                        overlap = 250
+
+                        for i in range(0, len(text), char_limit - overlap):
+                            chunk_id = f"{doc_name}_p{page_num}_c{chunk_counter}"
+
+                            if chunk_id not in existing_ids:
+                                chunk_text = text[i:i + char_limit].strip()
+                                if len(chunk_text) > 50:
+                                    chunks.append(chunk_text)
+                                    metadatas.append({"doc_name": doc_name, "doc_id": pdf_path, "page": page_num})
+                                    ids.append(chunk_id)
+                            chunk_counter += 1
+            except Exception as e:
                 print(f"Failed to index {doc_name}: {e}")
                 
         total_chunks = len(chunks)

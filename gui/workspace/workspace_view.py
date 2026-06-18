@@ -20,6 +20,7 @@ from core.utils.workspace_utils import (
 )
 from gui.components.dialogs.workspace_dialogs import ColorOrganizerDialog, DeclutterSettingsDialog, OutlineDialog, WeakpointsDialog, WorkspaceProcessOverlay
 from gui.utils.dialog_helpers import style_dialog_with_theme
+from gui.managers.dialog_manager import exec_as_modal, get_for_widget
 from gui.theme.theme import ThemeManager
 from gui.workspace.workspace_context_menus import (
     build_ai_menu,
@@ -126,6 +127,20 @@ class WorkspaceView(QGraphicsView):
         self._declutter_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self._declutter_sc.activated.connect(self.trigger_declutter)
         self._declutter_sc.activatedAmbiguously.connect(self.trigger_declutter)
+
+        # Undo / redo – new shortcuts added here so they appear in the keybinding editor
+        self._undo_sc = QShortcut(QKeySequence("Ctrl+Z"), self)
+        self._undo_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._undo_sc.activated.connect(self._trigger_undo)
+        self._undo_sc.activatedAmbiguously.connect(self._trigger_undo)
+        self._redo_sc = QShortcut(QKeySequence("Ctrl+Y"), self)
+        self._redo_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._redo_sc.activated.connect(self._trigger_redo)
+        self._redo_sc.activatedAmbiguously.connect(self._trigger_redo)
+
+        # Register all workspace shortcuts with the global KeybindingRegistry so they
+        # are editable in Settings → Shortcuts.
+        self._register_keybindings()
 
         self.loading_overlay = QFrame(self)
         self.loading_overlay.hide()
@@ -565,11 +580,20 @@ class WorkspaceView(QGraphicsView):
         if not node_ids:
             return
         dialog = TagAssignmentDialog(node_ids[0], "node", self)
-        if dialog.exec():
+
+        def _on_accepted():
             for node_id in node_ids:
                 node = self.nodes.get(node_id)
                 if node and hasattr(node, "refresh_tag_badges"):
                     node.refresh_tag_badges()
+
+        dialog.accepted.connect(_on_accepted)
+        dm = get_for_widget(self)
+        if dm:
+            dm.show_instance(dialog)
+        else:
+            if exec_as_modal(dialog):
+                _on_accepted()
     def _on_pdf_renamed(self, old_path, new_path, old_source_id=None, new_source_id=None):
         for node in self.nodes.values():
             if getattr(node, 'pdf_path', None) == old_path or getattr(node, "source_id", None) == old_source_id:
@@ -1132,6 +1156,33 @@ class WorkspaceView(QGraphicsView):
     def create_ai_menu(self, parent_widget):
         return build_ai_menu(self, parent_widget)
 
+    def _register_keybindings(self) -> None:
+        """Claim all workspace QShortcuts with the global KeybindingRegistry."""
+        kr = getattr(self.main_window, "keybinding_registry", None)
+        if not kr:
+            return
+        mapping = {
+            "workspace.copy":          self._copy_sc,
+            "workspace.cut":           self._cut_sc,
+            "workspace.paste":         self._paste_sc,
+            "workspace.refresh":       self._refresh_sc,
+            "workspace.new_node":      self._new_node_sc,
+            "workspace.clear_filters": self._clear_filters_sc,
+            "workspace.declutter":     self._declutter_sc,
+            "workspace.undo":          self._undo_sc,
+            "workspace.redo":          self._redo_sc,
+        }
+        for action_id, shortcut in mapping.items():
+            kr.claim_shortcut(action_id, shortcut)
+
+    def _trigger_undo(self) -> None:
+        from core.events.domains.workspace_events import WorkspaceIntent, WorkspacePayload
+        self.bus.workspace_action_requested.emit(WorkspaceIntent.UNDO_TRIGGERED, WorkspacePayload())
+
+    def _trigger_redo(self) -> None:
+        from core.events.domains.workspace_events import WorkspaceIntent, WorkspacePayload
+        self.bus.workspace_action_requested.emit(WorkspaceIntent.REDO_TRIGGERED, WorkspacePayload())
+
     def update_theme(self, theme):
         self.setBackgroundBrush(QBrush(QColor(theme['canvas'])))
         self.loading_overlay.setStyleSheet("background-color: rgba(0, 0, 0, 180); border-radius: 8px;")
@@ -1185,7 +1236,11 @@ class WorkspaceView(QGraphicsView):
         if "ALL" in checked or not checked:
             sources = pm.list_source_entities() if pm and hasattr(pm, "list_source_entities") else []
             if sources:
-                return [os.path.basename(s.properties.get("path") or s.origin_id or "") for s in sources]
+                return [
+                    os.path.basename(s.properties.get("path") or s.origin_id or "")
+                    for s in sources
+                    if not (getattr(s, "state", {}) or {}).get("is_removed")
+                ]
             return [os.path.basename(p) for p in pm.pdfs] if pm else []
         names = []
         for item in checked:
@@ -1482,30 +1537,44 @@ class WorkspaceView(QGraphicsView):
             return
 
         dialog = DeclutterSettingsDialog(self)
-        if not dialog.exec(): return
-        use_ai, semantic_strength = dialog.get_settings()
 
-        nodes_info = {n.node_id: {'width': n.base_width, 'height': n.base_height} for n in target_nodes}
-        edges_info = [(e.source_node.node_id, e.dest_node.node_id) for e in self.edges if e.source_node in target_nodes and e.dest_node in target_nodes]
-        avg_x = sum(n.pos().x() + n.base_width / 2 for n in target_nodes) / len(target_nodes)
-        avg_y = sum(n.pos().y() + n.base_height / 2 for n in target_nodes) / len(target_nodes)
-        node_ids = [n.node_id for n in target_nodes]
-        texts_to_embed = [f"{n.quote} {n.note}".strip() for n in target_nodes]
+        def _on_declutter_accepted():
+            try:
+                use_ai, semantic_strength = dialog.get_settings()
+            except RuntimeError:
+                return
+            nodes_info = {n.node_id: {"width": n.base_width, "height": n.base_height} for n in target_nodes}
+            edges_info = [
+                (e.source_node.node_id, e.dest_node.node_id)
+                for e in self.edges
+                if e.source_node in target_nodes and e.dest_node in target_nodes
+            ]
+            avg_x = sum(n.pos().x() + n.base_width / 2 for n in target_nodes) / len(target_nodes)
+            avg_y = sum(n.pos().y() + n.base_height / 2 for n in target_nodes) / len(target_nodes)
+            node_ids = [n.node_id for n in target_nodes]
+            texts_to_embed = [f"{n.quote} {n.note}".strip() for n in target_nodes]
+            self.save_state_for_undo()
+            self.bus.workspace_action_requested.emit(
+                WorkspaceIntent.CALCULATE_LAYOUT,
+                WorkspacePayload(extra={
+                    "node_ids": node_ids,
+                    "texts": texts_to_embed,
+                    "nodes_info": nodes_info,
+                    "edges_info": edges_info,
+                    "center_x": avg_x,
+                    "center_y": avg_y,
+                    "use_ai": use_ai,
+                    "semantic_strength": semantic_strength,
+                }),
+            )
 
-        self.save_state_for_undo()
-        self.bus.workspace_action_requested.emit(
-            WorkspaceIntent.CALCULATE_LAYOUT,
-            WorkspacePayload(extra={
-                "node_ids": node_ids,
-                "texts": texts_to_embed,
-                "nodes_info": nodes_info,
-                "edges_info": edges_info,
-                "center_x": avg_x,
-                "center_y": avg_y,
-                "use_ai": use_ai,
-                "semantic_strength": semantic_strength,
-            }),
-        )
+        dialog.accepted.connect(_on_declutter_accepted)
+        dm = get_for_widget(self)
+        if dm:
+            dm.show_instance(dialog)
+        else:
+            if exec_as_modal(dialog):
+                _on_declutter_accepted()
 
     def _apply_layout_positions(self, new_positions):
         if not new_positions:
@@ -1845,10 +1914,18 @@ class WorkspaceView(QGraphicsView):
             elif action == color_action:
                 item.trigger_color_change()
             elif action == manage_tags_action:
-                if TagAssignmentDialog(self._pm(), item.node_id, "node", self).exec():
-                    item.refresh_tag_badges()
+                _dlg = TagAssignmentDialog(self._pm(), item.node_id, "node", self)
+                def _on_tags_accepted(_item=item):
+                    _item.refresh_tag_badges()
                     self._refresh_tag_list()
                     self._apply_filter()
+                _dlg.accepted.connect(_on_tags_accepted)
+                _dm = get_for_widget(self)
+                if _dm:
+                    _dm.show_instance(_dlg)
+                else:
+                    if exec_as_modal(_dlg):
+                        _on_tags_accepted()
             elif connect_action and action == connect_action:
                 self.save_state_for_undo()
                 self.connecting_node = connect_source
@@ -1940,7 +2017,12 @@ class WorkspaceView(QGraphicsView):
             return
 
         matches = [{"text": doc_text.strip(), "doc_name": meta.get('doc_name', 'Unknown Document'), "page": meta.get('page', 0)} for doc_text, meta in zip(results['documents'][0], results['metadatas'][0])]
-        AIResultsDialog(f"Related to '{tag_name}'", matches, self.main_window, self).exec()
+        _dlg = AIResultsDialog(f"Related to '{tag_name}'", matches, self.main_window, self.main_window)
+        dm = get_for_widget(self)
+        if dm is not None:
+            dm.show_instance(_dlg)
+        else:
+            exec_as_modal(_dlg)
 
     def trigger_tag_opposing_views(self, tag_name):
         pm, llm = self._pm(), self._llm()
@@ -1995,7 +2077,13 @@ class WorkspaceView(QGraphicsView):
             try:
                 if error: QMessageBox.warning(self.main_window, "Error", error)
                 elif not matches: QMessageBox.information(self.main_window, "No Opposing Views", f"The AI could not find any strongly opposing arguments to the tag '{tag_name}'.")
-                else: AIResultsDialog(f"⚖️ Opposing Views for '{tag_name}'", matches, self.main_window, self.main_window).exec()
+                else:
+                    _dlg2 = AIResultsDialog(f"⚖️ Opposing Views for '{tag_name}'", matches, self.main_window, self.main_window)
+                    dm2 = get_for_widget(self)
+                    if dm2 is not None:
+                        dm2.show_instance(_dlg2)
+                    else:
+                        exec_as_modal(_dlg2)
             except Exception as e:
                 QMessageBox.critical(self.main_window, "UI Error", f"Failed to open results: {str(e)}")
 
@@ -2006,22 +2094,35 @@ class WorkspaceView(QGraphicsView):
 
 
     def _manage_tags_for_nodes(self, selected_nodes):
-        if not selected_nodes: return
+        if not selected_nodes:
+            return
         pm = self._pm()
-        if not pm: return
+        if not pm:
+            return
 
-        if TagAssignmentDialog(pm, selected_nodes[0].node_id, "node", self).exec() != QDialog.DialogCode.Accepted: return
+        dlg = TagAssignmentDialog(pm, selected_nodes[0].node_id, "node", self)
 
-        template_tag_ids = {t.get("id") for t in pm.get_tags_for_node(selected_nodes[0].node_id)}
-        for node in selected_nodes[1:]:
-            node_tag_ids = {t.get("id") for t in pm.get_tags_for_node(node.node_id)}
-            for tag_id in template_tag_ids - node_tag_ids: pm.assign_tag_to_node(node.node_id, tag_id)
-            for tag_id in node_tag_ids - template_tag_ids: pm.remove_tag_from_node(node.node_id, tag_id)
+        def _on_accepted():
+            template_tag_ids = {t.get("id") for t in pm.get_tags_for_node(selected_nodes[0].node_id)}
+            for node in selected_nodes[1:]:
+                node_tag_ids = {t.get("id") for t in pm.get_tags_for_node(node.node_id)}
+                for tag_id in template_tag_ids - node_tag_ids:
+                    pm.assign_tag_to_node(node.node_id, tag_id)
+                for tag_id in node_tag_ids - template_tag_ids:
+                    pm.remove_tag_from_node(node.node_id, tag_id)
+            for node in selected_nodes:
+                node.refresh_tag_badges()
+            self._refresh_tag_list()
+            self._apply_filter()
+            pm.mark_dirty("workspace")
 
-        for node in selected_nodes: node.refresh_tag_badges()
-        self._refresh_tag_list()
-        self._apply_filter()
-        pm.mark_dirty("workspace")
+        dlg.accepted.connect(_on_accepted)
+        dm = get_for_widget(self)
+        if dm:
+            dm.show_instance(dlg)
+        else:
+            if exec_as_modal(dlg) == QDialog.DialogCode.Accepted:
+                _on_accepted()
 
     def _update_loading_label(self, text): self.loading_label.setText(text + "\nThis may take a moment.")
 

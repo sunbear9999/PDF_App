@@ -75,6 +75,18 @@ class UIEventCoordinator(QObject):
                 w.layout_manager.restore_last_session()
             except RuntimeError:
                 pass
+        # Auto-open the first PDF in the project if the viewer is currently empty.
+        # This ensures opening a project always shows a document without the user
+        # having to manually click one in the explorer.
+        try:
+            pm = getattr(w, "project_manager", None)
+            if pm and pm.pdfs and not getattr(w, "current_file_path", None):
+                from core.events.domains.document_events import DocumentPayload
+                w.bus.document_action_requested.emit(
+                    DocumentIntent.OPEN, DocumentPayload(path=pm.pdfs[0])
+                )
+        except Exception:
+            pass
 
     def _on_project_clearing(self, event, payload) -> None:
         w = self._w

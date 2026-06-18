@@ -97,8 +97,9 @@ class BrainstormTab(BaseTab):
             **dynamic_state
         }
 
+        self._active_stream_widget = None
         self.send_to_pipeline(self.active_blueprint, initial_state)
-        
+
     def update_theme(self, theme):
         super().update_theme(theme)
         self.scroll_area.setStyleSheet("background: transparent;")

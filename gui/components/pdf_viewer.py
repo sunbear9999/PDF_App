@@ -13,7 +13,7 @@ from gui.components.search_bar_widget import SearchBarWidget
 from core.events.event_bus import EventBus
 from core.events.domains.document_events import AnnotationIntent, AnnotationPayload, DocumentEvent, DocumentEventPayload, DocumentIntent, DocumentPayload
 from core.events.domains.project_events import ProjectEvent, ProjectEventPayload
-
+from gui.theme.theme import ThemeManager
 class PageHUD(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -93,6 +93,11 @@ class PDFViewer(QGraphicsView):
         self.page_pixmaps = [None] * 0  # QGraphicsPixmapItem for each page, or None
         self.worker = None
         self.annot_manager = AnnotationManager(self)
+        self._data_select_active = False
+        self._data_select_start = None
+        self._data_select_rect_item = None
+        self._data_select_page = None
+        self._data_select_page_item = None
 
         self.pending_jump = None
 
@@ -149,6 +154,30 @@ class PDFViewer(QGraphicsView):
         """)
         self.dark_mode_btn.clicked.connect(self.toggle_dark_mode)
         toolbar_layout.addWidget(self.dark_mode_btn)
+        self.theme_mode_btn = QPushButton("Theme Mode", self.viewer_toolbar)
+        self.theme_mode_btn.setCheckable(True)
+        self.theme_mode_btn.setStyleSheet("""
+            background: #2b2b2b;
+            color: white;
+            border-radius: 4px;
+            padding: 2px 8px;
+        """)
+        self.theme_mode_btn.clicked.connect(self.toggle_theme_mode)
+        toolbar_layout.addWidget(self.theme_mode_btn)
+        
+        # Subscribe to global theme changes
+        self.bus.theme_changed.connect(self._on_global_theme_changed)
+        self.data_select_btn = QPushButton("Data Select", self.viewer_toolbar)
+        self.data_select_btn.setCheckable(True)
+        self.data_select_btn.setToolTip("Drag over a table to send it to Data Dock")
+        self.data_select_btn.setStyleSheet("""
+            background: #285e61;
+            color: white;
+            border-radius: 4px;
+            padding: 2px 8px;
+        """)
+        self.data_select_btn.toggled.connect(self._set_data_select_mode)
+        toolbar_layout.addWidget(self.data_select_btn)
 
 
         self.viewer_toolbar.setLayout(toolbar_layout)
@@ -173,6 +202,8 @@ class PDFViewer(QGraphicsView):
         if intent == DocumentIntent.RELOAD_PAGE:
             if payload.page_num is not None:
                 self.reload_page(payload.page_num)
+        elif intent == DocumentIntent.JUMP_TO_LOCATION:
+            self._jump_to_location(payload.page_num, payload.rects)
 
     def _on_document_opened_event(self, event: DocumentEvent, payload: DocumentEventPayload):
         if event == DocumentEvent.DOCUMENT_OPENED:
@@ -286,7 +317,8 @@ class PDFViewer(QGraphicsView):
         main_window = self.window()
         pdfs_to_search = []
         if scope == "Entire Project":
-            pdfs_to_search = main_window.project_manager.pdfs
+            from gui.utils.document_helpers import active_pdf_paths
+            pdfs_to_search = active_pdf_paths(main_window.project_manager)
         else:
             if main_window.current_file_path:
                 pdfs_to_search = [main_window.current_file_path]
@@ -421,7 +453,7 @@ class PDFViewer(QGraphicsView):
             self.page_rects.append(page_rect)
 
             placeholder = QGraphicsRectItem(page_rect)
-            placeholder.setBrush(QBrush(QColor(240, 240, 240)))
+            placeholder.setBrush(self._get_placeholder_brush())
             placeholder.setPen(QPen(Qt.PenStyle.NoPen))
             placeholder.setZValue(0)
             self.scene.addItem(placeholder)
@@ -441,8 +473,16 @@ class PDFViewer(QGraphicsView):
         self.rendered_pages = set()
         self.pages_in_flight = set()
         self.render_queue = Queue()
+        current_theme = ThemeManager().get_theme()
         # Use the viewer's locally stored path!
-        self.worker = RenderWorker(getattr(self, 'pdf_path', None), self.base_zoom, self.render_queue, pixel_ratio=self._get_dpi_scale())
+        self.worker = RenderWorker(
+            getattr(self, 'pdf_path', None), 
+            self.base_zoom, 
+            self.render_queue, 
+            pixel_ratio=self._get_dpi_scale(),
+            theme_mode_enabled=getattr(self, 'theme_mode_enabled', False),
+            theme_colors=current_theme
+        )
         self.worker.page_ready.connect(self._on_page_ready)
         self.worker.start()
 
@@ -474,9 +514,16 @@ class PDFViewer(QGraphicsView):
                 self.render_queue.get_nowait()
             except:
                 break
-
+        current_theme = ThemeManager().get_theme()
         # 3. Restart the background worker with the fresh document handle
-        self.worker = RenderWorker(getattr(self, 'pdf_path', None), self.base_zoom, self.render_queue, pixel_ratio=self._get_dpi_scale())
+        self.worker = RenderWorker(
+            getattr(self, 'pdf_path', None), 
+            self.base_zoom, 
+            self.render_queue, 
+            pixel_ratio=self._get_dpi_scale(),
+            theme_mode_enabled=getattr(self, 'theme_mode_enabled', False),
+            theme_colors=current_theme
+        )
         self.worker.page_ready.connect(self._on_page_ready)
         self.worker.start()
 
@@ -576,7 +623,7 @@ class PDFViewer(QGraphicsView):
                         self.page_pixmaps[i].setPixmap(QPixmap())
                         self.page_pixmaps[i].setVisible(False)
                         self.page_placeholders[i].setVisible(True)
-                        self.page_placeholders[i].setBrush(QBrush(QColor(240, 240, 240)))
+                        self.page_placeholders[i].setBrush(self._get_placeholder_brush())
                         self.page_placeholders[i].setZValue(0)
                         self.rendered_pages.discard(i)
 
@@ -614,13 +661,36 @@ class PDFViewer(QGraphicsView):
         dpi_scale = self._get_dpi_scale()
         mat = fitz.Matrix(self.base_zoom * dpi_scale, self.base_zoom * dpi_scale)
         pix = page.get_pixmap(matrix=mat)
+        # --- NEW: Sync Fallback Tinting ---
+        if getattr(self, 'theme_mode_enabled', False):
+            theme = ThemeManager().get_theme()
+            try:
+                bg_hex = int(theme.get('bg_main', '#ffffff').lstrip('#'), 16)
+                text_hex = int(theme.get('text_main', '#000000').lstrip('#'), 16)
+                pix.tint_with(text_hex, bg_hex)
+            except Exception:
+                pass
+        # ----------------------------------
         img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888).copy()
         if self.dark_mode_enabled:
             img.invertPixels(QImage.InvertMode.InvertRgb)
         img.setDevicePixelRatio(dpi_scale)
         self.page_pixmaps[page_num].setPixmap(QPixmap.fromImage(img))
+    def toggle_theme_mode(self):
+        if self.theme_mode_btn.isChecked():
+            self.dark_mode_enabled = False
+            if hasattr(self, 'dark_mode_btn'):
+                self.dark_mode_btn.setChecked(False)
+        
+        self.theme_mode_enabled = self.theme_mode_btn.isChecked()
+        self._force_full_rerender()
 
     def toggle_dark_mode(self):
+        if hasattr(self, 'dark_mode_btn') and self.dark_mode_btn.isChecked():
+            self.theme_mode_enabled = False
+            if hasattr(self, 'theme_mode_btn'):
+                self.theme_mode_btn.setChecked(False)
+        
         self.dark_mode_enabled = not self.dark_mode_enabled
         if hasattr(self, 'dark_mode_btn'):
             self.dark_mode_btn.setChecked(self.dark_mode_enabled)
@@ -639,11 +709,282 @@ class PDFViewer(QGraphicsView):
             img = pixmap.toImage()
             img.invertPixels(QImage.InvertMode.InvertRgb)
             pixmap_item.setPixmap(QPixmap.fromImage(img))
+        self._update_placeholders()
+    def _get_placeholder_brush(self):
+        from PySide6.QtGui import QBrush, QColor
+        if getattr(self, 'theme_mode_enabled', False):
+            from gui.theme.theme import ThemeManager
+            theme = ThemeManager().get_theme()
+            return QBrush(QColor(theme.get('canvas', '#1a1a1a')))
+        elif getattr(self, 'dark_mode_enabled', False):
+            return QBrush(QColor(40, 40, 40)) # Dark gray
+        return QBrush(QColor(240, 240, 240)) # Default light gray
+        
+    def _update_placeholders(self):
+        brush = self._get_placeholder_brush()
+        for p in getattr(self, 'page_placeholders', []):
+            if p is not None:
+                p.setBrush(brush)
+    def _on_global_theme_changed(self, event_type, new_theme):
+        if getattr(self, 'theme_mode_enabled', False):
+            self._force_full_rerender()
+
+    def _force_full_rerender(self):
+        """Cleans out the cache and forces a fresh pass for the new theme."""
+        if not self._doc_valid():
+            return
+            
+        if self.worker and self.worker.isRunning():
+            self.worker.stop()
+            self.worker.wait()
+            
+        while not self.render_queue.empty():
+            try:
+                self.render_queue.get_nowait()
+            except:
+                break
+                
+        self.rendered_pages.clear()
+        if hasattr(self, 'pages_in_flight'):
+            self.pages_in_flight.clear()
+            
+        # --- FIX: Empty out the old images so the engine is forced to re-render ---
+        from PySide6.QtGui import QPixmap
+        for i, p_item in enumerate(self.page_pixmaps):
+            if p_item is not None:
+                p_item.setPixmap(QPixmap()) 
+                p_item.setVisible(False)
+                if i < len(self.page_placeholders):
+                    self.page_placeholders[i].setVisible(True)
+        
+        # --- FIX: Color coordinate the unrendered background boxes ---
+        self._update_placeholders()
+            
+        current_theme = ThemeManager().get_theme()
+        
+        self.worker = RenderWorker(
+            getattr(self, 'pdf_path', None), 
+            self.base_zoom, 
+            self.render_queue, 
+            pixel_ratio=self._get_dpi_scale(),
+            theme_mode_enabled=getattr(self, 'theme_mode_enabled', False),
+            theme_colors=current_theme
+        )
+        self.worker.page_ready.connect(self._on_page_ready)
+        self.worker.start()
+        
+        # Trigger scroll event to enqueue currently visible pages
+        self._on_scroll()
+    def _set_data_select_mode(self, enabled):
+        self._data_select_active = bool(enabled)
+        if enabled:
+            self.annot_manager.clear_selection()
+            self.setDragMode(QGraphicsView.DragMode.NoDrag)
+            self.viewport().setCursor(Qt.CursorShape.CrossCursor)
+            self._status_tip("Drag a rectangle around a table or chart.")
+        else:
+            self._clear_data_select_rect()
+            self._data_select_start = None
+            self._data_select_page = None
+            self._data_select_page_item = None
+            self.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+
+    def _status_tip(self, message):
+        try:
+            self.bus.status_message_requested.emit(message, 3000)
+        except Exception:
+            pass
+
+    def _start_data_rect_selection(self, event):
+        scene_pos = self._event_scene_pos(event)
+        page_idx, page_item = self.annot_manager._get_page_at_pos(scene_pos)
+        if page_idx == -1 or page_item is None:
+            self._status_tip("Start the drag on a PDF page.")
+            return False
+        self._clear_data_select_rect()
+        self._data_select_start = scene_pos
+        self._data_select_page = page_idx
+        self._data_select_page_item = page_item
+        self._data_select_rect_item = QGraphicsRectItem(QRectF(scene_pos, scene_pos).normalized())
+        self._data_select_rect_item.setBrush(QBrush(QColor(20, 184, 166, 45)))
+        self._data_select_rect_item.setPen(QPen(QColor(20, 184, 166), 2, Qt.PenStyle.DashLine))
+        self._data_select_rect_item.setZValue(2000)
+        self.scene.addItem(self._data_select_rect_item)
+        return True
+
+    def _update_data_rect_selection(self, event):
+        if self._data_select_rect_item is None or self._data_select_start is None:
+            return
+        scene_pos = self._event_scene_pos(event)
+        self._data_select_rect_item.setRect(QRectF(self._data_select_start, scene_pos).normalized())
+
+    def _finish_data_rect_selection(self, event):
+        if self._data_select_rect_item is None or self._data_select_page_item is None:
+            return
+        scene_rect = self._data_select_rect_item.rect().normalized()
+        page_idx = self._data_select_page
+        page_item = self._data_select_page_item
+        local_rect = page_item.mapFromScene(scene_rect).boundingRect()
+        pdf_rect = fitz.Rect(
+            local_rect.left() / self.base_zoom,
+            local_rect.top() / self.base_zoom,
+            local_rect.right() / self.base_zoom,
+            local_rect.bottom() / self.base_zoom,
+        )
+        matrix = self._table_matrix_in_pdf_rect(page_idx, pdf_rect)
+        words = self._words_in_pdf_rect(page_idx, pdf_rect)
+        self._clear_data_select_rect()
+        if not matrix and not words:
+            self._status_tip("No selectable table text found in that region.")
+            return
+        # Use the PyMuPDF matrix only when it has good cell occupancy (bordered tables).
+        # For text/whitespace tables the spatial word clustering in the service is more reliable.
+        if matrix and (self._matrix_looks_sound(matrix) or not words):
+            self._send_matrix_to_data_dock(page_idx, pdf_rect, matrix)
+        else:
+            self._send_words_to_data_dock(page_idx, pdf_rect, words)
+
+    def _matrix_looks_sound(self, matrix):
+        if not matrix or len(matrix) < 2:
+            return False
+        width = max(len(row) for row in matrix)
+        if width < 2:
+            return False
+        total = len(matrix) * width
+        filled = sum(1 for row in matrix for cell in (row + [""] * (width - len(row))) if str(cell).strip())
+        return filled >= total * 0.35
+
+    def _clear_data_select_rect(self):
+        if self._data_select_rect_item is not None:
+            try:
+                self.scene.removeItem(self._data_select_rect_item)
+            except Exception:
+                pass
+        self._data_select_rect_item = None
+
+    def _words_in_pdf_rect(self, page_idx, pdf_rect):
+        if not self._doc_valid() or page_idx is None:
+            return []
+        try:
+            page = self.doc.load_page(page_idx)
+            selected = []
+            for word in page.get_text("words"):
+                w_rect = fitz.Rect(word[:4])
+                if w_rect.intersects(pdf_rect) or pdf_rect.contains(w_rect.tl) or pdf_rect.contains(w_rect.br):
+                    selected.append(list(word[:5]))
+            selected.sort(key=lambda w: (w[1], w[0]))
+            return selected
+        except Exception as exc:
+            print(f"Data selection failed: {exc}")
+            return []
+
+    def _table_matrix_in_pdf_rect(self, page_idx, pdf_rect):
+        if not self._doc_valid() or page_idx is None:
+            return []
+        try:
+            page = self.doc.load_page(page_idx)
+            try:
+                finder = page.find_tables(clip=pdf_rect)
+            except TypeError:
+                finder = page.find_tables()
+            tables = list(getattr(finder, "tables", []) or [])
+            best = None
+            best_area = 0
+            for table in tables:
+                bbox = getattr(table, "bbox", None)
+                if bbox:
+                    table_rect = fitz.Rect(bbox)
+                    if not table_rect.intersects(pdf_rect):
+                        continue
+                    x0 = max(float(table_rect.x0), float(pdf_rect.x0))
+                    y0 = max(float(table_rect.y0), float(pdf_rect.y0))
+                    x1 = min(float(table_rect.x1), float(pdf_rect.x1))
+                    y1 = min(float(table_rect.y1), float(pdf_rect.y1))
+                    area = max(0, x1 - x0) * max(0, y1 - y0)
+                    if area > best_area:
+                        best = table
+                        best_area = area
+                elif best is None:
+                    best = table
+            if best is None:
+                return []
+            matrix = best.extract()
+            return [
+                [str(cell or "").replace("\n", " ").strip() for cell in (row or [])]
+                for row in matrix or []
+                if any(str(cell or "").strip() for cell in (row or []))
+            ]
+        except Exception:
+            return []
+
+    def _send_words_to_data_dock(self, page_idx, pdf_rect, words):
+        from core.events.domains.data_dock_events import DataDockIntent, DataDockPayload
+        text = "\n".join(" ".join(str(w[4]) for w in row) for row in self._group_words_for_text(words))
+        pdf_path = getattr(self, "pdf_path", "") or ""
+        payload = DocumentPayload(
+            path=pdf_path,
+            text=text,
+            context={
+                "page_num": page_idx,
+                "doc_path": pdf_path,
+                "pdf_path": pdf_path,
+                "rects": [[float(pdf_rect.x0), float(pdf_rect.y0), float(pdf_rect.x1), float(pdf_rect.y1)]],
+                "words": words,
+            },
+        )
+        self.bus.pdf_data_selection_ready.emit(None, payload)
+        self.bus.data_dock_action_requested.emit(DataDockIntent.LOAD_SELECTION, DataDockPayload(selection=payload))
+        self._status_tip(f"Sent {len(words)} selected words to Data Dock.")
+
+    def _send_matrix_to_data_dock(self, page_idx, pdf_rect, matrix):
+        from core.events.domains.data_dock_events import DataDockIntent, DataDockPayload
+        text = "\n".join("\t".join(str(cell) for cell in row) for row in matrix)
+        pdf_path = getattr(self, "pdf_path", "") or ""
+        payload = DocumentPayload(
+            path=pdf_path,
+            text=text,
+            context={
+                "page_num": page_idx,
+                "doc_path": pdf_path,
+                "pdf_path": pdf_path,
+                "rects": [[float(pdf_rect.x0), float(pdf_rect.y0), float(pdf_rect.x1), float(pdf_rect.y1)]],
+                "matrix": matrix,
+            },
+        )
+        self.bus.pdf_data_selection_ready.emit(None, payload)
+        self.bus.data_dock_action_requested.emit(DataDockIntent.LOAD_SELECTION, DataDockPayload(selection=payload))
+        self._status_tip(f"Sent detected table with {len(matrix)} row(s) to Data Dock.")
+
+    def _group_words_for_text(self, words):
+        rows = []
+        current = []
+        current_y = None
+        for word in words:
+            y = float(word[1])
+            if current_y is None or abs(y - current_y) <= 4:
+                current.append(word)
+                current_y = y if current_y is None else (current_y + y) / 2
+            else:
+                rows.append(current)
+                current = [word]
+                current_y = y
+        if current:
+            rows.append(current)
+        for row in rows:
+            row.sort(key=lambda w: w[0])
+        return rows
 
     def mousePressEvent(self, event):
         is_shift = event.modifiers() == Qt.KeyboardModifier.ShiftModifier
         is_right = event.button() == Qt.MouseButton.RightButton
         is_left = event.button() == Qt.MouseButton.LeftButton
+        is_data_select = bool(getattr(self, "data_select_btn", None) and self.data_select_btn.isChecked())
+
+        if is_left and is_data_select:
+            if self._start_data_rect_selection(event):
+                event.accept()
+            return
 
         # Handle PDF links before selection/annotation behavior.
         if is_left and self._doc_valid():
@@ -703,7 +1044,10 @@ class PDFViewer(QGraphicsView):
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        if self.annot_manager.is_selecting:
+        if self._data_select_active and self._data_select_rect_item is not None:
+            self._update_data_rect_selection(event)
+            event.accept()
+        elif self.annot_manager.is_selecting:
             self.annot_manager.update_selection(event)
         else:
             super().mouseMoveEvent(event)
@@ -719,8 +1063,18 @@ class PDFViewer(QGraphicsView):
                     self.viewport().setToolTip("")
 
     def mouseReleaseEvent(self, event):
+        if self._data_select_active and self._data_select_rect_item is not None:
+            self._finish_data_rect_selection(event)
+            if getattr(self, "data_select_btn", None):
+                self.data_select_btn.setChecked(False)
+            event.accept()
+            return
         if self.annot_manager.is_selecting:
             self.annot_manager.finish_selection(event)
+            if getattr(self, "data_select_btn", None) and self.data_select_btn.isChecked() and self.annot_manager.selected_words:
+                text = " ".join(w[4] for w in self.annot_manager.selected_words if len(w) > 4)
+                self.annot_manager.send_selection_to_data_dock(text)
+                self.data_select_btn.setChecked(False)
             self.viewport().setCursor(Qt.CursorShape.ArrowCursor)
             self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         super().mouseReleaseEvent(event)
@@ -763,6 +1117,30 @@ class PDFViewer(QGraphicsView):
             self.pending_jump = (page_num, annot_id)
         else:
             self._execute_jump(page_num, annot_id)
+
+    def _jump_to_location(self, page_num, rects=None):
+        """Scroll the viewer to a page, optionally framing a specific PDF-coordinate bbox."""
+        if page_num is None or not (0 <= page_num < len(self.page_placeholders)):
+            return
+        if page_num not in getattr(self, "rendered_pages", set()):
+            self._render_page_sync(page_num)
+        from PySide6.QtWidgets import QApplication
+        QApplication.processEvents()
+        target = self.page_pixmaps[page_num] if self.page_pixmaps[page_num] else self.page_placeholders[page_num]
+        bbox = (rects[0] if rects else None)
+        if bbox and len(bbox) >= 4:
+            z = self.base_zoom
+            qt_rect = QRectF(
+                float(bbox[0]) * z, float(bbox[1]) * z,
+                (float(bbox[2]) - float(bbox[0])) * z,
+                (float(bbox[3]) - float(bbox[1])) * z,
+            )
+            scene_rect = target.mapToScene(qt_rect).boundingRect()
+            self.ensureVisible(scene_rect, 80, 120)
+        else:
+            self.jump_to_page(page_num)
+        if hasattr(self, "page_hud") and self.doc:
+            self.page_hud.update_hud(page_num + 1, len(self.doc))
     def _render_page_sync(self, page_num):
         """Synchronously renders a page immediately on the main thread to prevent ghost-jumping."""
         if not self._doc_valid() or not (0 <= page_num < len(self.page_pixmaps)):
@@ -776,6 +1154,16 @@ class PDFViewer(QGraphicsView):
             dpi_scale = getattr(self, '_get_dpi_scale', lambda: 1.0)()
             mat = fitz.Matrix(self.base_zoom * dpi_scale, self.base_zoom * dpi_scale)
             pix = page.get_pixmap(matrix=mat)
+            # --- NEW: Sync Fallback Tinting ---
+            if getattr(self, 'theme_mode_enabled', False):
+                theme = ThemeManager().get_theme()
+                try:
+                    bg_hex = int(theme.get('bg_main', '#ffffff').lstrip('#'), 16)
+                    text_hex = int(theme.get('text_main', '#000000').lstrip('#'), 16)
+                    pix.tint_with(text_hex, bg_hex)
+                except Exception:
+                    pass
+            # ----------------------------------
             img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888).copy()
 
             if getattr(self, 'dark_mode_enabled', False):

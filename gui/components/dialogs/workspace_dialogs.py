@@ -1,8 +1,9 @@
-from PySide6.QtWidgets import (QGraphicsView, QGraphicsScene, QMenu, QMessageBox, 
+from PySide6.QtWidgets import (QGraphicsView, QGraphicsScene, QMenu, QMessageBox,
                              QInputDialog, QFrame, QLabel, QVBoxLayout,
                              QHBoxLayout, QComboBox, QPushButton, QDialog,
-                             QScrollArea, QWidget, QFormLayout, QDialogButtonBox, 
+                             QScrollArea, QWidget, QFormLayout, QDialogButtonBox,
                              QColorDialog, QFileDialog, QTextEdit,QCheckBox,QSlider,QLabel,QTabWidget,QListWidget,QListWidgetItem)
+from gui.managers.dialog_manager import exec_as_modal, get_for_widget
 from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import QColor, QPen, QBrush, QFont, QPainter, QImage, QStandardItemModel, QStandardItem, QCursor
 import uuid
@@ -11,6 +12,7 @@ from gui.components.workspace_items import Node
 class OutlineDialog(QDialog):
     def __init__(self, outline_text, workspace_view, parent=None):
         super().__init__(parent or workspace_view)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.workspace_view = workspace_view
         self.setWindowTitle("AI Generated Outline")
         self.setMinimumSize(600, 700)
@@ -70,6 +72,7 @@ class OutlineDialog(QDialog):
 class DeclutterSettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setWindowTitle("Declutter Options")
         self.setMinimumWidth(350)
         
@@ -136,6 +139,7 @@ class DeclutterSettingsDialog(QDialog):
 class WeakpointsDialog(QDialog):
     def __init__(self, weakpoints_text, workspace_view, parent=None):
         super().__init__(parent or workspace_view)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.workspace_view = workspace_view
         self.setWindowTitle("AI Weakpoint Analysis")
         self.setMinimumSize(600, 700)
@@ -198,6 +202,7 @@ class WeakpointsDialog(QDialog):
 class ColorOrganizerDialog(QDialog):
     def __init__(self, pdfs, tags, current_pdf_colors, current_tag_colors, parent=None):
         super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setWindowTitle("Organize by Color")
         self.setMinimumSize(400, 450)
         
@@ -284,6 +289,7 @@ class ColorOrganizerDialog(QDialog):
 class ContextFilterDialog(QDialog):
     def __init__(self, project_manager, target_nodes, parent=None):
         super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.project_manager = project_manager
         self.target_nodes = target_nodes
         self.setWindowTitle("Context Optimization Required")
@@ -354,8 +360,13 @@ class ContextFilterDialog(QDialog):
     def _open_tag_manager(self):
         from gui.components.dialogs.tag_manager_dialog import TagManagerDialog
         dlg = TagManagerDialog(self.project_manager, self)
-        dlg.exec()
-        self._load_tags() # Refresh available tags in case the user created new ones
+        dm = get_for_widget(self)
+        if dm:
+            dlg.finished.connect(lambda _: self._load_tags())
+            dm.show_instance(dlg)
+        else:
+            exec_as_modal(dlg)
+            self._load_tags()
 
     def _load_tags(self):
         # Clear existing checkboxes

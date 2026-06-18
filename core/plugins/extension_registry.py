@@ -14,6 +14,14 @@ from typing import Any, Callable, Dict, List, Optional
 
 
 @dataclass
+class ThemeSpec:
+    """A theme contributed by a plugin. Not persisted across sessions."""
+    name: str
+    theme_dict: Dict[str, str]
+    plugin_id: str = ""
+
+
+@dataclass
 class ToolbarButtonSpec:
     """A button to inject into a named dock's toolbar."""
     button_id: str
@@ -147,6 +155,7 @@ class PluginExtensionRegistry:
         self._commands: List[CommandSpec] = []
         self._workspace_context_menu_items: List[WorkspaceContextMenuSpec] = []
         self._actions: List[Any] = []  # ActionSpec instances from gui.registry.action_spec
+        self._themes: List[ThemeSpec] = []
 
     # ----------------------------------------------------------------
     # Registration
@@ -178,6 +187,10 @@ class PluginExtensionRegistry:
 
     def add_workspace_context_menu_item(self, spec: WorkspaceContextMenuSpec) -> None:
         self._workspace_context_menu_items.append(spec)
+
+    def add_theme(self, spec: "ThemeSpec") -> None:
+        """Register a theme contributed by a plugin."""
+        self._themes.append(spec)
 
     def add_action(self, spec: Any) -> None:
         """Register an ActionSpec (from gui.registry.action_spec) for cross-context mounting.
@@ -269,12 +282,15 @@ class PluginExtensionRegistry:
     def register_workspace_context_menu_item(self, spec: WorkspaceContextMenuSpec) -> None:
         self.add_workspace_context_menu_item(spec)
 
+    def get_themes(self) -> List["ThemeSpec"]:
+        return list(self._themes)
+
     def _spec_list_attrs(self) -> List[str]:
         """Canonical list of all spec-list attribute names. Used by hot-reload cleanup and tagging."""
         return [
             "_toolbar_buttons", "_research_tabs", "_ai_renderers", "_extra_docks",
             "_menu_items", "_main_toolbar_buttons", "_shortcuts", "_commands",
-            "_workspace_context_menu_items", "_actions",
+            "_workspace_context_menu_items", "_actions", "_themes",
         ]
 
     def remove_plugin_specs(self, plugin_id: str) -> None:

@@ -232,6 +232,21 @@ class PapyrusAPI:
         return self._core.plugin_extension_registry
 
     @property
+    def help_registry(self):
+        """Register help topics contributed by this plugin. Returns HelpRegistry."""
+        return self._core.help_service.help_registry
+
+    @property
+    def tutorial_registry(self):
+        """Register tutorials contributed by this plugin. Returns TutorialRegistry."""
+        return self._core.help_service.tutorial_registry
+
+    @property
+    def ui_targets(self):
+        """Register UI target widgets for tutorial spotlighting. Returns UITargetRegistry."""
+        return self._core.help_service.ui_target_registry
+
+    @property
     def citation_service(self) -> "CitationAppService":
         """Citation app service — use register_provider() to contribute citation entries."""
         return self._core.citation_app_service
@@ -418,7 +433,7 @@ class PapyrusAPI:
         def _slot(event, payload):
             callback(
                 getattr(payload, "path", ""),
-                getattr(payload, "content", ""),
+                getattr(payload, "text", "") or getattr(payload, "content", ""),
             )
         self.subscribe("editor_before_save", _slot)
 
@@ -443,6 +458,80 @@ class PapyrusAPI:
     # ----------------------------------------------------------------
     # Section H: UI helpers
     # ----------------------------------------------------------------
+
+    def register_theme(self, name: str, theme_dict: dict) -> None:
+        """
+        Register a custom theme contributed by this plugin.
+
+        The theme appears in the Theme Manager under its *name* and is
+        automatically removed when the plugin is unloaded or hot-reloaded.
+        It is NOT persisted to disk — the plugin must re-register it on every
+        app startup.
+
+        :param name: Display name for the theme (must be unique across all themes).
+        :param theme_dict: Mapping of theme token keys (see gui/theme/tokens.py)
+                           to hex colour strings.
+
+        Example::
+
+            api.register_theme("My Dark Blue", {
+                "bg_main": "#0a0f1e",
+                "bg_panel": "#111827",
+                ...
+            })
+        """
+        from core.plugins.extension_registry import ThemeSpec
+        spec = ThemeSpec(name=name, theme_dict=dict(theme_dict), plugin_id=self._plugin_id)
+        self.gui_extensions.add_theme(spec)
+        # If the GUI is already running, register immediately via the ThemeManager
+        # (lazy import keeps the core layer free of hard GUI dependencies).
+        try:
+            from gui.theme.theme import ThemeManager
+            ThemeManager().register_plugin_theme(name, theme_dict, self._plugin_id)
+        except Exception:
+            pass  # GUI not available (headless / test mode) — no-op
+
+    def register_shortcut(
+        self,
+        shortcut_id: str,
+        label: str,
+        callback: "Callable",
+        default_key: str = "",
+        description: str = "",
+    ) -> None:
+        """
+        Register a keyboard shortcut contributed by this plugin.
+
+        The shortcut appears in Settings → Shortcuts under the "Plugins" scope
+        and is user-editable.  The callback is invoked when the key fires.
+
+        :param shortcut_id: Unique ID within this plugin, e.g. ``"sync_zotero"``.
+                            The registry stores it as ``plugin.<plugin_id>.<shortcut_id>``.
+        :param label: Human-readable label shown in the shortcut editor.
+        :param callback: Zero-argument callable to invoke when the key fires.
+        :param default_key: Default key sequence string, e.g. ``"Ctrl+Shift+Z"``.
+                            Pass ``""`` to leave unbound by default.
+        :param description: One-line description shown in the shortcut editor.
+
+        Example::
+
+            api.register_shortcut(
+                "sync_citations",
+                "Sync Citations from Zotero",
+                self._sync,
+                default_key="Ctrl+Shift+Z",
+                description="Pull latest citations from your Zotero library",
+            )
+        """
+        from core.plugins.extension_registry import ShortcutSpec
+        spec = ShortcutSpec(
+            shortcut_id=f"{self._plugin_id}.{shortcut_id}",
+            label=label,
+            key_sequence=default_key,
+            callback=callback,
+            plugin_id=self._plugin_id,
+        )
+        self.gui_extensions.register_shortcut(spec)
 
     def notify(self, message: str, level: str = "info", duration: int = 3000) -> None:
         """
@@ -492,6 +581,32 @@ class PapyrusAPI:
         MasterActionRunner.register_plugin_step_handler(step_cls.step_type, step_cls)
         self._registered_step_types.append(step_cls.step_type)
 
+    def register_pack_contributor(self, contributor) -> None:
+        """
+        Register a :class:`PackContributor` so the Import/Export system can include
+        this plugin's custom data in .ppack files.
+
+        :param contributor: Object implementing the ``PackContributor`` protocol
+                            (``contributor_id``, ``display_name``, ``get_exportable_items``,
+                            ``export_items``, ``preview_items``, ``import_items``).
+
+        Example::
+
+            class MyContributor:
+                contributor_id = "myplugin"
+                display_name = "My Plugin Data"
+
+                def get_exportable_items(self): ...
+                def export_items(self, item_ids): ...
+                def preview_items(self, data): ...
+                def import_items(self, data, item_ids): ...
+
+            api.register_pack_contributor(MyContributor())
+        """
+        reg = getattr(self._core, "pack_contributor_registry", None)
+        if reg is not None:
+            reg.register(contributor, self._plugin_id)
+
     def reload_plugin(self, plugin_id: str) -> bool:
         """
         Hot-reload a plugin by ID. Dev mode only.
@@ -525,8 +640,17 @@ class PapyrusAPI:
         # Kill any running background tasks
         if self._tasks_ns is not None:
             self._tasks_ns.kill_all()
+        # Unregister pack contributors
+        reg = getattr(self._core, "pack_contributor_registry", None)
+        if reg is not None:
+            reg.remove_plugin(self._plugin_id)
         # Unregister plugin workflow step handlers
         from core.engine.master_runner import MasterActionRunner
         for st in self._registered_step_types:
             MasterActionRunner.unregister_plugin_step_handler(st)
         self._registered_step_types.clear()
+        # Remove plugin help content
+        hs = getattr(self._core, "help_service", None)
+        if hs is not None:
+            hs.help_registry.remove_plugin_topics(self._plugin_id)
+            hs.tutorial_registry.remove_plugin_tutorials(self._plugin_id)

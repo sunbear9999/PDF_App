@@ -718,7 +718,29 @@ class OntologyRegistry:
             requires_source=True)
             
         entity(EntityType.METHOD.value, "Method", "Research methodology.", {"method_type": ""}, requires_source=True)
-        entity(EntityType.DATA_TABLE.value, "Data/Table", "Structured data.", {"units": ""}, requires_source=True)
+        data_blocks = [
+            RenderBlockDefinition("header", "header", "properties.title", "Title"),
+            RenderBlockDefinition("body", "text", "properties.preview_text", "Preview"),
+            RenderBlockDefinition("verify", "verify_badge", "state.is_verified", "Verify"),
+        ]
+        entity(
+            EntityType.DATA_TABLE.value,
+            "Data/Table",
+            "Structured data.",
+            {"units": "", "title": "Dataset", "preview_text": "", "data_dock": {}},
+            render_blocks=data_blocks,
+            requires_source=False,
+            style=VisualStyleDefinition("#155e75"),
+        )
+        entity(
+            EntityType.CHART.value,
+            "Chart",
+            "A visual chart generated from structured data.",
+            {"title": "Chart", "preview_text": "", "data_dock": {}},
+            render_blocks=data_blocks,
+            requires_source=False,
+            style=VisualStyleDefinition("#6d28d9"),
+        )
 
         def relation(type_key, name, traits=None, sources=None, targets=None, props=None, fields=None, style=None):
             style = style or VisualStyleDefinition()
@@ -745,7 +767,7 @@ class OntologyRegistry:
             FieldDefinition("confidence", "Confidence", "float", 1.0, minimum=0.0, maximum=1.0),
         ]
         relation(RelationType.BASIC.value, "Connection", props={"label": "Connection"}, style=VisualStyleDefinition("#888888", "solid", "", 2))
-        evidence_sources = [EntityType.QUOTE.value, EntityType.EVIDENCE.value, EntityType.FINDING.value, EntityType.REASONING.value]
+        evidence_sources = [EntityType.QUOTE.value, EntityType.EVIDENCE.value, EntityType.FINDING.value, EntityType.REASONING.value, EntityType.DATA_TABLE.value, EntityType.CHART.value]
         argumentative_targets = [EntityType.CLAIM.value, EntityType.FINDING.value, EntityType.REASONING.value]
         relation(RelationType.SUPPORTS.value, "Supports", [RelationTrait.EVIDENTIARY], evidence_sources, argumentative_targets, {"strength": 1.0, "confidence": 1.0}, confidence_fields, VisualStyleDefinition("#00aa66", "solid", "+", 3))
         relation(RelationType.REFUTES.value, "Refutes", [RelationTrait.EVIDENTIARY], evidence_sources, argumentative_targets, {"strength": 1.0, "confidence": 1.0}, confidence_fields, VisualStyleDefinition("#d94848", "dash", "-", 3))
@@ -755,6 +777,7 @@ class OntologyRegistry:
         relation(RelationType.ANSWERS.value, "Answers", [RelationTrait.HIERARCHICAL], [EntityType.CLAIM.value, EntityType.FINDING.value, EntityType.QUOTE.value, EntityType.EVIDENCE.value], [EntityType.QUESTION.value], {"completeness": 1.0}, [FieldDefinition("completeness", "Completeness", "float", 1.0, minimum=0.0, maximum=1.0)], VisualStyleDefinition("#099268", "solid", "✓", 2))
         relation(RelationType.FOLLOW_UP.value, "Follow-up", [RelationTrait.HIERARCHICAL], [EntityType.QUESTION.value], [EntityType.QUESTION.value], {"priority": "normal", "dependency": ""}, [FieldDefinition("priority", "Priority", "string", "normal", choices=["low", "normal", "high"]), FieldDefinition("dependency", "Dependency", "string", "")], VisualStyleDefinition("#fab005", "dash", "?", 2))
         relation(RelationType.DERIVED_FROM.value, "Derived From", [RelationTrait.HIERARCHICAL, RelationTrait.EVIDENTIARY], [EntityType.CLAIM.value, EntityType.FINDING.value, EntityType.REASONING.value, EntityType.COUNTERARGUMENT.value, EntityType.TIMELINE_EVENT.value, EntityType.METHOD.value, EntityType.DATA_TABLE.value], [EntityType.QUOTE.value, EntityType.EVIDENCE.value, EntityType.SOURCE.value, EntityType.DATA_TABLE.value], {"reasoning_note": ""}, [FieldDefinition("reasoning_note", "Reasoning Note", "string", "")], VisualStyleDefinition("#0b7285", "dot", "↩", 2))
+        relation(RelationType.DATA_FLOW.value, "Data Flow", [RelationTrait.SEMANTIC], [EntityType.DATA_TABLE.value], [EntityType.CHART.value], {"reactive": True}, style=VisualStyleDefinition("#14b8a6", "solid", "↦", 3))
         relation(RelationType.PART_OF.value, "Part Of", [RelationTrait.HIERARCHICAL], ["*"], ["*"], {"weight": 1.0}, style=VisualStyleDefinition("#868e96", "dot", "⊂", 2))
         relation(RelationType.REFERENCES.value, "References", [RelationTrait.CITATIONAL], [EntityType.QUOTE.value, EntityType.EVIDENCE.value, EntityType.CLAIM.value, EntityType.FINDING.value, EntityType.SOURCE.value, EntityType.PERSON_ORG.value], [EntityType.SOURCE.value, EntityType.QUOTE.value, EntityType.EVIDENCE.value, EntityType.PERSON_ORG.value], {"citation_context": ""}, citation_fields, VisualStyleDefinition("#6741d9", "dash", "↗", 2))
         relation(RelationType.CAUSES.value, "Causes", [RelationTrait.CAUSAL], [EntityType.TIMELINE_EVENT.value, EntityType.CLAIM.value, EntityType.FINDING.value], [EntityType.TIMELINE_EVENT.value, EntityType.CLAIM.value, EntityType.FINDING.value], {"certainty": "unknown"}, [FieldDefinition("certainty", "Certainty", "string", "unknown", choices=["unknown", "weak", "moderate", "strong"])], VisualStyleDefinition("#e67700", "solid", "→", 2))

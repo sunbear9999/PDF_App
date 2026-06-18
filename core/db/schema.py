@@ -113,6 +113,27 @@ class DatabaseSchema(BaseDB):
                 doc_path TEXT, template_id TEXT, chunk_index INTEGER, json_data TEXT
             )''')
 
+            cursor.execute('''CREATE TABLE IF NOT EXISTS data_dock_datasets (
+                id TEXT PRIMARY KEY,
+                name TEXT,
+                grid_json TEXT NOT NULL,
+                provenance_json TEXT NOT NULL DEFAULT '{}',
+                column_types_json TEXT NOT NULL DEFAULT '{}',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )''')
+            cursor.execute('''CREATE TABLE IF NOT EXISTS data_dock_charts (
+                id TEXT PRIMARY KEY,
+                dataset_id TEXT,
+                name TEXT,
+                config_json TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(dataset_id) REFERENCES data_dock_datasets(id) ON DELETE SET NULL
+            )''')
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_data_dock_datasets_updated ON data_dock_datasets(updated_at)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_data_dock_charts_dataset ON data_dock_charts(dataset_id)")
+
             self._ensure_graph_tables(cursor)
             self._migrate_legacy_workspace_to_graph(cursor)
 

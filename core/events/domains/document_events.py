@@ -15,6 +15,7 @@ class DocumentIntent(Enum):
     DELETE_HIGHLIGHT = auto()
     FIND_SIMILAR = auto()   # Trigger semantic similarity search in the viewer
     FIND_TEXT = auto()      # Open the viewer search bar and search for text
+    JUMP_TO_LOCATION = auto()  # Scroll viewer to page_num + optional rects bbox
 
 @dataclass
 class DocumentPayload(BasePayload):
@@ -30,6 +31,7 @@ class DocumentPayload(BasePayload):
     color: Any = None
     rects: Optional[List[Any]] = None
     doc_name: Optional[str] = None
+    context: Dict[str, Any] = field(default_factory=dict)
 
 
 class AnnotationIntent(Enum):

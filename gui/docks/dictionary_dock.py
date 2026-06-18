@@ -3,6 +3,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QPushButton, QComboBox, QLineEdit, QCheckBox,
                              QFileDialog, QMessageBox, QScrollArea, QFrame,
                              QDialog, QTextEdit)
+from gui.managers.dialog_manager import exec_as_modal, get_for_widget
 from PySide6.QtCore import Qt
 from core.events.event_bus import EventBus
 from gui.components.base import BaseCard, BaseDialog
@@ -174,13 +175,25 @@ class DictionaryTab(QWidget):
             return
 
         dialog = AddWordDialog(theme=self.theme, parent=self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            word, definition = dialog.get_data()
-            if word and definition:
-                self.bus.dictionary_action_requested.emit(
-                    DictionaryIntent.ADD_WORD,
-                    DictionaryPayload(dict_id=dict_id, word=word, definition=definition)
-                )
+
+        def _on_accepted():
+            try:
+                word, definition = dialog.get_data()
+                if word and definition:
+                    self.bus.dictionary_action_requested.emit(
+                        DictionaryIntent.ADD_WORD,
+                        DictionaryPayload(dict_id=dict_id, word=word, definition=definition),
+                    )
+            except RuntimeError:
+                pass
+
+        dialog.accepted.connect(_on_accepted)
+        dm = get_for_widget(self)
+        if dm:
+            dm.show_instance(dialog)
+        else:
+            if exec_as_modal(dialog) == QDialog.DialogCode.Accepted:
+                _on_accepted()
             else:
                 QMessageBox.warning(self, "Missing Data", "Both a word and a definition are required.")
 

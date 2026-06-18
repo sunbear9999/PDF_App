@@ -1,7 +1,8 @@
 from PySide6.QtWidgets import (QCheckBox, QDockWidget, QWidget, QHBoxLayout, QVBoxLayout,
-                             QStackedWidget, QDialog,QPushButton, QLabel, QComboBox, QFrame, QButtonGroup,QMessageBox, QMenu,QTextEdit,QScrollArea, QLineEdit)
+                             QStackedWidget, QDialog, QPushButton, QLabel, QComboBox, QFrame, QButtonGroup, QMessageBox, QMenu, QTextEdit, QScrollArea, QLineEdit)
 from PySide6.QtCore import Qt, Signal, QThread, QTimer
 from PySide6.QtGui import QCursor, QAction
+from gui.managers.dialog_manager import exec_as_modal, get_for_widget
 
 from gui.docks.unified_research.components.context_filter_dialog import ContextFilterDialog
 from gui.docks.unified_research.tabs.blueprint_editor_tab import BlueprintEditorTab
@@ -18,6 +19,8 @@ from gui.docks.unified_research.components.history_renderer import ChatHistoryRe
 from core.events.event_bus import EventBus
 from core.events.domains.document_events import DocumentEvent, DocumentEventPayload
 from core.events.domains.workspace_events import WorkspaceEvent, WorkspaceEventPayload
+from core.events.domains.project_events import ProjectEvent
+from gui.utils.document_helpers import active_pdf_names, active_pdf_paths, prune_doc_names
 class IndexWorker(QThread):
     progress = Signal(str)
     finished_indexing = Signal(bool, str)
@@ -62,17 +65,63 @@ class UnifiedResearchDock(QDockWidget):
         self.active_docs, self.active_tags = [], []
         self.tag_logic = "AND"
         self.theme = None
+        self._plugin_tab_widgets = []
+        # plugin_id → [(btn, widget, tab_id)]
+        self._plugin_tab_map: dict = {}
+        self._injected_tab_ids: set = set()
 
         self._build_sidebar()
         self._build_core_area()
         self._inject_plugin_tabs()
 
-        # --- NEW: Subscribe to Global Events ---
+        # --- Subscribe to Global Events ---
         self.bus = EventBus.get_instance()
         self.bus.pdf_switched.connect(self._on_pdf_switched_event)
+        self.bus.document_added.connect(self._on_document_list_changed)
+        self.bus.pdf_removed.connect(self._on_document_list_changed)
+        self.bus.pdf_renamed.connect(self._on_document_list_changed)
+        self.bus.project_loaded.connect(self._on_project_loaded)
+        self.bus.plugin_unloaded.connect(self.remove_plugin_tabs)
+        self.bus.plugin_loaded.connect(self._on_plugin_loaded)
+        # Auto-update theme whenever the app theme changes — handles the case
+        # where this dock is the outer QDockWidget and broadcast_theme() only
+        # walks inner widgets.
+        self.bus.theme_changed.connect(self._on_bus_theme_changed)
     def _on_pdf_switched_event(self, event: DocumentEvent, payload: DocumentEventPayload):
         if event == DocumentEvent.PDF_SWITCHED:
             self._on_pdf_switched(payload.path)
+
+    def _on_document_list_changed(self, event, payload):
+        if event in {DocumentEvent.DOCUMENT_ADDED, DocumentEvent.PDF_REMOVED, DocumentEvent.PDF_RENAMED}:
+            self._prune_active_docs()
+            self.check_index_status()
+
+    def _on_project_loaded(self, event, payload):
+        if event == ProjectEvent.LOADED:
+            self._prune_active_docs()
+            self.refresh_project_ui()
+
+    def _prune_active_docs(self):
+        self.active_docs = prune_doc_names(self.project_manager, self.active_docs)
+        if self.project_manager:
+            try:
+                self.project_manager.set_metadata("active_rag_docs", json.dumps(self.active_docs))
+            except Exception:
+                pass
+        if hasattr(self, "btn_filter"):
+            self.btn_filter.setText(f"⚙️ Filter Context ({len(self.active_docs)} Docs, {len(self.active_tags)} Tags)")
+
+    def _on_bus_theme_changed(self, event, theme):
+        if isinstance(theme, dict):
+            self.update_theme(theme)
+
+    def closeEvent(self, event):
+        for widget in getattr(self, "_plugin_tab_widgets", []):
+            if hasattr(widget, "_stop_loader"):
+                widget._stop_loader()
+            elif hasattr(widget, "_stop_worker"):
+                widget._stop_worker()
+        super().closeEvent(event)
 
     def _on_pdf_switched(self, pdf_path=None):
         """Safe wrapper to handle global event signals."""
@@ -137,7 +186,7 @@ class UnifiedResearchDock(QDockWidget):
         )
 
         self.btn_brief = QPushButton("📝 Project Manifest")
-        self.btn_brief.clicked.connect(lambda: ProjectBriefDialog(self.project_manager, self.theme, self).exec())
+        self.btn_brief.clicked.connect(self._open_project_brief)
         header_layout.addWidget(self.btn_brief, 0, 2)
 
         self.btn_filter = QPushButton("⚙️ Filter Context")
@@ -172,15 +221,20 @@ class UnifiedResearchDock(QDockWidget):
             return
         sidebar_layout = self.sidebar.layout()
         for spec in registry.get_research_tabs():
+            if spec.tab_id in self._injected_tab_ids:
+                continue  # Already injected (e.g. after plugin re-enable)
             try:
                 widget = spec.factory(app_context) if spec.factory else None
                 if widget is None:
                     print(f"[PluginTab] Warning: factory for '{spec.tab_id}' returned None — tab skipped")
                     continue
-                tab_idx = self.stacked_widget.count()
                 self.stacked_widget.addWidget(widget)
+                self._plugin_tab_widgets.append(widget)
+                self._injected_tab_ids.add(spec.tab_id)
+                if self.theme and hasattr(widget, "update_theme"):
+                    widget.update_theme(self.theme)
 
-                # Sidebar nav button — prefer spec.icon, else first word of label
+                # Sidebar nav button — use setCurrentWidget so indices don't matter
                 icon_text = spec.icon if spec.icon else spec.label.split()[0]
                 btn = QPushButton(icon_text)
                 btn.setCheckable(True)
@@ -191,10 +245,19 @@ class UnifiedResearchDock(QDockWidget):
                     " font-weight: bold; color: #888; }"
                     " QPushButton:checked { color: #b366ff; }"
                 )
-                btn.clicked.connect(lambda checked, idx=tab_idx: self.stacked_widget.setCurrentIndex(idx))
-                self.nav_group.addButton(btn, tab_idx)
+                plugin_id = getattr(spec, "plugin_id", "")
+                if plugin_id:
+                    btn.setProperty("papyrus_plugin_id", plugin_id)
+                btn.clicked.connect(lambda checked, w=widget: self.stacked_widget.setCurrentWidget(w))
+                self.nav_group.addButton(btn)
                 # Insert before the stretch at the bottom of the sidebar
                 sidebar_layout.insertWidget(sidebar_layout.count() - 1, btn)
+
+                # Track for later removal
+                if plugin_id:
+                    self._plugin_tab_map.setdefault(plugin_id, []).append(
+                        (btn, widget, spec.tab_id)
+                    )
 
                 # Register with AI output router if this tab has a target_id
                 if spec.target_id and app_context and getattr(app_context, "ui_router", None):
@@ -202,6 +265,37 @@ class UnifiedResearchDock(QDockWidget):
 
             except Exception as exc:
                 print(f"[PluginTab] Failed to inject tab '{spec.tab_id}': {exc}")
+
+    def remove_plugin_tabs(self, plugin_id: str) -> None:
+        """Remove all sidebar tabs and stacked widgets belonging to plugin_id."""
+        entries = self._plugin_tab_map.pop(plugin_id, [])
+        sidebar_layout = self.sidebar.layout()
+        for btn, widget, tab_id in entries:
+            try:
+                # Switch away if currently showing this tab
+                if self.stacked_widget.currentWidget() is widget:
+                    self.stacked_widget.setCurrentIndex(0)
+                    self.nav_group.button(0).setChecked(True)
+                self.nav_group.removeButton(btn)
+                sidebar_layout.removeWidget(btn)
+                btn.setVisible(False)
+                btn.deleteLater()
+                self.stacked_widget.removeWidget(widget)
+                if hasattr(widget, "_stop_loader"):
+                    widget._stop_loader()
+                elif hasattr(widget, "_stop_worker"):
+                    widget._stop_worker()
+                widget.close()
+                widget.deleteLater()
+                self._injected_tab_ids.discard(tab_id)
+                if widget in self._plugin_tab_widgets:
+                    self._plugin_tab_widgets.remove(widget)
+            except RuntimeError:
+                pass
+
+    def _on_plugin_loaded(self, plugin_id: str) -> None:
+        """Re-inject tabs for a plugin that was just enabled."""
+        self._inject_plugin_tabs()
 
     def load_tab_history(self, tab_widget, tab_id):
         """Universally rebuilds chat UI for any tab from the SQLite history."""
@@ -282,6 +376,11 @@ class UnifiedResearchDock(QDockWidget):
         if hasattr(self, 'tab_analysis'): self.tab_analysis.update_theme(theme)
         if hasattr(self, 'tab_editor'): self.tab_editor.update_theme(theme)
         if hasattr(self, 'tab_custom'): self.tab_custom.update_theme(theme) # <-- FIX: Was missing!
+        for widget in getattr(self, "_plugin_tab_widgets", []):
+            if hasattr(widget, "update_theme"):
+                widget.update_theme(theme)
+            elif hasattr(widget, "apply_theme"):
+                widget.apply_theme(theme)
 
         self.check_index_status()
 
@@ -295,10 +394,22 @@ class UnifiedResearchDock(QDockWidget):
                     if hasattr(widget, 'update_theme'):
                         widget.update_theme(theme)
 
+    def _open_project_brief(self):
+        dm = get_for_widget(self)
+        if dm:
+            dm.show(
+                ProjectBriefDialog,
+                key="project_brief",
+                singleton=True,
+                factory=lambda: ProjectBriefDialog(self.project_manager, self.theme, self),
+            )
+        else:
+            exec_as_modal(ProjectBriefDialog(self.project_manager, self.theme, self))
+
     def _open_filter_dialog(self):
-        if not self.active_docs and self.project_manager.pdfs:
-            import os
-            self.active_docs = [os.path.basename(p) for p in self.project_manager.pdfs]
+        self._prune_active_docs()
+        if not self.active_docs and active_pdf_paths(self.project_manager):
+            self.active_docs = active_pdf_names(self.project_manager)
 
         dialog = ContextFilterDialog(
             self.project_manager,
@@ -306,16 +417,28 @@ class UnifiedResearchDock(QDockWidget):
             self.active_tags,
             self.tag_logic,
             self.theme,
-            self
+            self,
         )
-        if dialog.exec():
-            self.active_docs, self.active_tags, self.tag_logic = dialog.get_results()
-            self.project_manager.set_metadata("active_rag_docs", json.dumps(self.active_docs))
-            self.project_manager.set_metadata("active_rag_tags", json.dumps(self.active_tags))
-            self.project_manager.set_metadata("active_rag_tag_logic", self.tag_logic)
-            doc_count = len(self.active_docs)
-            tag_count = len(self.active_tags)
-            self.btn_filter.setText(f"⚙️ Filter Context ({doc_count} Docs, {tag_count} Tags)")
+
+        def _on_accepted():
+            try:
+                self.active_docs, self.active_tags, self.tag_logic = dialog.get_results()
+                self.project_manager.set_metadata("active_rag_docs", json.dumps(self.active_docs))
+                self.project_manager.set_metadata("active_rag_tags", json.dumps(self.active_tags))
+                self.project_manager.set_metadata("active_rag_tag_logic", self.tag_logic)
+                doc_count = len(self.active_docs)
+                tag_count = len(self.active_tags)
+                self.btn_filter.setText(f"⚙️ Filter Context ({doc_count} Docs, {tag_count} Tags)")
+            except RuntimeError:
+                pass
+
+        dialog.accepted.connect(_on_accepted)
+        dm = get_for_widget(self)
+        if dm:
+            dm.show_instance(dialog)
+        else:
+            if exec_as_modal(dialog):
+                _on_accepted()
     def check_index_status(self):
         """Silently checks if the database is loaded and indexed."""
         proj_path = self.project_manager.project_filepath
@@ -338,7 +461,7 @@ class UnifiedResearchDock(QDockWidget):
 
     def start_indexing(self):
         """Starts the background embedding thread."""
-        paths_to_index = self.project_manager.pdfs
+        paths_to_index = active_pdf_paths(self.project_manager)
         if not paths_to_index:
             QMessageBox.warning(self, "Error", "No PDFs available in project to index.")
             return
@@ -360,7 +483,7 @@ class UnifiedResearchDock(QDockWidget):
             # Sync any new tags to ChromaDB
             pm = self.project_manager
             if hasattr(pm, '_sync_doc_tags_for_llm'):
-                for pdf_path in pm.pdfs:
+                for pdf_path in active_pdf_paths(pm):
                     pm._sync_doc_tags_for_llm(pdf_path)
 
             # Re-evaluate the status label

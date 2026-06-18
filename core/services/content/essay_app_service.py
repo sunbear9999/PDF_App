@@ -44,6 +44,15 @@ class EssayAppService(QObject):
             )
 
     def _save_essay(self, payload: EssayPayload):
+        # Let plugins intercept the save (e.g. auto-format, word-count tracking)
+        try:
+            from core.events.domains.document_events import DocumentPayload
+            self.bus.editor_before_save.emit(
+                None,
+                DocumentPayload(path=payload.essay_id, text=payload.content),
+            )
+        except Exception:
+            pass
         self.pm.upsert_essay(payload.essay_id, payload.title, payload.content)
         self.bus.essay_data_ready.emit(
             EssayEvent.SAVED,

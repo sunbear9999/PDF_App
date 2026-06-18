@@ -1,3 +1,4 @@
+import shiboken6
 from PySide6.QtCore import QObject, QThread, Signal
 from core.events.event_bus import EventBus
 from core.events.domains.tool_events import (
@@ -94,6 +95,7 @@ class IndexAppService(QObject):
             )
         )
         self._worker.finished_indexing.connect(self._on_worker_finished)
+        self._worker.finished.connect(self._worker.deleteLater)
         self._worker.start()
 
     def _on_worker_finished(self, success: bool, error_msg: str):

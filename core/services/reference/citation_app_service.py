@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Dict, List, Protocol, runtime_checkable
 
+import shiboken6
 from PySide6.QtCore import QObject, QThread, Signal
 
 from core.events.event_bus import EventBus
@@ -55,6 +56,7 @@ class CitationAppService(QObject):
         self.cm = citation_manager
         self.bus = EventBus.get_instance()
         self.bus.citation_action_requested.connect(self._handle_intent)
+        self.bus.pdf_removed.connect(self._on_pdf_removed)
         self.worker = None
         self._providers: Dict[str, CitationProvider] = {}
 
@@ -70,22 +72,29 @@ class CitationAppService(QObject):
     # Intent handling
     # ------------------------------------------------------------------
 
+    def _on_pdf_removed(self, event, payload):
+        path = getattr(payload, "path", None)
+        if path:
+            self.pm.delete_citation(path)
+            self._run_extraction()
+
     def _handle_intent(self, intent: CitationIntent, payload: CitationPayload):
         if intent == CitationIntent.REFRESH_TABLE:
             self._run_extraction()
         elif intent == CitationIntent.UPDATE_ENTRY:
             data = payload.get("data") or {}
             doc_id = data.get("doc_id", "")
-            if not str(doc_id).startswith("zotero:"):
+            if not self._provider_entry(str(doc_id)) or doc_id in getattr(self.pm, "pdfs", []):
                 self.pm.upsert_citation(data)
         elif intent == CitationIntent.GENERATE_WORKS_CITED:
             self._generate_works_cited(payload)
 
     def _run_extraction(self):
-        if self.worker and self.worker.isRunning():
+        if self.worker and shiboken6.isValid(self.worker) and self.worker.isRunning():
             return
         self.worker = ExtractionWorker(self.pm, self.cm)
         self.worker.finished_extraction.connect(self._on_extraction_finished)
+        self.worker.finished.connect(self.worker.deleteLater)
         self.worker.start()
 
     def _on_extraction_finished(self, data: list):
@@ -106,21 +115,17 @@ class CitationAppService(QObject):
         self.cm.set_style(style)
         all_doc_ids = payload.get("doc_ids") or []
 
-        # PDF-backed entries go through the existing citation manager lookup
-        pdf_ids = [d for d in all_doc_ids if d and not str(d).startswith("zotero:")]
-        works = self.cm.format_works_cited(pdf_ids)
-
-        # Provider entries: look up from the provider that owns the doc_id
+        works = []
         for doc_id in all_doc_ids:
-            if not doc_id or not str(doc_id).startswith("zotero:"):
+            if not doc_id:
                 continue
-            for provider in self._providers.values():
-                entry = provider.get_entry(str(doc_id))
-                if entry:
-                    formatted = self.cm.format_entry(entry)
-                    if formatted:
-                        works.append(formatted)
-                    break
+            entry = self._provider_entry(str(doc_id))
+            if entry and doc_id not in getattr(self.pm, "pdfs", []):
+                formatted = self.cm.format_entry(entry)
+            else:
+                formatted = self.cm.format_entry(self.pm.get_citation(doc_id))
+            if formatted:
+                works.append(formatted)
 
         works = sorted(works)
         formatted_text = f"Works Cited ({style})\n\n" + "\n\n".join(works)
@@ -128,3 +133,13 @@ class CitationAppService(QObject):
             CitationEvent.WORKS_CITED_GENERATED,
             CitationEventPayload(works=works, formatted_text=formatted_text),
         )
+
+    def _provider_entry(self, doc_id: str) -> dict | None:
+        for provider in self._providers.values():
+            try:
+                entry = provider.get_entry(doc_id)
+                if entry:
+                    return entry
+            except Exception:
+                continue
+        return None

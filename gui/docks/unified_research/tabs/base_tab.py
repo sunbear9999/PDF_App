@@ -7,6 +7,7 @@ from core.events.event_bus import EventBus
 from core.events.domains.workflow_events import WorkflowIntent, WorkflowPayload
 from gui.docks.unified_research.components.chat_streamer import ChatMessageWidget
 from gui.docks.unified_research.components.history_renderer import ChatHistoryRenderer
+from gui.utils.document_helpers import prune_doc_names
 
 class BaseTab(QWidget):
     def __init__(self, main_window, target_id=None, parent=None):
@@ -126,8 +127,13 @@ class BaseTab(QWidget):
 
         if payload_type == "results_dialog":
             from gui.components.dialogs.tag_relatives_dialog import AIResultsDialog
+            from gui.managers.dialog_manager import get_for_widget
             dlg = AIResultsDialog(payload.get("title", "AI Results"), payload.get("items", []), self.main_window, self.main_window)
-            dlg.show()
+            dm = get_for_widget(self)
+            if dm:
+                dm.show_instance(dlg)
+            else:
+                dlg.show()
             return
 
         if payload_type == "error":
@@ -187,7 +193,10 @@ class BaseTab(QWidget):
             except Exception: pass
             
             initial_state["project_manifest"] = self.project_manager.get_metadata("project_manifest", "{}")
-            initial_state["active_rag_docs"] = self._metadata_json("active_rag_docs", [])
+            initial_state["active_rag_docs"] = prune_doc_names(
+                self.project_manager,
+                self._metadata_json("active_rag_docs", []),
+            )
             initial_state["active_rag_tags"] = self._metadata_json("active_rag_tags", [])
             initial_state["active_rag_tag_logic"] = self.project_manager.get_metadata("active_rag_tag_logic", "OR")
             

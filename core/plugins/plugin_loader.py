@@ -138,14 +138,53 @@ def _tag_plugin_specs(registry, plugin_id: str, before_count: dict) -> None:
                 spec.plugin_id = plugin_id
 
 
+def scan_plugin_dirs() -> List[Dict]:
+    """Return lightweight metadata for all plugin directories (including disabled ones).
+
+    Reads only class-level attributes from each plugin.py without calling any
+    lifecycle methods.  Safe to call at any time.
+
+    Returns a list of dicts with keys: plugin_id, name, version, dir_name.
+    """
+    plugins_dir = _plugins_dir()
+    if not os.path.isdir(plugins_dir):
+        return []
+    results = []
+    for entry in sorted(os.listdir(plugins_dir)):
+        plugin_path = os.path.join(plugins_dir, entry, "plugin.py")
+        if not os.path.isfile(plugin_path):
+            continue
+        module_name = f"plugins.{entry}.plugin.__scan__"
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, plugin_path)
+            if spec is None or spec.loader is None:
+                continue
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            cls = getattr(module, "Plugin", None)
+            if cls is None:
+                continue
+            results.append({
+                "plugin_id": getattr(cls, "plugin_id", entry),
+                "name": getattr(cls, "name", entry),
+                "version": getattr(cls, "version", "?"),
+                "dir_name": entry,
+            })
+        except Exception:
+            results.append({"plugin_id": entry, "name": entry, "version": "?", "dir_name": entry})
+    return results
+
+
 def load_plugins(core: "PapyrusCore") -> List[PapyrusPlugin]:
     """
     Discover, sort by dependency, and register all plugins.
 
     Each plugin receives its own PapyrusAPI instance. The (plugin, api) pairs
     are stored on ``core._loaded_plugins`` for later cleanup.
+    Plugins listed in the PluginEnableRegistry as disabled are skipped.
     """
     from core.plugins.papyrus_api import PapyrusAPI
+    from core.plugins.plugin_enable_registry import PluginEnableRegistry
 
     plugins_dir = _plugins_dir()
     if not os.path.isdir(plugins_dir):
@@ -156,8 +195,19 @@ def load_plugins(core: "PapyrusCore") -> List[PapyrusPlugin]:
     if not hasattr(core, "_custom_services"):
         core._custom_services: Dict[str, object] = {}
 
+    # Init enable registry with the app data dir so it can read the persist file.
+    enable_reg = PluginEnableRegistry.get_instance()
+    enable_reg.init(core.user_data_dir)
+    disabled = enable_reg.disabled_ids()
+
     try:
-        discovered = _discover_plugins(plugins_dir)
+        all_discovered = _discover_plugins(plugins_dir)
+        # Filter out explicitly disabled plugins before dependency resolution
+        discovered = {pid: p for pid, p in all_discovered.items() if pid not in disabled}
+        if disabled:
+            for pid in disabled:
+                if pid in all_discovered:
+                    print(f"[PluginLoader] Skipping disabled plugin: {pid}")
         ordered = _topological_sort(discovered)
     except PluginLoadError as exc:
         print(f"[PluginLoader] {exc}")
@@ -278,4 +328,102 @@ def reload_plugin(core: "PapyrusCore", plugin_id: str) -> bool:
     except Exception as exc:
         print(f"[HotReload] Reload failed for '{plugin_id}': {exc}")
         new_api._cleanup()
+        return False
+
+
+def _unload_plugin_internal(core: "PapyrusCore", plugin_id: str) -> bool:
+    """Unload a plugin without reloading it. Returns True if it was loaded."""
+    target = next(
+        ((p, a) for p, a in getattr(core, "_loaded_plugins", []) if p.plugin_id == plugin_id),
+        None,
+    )
+    if target is None:
+        return False
+
+    plugin, api = target
+    try:
+        if hasattr(plugin, "on_unload") and callable(plugin.on_unload):
+            plugin.on_unload()
+    except Exception as exc:
+        print(f"[PluginLoader] on_unload error for '{plugin_id}': {exc}")
+    api._cleanup()
+    if hasattr(core, "bus"):
+        core.bus.plugin_unloaded.emit(plugin_id)
+
+    core.plugin_extension_registry.remove_plugin_specs(plugin_id)
+    core.plugin_dock_specs = [s for s in core.plugin_dock_specs if s.plugin_id != plugin_id]
+    core.blueprint_registry.remove_by_plugin(plugin_id)
+    core.workspace_ai_tools_registry.remove_by_plugin(plugin_id)
+    core.workspace_node_type_registry.remove_by_plugin(plugin_id)
+    core.workflow_node_type_registry.remove_by_plugin(plugin_id)
+    core.ontology_registry.remove_by_plugin(plugin_id)
+
+    core._loaded_plugins = [(p, a) for p, a in core._loaded_plugins if p.plugin_id != plugin_id]
+    return True
+
+
+def disable_plugin(core: "PapyrusCore", plugin_id: str) -> bool:
+    """Disable a plugin: unload it live and persist the disabled state.
+
+    The plugin stays disabled on next app restart. Returns True on success.
+    """
+    from core.plugins.plugin_enable_registry import PluginEnableRegistry
+    unloaded = _unload_plugin_internal(core, plugin_id)
+    PluginEnableRegistry.get_instance().disable(plugin_id)
+    if not unloaded:
+        print(f"[PluginLoader] Plugin '{plugin_id}' was not loaded (marked disabled anyway).")
+    else:
+        print(f"[PluginLoader] Disabled: {plugin_id}")
+    return True
+
+
+def enable_plugin(core: "PapyrusCore", plugin_id: str) -> bool:
+    """Enable a previously-disabled plugin: remove it from the disabled list and load it.
+
+    Returns True on success, False if the plugin directory was not found.
+    """
+    from core.plugins.papyrus_api import PapyrusAPI
+    from core.plugins.plugin_enable_registry import PluginEnableRegistry
+
+    # Remove from disabled list first so _discover_plugins won't skip it
+    PluginEnableRegistry.get_instance().enable(plugin_id)
+
+    # Check it's not already loaded
+    already_loaded = any(
+        p.plugin_id == plugin_id for p, _ in getattr(core, "_loaded_plugins", [])
+    )
+    if already_loaded:
+        print(f"[PluginLoader] Plugin '{plugin_id}' is already loaded.")
+        return True
+
+    plugins_dir = _plugins_dir()
+    discovered = _discover_plugins(plugins_dir)
+    instance = discovered.get(plugin_id)
+    if instance is None:
+        print(f"[PluginLoader] Plugin '{plugin_id}' not found in plugins directory.")
+        PluginEnableRegistry.get_instance().disable(plugin_id)  # roll back
+        return False
+
+    api = PapyrusAPI(core, plugin_id=plugin_id)
+    try:
+        if hasattr(instance, "on_load") and callable(instance.on_load):
+            instance.on_load(api)
+        if hasattr(instance, "on_register") and callable(instance.on_register):
+            instance.on_register(api)
+
+        reg = core.plugin_extension_registry
+        before = {attr: len(getattr(reg, attr, [])) for attr in reg._spec_list_attrs()}
+        core.register_plugin(instance, api)
+        _tag_plugin_specs(reg, plugin_id, before)
+
+        core._loaded_plugins.append((instance, api))
+        print(f"[PluginLoader] Enabled: {instance.name} ({plugin_id}) v{instance.version}")
+        if hasattr(core, "bus"):
+            core.bus.plugin_loaded.emit(plugin_id)
+        return True
+
+    except Exception as exc:
+        print(f"[PluginLoader] Failed to enable plugin '{plugin_id}': {exc}")
+        api._cleanup()
+        PluginEnableRegistry.get_instance().disable(plugin_id)  # roll back
         return False

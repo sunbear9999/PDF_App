@@ -60,6 +60,12 @@ def register_default_docks(dock_manager, window_ref):
         dock.setWidget(SlideshowTab(w.project_manager, w))
         return dock
 
+    def make_data_dock(w):
+        dock = QDockWidget("Data Dock", w)
+        from gui.docks.data_dock import DataDockView
+        dock.setWidget(DataDockView(w.app_context, w))
+        return dock
+
     def make_scratchpad(w):
         dock = QDockWidget("✍️ Scratchpad", w)
         editor = QTextEdit()
@@ -70,6 +76,7 @@ def register_default_docks(dock_manager, window_ref):
     dm = dock_manager
     dm.register(DockDefinition("research", "SingleResearchDock", "Research Assistant", R, True, make_research))
     dm.register(DockDefinition("slides", "SlideshowDock", "Slideshow Maker", R, False, make_slides))
+    dm.register(DockDefinition("data_dock", "SingleDataDock", "Data Dock", R, True, make_data_dock))
     dm.register(DockDefinition("workspaces", "WorkspaceDock", "Workspaces", R, False, make_workspace))
     dm.register(DockDefinition("notes", "NotesDock", "Notes List", R, True, make_notes))
     dm.register(DockDefinition("dicts", "SingleDictionaryDock", "Dictionary", R, True, make_dict))

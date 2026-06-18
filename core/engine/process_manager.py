@@ -86,17 +86,36 @@ class ProcessRegistry(QObject):
                 self.job_updated.emit(job)
                 break
 
+    def _disconnect_runner(self, job):
+        """Sever all signal connections on a finished runner to break reference cycles."""
+        runner = getattr(job, "runner", None)
+        if runner is None:
+            return
+        for signal_name in (
+            "progress_update", "step_started", "step_complete",
+            "action_complete", "error", "state_snapshot", "user_input_requested",
+        ):
+            sig = getattr(runner, signal_name, None)
+            if sig is not None:
+                try:
+                    sig.disconnect()
+                except RuntimeError:
+                    pass
+        job.runner = None
+
     def complete_job(self, job_id):
         if self.active_job and self.active_job.id == job_id:
+            self._disconnect_runner(self.active_job)
             self._remember_recent_job(self.active_job)
             self.active_job = None
             self.job_removed.emit(job_id)
             self._process_next()
             return
-            
+
         # Clean up completed express jobs
         for i, job in enumerate(self.express_jobs):
             if job.id == job_id:
+                self._disconnect_runner(job)
                 self._remember_recent_job(job)
                 self.express_jobs.pop(i)
                 self.job_removed.emit(job_id)

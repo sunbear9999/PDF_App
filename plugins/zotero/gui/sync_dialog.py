@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.events.event_bus import EventBus
+from gui.utils.document_helpers import active_pdf_paths
 from core.events.domains.tool_events import CitationIntent, CitationPayload
 
 if TYPE_CHECKING:
@@ -46,19 +47,31 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 class _LoadWorker(QThread):
-    finished = Signal(list)
+    finished = Signal(list, str)
 
-    def __init__(self, db: "ZoteroDB"):
+    def __init__(self, db: "ZoteroDB", config: dict | None = None):
         super().__init__()
         self._db = db
+        self._config = config or {}
 
     def run(self):
+        source = "desktop"
         try:
-            items = self._db.get_items()
+            items = self._db.get_items() if self._db and self._db.is_available() else []
         except Exception as exc:
             print(f"[ZoteroSync] Load error: {exc}")
             items = []
-        self.finished.emit(items)
+        if not items:
+            try:
+                from ..zotero_sync_adapter import PyZoteroClient
+                client = PyZoteroClient(local_api_base_url=self._config.get("pyzotero_local_api_base_url", ""))
+                items = client.list_local_items()
+                if items:
+                    source = "local_api"
+            except Exception as exc:
+                print(f"[ZoteroSync] Local API load error: {exc}")
+                items = []
+        self.finished.emit(items, source)
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +171,10 @@ class ZoteroSyncDialog(QDialog):
         project_manager: Optional["ProjectManager"] = None,
         initial_pdf_paths: Optional[List[str]] = None,
         outbound_adapter=None,
+        outbound_enabled: bool = False,
+        outbound_collection_name: str = "",
+        config=None,
+        library_cache=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -168,6 +185,10 @@ class ZoteroSyncDialog(QDialog):
         self._pm = project_manager
         self._initial_pdf_paths = list(initial_pdf_paths or [])
         self._outbound_adapter = outbound_adapter
+        self._outbound_enabled = outbound_enabled
+        self._outbound_collection_name = outbound_collection_name
+        self._config = config
+        self._library_cache = library_cache
         self._zotero_items: List[dict] = []
         self._assignments: Dict[str, dict] = {}  # pdf_path → zotero item
         self._selected_pdf: Optional[str] = None
@@ -175,6 +196,24 @@ class ZoteroSyncDialog(QDialog):
         self._build_ui()
         self._load_project_pdfs()
         self._load_zotero_items()
+
+    def closeEvent(self, event):
+        self._stop_worker()
+        super().closeEvent(event)
+
+    def _stop_worker(self):
+        worker = self._worker
+        self._worker = None
+        if not worker:
+            return
+        try:
+            if worker.isRunning():
+                worker.requestInterruption()
+                if not worker.wait(1500):
+                    worker.terminate()
+                    worker.wait(500)
+        except RuntimeError:
+            pass
 
     # ------------------------------------------------------------------
     # UI construction
@@ -195,8 +234,8 @@ class ZoteroSyncDialog(QDialog):
 
         if self._outbound_adapter is not None and not self._outbound_adapter.can_write():
             readonly = QLabel(
-                "Sync to Zotero is unavailable with the local API; "
-                "metadata import/copy is available."
+                "Automatic PDF add is unavailable until PyZotero write settings are configured; "
+                "metadata import/copy is available locally."
             )
             readonly.setWordWrap(True)
             readonly.setObjectName("zoteroReadOnlyNotice")
@@ -231,8 +270,15 @@ class ZoteroSyncDialog(QDialog):
         self._auto_btn.clicked.connect(self._do_auto_match)
         self._remove_btn = QPushButton("✕ Remove Selected")
         self._remove_btn.clicked.connect(self._remove_selected_assignment)
+        self._outbound_btn = QPushButton("Add PDFs to Zotero")
+        self._outbound_btn.clicked.connect(self._sync_pdfs_to_zotero)
+        self._outbound_btn.setVisible(self._outbound_enabled)
+        self._outbound_btn.setEnabled(
+            bool(self._outbound_adapter and self._outbound_enabled and self._outbound_adapter.can_write())
+        )
         btn_row.addWidget(self._auto_btn)
         btn_row.addWidget(self._remove_btn)
+        btn_row.addWidget(self._outbound_btn)
         btn_row.addStretch()
         center_lay.addLayout(btn_row)
         splitter.addWidget(center)
@@ -273,9 +319,10 @@ class ZoteroSyncDialog(QDialog):
         if not self._pm:
             self._pdf_list.addItem(QListWidgetItem("(No project open)"))
             return
-        allowed = set(self._pm.pdfs)
+        active_paths = active_pdf_paths(self._pm)
+        allowed = set(active_paths)
         selected = [path for path in self._initial_pdf_paths if path in allowed]
-        paths = selected or list(self._pm.pdfs)
+        paths = selected or active_paths
         for path in paths:
             item = QListWidgetItem(os.path.basename(path))
             item.setData(Qt.ItemDataRole.UserRole, path)
@@ -283,21 +330,50 @@ class ZoteroSyncDialog(QDialog):
             self._pdf_list.addItem(item)
 
     def _load_zotero_items(self):
-        if not self._db.is_available():
-            self._status_lbl.setText("⚠️ Zotero library not found")
-            return
         self._status_lbl.setText("Loading Zotero library…")
-        self._worker = _LoadWorker(self._db)
-        self._worker.finished.connect(self._on_zotero_loaded)
-        self._worker.start()
+        self._stop_worker()
+        self._worker = _LoadWorker(self._db, self._config_snapshot())
+        worker = self._worker
+        worker.finished.connect(self._on_zotero_loaded)
+        worker.finished.connect(lambda *_: self._clear_worker_ref(worker))
+        worker.start()
 
-    def _on_zotero_loaded(self, items: List[dict]):
+    def _clear_worker_ref(self, worker):
+        if self._worker is worker:
+            self._worker = None
+        try:
+            worker.deleteLater()
+        except RuntimeError:
+            pass
+
+    def _config_snapshot(self) -> dict:
+        config = self._config
+        if not config:
+            return {}
+        return {"pyzotero_local_api_base_url": config.get("pyzotero_local_api_base_url", "")}
+
+    def _on_zotero_loaded(self, items: List[dict], source: str = "desktop"):
+        # Merge in any items from the plugin write cache (recently added via API)
+        if self._library_cache:
+            seen_keys = {
+                str(it.get("key") or it.get("item_id") or it.get("doc_id") or "")
+                for it in items
+            }
+            for cached in self._library_cache.items():
+                key = str(cached.get("key") or cached.get("item_id") or cached.get("doc_id") or "")
+                if key and key not in seen_keys:
+                    items.append(cached)
+                    seen_keys.add(key)
+
         self._zotero_items = items
         self._zotero_list.clear()
         for item in items:
             # Pre-fetch attachments once so auto-match can use them
             try:
-                item["_attachments"] = self._db.get_attachments(item["item_id"])
+                if item.get("_source") != "local_api":
+                    item["_attachments"] = self._db.get_attachments(item["item_id"])
+                else:
+                    item["_attachments"] = []
             except Exception:
                 item["_attachments"] = []
             label = f"{item.get('title', '(no title)')}  [{item.get('year', '')}]"
@@ -307,7 +383,11 @@ class ZoteroSyncDialog(QDialog):
             li.setToolTip(f"{item.get('title', '')}\n{authors}")
             self._zotero_list.addItem(li)
         n = len(items)
-        self._status_lbl.setText(f"{n} item{'s' if n != 1 else ''}")
+        if n:
+            source_label = "local API" if source == "local_api" else "desktop library"
+            self._status_lbl.setText(f"{n} item{'s' if n != 1 else ''} from {source_label}")
+        else:
+            self._status_lbl.setText("No Zotero items found locally. If Zotero desktop is open, close it and refresh.")
 
     # ------------------------------------------------------------------
     # Interaction
@@ -365,6 +445,59 @@ class ZoteroSyncDialog(QDialog):
         self._assignments.pop(pdf_path, None)
         self._rebuild_table()
         self._update_summary()
+
+    def _sync_pdfs_to_zotero(self):
+        if not self._pm or not self._outbound_adapter:
+            return
+        pdf_paths = [
+            self._pdf_list.item(i).data(Qt.ItemDataRole.UserRole)
+            for i in range(self._pdf_list.count())
+        ]
+        citations = {path: self._pm.get_citation(path) for path in pdf_paths}
+        result = self._outbound_adapter.sync_pdfs(
+            pdf_paths,
+            citations,
+            collection_name=self._outbound_collection_name,
+        )
+        self._summary_lbl.setText(result.message)
+
+    def update_theme(self, theme: dict):
+        bg = theme.get("bg_panel", theme.get("bg_main", "#1e1e1e"))
+        input_bg = theme.get("bg_input", "#2b2b2b")
+        text = theme.get("text_main", "#ffffff")
+        muted = theme.get("text_muted", "#aaaaaa")
+        border = theme.get("border", "#444444")
+        accent = theme.get("accent", "#4a8cff")
+        self.setStyleSheet(f"""
+            QDialog {{ background-color: {bg}; color: {text}; }}
+            QLabel {{ color: {text}; }}
+            QLabel#zoteroReadOnlyNotice {{ color: {muted}; }}
+            QListWidget, QTableWidget {{
+                background-color: {input_bg};
+                color: {text};
+                border: 1px solid {border};
+                border-radius: 4px;
+            }}
+            QHeaderView::section {{
+                background-color: {bg};
+                color: {text};
+                border: 1px solid {border};
+                padding: 4px;
+            }}
+            QPushButton {{
+                background-color: {input_bg};
+                color: {text};
+                border: 1px solid {border};
+                border-radius: 4px;
+                padding: 6px 10px;
+            }}
+            QPushButton:hover {{ background-color: {accent}; color: #ffffff; }}
+            QDialogButtonBox QPushButton {{
+                background-color: {accent};
+                color: #ffffff;
+                border: none;
+            }}
+        """)
 
     def _rebuild_table(self):
         self._assign_table.setRowCount(0)

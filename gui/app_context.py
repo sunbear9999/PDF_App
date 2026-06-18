@@ -66,6 +66,8 @@ class AppContext:
     workspace_graph_service: "WorkspaceGraphService"
     workflow_runner_service: "WorkflowRunnerService"
     research_agent_service: "ResearchAgentService"
+    data_dock_service: Any = None
+    data_provider_registry: Any = None
 
     # Plugin extension specs collected at startup
     plugin_extension_registry: Optional["PluginExtensionRegistry"] = field(default=None)
@@ -78,6 +80,15 @@ class AppContext:
     ui_router: Optional[Any] = field(default=None)
     theme_manager: Optional[Any] = field(default=None)
     viewer: Optional[Any] = field(default=None)
+    dialog_manager: Optional[Any] = field(default=None)
+    # Central keybinding registry – set by MainWindow after KeybindingRegistry is created
+    keybinding_registry: Optional[Any] = field(default=None)
+
+    # Pack import/export service
+    pack_service: Optional[Any] = field(default=None)
+
+    # Help & Tutorial subsystem
+    help_service: Optional[Any] = field(default=None)
 
     @classmethod
     def from_core(cls, core: "PapyrusCore") -> "AppContext":
@@ -100,5 +111,9 @@ class AppContext:
             workspace_graph_service=core.workspace_graph_service,
             workflow_runner_service=core.workflow_runner_service,
             research_agent_service=core.research_agent_service,
+            data_dock_service=getattr(core, "data_dock_service", None),
+            data_provider_registry=getattr(core, "data_provider_registry", None),
             plugin_extension_registry=getattr(core, "plugin_extension_registry", None),
+            pack_service=getattr(core, "pack_service", None),
+            help_service=getattr(core, "help_service", None),
         )

@@ -1,10 +1,12 @@
-from PySide6.QtWidgets import (QDialog, QFormLayout, QLineEdit, QTextEdit, 
-                             QDialogButtonBox, QSpinBox, QDoubleSpinBox,QBoxLayout, QComboBox, QVBoxLayout)
+from PySide6.QtWidgets import (QDialog, QFormLayout, QLineEdit, QTextEdit,
+                             QDialogButtonBox, QSpinBox, QDoubleSpinBox, QBoxLayout, QComboBox, QVBoxLayout)
+from PySide6.QtCore import Qt
 from core.ontology.registry import OntologyRegistry
 class EntityEditorDialog(QDialog):
     """Dynamically builds an edit form based on the Ontology Blueprint."""
     def __init__(self, entity, theme=None, parent=None):
         super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.entity = entity
         self.theme = theme
         self.registry = OntologyRegistry()

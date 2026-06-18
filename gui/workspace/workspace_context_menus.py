@@ -118,6 +118,8 @@ def populate_pdf_filter_combo(filter_combo, pdfs, checked_data):
     filter_combo.addItem("All PDFs", "ALL", checked=("ALL" in checked_data))
     for pdf in pdfs:
         if hasattr(pdf, "properties"):
+            if (getattr(pdf, "state", {}) or {}).get("is_removed"):
+                continue
             path = pdf.properties.get("path") or pdf.origin_id
             label = pdf.properties.get("title") or build_pdf_display_name(path)
             data = pdf.id

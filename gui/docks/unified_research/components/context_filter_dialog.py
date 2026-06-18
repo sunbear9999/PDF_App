@@ -4,10 +4,15 @@ import json
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton, 
                              QLabel, QListWidget, QListWidgetItem, QRadioButton, QFrame, QCheckBox)
 from PySide6.QtCore import Qt
+from core.events.domains.document_events import DocumentEvent
+from core.events.domains.project_events import ProjectEvent
+from core.events.event_bus import EventBus
+from gui.utils.document_helpers import active_pdf_paths, prune_doc_names
 
 class ContextFilterDialog(QDialog):
     def __init__(self, project_manager, current_docs, current_tags, current_logic, theme, parent=None):
         super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setWindowTitle("⚙️ Global AI Engine Settings")
         self.setMinimumSize(450, 700)
         self.pm = project_manager
@@ -24,12 +29,17 @@ class ContextFilterDialog(QDialog):
             "include_selected_nodes": False
         }
         
-        self.selected_docs = current_docs
+        self.selected_docs = prune_doc_names(self.pm, current_docs)
         self.selected_tags = current_tags
         self.tag_logic = current_logic 
+        self.bus = EventBus.get_instance()
         
         self._build_ui(theme)
         self._on_autopilot_toggled(self.chk_autopilot.isChecked())
+        self.bus.document_added.connect(self._on_document_list_changed)
+        self.bus.pdf_removed.connect(self._on_document_list_changed)
+        self.bus.pdf_renamed.connect(self._on_document_list_changed)
+        self.bus.project_loaded.connect(self._on_project_loaded)
         
     def _build_ui(self, theme):
         layout = QVBoxLayout(self)
@@ -89,13 +99,7 @@ class ContextFilterDialog(QDialog):
         layout.addWidget(QLabel("<b>📄 Target Documents:</b> (Searches across ANY selected)"))
         self.list_docs = QListWidget()
         layout.addWidget(self.list_docs)
-        
-        for path in self.pm.pdfs:
-            doc_name = os.path.basename(path)
-            item = QListWidgetItem(doc_name)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked if doc_name in self.selected_docs or not self.selected_docs else Qt.CheckState.Unchecked)
-            self.list_docs.addItem(item)
+        self._populate_documents()
 
         btn_all_docs = QPushButton("Select All")
         btn_all_docs.clicked.connect(lambda: self._set_all(self.list_docs, Qt.CheckState.Checked))
@@ -145,6 +149,35 @@ class ContextFilterDialog(QDialog):
             self.list_docs.setStyleSheet(f"background-color: {theme.get('bg_input', '#2b2b2b')}; border: 1px solid {theme.get('border', '#444')};")
             self.list_tags.setStyleSheet(f"background-color: {theme.get('bg_input', '#2b2b2b')}; border: 1px solid {theme.get('border', '#444')};")
             btn_save.setStyleSheet(f"background-color: {theme.get('accent', '#b366ff')}; color: white; font-weight: bold; padding: 6px; border-radius: 4px;")
+
+    def _on_document_list_changed(self, event, payload):
+        if event in {DocumentEvent.DOCUMENT_ADDED, DocumentEvent.PDF_REMOVED, DocumentEvent.PDF_RENAMED}:
+            self._populate_documents()
+
+    def _on_project_loaded(self, event, payload):
+        if event == ProjectEvent.LOADED:
+            self._populate_documents()
+
+    def _populate_documents(self):
+        checked_docs = {
+            self.list_docs.item(i).text()
+            for i in range(self.list_docs.count())
+            if self.list_docs.item(i).checkState() == Qt.CheckState.Checked
+        } if hasattr(self, "list_docs") else set()
+        selected = prune_doc_names(self.pm, checked_docs or self.selected_docs)
+        self.selected_docs = selected
+
+        self.list_docs.clear()
+        for path in active_pdf_paths(self.pm):
+            doc_name = os.path.basename(path)
+            item = QListWidgetItem(doc_name)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.CheckState.Checked
+                if doc_name in selected or not selected
+                else Qt.CheckState.Unchecked
+            )
+            self.list_docs.addItem(item)
 
     def _on_autopilot_toggled(self, checked):
         """Disables and unchecks manual options to visually indicate AI control."""

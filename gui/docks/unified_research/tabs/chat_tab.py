@@ -2,11 +2,13 @@
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QPushButton, QScrollArea, QFrame, QSizePolicy, QMenu
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QCursor, QAction
+from gui.managers.dialog_manager import exec_as_modal, get_for_widget
 from gui.docks.unified_research.components.chat_streamer import ChatMessageWidget
 from gui.docks.unified_research.components.dynamic_inputs import DynamicInputWidget
 import json
 import os 
 from gui.docks.unified_research.tabs.base_tab import BaseTab
+from gui.utils.document_helpers import active_pdf_names, prune_doc_names
 
 class ChatTab(BaseTab):
     def __init__(self, main_window, parent=None):
@@ -90,19 +92,34 @@ class ChatTab(BaseTab):
     def _open_context_filter(self):
         from gui.docks.unified_research.components.context_filter_dialog import ContextFilterDialog
         pm = self.project_manager
-        current_docs = self._metadata_json("active_rag_docs", [os.path.basename(p) for p in pm.pdfs])
+        current_docs = prune_doc_names(
+            pm,
+            self._metadata_json("active_rag_docs", active_pdf_names(pm)),
+        )
         current_tags = self._metadata_json("active_rag_tags", [])
         current_logic = pm.get_metadata("active_rag_tag_logic", "OR")
-        
+
         dlg = ContextFilterDialog(pm, current_docs, current_tags, current_logic, self.theme, self)
-        if dlg.exec():
-            docs, tags, logic = dlg.get_results()
-            pm.set_metadata("active_rag_docs", json.dumps(docs))
-            pm.set_metadata("active_rag_tags", json.dumps(tags))
-            pm.set_metadata("active_rag_tag_logic", logic)
-            sys_msg = ChatMessageWidget("System", theme=self.theme, is_user=False)
-            sys_msg.append_chunk(f"Context updated. Now targeting **{len(docs)}** documents.")
-            self.receive_ai_widget(sys_msg)
+
+        def _on_accepted():
+            try:
+                docs, tags, logic = dlg.get_results()
+                pm.set_metadata("active_rag_docs", json.dumps(docs))
+                pm.set_metadata("active_rag_tags", json.dumps(tags))
+                pm.set_metadata("active_rag_tag_logic", logic)
+                sys_msg = ChatMessageWidget("System", theme=self.theme, is_user=False)
+                sys_msg.append_chunk(f"Context updated. Now targeting **{len(docs)}** documents.")
+                self.receive_ai_widget(sys_msg)
+            except RuntimeError:
+                pass
+
+        dlg.accepted.connect(_on_accepted)
+        dm = get_for_widget(self)
+        if dm:
+            dm.show_instance(dlg)
+        else:
+            if exec_as_modal(dlg):
+                _on_accepted()
 
     def _metadata_json(self, key, default):
         raw = self.project_manager.get_metadata(key, json.dumps(default))
@@ -143,6 +160,7 @@ class ChatTab(BaseTab):
             **dynamic_state 
         }
 
+        self._active_stream_widget = None
         self.send_to_pipeline(self.active_blueprint, initial_state)
 
     def update_theme(self, theme):

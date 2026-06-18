@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
 from PySide6.QtCore import Qt, QTimer
 
 from gui.components.dialogs.tag_manager_dialog import TagAssignmentDialog
+from gui.managers.dialog_manager import exec_as_modal, get_for_widget
 from core.events.event_bus import EventBus
 from core.events.domains.document_events import AnnotationIntent, AnnotationPayload, DocumentEvent, DocumentEventPayload, DocumentIntent, DocumentPayload
 from core.events.domains.metadata_events import NotesEvent, NotesEventPayload, NotesIntent, NotesPayload
@@ -114,8 +115,20 @@ class NoteBubble(QFrame):
 
     def manage_tags(self):
         dlg = TagAssignmentDialog(self.annot_id, "node", self)
-        if dlg.exec():
-            self.tab.bus.notes_action_requested.emit(NotesIntent.SYNC_TAGS, NotesPayload(annot_id=self.annot_id))
+        annot_id = self.annot_id
+
+        def _on_accepted():
+            self.tab.bus.notes_action_requested.emit(
+                NotesIntent.SYNC_TAGS, NotesPayload(annot_id=annot_id)
+            )
+
+        dlg.accepted.connect(_on_accepted)
+        dm = get_for_widget(self)
+        if dm:
+            dm.show_instance(dlg)
+        else:
+            if exec_as_modal(dlg):
+                _on_accepted()
 
 
 # --- NEW: Discovered Entity Bubble UI ---
@@ -208,12 +221,28 @@ class DiscoveredEntityBubble(QFrame):
                     self.tab.bus.annotation_action_requested.emit(AnnotationIntent.JUMP_TO_PAGE, AnnotationPayload(page_num=page_num))
 
     def _edit_and_save_entity(self):
-        # Assumes EntityEditorDialog is defined higher up in notes_dock.py
         dialog = EntityEditorDialog(self.entity, self.theme, self)
-        if dialog.exec():
-            updated_props = dialog.get_updated_properties()
-            self.tab.bus.entity_action_requested.emit(EntityIntent.UPDATE_PROPERTIES, EntityPayload(entity_id=self.entity.id, data=updated_props))
-            self.tab.bus.entity_action_requested.emit(EntityIntent.VERIFY, EntityPayload(entity_id=self.entity.id))
+        entity_id = self.entity.id
+
+        def _on_accepted():
+            try:
+                updated_props = dialog.get_updated_properties()
+                self.tab.bus.entity_action_requested.emit(
+                    EntityIntent.UPDATE_PROPERTIES, EntityPayload(entity_id=entity_id, data=updated_props)
+                )
+                self.tab.bus.entity_action_requested.emit(
+                    EntityIntent.VERIFY, EntityPayload(entity_id=entity_id)
+                )
+            except RuntimeError:
+                pass
+
+        dialog.accepted.connect(_on_accepted)
+        dm = get_for_widget(self)
+        if dm:
+            dm.show_instance(dialog)
+        else:
+            if exec_as_modal(dialog):
+                _on_accepted()
 
     def _reject_entity(self):
         self.tab.bus.entity_action_requested.emit(EntityIntent.PURGE_GLOBALLY, EntityPayload(entity_id=self.entity.id))

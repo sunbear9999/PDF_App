@@ -1,3 +1,4 @@
+import shiboken6
 from PySide6.QtCore import QObject, QThread, Signal
 from core.events.event_bus import EventBus
 from core.models.dictionary_models import DictionaryDefinitionGroup
@@ -53,7 +54,7 @@ class DictionaryAppService(QObject):
                 self._handle_intent(DictionaryIntent.SEARCH, DictionaryPayload(query=query, dict_id="ALL", fuzzy=True))
 
         elif intent == DictionaryIntent.SEARCH:
-            if self.worker and self.worker.isRunning(): return
+            if self.worker and shiboken6.isValid(self.worker) and self.worker.isRunning(): return
             self.worker = DictSearchWorker(self.dm, payload.get("query"), payload.get("dict_id"), payload.get("fuzzy"))
             self.worker.results_ready.connect(
                 lambda res: self.bus.dictionary_results_ready.emit(
@@ -61,6 +62,7 @@ class DictionaryAppService(QObject):
                     DictionaryEventPayload(results=res),
                 )
             )
+            self.worker.finished.connect(self.worker.deleteLater)
             self.worker.start()
 
         elif intent == DictionaryIntent.ADD_WORD:

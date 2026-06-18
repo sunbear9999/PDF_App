@@ -16,6 +16,7 @@ from core.db.tag_db import TagDB
 from core.db.ai_db import AIDB
 from core.db.document_db import DocumentDB
 from core.db.graph_db import GraphDB
+from core.db.data_dock_db import DataDockDB
 from core.events.event_bus import EventBus
 from core.events.domains.document_events import DocumentEvent, DocumentEventPayload
 
@@ -48,6 +49,7 @@ class ProjectManager:
         self.db_ai = AIDB(self)
         self.db_docs = DocumentDB(self)
         self.db_graph = GraphDB(self)
+        self.db_data_dock = DataDockDB(self)
 
         self.db_docs.ensure_default_templates()
 
@@ -246,6 +248,7 @@ class ProjectManager:
                 cursor.execute("DELETE FROM pdfs WHERE path = ?", (pdf_path,))
                 cursor.execute("DELETE FROM highlights WHERE doc_id = ?", (pdf_path,))
                 cursor.execute("DELETE FROM nodes WHERE pdf_path = ?", (pdf_path,))
+                cursor.execute("DELETE FROM citations WHERE doc_id = ?", (pdf_path,))
                 self.db_graph.remove_source_entity(pdf_path, purge=False, commit=False)
                 self._conn.commit()
             except sqlite3.Error as e:
@@ -434,6 +437,15 @@ class ProjectManager:
     def get_source_path(self, source_id): return self.db_graph.get_source_path(source_id)
     def list_source_entities(self): return self.db_graph.list_source_entities(self.pdfs)
 
+    # --- Data Dock ---
+    def list_data_dock_datasets(self): return self.db_data_dock.list_datasets()
+    def get_data_dock_dataset(self, dataset_id): return self.db_data_dock.get_dataset(dataset_id)
+    def save_data_dock_dataset(self, state): return self.db_data_dock.upsert_dataset(state)
+    def delete_data_dock_dataset(self, dataset_id): return self.db_data_dock.delete_dataset(dataset_id)
+    def list_data_dock_charts(self): return self.db_data_dock.list_charts()
+    def get_data_dock_chart(self, chart_id): return self.db_data_dock.get_chart(chart_id)
+    def save_data_dock_chart(self, config): return self.db_data_dock.upsert_chart(config)
+
     # --- Annotations ---
     def upsert_highlight(self, highlight_data): return self.db_annotations.upsert_highlight(highlight_data)
     def get_highlights(self): return self.db_annotations.get_highlights()
@@ -475,6 +487,7 @@ class ProjectManager:
     def get_essay(self, essay_id): return self.db_docs.get_essay(essay_id)
     def upsert_citation(self, citation_data): return self.db_docs.upsert_citation(citation_data)
     def get_citation(self, doc_id): return self.db_docs.get_citation(doc_id)
+    def delete_citation(self, doc_id): return self.db_docs.delete_citation(doc_id)
     def get_analysis_templates(self): return self.db_docs.get_analysis_templates()
     def save_analysis_templates(self, templates_list): return self.db_docs.save_analysis_templates(templates_list)
     def save_document_analysis(self, doc_path, template_id, chunk_index, json_data): return self.db_docs.save_document_analysis(doc_path, template_id, chunk_index, json_data)

@@ -1,6 +1,7 @@
 # core/services/tts_app_service.py
 import os
 import time
+import shiboken6
 from PySide6.QtCore import QObject, QThread, Signal
 from core.events.event_bus import EventBus
 from core.tts_engine import generate_audio
@@ -111,6 +112,7 @@ class TTSAppService(QObject):
             )
         )
         self.worker.finished.connect(self._on_worker_finished)
+        self.worker.finished.connect(self.worker.deleteLater)
         self.worker.start()
 
     def _on_worker_finished(self):

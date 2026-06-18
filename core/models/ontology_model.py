@@ -19,6 +19,7 @@ class EntityType(str, Enum):
     COUNTERARGUMENT = "entity.counterargument"
     METHOD = "entity.method"
     DATA_TABLE = "entity.data_table"
+    CHART = "entity.chart"
     PERSON_ORG = "entity.person_org"
 
 class RelationType(str, Enum):
@@ -38,6 +39,7 @@ class RelationType(str, Enum):
     CRITIQUES = "relation.critiques"
     SIMILAR_TO = "relation.similar_to"
     AUTHORED_BY = "relation.authored_by"
+    DATA_FLOW = "relation.data_flow"
 
 class ViewType(str, Enum):
     GRAPH = "view.graph"

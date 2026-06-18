@@ -1,3 +1,4 @@
+import shiboken6
 from PySide6.QtCore import QObject, QThread, Signal
 from core.events.event_bus import EventBus
 import fitz
@@ -75,17 +76,18 @@ class NotesAppService(QObject):
             self._fetch_notes(NotesPayload(scope="Entire Project", tag=None, active_pdf=None))
 
     def _fetch_notes(self, payload: NotesPayload):
-        if self.worker and self.worker.isRunning(): return
-        
+        if self.worker and shiboken6.isValid(self.worker) and self.worker.isRunning(): return
+
         self.worker = NotesFetchWorker(
-            self.pm, 
-            payload.get("scope", "Current PDF"), 
-            payload.get("tag"), 
+            self.pm,
+            payload.get("scope", "Current PDF"),
+            payload.get("tag"),
             payload.get("active_pdf")
         )
         self.worker.notes_ready.connect(
             lambda data: self.bus.notes_data_ready.emit(NotesEvent.DATA_READY, NotesEventPayload(notes=data))
         )
+        self.worker.finished.connect(self.worker.deleteLater)
         self.worker.start()
 
     def _modify_note(self, payload: NotesPayload, action: str):

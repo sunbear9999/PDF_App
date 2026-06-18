@@ -9,6 +9,7 @@ class CitationSyncResult:
     ok: bool
     message: str
     synced_ids: list[str]
+    details: Dict[str, Any] | None = None
 
 
 class CitationOutboundSyncAdapter(Protocol):

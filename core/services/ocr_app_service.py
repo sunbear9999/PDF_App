@@ -1,6 +1,7 @@
 # core/services/ocr_app_service.py
 import os
 import shutil
+import shiboken6
 from PySide6.QtCore import QObject, QThread, Signal
 from core.events.event_bus import EventBus
 from core.events.domains.tool_events import OCRIntent, OCRPayload, OCRStatus, OCRStatusPayload
@@ -71,6 +72,7 @@ class OCRAppService(QObject):
             )
         )
         self.worker.finished.connect(lambda: self._finalize_ocr(file_path, mode))
+        self.worker.finished.connect(self.worker.deleteLater)
         self.worker.start()
 
     def _finalize_ocr(self, original_path, ui_mode):

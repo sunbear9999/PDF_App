@@ -8,14 +8,17 @@ class RenderWorker(QThread):
     page_ready = Signal(int, QImage)
     finished_rendering = Signal()
 
-    def __init__(self, pdf_path, zoom, page_queue_or_list, pixel_ratio=1.0):
+    def __init__(self, pdf_path, zoom, page_queue_or_list, pixel_ratio=1.0, theme_mode_enabled=False, theme_colors=None):
         super().__init__()
-        # 🔥 FIX 3: Store string path, NEVER the fitz.Document object!
         self.pdf_path = pdf_path 
         self.zoom = zoom
         self.pixel_ratio = pixel_ratio if pixel_ratio and pixel_ratio > 0 else 1.0
         self._is_running = True
         self.page_queue = page_queue_or_list
+        
+        # --- ADD THESE TWO LINES ---
+        self.theme_mode_enabled = theme_mode_enabled
+        self.theme_colors = theme_colors or {}
 
     def run(self):
         if not self.pdf_path:
@@ -44,6 +47,18 @@ class RenderWorker(QThread):
                     if 0 <= page_num < len(local_doc):
                         page = local_doc.load_page(page_num)
                         pix = page.get_pixmap(matrix=mat)
+                        
+                        # --- NEW: Instant C-level Duotone Tinting ---
+                        if self.theme_mode_enabled and self.theme_colors:
+                            try:
+                                # Convert hex strings to integer values for PyMuPDF
+                                bg_hex = int(self.theme_colors.get('bg_main', '#ffffff').lstrip('#'), 16)
+                                text_hex = int(self.theme_colors.get('text_main', '#000000').lstrip('#'), 16)
+                                pix.tint_with(text_hex, bg_hex)
+                            except Exception as e:
+                                print(f"Failed to apply theme tint: {e}")
+                        # --------------------------------------------
+
                         img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888).copy()
                         img.setDevicePixelRatio(self.pixel_ratio)
                         self.page_ready.emit(page_num, img.copy())
@@ -54,6 +69,14 @@ class RenderWorker(QThread):
                     if 0 <= page_num < len(local_doc):
                         page = local_doc.load_page(page_num)
                         pix = page.get_pixmap(matrix=mat)
+                        if self.theme_mode_enabled and self.theme_colors:
+                            try:
+                                # Convert hex strings to integer values for PyMuPDF
+                                bg_hex = int(self.theme_colors.get('bg_main', '#ffffff').lstrip('#'), 16)
+                                text_hex = int(self.theme_colors.get('text_main', '#000000').lstrip('#'), 16)
+                                pix.tint_with(text_hex, bg_hex)
+                            except Exception as e:
+                                print(f"Failed to apply theme tint: {e}")
                         img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888).copy()
                         img.setDevicePixelRatio(self.pixel_ratio)
                         self.page_ready.emit(page_num, img.copy())

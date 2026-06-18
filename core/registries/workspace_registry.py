@@ -117,6 +117,39 @@ def build_quote_node_display(node, expanded: bool = False) -> str:
     return f'"{quote}"' if quote else ""
 
 
+def build_data_node_display(node, expanded: bool = False) -> str:
+    props = getattr(node, "entity_properties", {}) or {}
+    dock = props.get("data_dock") or {}
+    snapshot = dock.get("snapshot") or dock.get("grid") or {}
+    title = props.get("title") or snapshot.get("name") or "Dataset"
+    headers = list(snapshot.get("headers") or [])
+    rows = list(snapshot.get("rows") or [])
+    if not headers:
+        return title
+    preview_rows = rows[:8 if expanded else 3]
+    lines = [title, " | ".join(str(h) for h in headers[:6])]
+    lines.append(" | ".join("---" for _ in headers[:6]))
+    for row in preview_rows:
+        lines.append(" | ".join(str((row + [''] * len(headers))[i]) for i in range(min(len(headers), 6))))
+    if len(rows) > len(preview_rows):
+        lines.append(f"... {len(rows) - len(preview_rows)} more rows")
+    return "\n".join(lines)
+
+
+def build_chart_node_display(node, expanded: bool = False) -> str:
+    props = getattr(node, "entity_properties", {}) or {}
+    dock = props.get("data_dock") or {}
+    config = dock.get("chart_config") or {}
+    title = props.get("title") or config.get("name") or "Chart"
+    chart_type = str(config.get("chart_type") or "bar").title()
+    x_field = config.get("x_field") or ""
+    y_field = config.get("y_field") or ""
+    lines = [title, f"{chart_type} chart"]
+    if x_field or y_field:
+        lines.append(f"{x_field} -> {y_field}".strip())
+    return "\n".join(lines)
+
+
 def build_default_workspace_node_type_registry() -> WorkspaceNodeTypeRegistry:
     registry = WorkspaceNodeTypeRegistry()
     base_actions = ["node.edit", "node.color", "node.font_size", "node.connect"]
@@ -134,6 +167,22 @@ def build_default_workspace_node_type_registry() -> WorkspaceNodeTypeRegistry:
         base_type_id="workspace.node.text",
         action_ids=[*base_actions, "node.jump", "node.copy_citation"],
         display_factory=build_quote_node_display,
+    ))
+    registry.register(WorkspaceNodeTypeDefinition(
+        id="workspace.node.data",
+        label="Data Node",
+        description="A structured dataset captured from the Data Dock.",
+        base_type_id="workspace.node.text",
+        action_ids=base_actions,
+        display_factory=build_data_node_display,
+    ))
+    registry.register(WorkspaceNodeTypeDefinition(
+        id="workspace.node.chart",
+        label="Chart Node",
+        description="A chart generated from a Data Dock dataset.",
+        base_type_id="workspace.node.text",
+        action_ids=base_actions,
+        display_factory=build_chart_node_display,
     ))
     return registry
 

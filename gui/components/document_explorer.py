@@ -2,11 +2,13 @@
 import os
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QListWidget, QListWidgetItem, QComboBox, QMenu,
-                             QMessageBox, QInputDialog, QSizePolicy)
+                             QMessageBox, QInputDialog, QSizePolicy, QPushButton,
+                             QFileDialog)
 from PySide6.QtCore import Qt
 from core.events.event_bus import EventBus
 from core.events.domains.document_events import DocumentEvent, DocumentEventPayload, DocumentIntent, DocumentPayload
 from core.events.domains.project_events import ProjectEvent, ProjectEventPayload, ProjectIntent, ProjectPayload
+from gui.managers.dialog_manager import exec_as_modal, get_for_widget
 
 class ElidedLabel(QLabel):
     def minimumSizeHint(self):
@@ -39,6 +41,7 @@ class DocumentExplorer(QWidget):
 
         # Subscribe to global events so the list updates automatically
         self.bus.project_loaded.connect(self._on_project_loaded)
+        self.bus.document_added.connect(self._on_pdf_changed)
         self.bus.pdf_renamed.connect(self._on_pdf_changed)
         self.bus.pdf_removed.connect(self._on_pdf_changed)
 
@@ -47,7 +50,7 @@ class DocumentExplorer(QWidget):
             self.refresh_list()
 
     def _on_pdf_changed(self, event: DocumentEvent, payload: DocumentEventPayload):
-        if event in {DocumentEvent.PDF_RENAMED, DocumentEvent.PDF_REMOVED}:
+        if event in {DocumentEvent.DOCUMENT_ADDED, DocumentEvent.PDF_RENAMED, DocumentEvent.PDF_REMOVED}:
             self.refresh_list()
 
     def _build_ui(self):
@@ -74,6 +77,19 @@ class DocumentExplorer(QWidget):
             )
         )
         layout.addWidget(self.doc_list)
+
+        self.add_pdf_btn = QPushButton("Add PDF")
+        self.add_pdf_btn.setToolTip("Add PDFs to the current project")
+        self.add_pdf_btn.clicked.connect(self._add_pdf)
+        layout.addWidget(self.add_pdf_btn)
+
+    def _add_pdf(self):
+        paths, _ = QFileDialog.getOpenFileNames(self, "Add PDFs", "", "PDF Files (*.pdf)")
+        if paths:
+            self.bus.document_action_requested.emit(
+                DocumentIntent.ADD_FILES,
+                DocumentPayload(paths=paths),
+            )
 
     def refresh_tag_filter(self):
         """Refreshes the available tags in the combo box."""
@@ -187,17 +203,28 @@ class DocumentExplorer(QWidget):
 
             if chosen == manage_tags_action:
                 from gui.components.dialogs.tag_manager_dialog import TagAssignmentDialog
-                if TagAssignmentDialog(doc_path, "doc", self.main_window).exec():
-                    self.refresh_list()
-                    # Trigger LLM tag filters to update
+                _dlg = TagAssignmentDialog(doc_path, "doc", self.main_window)
+                _dlg.accepted.connect(self.refresh_list)
+                _dm = get_for_widget(self)
+                if _dm:
+                    _dm.show_instance(_dlg)
+                else:
+                    if exec_as_modal(_dlg):
+                        self.refresh_list()
             elif chosen == rename_action:
                 self._rename_pdf(doc_path)
             elif chosen == remove_action:
                 self._remove_pdf(doc_path)
             elif chosen == extract_action:
                 from gui.components.dialogs.extract_pages_dialog import ExtractPagesDialog
-                if ExtractPagesDialog(doc_path, self.pm, self.main_window).exec():
-                    self.refresh_list()
+                _dlg2 = ExtractPagesDialog(doc_path, self.pm, self.main_window)
+                _dlg2.accepted.connect(self.refresh_list)
+                _dm2 = get_for_widget(self)
+                if _dm2:
+                    _dm2.show_instance(_dlg2)
+                else:
+                    if exec_as_modal(_dlg2):
+                        self.refresh_list()
 
     def _inject_plugin_doc_items(self, menu: "QMenu", doc_paths: list) -> None:
         """Append plugin-registered document_list context menu actions."""

@@ -1,10 +1,12 @@
 # gui/components/main_toolbar.py
 from PySide6.QtWidgets import QToolBar, QPushButton, QMenu, QWidget, QHBoxLayout, QLabel, QComboBox, QSizePolicy, QMessageBox, QInputDialog, QFileDialog
 from PySide6.QtCore import Qt, QEvent
+from gui.managers.dialog_manager import exec_as_modal, get_for_widget
 import webbrowser
 from core.events.event_bus import EventBus
 from core.events.domains.document_events import DocumentIntent, DocumentPayload
 from core.events.domains.project_events import ProjectIntent, ProjectPayload
+from core.events.domains.help_events import HelpIntent, HelpPayload
 
 class MainToolbar(QToolBar):
     def __init__(self, main_window):
@@ -53,6 +55,7 @@ class MainToolbar(QToolBar):
 
         # 4. Core Spawners
         self.addWidget(self._make_spawner("➕ Workspace", "workspaces"))
+        self.addWidget(self._make_spawner("▦ Data Dock", "data_dock"))
         self.addWidget(self._make_spawner("🔬 Research Assistant", "research"))
         self.addWidget(self._make_spawner("📝 Writing", "essays"))
         self.addWidget(self._make_spawner("📊 Slideshow Maker", "slides"))
@@ -102,6 +105,26 @@ class MainToolbar(QToolBar):
         self.btn_prompt_editor.clicked.connect(mw._open_prompt_editor)
         self.addWidget(self.btn_prompt_editor)
 
+        self.btn_settings = QPushButton()
+        self._configure_hover_expand(self.btn_settings, "⚙️", "Settings", expanded_width=120)
+        self.btn_settings.clicked.connect(mw._open_settings)
+        self.addWidget(self.btn_settings)
+
+        # Help Menu
+        self.btn_help = QPushButton()
+        self._configure_hover_expand(self.btn_help, "?", "Help", expanded_width=90, collapsed_width=44)
+        self.btn_help.setToolTip("Help Center, tutorials, and What's This? mode")
+        _bus = mw.bus
+        help_menu = QMenu(self)
+        help_menu.addAction("📖  Help Center", lambda: _bus.help_action_requested.emit(HelpIntent.SHOW_CENTER, HelpPayload()))
+        help_menu.addAction("🎓  Interactive Tutorials", lambda: _bus.help_action_requested.emit(HelpIntent.SHOW_CENTER, HelpPayload()))
+        help_menu.addSeparator()
+        help_menu.addAction("❓  What's This?  (Shift+F1)", lambda: _bus.help_action_requested.emit(HelpIntent.SHOW_WHATS_THIS, HelpPayload()))
+        help_menu.addSeparator()
+        help_menu.addAction("🔄  Reset Tutorial Progress", lambda: _bus.help_action_requested.emit(HelpIntent.RESET_PROGRESS, HelpPayload()))
+        self.btn_help.setMenu(help_menu)
+        self.addWidget(self.btn_help)
+
         # Layouts Menu
         self.btn_layouts = QPushButton()
         self._configure_hover_expand(self.btn_layouts, "🗔", "Window Layouts", expanded_width=160, collapsed_width=65)
@@ -126,20 +149,23 @@ class MainToolbar(QToolBar):
         theme_layout = QHBoxLayout(theme_widget)
         theme_layout.setContentsMargins(5, 0, 5, 0)
         theme_layout.addWidget(QLabel("Theme:"))
-        
+
         self.theme_selector = QComboBox()
-        # Uses the new theme manager safely
-        if hasattr(mw.theme_manager, 'get_available_themes'):
-            self.theme_selector.addItems(mw.theme_manager.get_available_themes())
-        else:
-            self.theme_selector.addItems(mw.theme_manager.themes.keys())
-            
-        if hasattr(mw.theme_manager, 'current_theme_name'):
-            self.theme_selector.setCurrentText(mw.theme_manager.current_theme_name)
-            
+        self._refresh_theme_selector()
         self.theme_selector.currentTextChanged.connect(mw._on_theme_changed)
         theme_layout.addWidget(self.theme_selector)
+
+        self.btn_manage_themes = QPushButton("🎨")
+        self.btn_manage_themes.setToolTip("Manage Themes — create, edit, delete custom themes")
+        self.btn_manage_themes.setFixedWidth(36)
+        self.btn_manage_themes.clicked.connect(mw.open_theme_manager)
+        theme_layout.addWidget(self.btn_manage_themes)
+
         self.addWidget(theme_widget)
+
+        # Refresh selector when active theme switches OR when theme list changes
+        mw.theme_manager.theme_changed.connect(self._on_theme_manager_changed)
+        mw.theme_manager.themes_list_changed.connect(self._refresh_theme_selector)
 
         # Full Screen
         mw.btn_fullscreen = QPushButton()
@@ -155,21 +181,20 @@ class MainToolbar(QToolBar):
         loaded = getattr(core, "_loaded_plugins", [])
         registry = getattr(getattr(mw, "app_context", None), "plugin_extension_registry", None)
 
-        # Collect plugin-contributed menu items for the "Plugins" menu
         plugin_menu_items = []
         if registry:
             for spec in sorted(registry.get_menu_items("Plugins"), key=lambda s: s.position):
                 plugin_menu_items.append(spec)
 
-        # Collect plugins with settings schemas
         settings_plugins = [(p, api) for p, api in loaded if getattr(p, "settings_schema", None)]
-
-        if not loaded and not plugin_menu_items:
-            return  # No plugins at all — skip the button
 
         self.btn_plugins = QPushButton()
         self._configure_hover_expand(self.btn_plugins, "🔌", "Plugins", expanded_width=110, collapsed_width=60)
         plugin_menu = QMenu(self)
+
+        # Always show Plugin Manager even when no plugins are loaded
+        plugin_menu.addAction("🔌 Plugin Manager…").triggered.connect(self._open_plugin_manager)
+        plugin_menu.addSeparator()
 
         if not loaded:
             plugin_menu.addAction("No plugins loaded").setEnabled(False)
@@ -201,6 +226,46 @@ class MainToolbar(QToolBar):
         self.btn_plugins.setMenu(plugin_menu)
         self.addWidget(self.btn_plugins)
 
+    def _refresh_theme_selector(self) -> None:
+        """Rebuild the theme dropdown from the current ThemeManager state."""
+        mw = self.main_window
+        tm = getattr(mw, "theme_manager", None)
+        if tm is None:
+            return
+        self.theme_selector.blockSignals(True)
+        current = getattr(tm, "current_theme_name", "")
+        self.theme_selector.clear()
+        self.theme_selector.addItems(tm.get_available_themes())
+        if current:
+            idx = self.theme_selector.findText(current)
+            if idx >= 0:
+                self.theme_selector.setCurrentIndex(idx)
+        self.theme_selector.blockSignals(False)
+
+    def _on_theme_manager_changed(self, theme: dict) -> None:
+        """Called when ThemeManager.theme_changed fires — keeps selector in sync."""
+        mw = self.main_window
+        tm = getattr(mw, "theme_manager", None)
+        if tm is None:
+            return
+        # Refresh list (plugin themes may have been added/removed)
+        self._refresh_theme_selector()
+
+    def _open_plugin_manager(self) -> None:
+        from gui.components.plugin_manager_dialog import PluginManagerDialog
+        core = getattr(self.main_window, "core", None)
+        dlg = PluginManagerDialog(core, parent=self.main_window)
+        theme = getattr(
+            getattr(self.main_window, "theme_manager", None), "get_theme", lambda: {}
+        )()
+        if theme and hasattr(dlg, "update_theme"):
+            dlg.update_theme(theme)
+        dm = get_for_widget(self)
+        if dm is not None:
+            dm.show_instance(dlg, key="plugin_manager")
+        else:
+            exec_as_modal(dlg)
+
     def _open_plugin_settings(self, plugin, api) -> None:
         from PySide6.QtWidgets import QDialog, QVBoxLayout, QDialogButtonBox
         from gui.components.plugin_widgets import PluginForm
@@ -215,9 +280,20 @@ class MainToolbar(QToolBar):
         buttons.accepted.connect(dlg.accept)
         buttons.rejected.connect(dlg.reject)
         layout.addWidget(buttons)
-        if dlg.exec():
-            for key, value in form.get_values().items():
-                api.config.set(key, value)
+        def _on_settings_accepted():
+            try:
+                for key, value in form.get_values().items():
+                    api.config.set(key, value)
+            except RuntimeError:
+                pass
+
+        dlg.accepted.connect(_on_settings_accepted)
+        dm2 = get_for_widget(self)
+        if dm2:
+            dm2.show_instance(dlg)
+        else:
+            if exec_as_modal(dlg):
+                _on_settings_accepted()
 
     def _inject_plugin_buttons(self) -> None:
         """Inject MainToolbarButtonSpec entries registered by plugins."""

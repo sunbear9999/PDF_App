@@ -127,6 +127,7 @@ class DockManager:
     def _right_side_anchor(self, exclude: Optional[QDockWidget] = None) -> Optional[QDockWidget]:
         preferred_prefixes = (
             "SingleResearchDock",
+            "SingleDataDock",
             "WorkspaceDock",
             "NotesDock",
             "SingleDictionaryDock",
@@ -204,21 +205,43 @@ class DockManager:
         label = f"{spec.icon} {spec.label}".strip() if getattr(spec, "icon", "") else spec.label
         btn = QPushButton(label)
         btn.setToolTip(getattr(spec, "tooltip", "") or "")
+        plugin_id = getattr(spec, "plugin_id", "")
+        if plugin_id:
+            btn.setProperty("papyrus_plugin_id", plugin_id)
         cb = getattr(spec, "callback", None)
         if cb:
             btn.clicked.connect(cb)
         return btn
 
+    def sweep_plugin_toolbar_buttons(self, plugin_id: str) -> None:
+        """Remove injected ToolbarButtonSpec buttons tagged with plugin_id from all live docks."""
+        from PySide6.QtWidgets import QPushButton
+        for dock_id in list(self.instances.keys()):
+            for dock in self.get_instances(dock_id):
+                try:
+                    if not shiboken6.isValid(dock):
+                        continue
+                    inner = dock.widget()
+                    if inner:
+                        for btn in inner.findChildren(QPushButton):
+                            if btn.property("papyrus_plugin_id") == plugin_id:
+                                btn.setVisible(False)
+                                btn.deleteLater()
+                except RuntimeError:
+                    pass
+
     def broadcast_theme(self, theme: dict) -> None:
-        """Push a theme update to all live dock inner widgets."""
+        """Push a theme update to all live docks and their inner widgets."""
         for dock_id in self.registry.keys():
             for dock in self.get_instances(dock_id):
-                inner = dock.widget()
-                if inner and hasattr(inner, "update_theme"):
-                    try:
+                try:
+                    inner = dock.widget()
+                    if inner and hasattr(inner, "update_theme"):
                         inner.update_theme(theme)
-                    except RuntimeError:
-                        pass
+                    elif hasattr(dock, "update_theme"):
+                        dock.update_theme(theme)
+                except RuntimeError:
+                    pass
 
     def toggle_by_menu_name(self, menu_name: str, checked: bool) -> None:
         """Show or hide the first singleton dock whose menu_name matches."""

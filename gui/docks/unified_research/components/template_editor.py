@@ -1,8 +1,9 @@
 import json
-from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton, 
+from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton,
                              QLabel, QLineEdit, QTextEdit,
                              QMessageBox, QListWidget, QCheckBox, QListWidgetItem, QSpinBox, QGroupBox)
 from PySide6.QtCore import Qt
+from gui.managers.dialog_manager import exec_as_modal, get_for_widget
 from core.models.ontology_model import EntityType
 from core.ontology.registry import OntologyRegistry, RelationTrait
 
@@ -274,7 +275,11 @@ class TemplateEditorDialog(QDialog):
         from gui.components.dialogs.prompt_editor_dialog import PromptEditorDialog
         dlg = PromptEditorDialog(parent.prompt_manager, parent)
         dlg.view_mode_combo.setCurrentIndex(2)
-        dlg.exec()
+        dm = get_for_widget(self)
+        if dm:
+            dm.show_instance(dlg)
+        else:
+            exec_as_modal(dlg)
 
     def _apply_theme(self):
         if not self.theme: return

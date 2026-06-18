@@ -4,11 +4,13 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
 from PySide6.QtCore import Qt, QTimer
 from core.events.event_bus import EventBus
 from core.events.domains.document_events import AnnotationIntent, AnnotationPayload, DocumentIntent, DocumentPayload
+from gui.utils.document_helpers import active_pdf_paths
 
 class AIResultsDialog(QDialog):
     # Added 'window_title' to handle both Tags and Opposing Views dynamically
     def __init__(self, window_title, matches, main_window, parent=None):
         super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.main_window = main_window
         self.matches = matches
         self.bus = EventBus.get_instance()
@@ -83,7 +85,7 @@ class AIResultsDialog(QDialog):
         self.content_layout.addWidget(bubble)
 
     def _jump_to_match(self, match):
-        pdf_path = next((p for p in self.main_window.project_manager.pdfs if os.path.basename(p) == match['doc_name']), None)
+        pdf_path = next((p for p in active_pdf_paths(self.main_window.project_manager) if os.path.basename(p) == match['doc_name']), None)
         if not pdf_path:
             QMessageBox.warning(self, "Error", "Document not found in project.")
             return
@@ -104,7 +106,7 @@ class AIResultsDialog(QDialog):
         note, ok = QInputDialog.getText(self, "Save Note", "Enter a note for this highlight:")
         if not ok: return
 
-        pdf_path = next((p for p in self.main_window.project_manager.pdfs if os.path.basename(p) == match['doc_name']), None)
+        pdf_path = next((p for p in active_pdf_paths(self.main_window.project_manager) if os.path.basename(p) == match['doc_name']), None)
         if not pdf_path:
             QMessageBox.warning(self, "Error", "Document not found in project.")
             return

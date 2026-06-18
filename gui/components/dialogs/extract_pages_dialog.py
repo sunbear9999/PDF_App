@@ -1,13 +1,15 @@
 # gui/components/dialogs/extract_pages_dialog.py
 from pathlib import Path
-from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
+from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                              QLineEdit, QPushButton, QMessageBox, QFileDialog)
+from PySide6.QtCore import Qt
 from core.events.event_bus import EventBus
 from core.events.domains.document_events import DocumentIntent, DocumentPayload
 
 class ExtractPagesDialog(QDialog):
     def __init__(self, source_pdf_path, project_manager, parent=None):
         super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.source_pdf_path = source_pdf_path
         self.bus = EventBus.get_instance()
         self.setWindowTitle("Extract Pages to New PDF")

@@ -36,6 +36,10 @@ from core.services.ai.prompt_app_service import PromptAppService
 from core.services.ai.tts_app_service import TTSAppService
 from core.plugins.plugin_loader import load_plugins
 from core.plugins.extension_registry import PluginExtensionRegistry
+from core.plugins.pack_contributor import PackContributorRegistry
+from core.services.pack_service import PackService
+from core.registries.data_provider_registry import DataProviderRegistry
+from core.services.data_dock_service import DataDockService
 
 def get_resource_path(relative_path):
     if hasattr(sys, '_MEIPASS'):
@@ -73,6 +77,7 @@ class PapyrusCore:
         self.workspace_ai_tools_registry = build_default_workspace_ai_tool_registry()
         self.workspace_node_type_registry = build_default_workspace_node_type_registry()
         self.ontology_registry = OntologyRegistry()
+        self.data_provider_registry = DataProviderRegistry()
 
         # 3. Headless App Services
         self.embedding_service = EmbeddingService(self.llm_manager, self.project_manager)
@@ -94,6 +99,7 @@ class PapyrusCore:
         self.workspace_graph_service = WorkspaceGraphService(self.bus)
         self.workspace_layout_service = WorkspaceLayoutService(self.project_manager, self.llm_manager, self.bus)
         self.ontology_service = OntologyService(self.project_manager, self.bus, self.ontology_registry)
+        self.data_dock_service = DataDockService(self.project_manager, self.data_provider_registry, self.bus)
 
         self.essay_app_service = EssayAppService(self.project_manager)
         self.index_app_service = IndexAppService(self.llm_manager, self.project_manager)
@@ -118,6 +124,10 @@ class PapyrusCore:
             runner_starter=self.workflow_runner_service.start_runner,
         )
 
+        # 4.5 Help & Tutorial subsystem
+        from core.services.help_service import HelpService
+        self.help_service = HelpService(self.bus)
+
         # 5. Plugin extension registry (GUI extension points for plugins)
         self.plugin_extension_registry = PluginExtensionRegistry()
         # plugin_dock_specs consumed by MainWindow
@@ -125,6 +135,16 @@ class PapyrusCore:
         # Storage for plugin instances + their API objects (populated by loader)
         self._loaded_plugins = []
         self._custom_services = {}
+
+        # 6. Pack import/export system
+        self.pack_contributor_registry = PackContributorRegistry()
+        self.pack_service = PackService(
+            blueprint_manager=self.blueprint_manager,
+            prompt_manager=self.prompt_manager,
+            step_manager=self.step_manager,
+            contributor_registry=self.pack_contributor_registry,
+            project_manager=self.project_manager,
+        )
 
         # Discover and register external plugins
         load_plugins(self)

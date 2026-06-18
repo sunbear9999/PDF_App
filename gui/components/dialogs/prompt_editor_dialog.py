@@ -8,6 +8,7 @@ from core.events.domains.metadata_events import PromptIntent, PromptPayload
 class PromptEditorDialog(QDialog):
     def __init__(self, prompt_manager, parent=None, trace_id=None, trace_record=None):
         super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.prompt_manager = prompt_manager
         self.blueprint_manager = getattr(parent, 'blueprint_manager', None)
         self.blueprint_registry = getattr(parent, 'blueprint_registry', None)

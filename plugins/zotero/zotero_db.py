@@ -356,7 +356,7 @@ class ZoteroDB:
             return []
         try:
             uri = f"file:{self._db_path}?mode=ro"
-            conn = sqlite3.connect(uri, uri=True)
+            conn = sqlite3.connect(uri, uri=True, timeout=0.2)
             conn.row_factory = None
             cur = conn.cursor()
             cur.execute(sql, params or [])
@@ -378,7 +378,7 @@ class ZoteroDB:
             with tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False) as tmp:
                 tmp_path = tmp.name
             shutil.copy2(self._db_path, tmp_path)
-            conn = sqlite3.connect(tmp_path)
+            conn = sqlite3.connect(tmp_path, timeout=0.2)
             cur = conn.cursor()
             cur.execute(sql, params or [])
             rows = cur.fetchall()

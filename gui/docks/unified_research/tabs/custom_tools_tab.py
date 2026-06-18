@@ -3,14 +3,35 @@ import re
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, 
                              QComboBox, QFrame, QTextEdit, QScrollArea, QSizePolicy)
 from PySide6.QtCore import Qt, QTimer
+from core.events.domains.document_events import DocumentEvent
+from core.events.domains.project_events import ProjectEvent
+from core.events.event_bus import EventBus
 from gui.docks.unified_research.components.chat_streamer import ChatMessageWidget
 from gui.docks.unified_research.tabs.base_tab import BaseTab
+from gui.utils.document_helpers import active_pdf_paths
 
 class CustomToolsTab(BaseTab):
     def __init__(self, main_window, parent=None):
         super().__init__(main_window, target_id="custom_tools_tab", parent=parent)
         self.dynamic_widgets = {}
+        self.bus = EventBus.get_instance()
+        self.bus.document_added.connect(self._on_document_list_changed)
+        self.bus.pdf_removed.connect(self._on_document_list_changed)
+        self.bus.pdf_renamed.connect(self._on_document_list_changed)
+        self.bus.project_loaded.connect(self._on_project_loaded)
         self._build_ui()
+
+    def _on_document_list_changed(self, event, payload):
+        if event in {DocumentEvent.DOCUMENT_ADDED, DocumentEvent.PDF_REMOVED, DocumentEvent.PDF_RENAMED}:
+            self._rebuild_current_form()
+
+    def _on_project_loaded(self, event, payload):
+        if event == ProjectEvent.LOADED:
+            self._rebuild_current_form()
+
+    def _rebuild_current_form(self):
+        if hasattr(self, "combo_tools"):
+            self._update_description()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -109,7 +130,7 @@ class CustomToolsTab(BaseTab):
                 cb.setStyleSheet(style)
                 pm = self.project_manager
                 if pm:
-                    for pdf in pm.pdfs: cb.addItem(os.path.basename(pdf), pdf)
+                    for pdf in active_pdf_paths(pm): cb.addItem(os.path.basename(pdf), pdf)
                 self.param_layout.addWidget(cb)
                 self.dynamic_widgets[inp_key] = cb
 

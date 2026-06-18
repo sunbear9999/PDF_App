@@ -2,10 +2,11 @@ import json
 import re
 import dataclasses
 import uuid
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, 
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
                              QComboBox, QFrame, QTextEdit, QLineEdit, QDialog,
                              QInputDialog, QStackedWidget, QSplitter, QTabWidget, QMessageBox)
 from PySide6.QtCore import Qt
+from gui.managers.dialog_manager import exec_as_modal, get_for_widget
 from PySide6.QtGui import QCursor
 
 from core.engine.action_model import AIActionBlueprint
@@ -268,7 +269,11 @@ class BlueprintEditorTab(QWidget):
 
     def _show_help(self):
         dlg = BlueprintHelpDialog(self.theme, self)
-        dlg.exec()
+        dm = get_for_widget(self)
+        if dm:
+            dm.show_instance(dlg)
+        else:
+            exec_as_modal(dlg)
 
     def _delete_tool(self):
         key = self._current_blueprint_key()

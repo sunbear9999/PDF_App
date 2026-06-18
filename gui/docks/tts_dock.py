@@ -146,9 +146,8 @@ class TTSTab(QWidget):
         if doc is None and hasattr(payload, 'path') and payload.path:
             import fitz
             try:
-                doc = fitz.open(payload.path)
-                self._page_count = len(doc)
-                doc.close()
+                with fitz.open(payload.path) as doc:
+                    self._page_count = len(doc)
             except Exception:
                 pass
         elif doc is not None:

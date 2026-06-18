@@ -11,7 +11,6 @@ from core.engine.ui_router import BlueprintUIRouter
 from gui.components.pdf_viewer import PDFViewer
 from gui.components.process_monitor import ProcessMonitorWidget
 from gui.theme.theme import ThemeManager
-from gui.components.help_dialog import HelpDialog
 from gui.components.dialogs.prompt_editor_dialog import PromptEditorDialog
 from gui.components.dialogs.tag_manager_dialog import TagManagerDialog
 from gui.components.universal_overlay import UniversalInternalOverlay
@@ -109,8 +108,12 @@ class MainWindow(QMainWindow):
         from gui.managers.workspace_builder import WorkspaceBuilder
         WorkspaceBuilder(self).build()
 
-        # Connect Theme Manager
+        # Connect Theme Manager — also relay into the EventBus so BaseDock
+        # subclasses (including future plugin docks) auto-receive theme changes.
         self.theme_manager.theme_changed.connect(self.update_theme)
+        self.theme_manager.theme_changed.connect(
+            lambda theme: self.bus.theme_changed.emit("theme_changed", theme)
+        )
         self.update_theme(self.theme_manager.get_theme())
 
         # Timers
@@ -120,6 +123,12 @@ class MainWindow(QMainWindow):
 
         # Unload plugins cleanly on exit
         QApplication.instance().aboutToQuit.connect(self.core._unload_plugins)
+
+        # Centralized dialog lifetime management.  Must be created before any
+        # dialogs are opened (including the startup help dialog).
+        from gui.managers.dialog_manager import DialogManager
+        self.dialog_manager = DialogManager(self, parent=self)
+        QApplication.instance().aboutToQuit.connect(self.dialog_manager.close_all)
 
 
         if self.settings.value("show_help_on_startup", True, type=bool):
@@ -136,6 +145,7 @@ class MainWindow(QMainWindow):
         self.app_context.ui_router = self.ui_router
         self.app_context.theme_manager = self.theme_manager
         self.app_context.viewer = self.viewer
+        self.app_context.dialog_manager = self.dialog_manager
         # plugin_extension_registry is already set from from_core(), but sync it in case
         # plugins registered dock specs before app_context was created
         if not self.app_context.plugin_extension_registry:
@@ -146,6 +156,13 @@ class MainWindow(QMainWindow):
             from gui.components.base.ai_output_factory import AIOutputWidgetFactory
             for payload_type, spec in self.app_context.plugin_extension_registry.get_ai_renderers().items():
                 AIOutputWidgetFactory.register(payload_type, spec.factory)
+
+        # Register any themes contributed by plugins
+        if self.app_context.plugin_extension_registry:
+            for theme_spec in self.app_context.plugin_extension_registry.get_themes():
+                self.theme_manager.register_plugin_theme(
+                    theme_spec.name, theme_spec.theme_dict, theme_spec.plugin_id
+                )
 
         # Wire UIEventCoordinator (replaces direct bus connections from MainWindow)
         from gui.managers.ui_event_coordinator import UIEventCoordinator
@@ -164,11 +181,30 @@ class MainWindow(QMainWindow):
             lambda msg, duration=3000: self.statusBar().showMessage(msg, duration)
         )
 
+        # KeybindingRegistry – central keyboard-shortcut management
+        from gui.managers.keybinding_registry import KeybindingRegistry, build_builtin_key_specs
+        self.keybinding_registry = KeybindingRegistry(core.user_data_dir, parent=self)
+        self.keybinding_registry.register_many(build_builtin_key_specs())
+        self.app_context.keybinding_registry = self.keybinding_registry
+
+        # Inject GUI-side deps into PackService now that all three are ready
+        pack_svc = getattr(self.app_context, "pack_service", None)
+        if pack_svc is not None:
+            pack_svc.configure_gui_services(
+                theme_manager=self.theme_manager,
+                keybinding_registry=self.keybinding_registry,
+                layout_manager=self.layout_manager,
+            )
+
         # Keyboard shortcuts (core + plugin)
         from gui.managers.shortcut_manager import ShortcutManager
         self._shortcut_manager = ShortcutManager(self)
         self._shortcut_manager.register_core_shortcuts()
         self._shortcut_manager.register_plugin_shortcuts()
+
+        # Help & Tutorial GUI coordinator
+        from gui.help.help_gui_coordinator import HelpGUICoordinator
+        self._help_gui_coordinator = HelpGUICoordinator(self, self.app_context, parent=self)
 
         # ActionRegistry + ContextMenuRegistry
         from gui.registry.action_spec import ActionRegistry
@@ -191,7 +227,12 @@ class MainWindow(QMainWindow):
 
         # Plugin lifecycle: sweep widgets when a plugin is unloaded (hot-reload)
         self.bus.plugin_unloaded.connect(self.dock_manager.remove_plugin_docks)
+        self.bus.plugin_unloaded.connect(self.dock_manager.sweep_plugin_toolbar_buttons)
         self.bus.plugin_unloaded.connect(self._sweep_plugin_toolbar_widgets)
+        self.bus.plugin_unloaded.connect(self.theme_manager.unregister_plugin_themes)
+        self.bus.plugin_unloaded.connect(self._on_plugin_unloaded_keybindings)
+        # Re-register plugin themes when a plugin is hot-reloaded
+        self.bus.plugin_loaded.connect(self._register_plugin_themes)
 
         # Active controller timer management
         from gui.managers.plugin_controller_manager import PluginControllerManager
@@ -201,13 +242,81 @@ class MainWindow(QMainWindow):
         self.bus.plugin_loaded.connect(self._plugin_controller_manager.on_plugin_loaded)
         self.bus.plugin_unloaded.connect(self._plugin_controller_manager.teardown_plugin)
 
-        # Ctrl+P command palette
+        # Register representative UI targets for F1 / What's This? / tutorials
+        self._register_help_targets()
+
+        # Ctrl+P command palette – bound via KeybindingRegistry so it's editable
         from gui.components.command_palette import CommandPalette
         self._command_palette = CommandPalette(self)
-        QShortcut(QKeySequence("Ctrl+P"), self).activated.connect(
-            self._command_palette.show_palette
+        self.keybinding_registry.bind(
+            "app.command_palette",
+            self._command_palette.show_palette,
+            self,
         )
 
+
+    def _register_help_targets(self) -> None:
+        """Register stable UITargetRegistry targets for key UI regions."""
+        hs = getattr(self.app_context, "help_service", None)
+        if hs is None:
+            return
+        reg = hs.ui_target_registry
+        dm = self.dock_manager
+
+        # Toolbar buttons
+        toolbar = getattr(self, "top_toolbar", None)
+        if toolbar:
+            if hasattr(toolbar, "btn_project"):
+                reg.register_widget("toolbar.project_btn", toolbar.btn_project,
+                                    topic_id="core.project.create_open")
+            if hasattr(toolbar, "btn_help"):
+                reg.register_widget("toolbar.help_btn", toolbar.btn_help,
+                                    topic_id="core.help.whats_this")
+            if hasattr(toolbar, "btn_prompt_editor"):
+                reg.register_widget("toolbar.prompt_editor_btn", toolbar.btn_prompt_editor,
+                                    topic_id="core.prompt_editor.overview")
+            if hasattr(toolbar, "btn_tag_manager"):
+                reg.register_widget("toolbar.tag_manager_btn", toolbar.btn_tag_manager,
+                                    topic_id="core.tags.overview")
+
+        # Helper: first inner widget of the research dock
+        def _research():
+            ws = dm.get_inner_widgets("research")
+            return ws[0] if ws else None
+
+        # Top-level dock resolvers
+        reg.register_resolver(
+            "dock.research",
+            _research,
+            topic_id="core.analysis.overview",
+        )
+        reg.register_resolver(
+            "dock.notes",
+            lambda: next(iter(dm.get_inner_widgets("notes")), None),
+            topic_id="core.notes.overview",
+        )
+        reg.register_resolver(
+            "dock.workspace",
+            lambda: next(iter(dm.get_inner_widgets("workspaces")), None),
+            topic_id="core.workspace.overview",
+        )
+
+        # Analysis tab inner widgets (exist once the research dock is open)
+        reg.register_resolver(
+            "analysis.run_button",
+            lambda: getattr(getattr(_research(), "tab_analysis", None), "btn_run", None),
+            topic_id="core.analysis.overview",
+        )
+        reg.register_resolver(
+            "analysis.template_selector",
+            lambda: getattr(getattr(_research(), "tab_analysis", None), "combo_templates", None),
+            topic_id="core.analysis.templates",
+        )
+        reg.register_resolver(
+            "dock.research.blueprint_editor",
+            lambda: getattr(_research(), "tab_editor", None),
+            topic_id="core.workflow.builder",
+        )
 
     def _halt_pdf_viewer(self, path):
         """Called by ProjectManager before saving the active PDF to stop the render worker."""
@@ -216,7 +325,9 @@ class MainWindow(QMainWindow):
             if viewer:
                 if viewer.worker and viewer.worker.isRunning():
                     viewer.worker.stop()
-                    viewer.worker.wait()
+                    viewer.worker.quit()
+                    if not viewer.worker.wait(3000):
+                        viewer.worker.terminate()
                 return viewer
         return None
 
@@ -251,10 +362,9 @@ class MainWindow(QMainWindow):
             if hasattr(self, 'layout_manager'):
                 self.layout_manager.restore_last_session()
 
-    def show_help_window(self,initial_tab_index=0):
-        # We keep a reference to it so it doesn't get garbage collected
-        self.help_dialog = HelpDialog(self,initial_tab_index=initial_tab_index)
-        self.help_dialog.show()
+    def show_help_window(self, initial_tab_index=0):
+        from core.events.domains.help_events import HelpIntent, HelpPayload
+        self.bus.help_action_requested.emit(HelpIntent.SHOW_CENTER, HelpPayload())
 
     def _apply_smart_window_size(self):
         screen = QApplication.primaryScreen()
@@ -276,6 +386,16 @@ class MainWindow(QMainWindow):
         x = available.x() + (available.width() - width) // 2
         y = available.y() + (available.height() - height) // 2
         self.setGeometry(x, y, width, height)
+
+    def _register_plugin_themes(self, plugin_id: str = "") -> None:
+        """Re-register plugin themes from the extension registry (called after hot-reload)."""
+        reg = getattr(self.app_context, "plugin_extension_registry", None)
+        if not reg:
+            return
+        for spec in reg.get_themes():
+            if plugin_id and spec.plugin_id != plugin_id:
+                continue
+            self.theme_manager.register_plugin_theme(spec.name, spec.theme_dict, spec.plugin_id)
 
     def _sweep_plugin_toolbar_widgets(self, plugin_id: str) -> None:
         """Remove main-toolbar buttons tagged with papyrus_plugin_id == plugin_id."""
@@ -317,29 +437,50 @@ class MainWindow(QMainWindow):
             self.top_toolbar._set_button_hover_state(self.btn_fullscreen, self.btn_fullscreen.property("hover_expanded"))
 
 
+    def _on_plugin_unloaded_keybindings(self, plugin_id: str) -> None:
+        if hasattr(self, "keybinding_registry"):
+            self.keybinding_registry.unregister_plugin(plugin_id)
+
+    def _open_settings(self) -> None:
+        from gui.components.dialogs.settings_dialog import GlobalSettingsDialog
+        self.dialog_manager.show(
+            GlobalSettingsDialog,
+            key="global_settings",
+            singleton=True,
+            factory=lambda: GlobalSettingsDialog(
+                self.app_context, parent=self
+            ),
+        )
+
     def _open_prompt_editor(self):
-        dialog = PromptEditorDialog(self.prompt_manager, self)
-        dialog.exec()
+        self.dialog_manager.show(
+            PromptEditorDialog,
+            key="prompt_editor",
+            singleton=True,
+            factory=lambda: PromptEditorDialog(self.prompt_manager, self),
+        )
 
     def _open_tag_manager(self):
         dialog = TagManagerDialog(self)
-        dialog.exec()
 
-        # 1. Update the Document Explorer's dropdown
-        if hasattr(self, 'doc_explorer'):
-            self.doc_explorer.refresh_tag_filter()
+        def _on_tag_manager_finished() -> None:
+            if hasattr(self, "doc_explorer"):
+                self.doc_explorer.refresh_tag_filter()
+            for r in self.dock_manager.get_instances("research"):
+                if hasattr(r, "refresh_project_ui"):
+                    r.refresh_project_ui()
 
-        # 2. Tell the unified research dock to refresh its filters via the registry
-        for r in self.dock_manager.get_instances("research"):
-            if hasattr(r, 'refresh_project_ui'):
-                r.refresh_project_ui()
+        dialog.finished.connect(_on_tag_manager_finished)
+        self.dialog_manager.show_instance(dialog, key="tag_manager")
 
     def _on_theme_changed(self, theme_name):
-        if theme_name == "Custom":
-            self.theme_manager.edit_custom_theme(self)
-
-        self.settings.setValue("theme", theme_name)
+        if not theme_name:
+            return
         self.theme_manager.set_theme(theme_name)
+
+    def open_theme_manager(self):
+        """Open the Theme Manager dialog (create, edit, delete custom/plugin themes)."""
+        self.theme_manager.open_theme_manager(parent=self)
 
     def update_theme(self, theme):
         self.top_toolbar.setStyleSheet(f"background-color: {theme['bg_panel']}; border-bottom: 1px solid {theme['border']};")
@@ -426,9 +567,14 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'autosave_timer') and self.autosave_timer.isActive():
             self.autosave_timer.stop()
 
+        if hasattr(self, 'shared_llm_manager'):
+            self.shared_llm_manager.shutdown()
+
         if hasattr(self, 'viewer') and hasattr(self.viewer, 'worker') and self.viewer.worker:
             self.viewer.worker._is_running = False
-            self.viewer.worker.wait()
+            self.viewer.worker.quit()
+            if not self.viewer.worker.wait(3000):
+                self.viewer.worker.terminate()
 
         if hasattr(self, 'quick_note_popup') and self.quick_note_popup:
             try:
