@@ -12,6 +12,23 @@ class AIDB(BaseDB):
             cursor = self._conn.cursor()
             cursor.execute("PRAGMA table_info(chat_messages)")
             columns = [col[1] for col in cursor.fetchall()]
+            has_payload = "ui_payload" in columns
+            cursor.execute(
+                f"SELECT id, role, content{', ui_payload' if has_payload else ''} "
+                "FROM chat_messages WHERE tab_name = ? ORDER BY timestamp DESC, id DESC LIMIT 1",
+                (tab_name,),
+            )
+            last = cursor.fetchone()
+            if last and last[1] == role and (last[2] or "") == (content or ""):
+                # A final workflow save may enrich an earlier text-only save
+                # with replayable GUI payloads. Preserve the richer record.
+                if has_payload and ui_payload and not last[3]:
+                    self._conn.execute(
+                        "UPDATE chat_messages SET ui_format = ?, trace_id = ?, ui_payload = ? WHERE id = ?",
+                        (ui_format, trace_id, ui_payload, last[0]),
+                    )
+                    self._conn.commit()
+                return
             if "ui_payload" in columns:
                 self._conn.execute(
                     "INSERT INTO chat_messages (tab_name, role, content, ui_format, trace_id, ui_payload) VALUES (?, ?, ?, ?, ?, ?)",

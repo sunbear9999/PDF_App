@@ -22,6 +22,7 @@ class WorkflowRunnerService(QObject):
         project_manager=None,
         ontology_registry=None,
         blueprint_manager=None,
+        node_type_registry=None,
         event_bus: Optional[EventBus] = None,
         ui_router=None,
         model_provider: Optional[Callable[[], str]] = None,
@@ -35,6 +36,7 @@ class WorkflowRunnerService(QObject):
         self.project_manager = project_manager
         self.ontology_registry = ontology_registry
         self.blueprint_manager = blueprint_manager
+        self.node_type_registry = node_type_registry
         self.bus = event_bus or EventBus.get_instance()
         self.ui_router = ui_router
         self.model_provider = model_provider
@@ -94,6 +96,7 @@ class WorkflowRunnerService(QObject):
             project_manager=self.project_manager,
             ontology_registry=self.ontology_registry,
             blueprint_manager=self.blueprint_manager,
+            node_type_registry=self.node_type_registry,
         )
         self._attach_runner(runner)
         return runner
@@ -221,5 +224,5 @@ class WorkflowRunnerService(QObject):
     def _abort_active_workflow(self):
         registry = self.process_registry
         job = getattr(registry, "active_job", None) if registry else None
-        if job and hasattr(job, "cancel"):
-            job.cancel()
+        if job and hasattr(job, "kill"):
+            job.kill()

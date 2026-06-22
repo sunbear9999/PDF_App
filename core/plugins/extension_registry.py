@@ -136,6 +136,63 @@ class WorkspaceContextMenuContext:
     event_bus: Any
 
 
+@dataclass
+class DockActionContext:
+    """Passed to DockActionSpec.callback or used to build initial_state for a workflow."""
+    dock_id: str                            # "source_viewer", "essay_dock", "data_dock", …
+    zone: str                               # "context_menu:text_selection", "toolbar", …
+    selection: Optional[str] = None         # highlighted / selected text
+    source_path: Optional[str] = None       # active PDF / video file path
+    extra: Dict[str, Any] = None            # dock-specific payload (cell coords, entity id, …)
+    app_context: Any = None                 # AppContext reference
+
+    def __post_init__(self):
+        if self.extra is None:
+            self.extra = {}
+
+
+@dataclass
+class DockActionSpec:
+    """A workflow action or callback mounted at one or more dock locations.
+
+    Plugin example::
+
+        from core.engine.dock_mounts import SOURCE_VIEWER_TEXT_SELECTION
+        from core.plugins.extension_registry import DockActionSpec, DockActionContext
+
+        def _handle(ctx: DockActionContext):
+            selected = ctx.selection or ""
+            api.workflow_runner.run_blueprint(my_blueprint, {"text": selected})
+
+        api.register_dock_action(DockActionSpec(
+            action_id="myplugin.summarize_selection",
+            label="Summarize Selection",
+            mounts=[SOURCE_VIEWER_TEXT_SELECTION],
+            callback=_handle,
+        ))
+    """
+    action_id: str
+    label: str
+    tooltip: str = ""
+    icon: str = ""
+    # Each string is a dock_mount constant from core.engine.dock_mounts
+    mounts: List[str] = None
+
+    # Either callback OR blueprint_id — not both
+    callback: Optional[Callable[["DockActionContext"], None]] = None
+    blueprint_id: Optional[str] = None              # run via WorkflowRunnerService
+    blueprint_factory: Optional[Callable] = None    # fallback factory if no registry id
+    # Optional: receives DockActionContext, returns dict to use as workflow initial_state
+    initial_state_builder: Optional[Callable[["DockActionContext"], Dict[str, Any]]] = None
+
+    position: int = 50
+    plugin_id: str = ""
+
+    def __post_init__(self):
+        if self.mounts is None:
+            self.mounts = []
+
+
 class PluginExtensionRegistry:
     """
     Central collector for all GUI extension specs contributed by plugins.
@@ -156,6 +213,7 @@ class PluginExtensionRegistry:
         self._workspace_context_menu_items: List[WorkspaceContextMenuSpec] = []
         self._actions: List[Any] = []  # ActionSpec instances from gui.registry.action_spec
         self._themes: List[ThemeSpec] = []
+        self._dock_actions: List[DockActionSpec] = []
 
     # ----------------------------------------------------------------
     # Registration
@@ -191,6 +249,10 @@ class PluginExtensionRegistry:
     def add_theme(self, spec: "ThemeSpec") -> None:
         """Register a theme contributed by a plugin."""
         self._themes.append(spec)
+
+    def add_dock_action(self, spec: DockActionSpec) -> None:
+        """Register a DockActionSpec to be injected into dock context menus / toolbars."""
+        self._dock_actions.append(spec)
 
     def add_action(self, spec: Any) -> None:
         """Register an ActionSpec (from gui.registry.action_spec) for cross-context mounting.
@@ -285,12 +347,26 @@ class PluginExtensionRegistry:
     def get_themes(self) -> List["ThemeSpec"]:
         return list(self._themes)
 
+    def get_dock_actions(self, mount: str) -> List[DockActionSpec]:
+        """Return all DockActionSpecs registered for an exact mount string."""
+        return sorted(
+            [s for s in self._dock_actions if mount in s.mounts],
+            key=lambda s: s.position,
+        )
+
+    def get_dock_actions_for_dock(self, dock_id: str) -> List[DockActionSpec]:
+        """Return all DockActionSpecs whose mount strings start with dock_id."""
+        return sorted(
+            [s for s in self._dock_actions if any(m.startswith(dock_id + ":") for m in s.mounts)],
+            key=lambda s: s.position,
+        )
+
     def _spec_list_attrs(self) -> List[str]:
         """Canonical list of all spec-list attribute names. Used by hot-reload cleanup and tagging."""
         return [
             "_toolbar_buttons", "_research_tabs", "_ai_renderers", "_extra_docks",
             "_menu_items", "_main_toolbar_buttons", "_shortcuts", "_commands",
-            "_workspace_context_menu_items", "_actions", "_themes",
+            "_workspace_context_menu_items", "_actions", "_themes", "_dock_actions",
         ]
 
     def remove_plugin_specs(self, plugin_id: str) -> None:

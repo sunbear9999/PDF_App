@@ -39,7 +39,14 @@ from core.plugins.extension_registry import PluginExtensionRegistry
 from core.plugins.pack_contributor import PackContributorRegistry
 from core.services.pack_service import PackService
 from core.registries.data_provider_registry import DataProviderRegistry
+from core.registries.llm_backend_registry import LLMBackendRegistry
+from core.backends.ollama_backend import make_ollama_backend_spec
+from core.backends.llamacpp_backend import make_llamacpp_backend_spec
 from core.services.data_dock_service import DataDockService
+from core.services.video_transcription_service import VideoTranscriptionService
+from core.services.content.deterministic_extractor_service import DeterministicExtractorService
+from core.services.document.source_evaluation_service import SourceEvaluationService
+from core.services.ai.ai_setup_service import AISetupService
 
 def get_resource_path(relative_path):
     if hasattr(sys, '_MEIPASS'):
@@ -60,11 +67,12 @@ class PapyrusCore:
         self.step_manager = StepManager()
         
         self.llm_manager = LocalLLMManager()
-        if hasattr(self.llm_manager, "prompt_manager"):
-            self.prompt_manager = self.llm_manager.prompt_manager
-        else:
-            self.llm_manager.prompt_manager = self.prompt_manager
         self.llm_manager.set_audit_logger(self.project_manager.log_ai_interaction_threadsafe)
+
+        # Load any prompt files shipped with the app under assets/prompts/
+        _assets_prompts = get_resource_path(os.path.join("assets", "prompts"))
+        if os.path.isdir(_assets_prompts):
+            self.prompt_manager.load_assets_dir(_assets_prompts, category="Asset Prompts")
         
         self.dictionary_manager = DictionaryManager(user_data_dir)
         self._ensure_default_dictionary()
@@ -78,6 +86,11 @@ class PapyrusCore:
         self.workspace_node_type_registry = build_default_workspace_node_type_registry()
         self.ontology_registry = OntologyRegistry()
         self.data_provider_registry = DataProviderRegistry()
+
+        # LLM backend registry — plugins can extend this via api.llm_backends.register()
+        self.llm_backend_registry = LLMBackendRegistry()
+        self.llm_backend_registry.register(make_ollama_backend_spec())
+        self.llm_backend_registry.register(make_llamacpp_backend_spec(user_data_dir))
 
         # 3. Headless App Services
         self.embedding_service = EmbeddingService(self.llm_manager, self.project_manager)
@@ -103,7 +116,13 @@ class PapyrusCore:
 
         self.essay_app_service = EssayAppService(self.project_manager)
         self.index_app_service = IndexAppService(self.llm_manager, self.project_manager)
+        self.deterministic_extractor_service = DeterministicExtractorService(self.project_manager)
         self.document_ingestion_service = DocumentIngestionService(self.llm_manager)
+        _metrics_db = get_resource_path(os.path.join("assets", "metrics.db"))
+        self.source_evaluation_service = SourceEvaluationService(
+            self.project_manager, _metrics_db, self.citation_manager
+        )
+        self.video_transcription_service = VideoTranscriptionService(self.project_manager, self.llm_manager)
 
         # 4. Workflow Services (ui_router and model_provider injected later by GUI layer)
         self.workflow_runner_service = WorkflowRunnerService(
@@ -114,6 +133,7 @@ class PapyrusCore:
             project_manager=self.project_manager,
             ontology_registry=self.ontology_registry,
             blueprint_manager=self.blueprint_manager,
+            node_type_registry=self.workflow_node_type_registry,
             event_bus=self.bus,
         )
         self.research_agent_service = ResearchAgentService(
@@ -128,8 +148,20 @@ class PapyrusCore:
         from core.services.help_service import HelpService
         self.help_service = HelpService(self.bus)
 
+        # AI setup service — coordinates backend detection and provider switching.
+        # startup_check() is called here to detect installed backends synchronously;
+        # provider switching and LLM availability are set before plugins load.
+        self.ai_setup_service = AISetupService(
+            self.llm_backend_registry,
+            self.llm_manager,
+            user_data_dir,
+            self.bus,
+        )
+        self.ai_setup_service.startup_check()
+
         # 5. Plugin extension registry (GUI extension points for plugins)
         self.plugin_extension_registry = PluginExtensionRegistry()
+        self._register_builtin_dock_actions()
         # plugin_dock_specs consumed by MainWindow
         self.plugin_dock_specs = []
         # Storage for plugin instances + their API objects (populated by loader)
@@ -148,6 +180,31 @@ class PapyrusCore:
 
         # Discover and register external plugins
         load_plugins(self)
+
+    def _register_builtin_dock_actions(self) -> None:
+        """Register core built-in DockActionSpecs (not from plugins)."""
+        try:
+            from core.engine.dock_mounts import SOURCE_VIEWER_TEXT_SELECTION
+            from core.plugins.extension_registry import DockActionSpec, DockActionContext
+            from core.engine.blueprints.extract_claims import get_extract_claims_blueprint
+
+            def _extract_claims_state(ctx: DockActionContext) -> dict:
+                return {
+                    "selected_text": ctx.selection or "",
+                    "source_path": ctx.source_path or "",
+                }
+
+            self.plugin_extension_registry.add_dock_action(DockActionSpec(
+                action_id="core.extract_claims",
+                label="Extract Claims",
+                tooltip="Use AI to extract structured claims from the selected text and save them as workspace nodes.",
+                mounts=[SOURCE_VIEWER_TEXT_SELECTION],
+                blueprint_factory=lambda ctx: get_extract_claims_blueprint(),
+                initial_state_builder=_extract_claims_state,
+                position=30,
+            ))
+        except Exception as exc:
+            print(f"[PapyrusCore] Failed to register builtin dock actions: {exc}")
 
     def register_plugin(self, plugin, api=None) -> None:
         """Register a plugin's contributions (blueprints, tools, ontology, dock, GUI)."""

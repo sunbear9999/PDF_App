@@ -19,6 +19,10 @@ class DataDockIntent(Enum):
     CREATE_DATA_NODE = auto()
     CREATE_CHART_NODE = auto()
     GRID_UPDATED = auto()
+    RENAME_HEADERS = auto()
+    APPLY_CLEANER = auto()
+    EXPORT_CHART = auto()
+    JUMP_TO_PROVENANCE = auto()
 
 
 @dataclass
@@ -41,6 +45,11 @@ class DataDockEvent(Enum):
     DATASET_CHANGED = auto()
     LIBRARY_CHANGED = auto()
     CHART_CONFIGURED = auto()
+    DATASET_RENAMED = auto()
+    GRID_SELECTION_CHANGED = auto()
+    CLEANER_APPLIED = auto()
+    CHART_EXPORTED = auto()
+    PROVENANCE_JUMP_REQUESTED = auto()
 
 
 @dataclass

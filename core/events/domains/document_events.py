@@ -5,6 +5,7 @@ from .base import BasePayload
 class DocumentIntent(Enum):
     OPEN = auto()
     ADD_FILES = auto()
+    TRANSCRIBE = auto()
     SHOW_OCR_BANNER = auto()
     RELOAD_PAGE = auto()
     EXTRACT_PAGES = auto()
@@ -21,8 +22,10 @@ class DocumentIntent(Enum):
 class DocumentPayload(BasePayload):
     path: Optional[str] = None
     source_id: Optional[str] = None
+    source_type: Optional[str] = None
     paths: Optional[List[str]] = None
     page_num: Optional[int] = None
+    timestamp: Optional[float] = None
     save_path: Optional[str] = None
     page_range: Optional[str] = None
     annot_id: Optional[str] = None
@@ -59,10 +62,64 @@ class DocumentEvent(Enum):
     DOCUMENT_ADDED = auto()
 
 
+class SourceIntent(Enum):
+    ADD_FILES = auto()
+    OPEN = auto()
+    RENAME = auto()
+    REMOVE = auto()
+    JUMP_TO_LOCATION = auto()
+    TRANSCRIBE = auto()
+
+
+@dataclass
+class SourcePayload(BasePayload):
+    path: Optional[str] = None
+    source_id: Optional[str] = None
+    source_type: Optional[str] = None
+    paths: Optional[List[str]] = None
+    old_path: Optional[str] = None
+    new_path: Optional[str] = None
+    page_num: Optional[int] = None
+    timestamp: Optional[float] = None
+    rects: Optional[List[Any]] = None
+    context: Dict[str, Any] = field(default_factory=dict)
+
+
+class SourceEvent(Enum):
+    ADDED = auto()
+    OPENED = auto()
+    SWITCHED = auto()
+    RENAMED = auto()
+    REMOVED = auto()
+
+
+class VideoEvent(Enum):
+    TRANSCRIPTION_STARTED = auto()
+    TRANSCRIPTION_PROGRESS = auto()
+    TRANSCRIPTION_COMPLETED = auto()
+    TRANSCRIPTION_FAILED = auto()
+
+
+@dataclass
+class VideoEventPayload(BasePayload):
+    path: Optional[str] = None
+    source_id: Optional[str] = None
+    source_type: Optional[str] = "video"
+    status: Optional[str] = None
+    progress: Optional[float] = None
+    language: Optional[str] = None
+    model: Optional[str] = None
+    segments: Optional[List[Dict[str, Any]]] = None
+    text: Optional[str] = None
+    error: Optional[str] = None
+    context: Dict[str, Any] = field(default_factory=dict)
+
+
 @dataclass
 class DocumentEventPayload(BasePayload):
     path: Optional[str] = None
     source_id: Optional[str] = None
+    source_type: Optional[str] = None
     old_path: Optional[str] = None
     old_source_id: Optional[str] = None
     new_path: Optional[str] = None
@@ -72,3 +129,5 @@ class DocumentEventPayload(BasePayload):
     highlight_data: Dict[str, Any] = field(default_factory=dict)
     doc: Any = None
     needs_ocr: bool = False
+    timestamp: Optional[float] = None
+    context: Dict[str, Any] = field(default_factory=dict)

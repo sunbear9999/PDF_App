@@ -94,6 +94,8 @@ class WhatsThisHandler(QObject):
 
     def _resolve_and_show(self, widget) -> None:
         from core.events.domains.help_events import HelpIntent, HelpPayload
+
+        # Priority 1: registered UITargetRegistry topic
         target_id = self._targets.resolve_nearest_ancestor(widget)
         topic_id: Optional[str] = None
         if target_id:
@@ -102,5 +104,21 @@ class WhatsThisHandler(QObject):
             self._bus.help_action_requested.emit(
                 HelpIntent.SHOW_TOPIC, HelpPayload(topic_id=topic_id)
             )
-        else:
-            self._bus.help_action_requested.emit(HelpIntent.SHOW_CENTER, HelpPayload())
+            return
+
+        # Priority 2: Qt native whatsThis() text — walk up the widget tree
+        try:
+            from PySide6.QtWidgets import QToolTip, QWidget
+            from PySide6.QtGui import QCursor
+            w = widget
+            while w and isinstance(w, QWidget):
+                text = w.whatsThis() if callable(getattr(w, "whatsThis", None)) else ""
+                if text:
+                    QToolTip.showText(QCursor.pos(), text, w, msecShowTime=9000)
+                    return
+                w = w.parent()
+        except Exception:
+            pass
+
+        # Priority 3: open help center
+        self._bus.help_action_requested.emit(HelpIntent.SHOW_CENTER, HelpPayload())

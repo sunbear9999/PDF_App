@@ -25,10 +25,10 @@ if "PySide6" not in sys.modules:
     sys.modules["PySide6.QtCore"] = qtcore
 
 from core.db.data_dock_db import DataDockDB
-from core.models.data_dock_models import DataProvenance
+from core.models.data_dock_models import ChartConfig, DataGridState, DataProvenance
 from core.models.ontology_model import EntityType, RelationType
 from core.ontology.registry import OntologyRegistry
-from core.registries.data_provider_registry import DataProviderRegistry
+from core.registries.data_provider_registry import ChartTypeSpec, DataCleanerSpec, DataProviderRegistry, GridActionSpec
 from core.registries.workspace_registry import build_default_workspace_node_type_registry
 from core.services.data_dock_service import DataDockService
 
@@ -202,6 +202,29 @@ class DataDockServiceTests(unittest.TestCase):
             self.assertIn(saved.dataset_id, ids)
             pm.close()
 
+    def test_project_save_flushes_open_data_dock_edits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_path = os.path.join(tmp, "data_test.pdfproj")
+            pm = _DataDockManager(project_path)
+            service = DataDockService(pm, DataProviderRegistry())
+
+            state = service.new_dataset("Autosaved", rows=1, columns=1)
+            service.update_cell(state.dataset_id, 0, 0, "42")
+
+            saved = service.save_all_open_datasets()
+            self.assertEqual(len(saved), 1)
+            self.assertTrue(saved[0].is_persisted)
+            self.assertFalse(saved[0].dirty)
+
+            pm.save_project()
+            pm.close()
+            pm2 = _DataDockManager(project_path)
+            reloaded = pm2.get_data_dock_dataset(state.dataset_id)
+            self.assertIsNotNone(reloaded)
+            self.assertEqual(reloaded.name, "Autosaved")
+            self.assertEqual(reloaded.rows, [["42"]])
+            pm2.close()
+
     def test_transforms_and_summary(self):
         service = DataDockService(provider_registry=DataProviderRegistry())
         state = service.new_dataset("Numbers", rows=0, columns=0)
@@ -218,9 +241,163 @@ class DataDockServiceTests(unittest.TestCase):
         self.assertEqual(state.row_headers, ["A", "B"])
         self.assertEqual(state.rows, [["1", "3"], ["2", "4"]])
 
-        summary = service.selection_summary(["1", "$2", "bad", "3%"])
-        self.assertEqual(summary["count"], 3)
-        self.assertAlmostEqual(summary["sum"], 6.0)
+        summary = service.selection_summary(["1", "$2", "bad", "3%", "(4)", "", "1,000.50"])
+        self.assertEqual(summary["count"], 7)
+        self.assertEqual(summary["numeric_count"], 5)
+        self.assertAlmostEqual(summary["sum"], 1002.5)
+        self.assertAlmostEqual(summary["average"], 200.5)
+        self.assertEqual(summary["min"], -4.0)
+        self.assertEqual(summary["max"], 1000.5)
+        self.assertEqual(service.format_number(100000), "100,000")
+
+    def test_add_metric_row_and_column(self):
+        service = DataDockService(provider_registry=DataProviderRegistry())
+        state = service.new_dataset("Metrics", rows=0, columns=0)
+        service.update_grid(
+            state.dataset_id,
+            ["A", "B", "C"],
+            [["1", "2", "100,000"], ["3", "4", "200,000"]],
+            row_headers=["R1", "R2"],
+        )
+
+        service.add_metric(state.dataset_id, "column", "average", [0, 1], "Avg AB")
+        self.assertEqual(state.headers[-1], "Avg AB")
+        self.assertEqual(state.rows[0][-1], "1.5")
+        self.assertEqual(state.rows[1][-1], "3.5")
+
+        service.add_metric(state.dataset_id, "row", "sum", [0, 1], "Sum Rows")
+        self.assertEqual(state.row_headers[-1], "Sum Rows")
+        self.assertEqual(state.rows[-1][0], "4")
+        self.assertEqual(state.rows[-1][2], "300,000")
+
+    def test_add_metric_for_selection_leaves_unselected_cells_blank(self):
+        service = DataDockService(provider_registry=DataProviderRegistry())
+        state = service.new_dataset("Selection Metrics", rows=0, columns=0)
+        service.update_grid(
+            state.dataset_id,
+            ["A", "B", "C"],
+            [["1", "2", "9"], ["3", "4", "9"], ["5", "6", "9"]],
+            row_headers=["R1", "R2", "R3"],
+        )
+
+        service.add_metric_for_selection(state.dataset_id, "column", "average", rows=[0, 1], columns=[0, 1], label="Avg AB")
+        self.assertEqual(state.headers, ["A", "B", "Avg AB", "C"])
+        self.assertEqual(state.rows[0], ["1", "2", "1.5", "9"])
+        self.assertEqual(state.rows[1], ["3", "4", "3.5", "9"])
+        self.assertEqual(state.rows[2], ["5", "6", "", "9"])
+
+        service.add_metric_for_selection(state.dataset_id, "row", "sum", rows=[0, 1], columns=[0, 1], label="Sum R1 R2")
+        self.assertEqual(state.row_headers, ["R1", "R2", "Sum R1 R2", "R3"])
+        self.assertEqual(state.rows[2], ["4", "6", "", ""])
+
+    def test_cleaners_promote_fill_split_merge_and_infer(self):
+        service = DataDockService(provider_registry=DataProviderRegistry())
+        state = service.new_dataset("Messy", rows=0, columns=0)
+        service.update_grid(
+            state.dataset_id,
+            [" keep ", "Label", "Combined"],
+            [[" Year ", "A", "North;West"], ["2020", "Jan", "1200;North"], ["2021", "", "1300;West"]],
+            row_headers=[" r1 ", " r2 ", " r3 "],
+        )
+
+        service.trim_whitespace(state.dataset_id)
+        self.assertEqual(state.headers[0], "keep")
+        self.assertEqual(state.row_headers[0], "r1")
+
+        service.promote_row_to_headers(state.dataset_id, 0)
+        self.assertEqual(state.headers, ["Year", "A", "North;West"])
+        self.assertEqual(state.rows[0][0], "2020")
+
+        service.fill_down(state.dataset_id, [1])
+        self.assertEqual(state.rows[1][1], "Jan")
+
+        service.split_column(state.dataset_id, 2, ";")
+        self.assertEqual(state.headers[2:4], ["North;West", "North;West 2"])
+        self.assertEqual(state.rows[0][2:4], ["1200", "North"])
+
+        service.merge_columns(state.dataset_id, [2, 3], " / ")
+        self.assertIn("North;West", state.headers[2])
+
+        service.normalize_numbers(state.dataset_id, [0])
+        self.assertEqual(state.rows[0][0], "2020")
+
+        service.infer_column_types(state.dataset_id)
+        self.assertEqual(state.column_types["Year"], "Number")
+        self.assertIn("cleaning_history", state.metadata)
+
+    def test_promote_column_to_row_headers(self):
+        service = DataDockService(provider_registry=DataProviderRegistry())
+        state = service.new_dataset("Rows", rows=0, columns=0)
+        service.update_grid(state.dataset_id, ["Name", "Value"], [["Jan", "1"], ["Feb", "2"]])
+
+        service.promote_column_to_row_headers(state.dataset_id, 0)
+
+        self.assertEqual(state.headers, ["Value"])
+        self.assertEqual(state.row_headers, ["Jan", "Feb"])
+        self.assertEqual(state.rows, [["1"], ["2"]])
+
+    def test_richer_state_and_chart_config_roundtrip(self):
+        provenance = DataProvenance(
+            source_id="source:1",
+            source_path="/tmp/source.pdf",
+            source_type="pdf",
+            pdf_path="/tmp/source.pdf",
+            page_number=4,
+            bounding_box_coordinates=[[1, 2, 3, 4]],
+            selection_text="raw",
+            parent_dataset_id="data_parent",
+            selection_ref="sel-1",
+        )
+        state = DataGridState(
+            dataset_id="data_x",
+            name="X",
+            headers=["A"],
+            row_headers=["r1"],
+            rows=[["1"]],
+            provenance=provenance,
+            cell_provenance={"0:0": {"source": "cell"}},
+            metadata={"cleaning_history": [{"action": "trim"}]},
+        )
+        reloaded = DataGridState.from_dict(state.to_dict())
+
+        self.assertEqual(reloaded.provenance.source_id, "source:1")
+        self.assertEqual(reloaded.cell_provenance["0:0"]["source"], "cell")
+        self.assertEqual(reloaded.metadata["cleaning_history"][0]["action"], "trim")
+
+        config = ChartConfig(
+            chart_id="chart_x",
+            title="Cost",
+            subtitle="Annual",
+            chart_type="bar",
+            x_title="Time",
+            y_title="Cost of living",
+            show_data_labels=True,
+            color_overrides={"2020": "#ff0000"},
+            series=[{"name": "Cost"}],
+            source_selection={"cells": [[0, 0], [0, 1]]},
+            export_options={"format": "png"},
+        )
+        parsed = ChartConfig.from_dict(config.to_dict())
+        self.assertEqual(parsed.title, "Cost")
+        self.assertTrue(parsed.show_data_labels)
+        self.assertEqual(parsed.color_overrides["2020"], "#ff0000")
+
+    def test_data_dock_registry_plugin_extension_points(self):
+        registry = DataProviderRegistry()
+        registry.register_chart_type(ChartTypeSpec(chart_type="heatmap", label="Heatmap", plugin_id="p1"))
+        registry.register_cleaner(DataCleanerSpec(cleaner_id="p1.clean", label="Plugin Clean", plugin_id="p1"))
+        registry.register_grid_action(GridActionSpec(action_id="p1.action", label="Plugin Action", plugin_id="p1"))
+        registry.register_palette("plugin", ["#123456"])
+
+        self.assertIn("heatmap", registry.chart_types())
+        self.assertIn("p1.clean", registry.cleaners())
+        self.assertIn("p1.action", registry.grid_actions())
+        self.assertEqual(registry.palette("plugin"), ["#123456"])
+
+        registry.remove_plugin("p1")
+        self.assertNotIn("heatmap", registry.chart_types())
+        self.assertNotIn("p1.clean", registry.cleaners())
+        self.assertNotIn("p1.action", registry.grid_actions())
 
     def test_word_geometry_selection_reconstructs_table_rows(self):
         service = DataDockService(provider_registry=DataProviderRegistry())
@@ -253,7 +430,7 @@ class DataDockServiceTests(unittest.TestCase):
         states = service.extract_document(_FakeDoc(), "/tmp/stocks.pdf")
 
         self.assertEqual(len(states), 2)
-        self.assertEqual(states[0].name, "Page 1 Table 1")
+        self.assertEqual(states[0].name, "P1: Date | AAPL")
         self.assertEqual(states[0].headers, ["Date", "AAPL"])
         self.assertEqual(states[0].rows, [["Jan", "10"], ["Feb", "11"]])
         self.assertEqual(states[1].headers, ["Page", "Detected Item", "x0", "y0", "x1", "y1"])

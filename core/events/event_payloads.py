@@ -14,6 +14,7 @@ from core.events.domains.document_events import (
     DocumentIntent, DocumentPayload,
     DocumentEvent, DocumentEventPayload,
     AnnotationIntent, AnnotationPayload,
+    SourceIntent, SourcePayload, SourceEvent, VideoEvent, VideoEventPayload,
 )
 from core.events.domains.project_events import (
     ProjectIntent, ProjectPayload,
@@ -49,11 +50,22 @@ from core.events.domains.metadata_events import (
     TagIntent, TagPayload, TagEvent, TagEventPayload,
     PromptIntent, PromptPayload, PromptEvent, PromptEventPayload,
 )
+from core.events.domains.evaluation_events import (
+    SourceEvalIntent, SourceEvalEvent,
+    SourceEvalPayload, SourceEvalEventPayload,
+)
+from core.events.domains.ai_setup_events import (
+    AISetupIntent, AISetupEvent, AISetupPayload,
+)
 
 # Maps EventBus signal name → (intent/event enum, payload type)
 SIGNAL_CONTRACTS: dict = {
     "document_action_requested": (DocumentIntent, DocumentPayload),
     "document_opened": (DocumentEvent, DocumentEventPayload),
+    "source_action_requested": (SourceIntent, SourcePayload),
+    "source_opened": (SourceEvent, DocumentEventPayload),
+    "source_added": (SourceEvent, DocumentEventPayload),
+    "video_status_updated": (VideoEvent, VideoEventPayload),
     "annotation_action_requested": (AnnotationIntent, AnnotationPayload),
     "project_action_requested": (ProjectIntent, ProjectPayload),
     "project_loaded": (ProjectEvent, ProjectEventPayload),
@@ -71,12 +83,15 @@ SIGNAL_CONTRACTS: dict = {
     "notes_data_ready": (NotesEvent, NotesEventPayload),
     "tag_action_requested": (TagIntent, TagPayload),
     "prompt_action_requested": (PromptIntent, PromptPayload),
+    "ai_setup_action_requested": (AISetupIntent, AISetupPayload),
+    "ai_setup_state_changed": (AISetupEvent, AISetupPayload),
 }
 
 __all__ = [
     # Document
     "DocumentIntent", "DocumentPayload", "DocumentEvent", "DocumentEventPayload",
     "AnnotationIntent", "AnnotationPayload",
+    "SourceIntent", "SourcePayload", "SourceEvent", "VideoEvent", "VideoEventPayload",
     # Project
     "ProjectIntent", "ProjectPayload", "ProjectEvent", "ProjectEventPayload",
     # Workspace
@@ -97,6 +112,11 @@ __all__ = [
     "NotesIntent", "NotesPayload", "NotesEvent", "NotesEventPayload",
     "TagIntent", "TagPayload", "TagEvent", "TagEventPayload",
     "PromptIntent", "PromptPayload", "PromptEvent", "PromptEventPayload",
+    # Source Evaluation
+    "SourceEvalIntent", "SourceEvalEvent",
+    "SourceEvalPayload", "SourceEvalEventPayload",
+    # AI Setup
+    "AISetupIntent", "AISetupEvent", "AISetupPayload",
     # Contracts
     "SIGNAL_CONTRACTS",
 ]

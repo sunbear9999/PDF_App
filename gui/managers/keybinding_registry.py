@@ -52,6 +52,7 @@ from PySide6.QtWidgets import QWidget
 BUILTIN_SCOPE_ORDER: List[str] = [
     "global",
     "pdf_viewer",
+    "video_player",
     "workspace",
     "research",
     "notes",
@@ -67,6 +68,7 @@ BUILTIN_SCOPE_ORDER: List[str] = [
 SCOPE_LABELS: Dict[str, str] = {
     "global":     "Global",
     "pdf_viewer": "PDF Viewer",
+    "video_player": "Video Player",
     "workspace":  "Workspace",
     "research":   "Research Assistant",
     "notes":      "Notes",
@@ -82,6 +84,7 @@ SCOPE_LABELS: Dict[str, str] = {
 SCOPE_ICONS: Dict[str, str] = {
     "global":     "🌐",
     "pdf_viewer": "📄",
+    "video_player": "Video",
     "workspace":  "🕸️",
     "research":   "🔬",
     "notes":      "📝",
@@ -152,7 +155,10 @@ class KeybindingRegistry(QObject):
     # ------------------------------------------------------------------
 
     def register(self, spec: KeySpec) -> None:
-        if spec.action_id in self._specs:
+        existing = self._specs.get(spec.action_id)
+        if existing == spec:
+            return
+        if existing is not None:
             print(f"[KeybindingRegistry] Duplicate action_id '{spec.action_id}' – overwriting")
         self._specs[spec.action_id] = spec
 
@@ -405,6 +411,24 @@ def build_builtin_key_specs() -> List[KeySpec]:
                 "Show or hide the in-document text search bar",   "Ctrl+F"),
         KeySpec("pdf.copy",         "Copy Selection",    "pdf_viewer",
                 "Copy the selected text to the clipboard",        "Ctrl+C"),
+        KeySpec("pdf.toggle_viewer", "Toggle Source Viewer", "pdf_viewer",
+                "Show or hide the source viewer dock",            ""),
+
+        # ── Video Player ─────────────────────────────────────────────────────
+        KeySpec("video.play_pause",        "Play / Pause",       "video_player",
+                "Toggle playback for the active video source",    ""),
+        KeySpec("video.back_10s",          "Back 10 Seconds",    "video_player",
+                "Seek the active video backward ten seconds",     ""),
+        KeySpec("video.forward_10s",       "Forward 10 Seconds", "video_player",
+                "Seek the active video forward ten seconds",      ""),
+        KeySpec("video.toggle_captions",   "Toggle Captions",    "video_player",
+                "Show or hide captions in the video player",      ""),
+        KeySpec("video.toggle_transcript", "Toggle Transcript",  "video_player",
+                "Show or hide the transcript below the video",    ""),
+        KeySpec("video.toggle_timestamps", "Toggle Timestamps",  "video_player",
+                "Show or hide timestamps in the transcript",      ""),
+        KeySpec("video.save_note",         "Save Video Note",    "video_player",
+                "Save a quote note from the current video time",  ""),
 
         # ── Workspace ─────────────────────────────────────────────────────────
         KeySpec("workspace.copy",             "Copy",              "workspace",
@@ -437,6 +461,24 @@ def build_builtin_key_specs() -> List[KeySpec]:
                 "Open the Data Dock",                           ""),
         KeySpec("data_dock.save_dataset",   "Save Dataset",       "data_dock",
                 "Save the active dataset to the project",        "Ctrl+Shift+S"),
+        KeySpec("data_dock.extract_pdf",     "Extract PDF Data",   "data_dock",
+                "Extract tables and data from the open PDF",      ""),
+        KeySpec("data_dock.jump_to_source",  "Jump To Source",     "data_dock",
+                "Open the source document and jump to this dataset's origin", ""),
+        KeySpec("data_dock.copy",            "Copy Cells",         "data_dock",
+                "Copy selected data dock cells",                  "Ctrl+C"),
+        KeySpec("data_dock.cut",             "Cut Cells",          "data_dock",
+                "Cut selected data dock cells",                   "Ctrl+X"),
+        KeySpec("data_dock.paste",           "Paste Cells",        "data_dock",
+                "Paste clipboard data into the grid",             "Ctrl+V"),
+        KeySpec("data_dock.undo",            "Undo Grid Edit",     "data_dock",
+                "Undo the last data dock edit",                   "Ctrl+Z"),
+        KeySpec("data_dock.redo",            "Redo Grid Edit",     "data_dock",
+                "Redo the last undone data dock edit",            "Ctrl+Y"),
+        KeySpec("data_dock.add_average_column", "Add Average Column", "data_dock",
+                "Add an average column for the selected data range", ""),
+        KeySpec("data_dock.add_sum_column",  "Add Sum Column",     "data_dock",
+                "Add a sum column for the selected data range",   ""),
         KeySpec("data_dock.clear_grid",     "Clear Grid",         "data_dock",
                 "Clear the active grid values",                  ""),
         KeySpec("data_dock.generate_chart", "Generate Chart",     "data_dock",

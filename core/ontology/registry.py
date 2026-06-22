@@ -701,8 +701,19 @@ class OntologyRegistry:
                 FieldDefinition("context", "Context", "string", ""),
             ], hints={"extractors": ["ner"]}, requires_source=True)
 
-        # The Source automatically triggers background workflows when it is created
-        entity(EntityType.SOURCE.value, "Source", "A referenced document.", {"title": "", "authors": "", "year": ""}, 
+        # Source nodes show quality metrics when they represent project documents
+        # (properties.source_score / highlights_count / citations_count only exist
+        # for nodes added via "Add to Workspace" — bibliography citations won't have
+        # them, so the badges are silently skipped for those nodes).
+        source_blocks = [
+            RenderBlockDefinition("header", "header", "properties.title", "Title"),
+            RenderBlockDefinition("body", "text", "properties.text", "Text"),
+            RenderBlockDefinition("score", "metric_badge", "properties.source_score", "Score"),
+            RenderBlockDefinition("highlights", "metric_badge", "properties.highlights_count", "Highlights"),
+            RenderBlockDefinition("citations", "metric_badge", "properties.citations_count", "Refs"),
+            RenderBlockDefinition("verify", "verify_badge", "state.is_verified", "Verify"),
+        ]
+        entity(EntityType.SOURCE.value, "Source", "A referenced document.", {"title": "", "authors": "", "year": ""},
             fields=[
                 FieldDefinition("title", "Title", "string", ""),
                 FieldDefinition("authors", "Authors", "string", ""),
@@ -713,8 +724,9 @@ class OntologyRegistry:
                 ComputedMetricDefinition("cited_sources_count", "Bibliography Size", _source_cited_count),
                 ComputedMetricDefinition("in_text_citation_count", "In-Text Citations", _source_in_text_count),
                 ComputedMetricDefinition("most_cited_source", "Heavily Relied On", _source_most_cited),
-            ], hints={"extractors": ["citation", "duplicate_source"]}, 
+            ], hints={"extractors": ["citation", "duplicate_source"]},
             on_created=["document.intent.extract_citations", "document.intent.extract_timeline"],
+            render_blocks=source_blocks,
             requires_source=True)
             
         entity(EntityType.METHOD.value, "Method", "Research methodology.", {"method_type": ""}, requires_source=True)

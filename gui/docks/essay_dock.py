@@ -12,10 +12,9 @@ from PySide6.QtCore import QUrl, Qt, QMarginsF
 from PySide6.QtGui import QPageLayout, QPageSize
 
 class EssayTab(QWidget):
-    def __init__(self, project_manager, main_window):
-        super().__init__()
+    def __init__(self, project_manager, parent=None):
+        super().__init__(parent)
         self.project_manager = project_manager
-        self.main_window = main_window
         self.current_essay_id = str(uuid.uuid4())
         
         self.layout = QVBoxLayout(self)

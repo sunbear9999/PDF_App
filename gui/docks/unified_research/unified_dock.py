@@ -16,11 +16,12 @@ from gui.components.process_monitor import ProcessMonitorWidget
 import json
 from gui.docks.unified_research.components.manifest_bubble import ProjectBriefDialog
 from gui.docks.unified_research.components.history_renderer import ChatHistoryRenderer
-from core.events.event_bus import EventBus
 from core.events.domains.document_events import DocumentEvent, DocumentEventPayload
 from core.events.domains.workspace_events import WorkspaceEvent, WorkspaceEventPayload
 from core.events.domains.project_events import ProjectEvent
 from gui.utils.document_helpers import active_pdf_names, active_pdf_paths, prune_doc_names
+
+
 class IndexWorker(QThread):
     progress = Signal(str)
     finished_indexing = Signal(bool, str)
@@ -37,19 +38,20 @@ class IndexWorker(QThread):
         except Exception as e:
             self.finished_indexing.emit(False, str(e))
 
+
 class UnifiedResearchDock(QDockWidget):
     global_context_changed = Signal(list, list)
 
-    def __init__(self, main_window, project_manager, llm_manager, parent=None):
+    def __init__(self, app_context, parent=None):
         super().__init__("🔬 Research Workspace", parent)
         self.setObjectName("UnifiedResearchDock")
-        self.main_window = main_window
-        self.project_manager = project_manager
-        self.llm_manager = llm_manager
-
-
+        self.app_context = app_context
+        self.project_manager = app_context.project_manager
+        self.llm_manager = app_context.llm_manager
+        self.bus = app_context.bus
 
         self.central_widget = QWidget()
+        self.central_widget.setMinimumSize(320, 320)
         self.setWidget(self.central_widget)
         self.main_layout = QHBoxLayout(self.central_widget)
         self.main_layout.setContentsMargins(0, 0, 0, 0)
@@ -59,8 +61,6 @@ class UnifiedResearchDock(QDockWidget):
         line.setFixedWidth(1)
         line.setStyleSheet("background-color: #444;")
         self.main_layout.addWidget(line)
-
-        # 3. Add the Process Monitor at the bottom (fixed height so it doesn't take over)
 
         self.active_docs, self.active_tags = [], []
         self.tag_logic = "AND"
@@ -75,7 +75,6 @@ class UnifiedResearchDock(QDockWidget):
         self._inject_plugin_tabs()
 
         # --- Subscribe to Global Events ---
-        self.bus = EventBus.get_instance()
         self.bus.pdf_switched.connect(self._on_pdf_switched_event)
         self.bus.document_added.connect(self._on_document_list_changed)
         self.bus.pdf_removed.connect(self._on_document_list_changed)
@@ -83,10 +82,30 @@ class UnifiedResearchDock(QDockWidget):
         self.bus.project_loaded.connect(self._on_project_loaded)
         self.bus.plugin_unloaded.connect(self.remove_plugin_tabs)
         self.bus.plugin_loaded.connect(self._on_plugin_loaded)
-        # Auto-update theme whenever the app theme changes — handles the case
-        # where this dock is the outer QDockWidget and broadcast_theme() only
-        # walks inner widgets.
+        # Auto-update theme whenever the app theme changes
         self.bus.theme_changed.connect(self._on_bus_theme_changed)
+        # Track active model changes so app_context.active_model stays current
+        self.bus.active_model_changed.connect(self._on_active_model_changed)
+
+    def _on_active_model_changed(self, event, payload):
+        if event == WorkspaceEvent.ACTIVE_MODEL_CHANGED and hasattr(payload, "model_name"):
+            self.app_context.active_model = payload.model_name
+
+    def _open_bias_lab(self):
+        from gui.docks.unified_research.components.bias_detector_dialog import BiasDetectorDialog
+        dm = get_for_widget(self)
+        if dm:
+            dm.show(
+                BiasDetectorDialog,
+                key="bias_lab",
+                singleton=True,
+                factory=lambda: BiasDetectorDialog(
+                    self.app_context,
+                    self.theme,
+                    self
+                ),
+            )
+
     def _on_pdf_switched_event(self, event: DocumentEvent, payload: DocumentEventPayload):
         if event == DocumentEvent.PDF_SWITCHED:
             self._on_pdf_switched(payload.path)
@@ -126,6 +145,7 @@ class UnifiedResearchDock(QDockWidget):
     def _on_pdf_switched(self, pdf_path=None):
         """Safe wrapper to handle global event signals."""
         self.refresh_project_ui()
+
     def _build_sidebar(self):
         self.sidebar = QFrame()
         self.sidebar.setFixedWidth(50)
@@ -134,7 +154,6 @@ class UnifiedResearchDock(QDockWidget):
         self.nav_group = QButtonGroup(self)
         self.nav_group.setExclusive(True)
 
-        # --- ADD THE NEW TAB ICON HERE ---
         nav_items = [("💬", 0), ("🧭", 1), ("💡", 2), ("🔍", 3), ("📊", 4), ("🧰", 5), ("🛠️", 6)]
 
         for icon, index in nav_items:
@@ -155,28 +174,39 @@ class UnifiedResearchDock(QDockWidget):
         core_layout.setContentsMargins(0, 0, 0, 0)
 
         self.header = QFrame()
-        from PySide6.QtWidgets import QGridLayout
-        header_layout = QGridLayout(self.header)
-        header_layout.setContentsMargins(10, 5, 10, 5)
+        header_layout = QVBoxLayout(self.header)
+        header_layout.setContentsMargins(8, 4, 8, 4)
+        header_layout.setSpacing(3)
 
+        # Row 1: index status + model selector
+        row1 = QHBoxLayout()
+        row1.setSpacing(6)
         self.lbl_status = QLabel("🔴 Unindexed")
-        header_layout.addWidget(self.lbl_status, 0, 0)
+        row1.addWidget(self.lbl_status)
 
         self.model_combo = QComboBox()
         available_models = self.llm_manager.get_available_models() or ["llama3"]
         self.model_combo.addItems(available_models)
-        active_model = getattr(self.main_window, "_get_active_ai_model", lambda: "")()
+        active_model = self.app_context.get_active_ai_model()
         if active_model in available_models:
             self.model_combo.setCurrentText(active_model)
-        header_layout.addWidget(self.model_combo, 0, 1)
+        row1.addWidget(self.model_combo, 1)
 
-        self.model_combo.currentTextChanged.connect(
-            lambda txt: self.bus.active_model_changed.emit(
+        self.btn_index = QPushButton("🔄 Index")
+        self.btn_index.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_index.clicked.connect(self.start_indexing)
+        row1.addWidget(self.btn_index)
+        header_layout.addLayout(row1)
+
+        def _on_model_changed(txt):
+            self.app_context.active_model = txt
+            self.bus.active_model_changed.emit(
                 WorkspaceEvent.ACTIVE_MODEL_CHANGED,
                 WorkspaceEventPayload(model_name=txt),
             )
-        )
-        # Fire it once on startup so background services cache the initial state
+
+        self.model_combo.currentTextChanged.connect(_on_model_changed)
+        # Fire once on startup so background services cache the initial state
         QTimer.singleShot(
             100,
             lambda: self.bus.active_model_changed.emit(
@@ -185,38 +215,119 @@ class UnifiedResearchDock(QDockWidget):
             ),
         )
 
-        self.btn_brief = QPushButton("📝 Project Manifest")
+        # Row 2: action buttons
+        row2 = QHBoxLayout()
+        row2.setSpacing(4)
+
+        self.btn_brief = QPushButton("📝 Manifest")
         self.btn_brief.clicked.connect(self._open_project_brief)
-        header_layout.addWidget(self.btn_brief, 0, 2)
+        row2.addWidget(self.btn_brief)
+
+        self.btn_bias = QPushButton("⚖️ Bias Lab")
+        self.btn_bias.clicked.connect(self._open_bias_lab)
+        row2.addWidget(self.btn_bias)
 
         self.btn_filter = QPushButton("⚙️ Filter Context")
         self.btn_filter.clicked.connect(self._open_filter_dialog)
-        header_layout.addWidget(self.btn_filter, 0, 3)
+        row2.addWidget(self.btn_filter, 1)
+        header_layout.addLayout(row2)
 
-        self.btn_index = QPushButton("🔄 Index")
-        self.btn_index.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.btn_index.clicked.connect(self.start_indexing)
-        header_layout.addWidget(self.btn_index, 0, 4)
         core_layout.addWidget(self.header)
 
         self.stacked_widget = QStackedWidget()
-        self.tab_chat = ChatTab(self.main_window, parent=self)
-        self.tab_agent = ResearchAgentTab(self.main_window, parent=self)
-        self.tab_plan = BrainstormTab(self.main_window, parent=self)
-        self.tab_search = SearchTab(self.main_window,parent=self)
-        self.tab_analysis = AnalysisTab(self.main_window, parent=self)
-        self.tab_custom = CustomToolsTab(self.main_window, parent=self)
-        self.tab_editor = BlueprintEditorTab(self.main_window, parent=self)
+        self.tab_chat = ChatTab(self.app_context, parent=self)
+        self.tab_agent = ResearchAgentTab(self.app_context, parent=self)
+        self.tab_plan = BrainstormTab(self.app_context, parent=self)
+        self.tab_search = SearchTab(self.app_context, parent=self)
+        self.tab_analysis = AnalysisTab(self.app_context, parent=self)
+        self.tab_custom = CustomToolsTab(self.app_context, parent=self)
+        self.tab_editor = BlueprintEditorTab(self.app_context, parent=self)
 
         for tab in [self.tab_chat, self.tab_agent, self.tab_plan, self.tab_search, self.tab_analysis, self.tab_custom, self.tab_editor]:
             self.stacked_widget.addWidget(tab)
         core_layout.addWidget(self.stacked_widget)
-        self.main_layout.addWidget(core_widget)
+
+        # Wrap core_widget + no-AI overlay in a QStackedWidget for graceful degradation
+        self._content_stack = QStackedWidget()
+        self._content_stack.addWidget(core_widget)       # index 0 — normal view
+        self._content_stack.addWidget(self._build_no_ai_overlay())  # index 1 — setup prompt
+
+        # Show the correct page based on current AI availability
+        ai_available = getattr(self.llm_manager, "ai_enabled", True)
+        self._content_stack.setCurrentIndex(0 if ai_available else 1)
+
+        self.bus.ai_availability_changed.connect(self._on_ai_availability_changed)
+        self.main_layout.addWidget(self._content_stack)
+
+    def _build_no_ai_overlay(self) -> QWidget:
+        """Placeholder shown when no AI backend is installed."""
+        overlay = QWidget()
+        lay = QVBoxLayout(overlay)
+        lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.setSpacing(12)
+
+        icon = QLabel("🤖")
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon.setStyleSheet("font-size: 48px;")
+
+        title = QLabel("No AI Backend Installed")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("font-size: 18px; font-weight: 700;")
+
+        body = QLabel(
+            "AI features require a local language model backend.\n"
+            "Install Ollama or llama.cpp to get started."
+        )
+        body.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        body.setWordWrap(True)
+        body.setStyleSheet("font-size: 13px; color: #888; max-width: 320px;")
+
+        btn = QPushButton("Set Up AI Features")
+        btn.setFixedHeight(36)
+        btn.setFixedWidth(200)
+        btn.setStyleSheet(
+            "background: #0078D7; color: #fff; border: none; "
+            "border-radius: 6px; font-size: 13px; font-weight: 600;"
+        )
+        btn.clicked.connect(self._open_ai_setup)
+
+        lay.addStretch()
+        lay.addWidget(icon)
+        lay.addWidget(title)
+        lay.addWidget(body)
+        lay.addSpacing(8)
+        lay.addWidget(btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        lay.addStretch()
+        return overlay
+
+    def _open_ai_setup(self) -> None:
+        from gui.components.dialogs.settings_dialog import GlobalSettingsDialog
+        dm = getattr(self.app_context, "dialog_manager", None)
+        if dm:
+            dm.show(
+                GlobalSettingsDialog,
+                key="settings",
+                singleton=True,
+                factory=lambda: GlobalSettingsDialog(
+                    self.app_context,
+                    parent=self.parent(),
+                ),
+            )
+
+    def _on_ai_availability_changed(self, available: bool) -> None:
+        self._content_stack.setCurrentIndex(0 if available else 1)
+        if available:
+            # Refresh model combo when backend comes online
+            try:
+                models = self.llm_manager.get_available_models() or []
+                self.model_combo.clear()
+                self.model_combo.addItems(models)
+            except Exception:
+                pass
 
     def _inject_plugin_tabs(self) -> None:
         """Inject research tabs contributed by plugins via PluginExtensionRegistry."""
-        app_context = getattr(self.main_window, "app_context", None)
-        registry = getattr(app_context, "plugin_extension_registry", None)
+        registry = getattr(self.app_context, "plugin_extension_registry", None)
         if not registry:
             return
         sidebar_layout = self.sidebar.layout()
@@ -224,7 +335,7 @@ class UnifiedResearchDock(QDockWidget):
             if spec.tab_id in self._injected_tab_ids:
                 continue  # Already injected (e.g. after plugin re-enable)
             try:
-                widget = spec.factory(app_context) if spec.factory else None
+                widget = spec.factory(self.app_context) if spec.factory else None
                 if widget is None:
                     print(f"[PluginTab] Warning: factory for '{spec.tab_id}' returned None — tab skipped")
                     continue
@@ -260,8 +371,8 @@ class UnifiedResearchDock(QDockWidget):
                     )
 
                 # Register with AI output router if this tab has a target_id
-                if spec.target_id and app_context and getattr(app_context, "ui_router", None):
-                    app_context.ui_router.register_target(spec.target_id, widget)
+                if spec.target_id and getattr(self.app_context, "ui_router", None):
+                    self.app_context.ui_router.register_target(spec.target_id, widget)
 
             except Exception as exc:
                 print(f"[PluginTab] Failed to inject tab '{spec.tab_id}': {exc}")
@@ -302,7 +413,10 @@ class UnifiedResearchDock(QDockWidget):
         if not self.project_manager: return
 
         history = self.project_manager.get_chat_history(tab_id)
-        ChatHistoryRenderer(tab_widget, theme=self.theme).render(history)
+        if hasattr(tab_widget, "render_chat_history"):
+            tab_widget.render_chat_history(history, clear_existing=True)
+        else:
+            ChatHistoryRenderer(tab_widget, theme=self.theme).render(history)
 
     def clear_tab_history(self, tab_widget, tab_id):
         """Universally wipes SQLite history and clears the UI for a specific tab."""
@@ -314,12 +428,14 @@ class UnifiedResearchDock(QDockWidget):
             while tab_widget.chat_layout.count() > 1:
                 item = tab_widget.chat_layout.takeAt(0)
                 if item.widget(): item.widget().deleteLater()
+
     def refresh_project_ui(self):
         """Initializes or reloads the UI state from the active project database."""
         self.check_index_status()
         self.load_tab_history(self.tab_chat, "chat_dock")
         self.load_tab_history(self.tab_plan, "brainstorm_dock")
         self.load_tab_history(self.tab_custom, "custom_tools_tab")
+
     # --- THE UNIVERSAL "SEND TO" MENU ATTACHER ---
     def attach_send_to_menu(self, text_browser_widget):
         """Attaches a custom context menu to any text widget to send text between tabs."""
@@ -365,6 +481,7 @@ class UnifiedResearchDock(QDockWidget):
 
         self.model_combo.setStyleSheet(widget_style)
         self.btn_brief.setStyleSheet(widget_style)
+        self.btn_bias.setStyleSheet(widget_style)
         self.btn_filter.setStyleSheet(widget_style)
         self.btn_index.setStyleSheet(widget_style)
 
@@ -375,7 +492,7 @@ class UnifiedResearchDock(QDockWidget):
         if hasattr(self, 'tab_search'): self.tab_search.update_theme(theme)
         if hasattr(self, 'tab_analysis'): self.tab_analysis.update_theme(theme)
         if hasattr(self, 'tab_editor'): self.tab_editor.update_theme(theme)
-        if hasattr(self, 'tab_custom'): self.tab_custom.update_theme(theme) # <-- FIX: Was missing!
+        if hasattr(self, 'tab_custom'): self.tab_custom.update_theme(theme)
         for widget in getattr(self, "_plugin_tab_widgets", []):
             if hasattr(widget, "update_theme"):
                 widget.update_theme(theme)
@@ -384,9 +501,7 @@ class UnifiedResearchDock(QDockWidget):
 
         self.check_index_status()
 
-        # --- THE FIX: Stop wiping/rebuilding the SQLite history UI! ---
-        # Instead of calling load_tab_history(), we just loop over the existing
-        # chat widgets currently visible in the layout and update their colors.
+        # Loop over the existing chat widgets and update their colors without destroying history
         for tab in [self.tab_chat, self.tab_agent, self.tab_plan, self.tab_custom]:
             if hasattr(tab, 'chat_layout'):
                 for i in range(tab.chat_layout.count()):
@@ -439,9 +554,10 @@ class UnifiedResearchDock(QDockWidget):
         else:
             if exec_as_modal(dialog):
                 _on_accepted()
+
     def check_index_status(self):
         """Silently checks if the database is loaded and indexed."""
-        proj_path = self.project_manager.project_filepath
+        proj_path = self.project_manager.project_filepath if self.project_manager else None
         if proj_path and self.llm_manager:
             # Ensure the Chroma client is pointed at the current project
             if self.llm_manager.collection is None:

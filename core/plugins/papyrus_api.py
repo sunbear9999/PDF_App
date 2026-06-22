@@ -131,6 +131,38 @@ class _PluginTaskNamespace:
         self._active_workers.clear()
 
 
+class _PluginSourceNamespace:
+    def __init__(self, core: "PapyrusCore") -> None:
+        self._core = core
+
+    def list(self, source_type: str = "") -> list:
+        pm = self._core.project_manager
+        return pm.list_sources(source_type or None) if hasattr(pm, "list_sources") else []
+
+    def open(self, source_id: str = "", path: str = "", timestamp: float = 0) -> None:
+        from core.events.domains.document_events import SourceIntent, SourcePayload
+        self._core.bus.source_action_requested.emit(
+            SourceIntent.OPEN,
+            SourcePayload(source_id=source_id or None, path=path or None, timestamp=timestamp),
+        )
+
+
+class _PluginVideoNamespace:
+    def __init__(self, core: "PapyrusCore") -> None:
+        self._core = core
+
+    def transcript(self, source_id: str) -> dict:
+        pm = self._core.project_manager
+        return pm.get_video_transcript(source_id) if hasattr(pm, "get_video_transcript") else {}
+
+    def transcribe(self, source_id: str = "", path: str = "") -> None:
+        from core.events.domains.document_events import SourceIntent, SourcePayload
+        self._core.bus.source_action_requested.emit(
+            SourceIntent.TRANSCRIBE,
+            SourcePayload(source_id=source_id or None, path=path or None, source_type="video"),
+        )
+
+
 class PapyrusAPI:
     """
     Typed facade exposing the backend to plugins.
@@ -159,6 +191,8 @@ class PapyrusAPI:
         # Lazy-initialised namespaces
         self._db_ns: Optional["_PluginDBNamespace"] = None
         self._tasks_ns: Optional["_PluginTaskNamespace"] = None
+        self._sources_ns: Optional["_PluginSourceNamespace"] = None
+        self._video_ns: Optional["_PluginVideoNamespace"] = None
         # Per-plugin persistent config (lazy import to avoid circular at module level)
         from core.plugins.plugin_config import PluginConfig
         self._config = PluginConfig(plugin_id or "_unknown", core.user_data_dir)
@@ -232,6 +266,11 @@ class PapyrusAPI:
         return self._core.plugin_extension_registry
 
     @property
+    def data_dock(self):
+        """Register Data Dock parsers, cleaners, grid actions, chart types, and palettes."""
+        return self._core.data_provider_registry
+
+    @property
     def help_registry(self):
         """Register help topics contributed by this plugin. Returns HelpRegistry."""
         return self._core.help_service.help_registry
@@ -256,6 +295,18 @@ class PapyrusAPI:
         """Citation formatting and metadata helpers."""
         return self._core.citation_manager
 
+    @property
+    def llm_backends(self):
+        """
+        Register custom LLM backend specs.
+
+        Usage::
+
+            from core.registries.llm_backend_registry import BackendSpec
+            api.llm_backends.register(BackendSpec(id="my_backend", ...))
+        """
+        return self._core.llm_backend_registry
+
     # ----------------------------------------------------------------
     # Section B2: Database and task namespaces
     # ----------------------------------------------------------------
@@ -273,6 +324,20 @@ class PapyrusAPI:
         if self._tasks_ns is None:
             self._tasks_ns = _PluginTaskNamespace(self._core, self._plugin_id)
         return self._tasks_ns
+
+    @property
+    def sources(self) -> "_PluginSourceNamespace":
+        """Source helpers for PDFs/videos stored in the active project."""
+        if self._sources_ns is None:
+            self._sources_ns = _PluginSourceNamespace(self._core)
+        return self._sources_ns
+
+    @property
+    def video(self) -> "_PluginVideoNamespace":
+        """Video transcript and transcription helpers."""
+        if self._video_ns is None:
+            self._video_ns = _PluginVideoNamespace(self._core)
+        return self._video_ns
 
     # ----------------------------------------------------------------
     # Section C: Event subscription helpers
@@ -581,6 +646,31 @@ class PapyrusAPI:
         MasterActionRunner.register_plugin_step_handler(step_cls.step_type, step_cls)
         self._registered_step_types.append(step_cls.step_type)
 
+    def register_dock_action(self, spec: Any) -> None:
+        """Register a DockActionSpec to be injected into dock context menus or toolbars.
+
+        The spec's ``plugin_id`` is automatically set to this plugin's ID.
+        ``spec.mounts`` lists the mount point string constants from
+        ``core.engine.dock_mounts`` that the action should appear at.
+
+        Example::
+
+            from core.engine.dock_mounts import SOURCE_VIEWER_TEXT_SELECTION
+            from core.plugins.extension_registry import DockActionSpec, DockActionContext
+
+            def _handle(ctx: DockActionContext):
+                api.workflow_runner.run_blueprint(my_bp, {"text": ctx.selection or ""})
+
+            api.register_dock_action(DockActionSpec(
+                action_id="myplugin.summarize",
+                label="Summarize Selection",
+                mounts=[SOURCE_VIEWER_TEXT_SELECTION],
+                callback=_handle,
+            ))
+        """
+        spec.plugin_id = self._plugin_id
+        self.gui_extensions.add_dock_action(spec)
+
     def register_pack_contributor(self, contributor) -> None:
         """
         Register a :class:`PackContributor` so the Import/Export system can include
@@ -654,3 +744,6 @@ class PapyrusAPI:
         if hs is not None:
             hs.help_registry.remove_plugin_topics(self._plugin_id)
             hs.tutorial_registry.remove_plugin_tutorials(self._plugin_id)
+        data_registry = getattr(self._core, "data_provider_registry", None)
+        if data_registry is not None and hasattr(data_registry, "remove_plugin"):
+            data_registry.remove_plugin(self._plugin_id)

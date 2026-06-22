@@ -25,8 +25,12 @@ class ActionStep:
     ui_format: str = "silent"  
     ui_target: str = "floating" 
     ui_title: str = "AI Result"
+    status_text: str = "Processing..."
     inline_citations: bool = False
     citation_source_key: Optional[str] = None
+    # Manifest mutations must run in a dedicated silent step so protocol data
+    # can never leak into a user-visible answer stream.
+    allow_manifest_updates: bool = False
     
     html_template: Optional[str] = None
     output_schema: Optional[Dict[str, Any]] = None

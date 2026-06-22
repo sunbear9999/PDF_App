@@ -7,12 +7,13 @@ from gui.docks.unified_research.components.chat_streamer import ChatMessageWidge
 from gui.docks.unified_research.components.dynamic_inputs import DynamicInputWidget
 import json
 import os 
+from core.utils.json_utils import strip_tagged_block
 from gui.docks.unified_research.tabs.base_tab import BaseTab
 from gui.utils.document_helpers import active_pdf_names, prune_doc_names
 
 class ChatTab(BaseTab):
-    def __init__(self, main_window, parent=None):
-        super().__init__(main_window, target_id="chat_dock", parent=parent)
+    def __init__(self, app_context, parent=None):
+        super().__init__(app_context, target_id="chat_dock", parent=parent)
         self.active_blueprint = None
         self._build_ui()
         self._load_blueprint()
@@ -49,6 +50,7 @@ class ChatTab(BaseTab):
 
         self.input_wrapper = QFrame()
         self.input_wrapper.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        self.input_wrapper.setMinimumHeight(118)
         input_layout = QVBoxLayout(self.input_wrapper)
         input_layout.setContentsMargins(8, 8, 8, 8)
         
@@ -85,7 +87,7 @@ class ChatTab(BaseTab):
         menu.addAction(filter_action)
         menu.addSeparator()
         clear_action = QAction("🗑️ Clear Chat History", self)
-        clear_action.triggered.connect(lambda: self.main_window.unified_dock.clear_tab_history(self, self.target_id))
+        clear_action.triggered.connect(self._clear_history)
         menu.addAction(clear_action)
         menu.exec(self.btn_settings.mapToGlobal(self.btn_settings.rect().bottomLeft()))
 
@@ -121,15 +123,11 @@ class ChatTab(BaseTab):
             if exec_as_modal(dlg):
                 _on_accepted()
 
-    def _metadata_json(self, key, default):
-        raw = self.project_manager.get_metadata(key, json.dumps(default))
-        if isinstance(raw, list):
-            return raw
-        try:
-            parsed = json.loads(raw)
-            return parsed if isinstance(parsed, list) else default
-        except Exception:
-            return default
+    def _clear_history(self):
+        """Clear SQLite history and wipe chat UI widgets."""
+        if self.project_manager:
+            self.project_manager.clear_chat_history(self.target_id)
+        self.clear_rendered_chat()
 
     def _send_message(self):
         text = self.input_field.toPlainText().strip()
@@ -151,7 +149,8 @@ class ChatTab(BaseTab):
             for msg in history_data[-6:]:
                 role = "User" if msg["role"] == "user" else "AI"
                 if msg["ui_format"] in ["live_stream", "text"]:
-                    history_str += f"{role}: {msg['content']}\n\n"
+                    clean_content = strip_tagged_block(msg["content"] or "", "UPDATE_MANIFEST")
+                    history_str += f"{role}: {clean_content}\n\n"
 
         initial_state = {
             "user_query": text,

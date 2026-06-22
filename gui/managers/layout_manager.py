@@ -1,6 +1,7 @@
 # gui/managers/layout_manager.py
 import json
 from PySide6.QtCore import QByteArray, QSettings
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QDockWidget
 
 class LayoutManager:
@@ -10,6 +11,7 @@ class LayoutManager:
     def __init__(self, main_window):
         self.window = main_window
         self.settings = QSettings("PDFMultitool", "Workspace")
+        self._restoring_layout = False
 
     def _get_dock_widget(self, view):
         if isinstance(view, QDockWidget): return view
@@ -44,16 +46,22 @@ class LayoutManager:
 
     def _apply_state(self, state_str: str, counts: dict):
         try:
+            self._restoring_layout = True
             self.sync_dock_counts(counts)
             if state_str:
                 self.window.restoreState(QByteArray.fromBase64(state_str.encode('utf-8')))
             dock_manager = getattr(self.window, "dock_manager", None)
             if dock_manager:
                 for dock in self.window.findChildren(QDockWidget):
-                    closable = dock.objectName() not in {"DocExplorerDock", "PDFViewerDock"}
+                    closable = dock.objectName() != "DocExplorerDock"
                     dock_manager.configure_dock(dock, closable=closable)
+            QTimer.singleShot(250, self._finish_restore)
         except Exception as e:
+            self._finish_restore()
             print(f"Error applying layout state: {e}")
+
+    def _finish_restore(self):
+        self._restoring_layout = False
     def reset_default_layout(self):
         """Clears the saved session layout and restores the hardcoded startup layout."""
         self.settings.remove("last_session_layout")

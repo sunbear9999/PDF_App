@@ -115,7 +115,7 @@ class ManifestUpdateWidget(QFrame):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(6)
 
-        self.lbl_header = QLabel("<b>📝 Manifest Updated</b>")
+        self.lbl_header = QLabel("<b>✓ Project manifest updated</b>")
         self.lbl_header.setStyleSheet(f"color: {self.theme.get('text_main', '#fff')}; margin-bottom: 4px;")
         layout.addWidget(self.lbl_header)
 
@@ -125,7 +125,7 @@ class ManifestUpdateWidget(QFrame):
             layout.addWidget(card)
 
         # Action Toolbar
-        self.btn_open = QPushButton("📂 Edit Manifest")
+        self.btn_open = QPushButton("View changes / open manifest")
         self.btn_open.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_open.setStyleSheet(f"background-color: {self.theme.get('bg_panel', '#333')}; color: {self.theme.get('text_main', '#fff')}; border: 1px solid {self.theme.get('border', '#444')}; padding: 6px 12px; border-radius: 4px; margin-top: 4px;")
         
@@ -143,6 +143,18 @@ class ManifestUpdateWidget(QFrame):
                 margin-top: 6px; margin-bottom: 6px;
             }}
         """)
+
+    def update_theme(self, theme):
+        self.theme = theme or {}
+        self.lbl_header.setStyleSheet(
+            f"color: {self.theme.get('text_main', '#fff')}; margin-bottom: 4px;"
+        )
+        self.btn_open.setStyleSheet(
+            f"background-color: {self.theme.get('bg_panel', '#333')}; "
+            f"color: {self.theme.get('text_main', '#fff')}; "
+            f"border: 1px solid {self.theme.get('border', '#444')}; "
+            "padding: 6px 12px; border-radius: 4px; margin-top: 4px;"
+        )
 
 
 class ProjectBriefDialog(QDialog):

@@ -5,9 +5,9 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
 from core.events.event_bus import EventBus
 from core.events.domains.tool_events import OCRIntent, OCRPayload, OCRStatus, OCRStatusPayload
 class OCRTab(QWidget):
-    def __init__(self, parent=None, main_window=None):
+    def __init__(self, app_context=None, parent=None):
         super().__init__(parent)
-        self.main_window = main_window
+        self._ctx = app_context
         self.bus = EventBus.get_instance()
         self.theme = None
 
@@ -114,7 +114,8 @@ class OCRTab(QWidget):
 
     def request_ocr(self):
         """Emits an intent to the background service to process the OCR."""
-        current_file = self.main_window.current_file_path
+        viewer = getattr(self._ctx, 'viewer', None) if self._ctx else None
+        current_file = getattr(viewer, 'pdf_path', None) if viewer else None
         if not current_file:
             self.status_label.setText("No document loaded in viewer.")
             color = self.theme['error'] if self.theme else "#ff4444"

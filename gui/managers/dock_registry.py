@@ -10,18 +10,18 @@ def register_default_docks(dock_manager, window_ref):
 
     def make_research(w):
         from gui.docks.unified_research.unified_dock import UnifiedResearchDock
-        return UnifiedResearchDock(w, w.project_manager, w.shared_llm_manager, w)
+        return UnifiedResearchDock(w.app_context, w)
 
     def make_workspace(w):
         dock = QDockWidget("🧠 Workspace", w)
-        from gui.components.workspace_view import WorkspaceView
-        dock.setWidget(WorkspaceView(w))
+        from gui.workspace.workspace_view import WorkspaceView
+        dock.setWidget(WorkspaceView(w.app_context))
         return dock
 
     def make_notes(w):
         dock = QDockWidget("📝 Notes List", w)
         from gui.docks.notes_dock import NotesTab
-        dock.setWidget(NotesTab(parent=None, main_window=w))
+        dock.setWidget(NotesTab(w.app_context))
         return dock
 
     def make_dict(w):
@@ -33,7 +33,7 @@ def register_default_docks(dock_manager, window_ref):
     def make_essay(w):
         dock = QDockWidget("📝 Essay Writer", w)
         from gui.docks.essay_dock import EssayTab
-        dock.setWidget(EssayTab(w.project_manager, w))
+        dock.setWidget(EssayTab(w.project_manager))
         return dock
 
     def make_citations(w):
@@ -45,19 +45,19 @@ def register_default_docks(dock_manager, window_ref):
     def make_ocr(w):
         dock = QDockWidget("👁️ OCR Scanner", w)
         from gui.docks.ocr_dock import OCRTab
-        dock.setWidget(OCRTab(None, w))
+        dock.setWidget(OCRTab(w.app_context))
         return dock
 
     def make_audio(w):
         dock = QDockWidget("🔊 Audio (TTS)", w)
         from gui.docks.tts_dock import TTSTab
-        dock.setWidget(TTSTab(None, w))
+        dock.setWidget(TTSTab())
         return dock
 
     def make_slides(w):
         dock = QDockWidget("📊 Slideshow Maker", w)
         from gui.docks.slideshow_dock import SlideshowTab
-        dock.setWidget(SlideshowTab(w.project_manager, w))
+        dock.setWidget(SlideshowTab(w.project_manager))
         return dock
 
     def make_data_dock(w):

@@ -67,14 +67,16 @@ class GraphDB(BaseDB):
     def ensure_source_entity(self, pdf_path: str, properties: Optional[Dict] = None, commit: bool = True) -> Optional[EntityModel]:
         if not pdf_path:
             return None
+        properties = dict(properties or {})
+        source_type = properties.get("source_type") or "pdf"
         existing = self.get_source_entity_by_path(pdf_path)
         props = dict(existing.properties) if existing else {}
         props.update({
             "path": pdf_path,
             "title": props.get("title") or self._basename(pdf_path),
+            "source_type": source_type,
         })
-        if properties:
-            props.update(properties)
+        props.update(properties)
         entity = EntityModel(
             id=existing.id if existing else self._source_entity_id(pdf_path),
             entity_type=EntityType.SOURCE.value,
@@ -128,6 +130,7 @@ class GraphDB(BaseDB):
         source.origin_id = new_path
         source.properties["path"] = new_path
         source.properties["title"] = self._basename(new_path)
+        source.properties.setdefault("source_type", "pdf")
         self.upsert_entity(source, commit=False)
         self._rewrite_source_path_references(old_path, new_path, source.id)
         if commit:

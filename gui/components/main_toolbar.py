@@ -12,6 +12,7 @@ class MainToolbar(QToolBar):
     def __init__(self, main_window):
         super().__init__("Main Toolbar", main_window)
         self.main_window = main_window
+        self._ctx = getattr(main_window, "app_context", None)
         self.bus = EventBus.get_instance()
         self.setObjectName("MainToolbar")
         self.setMovable(False)
@@ -63,15 +64,17 @@ class MainToolbar(QToolBar):
         # 5. Dropdown Spawner
         self.btn_other_tools = QPushButton("➕ Other Tools")
         other_menu = QMenu(self)
-        other_menu.addAction("📝 Notes List").triggered.connect(lambda c=False: mw.dock_manager.spawn("notes"))
-        other_menu.addAction("✍️ Scratchpad").triggered.connect(lambda c=False: mw.dock_manager.spawn("scratchpads"))
-        other_menu.addAction("📖 Dictionary").triggered.connect(lambda c=False: mw.dock_manager.spawn("dicts"))
-        other_menu.addAction("📚 Citations").triggered.connect(lambda c=False: mw.dock_manager.spawn("citations"))
-        other_menu.addAction("👁️ OCR Scanner").triggered.connect(lambda c=False: mw.dock_manager.spawn("ocrs"))
-        other_menu.addAction("🔊 Audio (TTS)").triggered.connect(lambda c=False: mw.dock_manager.spawn("audios"))
+        other_menu.addAction("📄 Source Viewer").triggered.connect(lambda c=False: mw.show_source_viewer())
+        other_menu.addSeparator()
+        other_menu.addAction("📝 Notes List").triggered.connect(lambda c=False: self._spawn_dock("notes"))
+        other_menu.addAction("✍️ Scratchpad").triggered.connect(lambda c=False: self._spawn_dock("scratchpads"))
+        other_menu.addAction("📖 Dictionary").triggered.connect(lambda c=False: self._spawn_dock("dicts"))
+        other_menu.addAction("📚 Citations").triggered.connect(lambda c=False: self._spawn_dock("citations"))
+        other_menu.addAction("👁️ OCR Scanner").triggered.connect(lambda c=False: self._spawn_dock("ocrs"))
+        other_menu.addAction("🔊 Audio (TTS)").triggered.connect(lambda c=False: self._spawn_dock("audios"))
 
         # Plugin-contributed docks
-        registry = getattr(getattr(mw, "app_context", None), "plugin_extension_registry", None)
+        registry = getattr(self._ctx, "plugin_extension_registry", None) if self._ctx else None
         if registry:
             plugin_docks = registry.get_extra_docks()
             if plugin_docks:
@@ -79,7 +82,7 @@ class MainToolbar(QToolBar):
                 for spec in plugin_docks:
                     did = spec.id
                     other_menu.addAction(spec.menu_name).triggered.connect(
-                        lambda c=False, d=did: mw.dock_manager.spawn(d)
+                        lambda c=False, d=did: self._spawn_dock(d)
                     )
 
         self.btn_other_tools.setMenu(other_menu)
@@ -179,7 +182,7 @@ class MainToolbar(QToolBar):
         mw = self.main_window
         core = getattr(mw, "core", None)
         loaded = getattr(core, "_loaded_plugins", [])
-        registry = getattr(getattr(mw, "app_context", None), "plugin_extension_registry", None)
+        registry = getattr(self._ctx, "plugin_extension_registry", None) if self._ctx else None
 
         plugin_menu_items = []
         if registry:
@@ -273,7 +276,8 @@ class MainToolbar(QToolBar):
         dlg = QDialog(self.main_window)
         dlg.setWindowTitle(f"Settings — {getattr(plugin, 'name', plugin.plugin_id)}")
         layout = QVBoxLayout(dlg)
-        form = PluginForm(schema, theme=getattr(self.main_window.theme_manager, "get_theme", lambda: {})())
+        tm = getattr(self._ctx, 'theme_manager', None) or getattr(self.main_window, 'theme_manager', None)
+        form = PluginForm(schema, theme=tm.get_theme() if tm else {})
         form.set_values({k: api.config.get(k) for field in schema for k in [field["key"]] if api.config.get(k) is not None})
         layout.addWidget(form)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -297,7 +301,7 @@ class MainToolbar(QToolBar):
 
     def _inject_plugin_buttons(self) -> None:
         """Inject MainToolbarButtonSpec entries registered by plugins."""
-        registry = getattr(getattr(self.main_window, "app_context", None), "plugin_extension_registry", None)
+        registry = getattr(self._ctx, "plugin_extension_registry", None) if self._ctx else None
         if not registry:
             return
         for position in ("left", "center", "right"):
@@ -328,7 +332,12 @@ class MainToolbar(QToolBar):
         if path: self.bus.project_action_requested.emit(ProjectIntent.SAVE_AS, ProjectPayload(new_path=path))
         
     def _trigger_add_pdf(self):
-        paths, _ = QFileDialog.getOpenFileNames(self, "Add PDFs", "", "PDF Files (*.pdf)")
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Add PDFs",
+            "",
+            "Sources (*.pdf *.mp4 *.mov *.mkv *.webm *.avi *.m4v);;PDF Files (*.pdf);;Video Files (*.mp4 *.mov *.mkv *.webm *.avi *.m4v)",
+        )
         if paths: self.bus.document_action_requested.emit(DocumentIntent.ADD_FILES, DocumentPayload(paths=paths))
 
     def _trigger_export_log(self):
@@ -380,9 +389,14 @@ class MainToolbar(QToolBar):
     # --- ANIMATION & HOVER LOGIC ---
     # ==========================================
 
+    def _spawn_dock(self, dock_id: str):
+        dm = getattr(self._ctx, 'dock_manager', None)
+        if dm:
+            dm.spawn(dock_id)
+
     def _make_spawner(self, text, dock_id):
         btn = QPushButton(text)
-        btn.clicked.connect(lambda checked=False: self.main_window.dock_manager.spawn(dock_id))
+        btn.clicked.connect(lambda checked=False: self._spawn_dock(dock_id))
         return btn
 
     def _configure_hover_expand(self, button, icon, label, expanded_width=170, collapsed_width=44):

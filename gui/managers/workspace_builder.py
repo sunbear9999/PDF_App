@@ -6,7 +6,7 @@ from PySide6.QtWidgets import QDockWidget, QWidget, QHBoxLayout, QLabel, QPushBu
 class WorkspaceBuilder:
     """
     Assembles the fixed-position, non-spawnable docks of the main workspace:
-      - PDF Viewer dock (center-left, non-closable)
+      - Source Viewer dock (center-left, closable/reopenable)
       - Document Explorer dock (left panel, non-closable)
 
     Called once from MainWindow.__init__ after dock_manager is configured.
@@ -26,19 +26,21 @@ class WorkspaceBuilder:
         )
 
     # ----------------------------------------------------------------
-    # PDF Viewer
+    # Source Viewer
     # ----------------------------------------------------------------
 
     def _build_pdf_dock(self) -> None:
         w = self._w
-        pdf_dock = QDockWidget("📄 PDF Viewer", w)
+        pdf_dock = QDockWidget("📄 Source Viewer", w)
         pdf_dock.setObjectName("PDFViewerDock")
         pdf_dock.setWidget(w.viewer)
-        pdf_dock.setMinimumSize(400, 400)
+        pdf_dock.setMinimumSize(160, 200)
 
-        # Non-closable, non-floatable — always visible centre pane
+        # Reclaimable source pane: users can close it for more workspace room and reopen it from toolbar/shortcuts.
         pdf_dock.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+            | QDockWidget.DockWidgetFeature.DockWidgetClosable
         )
         pdf_dock.setAllowedAreas(
             Qt.DockWidgetArea.LeftDockWidgetArea
@@ -47,12 +49,13 @@ class WorkspaceBuilder:
             | Qt.DockWidgetArea.BottomDockWidgetArea
         )
 
-        # Custom title bar with viewer controls
+        # Custom title bar with viewer controls + close button
         title_bar = QWidget()
         title_layout = QHBoxLayout(title_bar)
-        title_layout.setContentsMargins(10, 0, 10, 0)
+        title_layout.setContentsMargins(6, 0, 4, 0)
+        title_layout.setSpacing(2)
 
-        lbl = QLabel("📄 PDF Viewer")
+        lbl = QLabel("📄 Source Viewer")
         lbl.setStyleSheet("font-weight: bold; background: transparent;")
         title_layout.addWidget(lbl)
         title_layout.addStretch()
@@ -76,6 +79,19 @@ class WorkspaceBuilder:
             title_layout.addWidget(btn)
 
         title_layout.addStretch()
+
+        # Explicit close button since we override the system title bar
+        btn_close = QPushButton("✕")
+        btn_close.setFixedSize(22, 22)
+        btn_close.setToolTip("Close Source Viewer")
+        btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_close.setStyleSheet(
+            "QPushButton { background: transparent; border: none; padding: 0; font-size: 13px; }"
+            "QPushButton:hover { background: rgba(200,60,60,0.7); border-radius: 4px; color: white; }"
+        )
+        btn_close.clicked.connect(pdf_dock.close)
+        title_layout.addWidget(btn_close)
+
         pdf_dock.setTitleBarWidget(title_bar)
 
         w.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, pdf_dock)
@@ -88,7 +104,7 @@ class WorkspaceBuilder:
     def _build_doc_explorer_dock(self) -> None:
         w = self._w
         from gui.components.document_explorer import DocumentExplorer
-        doc_explorer = DocumentExplorer(w)
+        doc_explorer = DocumentExplorer(w.app_context)
         w.doc_explorer = doc_explorer
 
         explorer_dock = QDockWidget("📂 Documents", w)

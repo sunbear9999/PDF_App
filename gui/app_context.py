@@ -6,6 +6,7 @@ Plugins and docks should depend on AppContext, not MainWindow.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
@@ -33,6 +34,9 @@ if TYPE_CHECKING:
     from core.plugins.extension_registry import PluginExtensionRegistry
     from gui.registry.action_spec import ActionRegistry
     from gui.registry.context_menu_registry import ContextMenuRegistry
+    
+    from core.services.gui_bridge.ai_bootstrap_service import AIBootstrapService
+    from core.services.ai.prompt_app_service import PromptAppService
 
 
 @dataclass
@@ -66,8 +70,11 @@ class AppContext:
     workspace_graph_service: "WorkspaceGraphService"
     workflow_runner_service: "WorkflowRunnerService"
     research_agent_service: "ResearchAgentService"
+    workspace_annotation_service: Any = None
+    workspace_ai_service: Any = None
     data_dock_service: Any = None
     data_provider_registry: Any = None
+    video_transcription_service: Any = None
 
     # Plugin extension specs collected at startup
     plugin_extension_registry: Optional["PluginExtensionRegistry"] = field(default=None)
@@ -89,6 +96,96 @@ class AppContext:
 
     # Help & Tutorial subsystem
     help_service: Optional[Any] = field(default=None)
+
+    # AI backend registry and setup service
+    llm_backend_registry: Optional[Any] = field(default=None)
+    ai_setup_service: Optional[Any] = field(default=None)
+
+    # Prompt management service — fully wired with blueprint_registry and step_manager
+    prompt_app_service: Optional["PromptAppService"] = field(default=None)
+
+    # Raw core reference — used by AI setup tab to access user_data_dir and registry
+    core: Optional[Any] = field(default=None)
+
+    # Dock spawning — set by MainWindow after DockManager is created
+    dock_manager: Optional[Any] = field(default=None)
+
+    # GUI bridge services — wired by MainWindow; need viewer + dock_manager + project_manager
+    workspace_annotation_service: Optional[Any] = field(default=None)
+    workspace_ai_service: Optional[Any] = field(default=None)
+
+    # Deterministic extraction service
+    deterministic_extractor_service: Optional[Any] = field(default=None)
+
+    # Source evaluation service
+    source_evaluation_service: Optional[Any] = field(default=None)
+
+    # Currently selected AI model — updated by UnifiedResearchDock when model combo changes
+    active_model: str = field(default="")
+
+    # ------------------------------------------------------------------ helpers
+
+    def get_active_ai_model(self) -> str:
+        """Return the currently selected AI model, falling back to the first available."""
+        if self.active_model:
+            return self.active_model
+        # Prefer the persisted default from AISetupService
+        if self.ai_setup_service:
+            try:
+                default = self.ai_setup_service.get_default_chat_model()
+                if default:
+                    return default
+            except Exception:
+                pass
+        try:
+            models = self.llm_manager.get_available_models() or []
+            return models[0] if models else ""
+        except Exception:
+            return ""
+
+    def build_rag_context_payload(self) -> dict:
+        """
+        Package the standard RAG context variables that workflow blueprints expect.
+        Consolidates the metadata assembly that was duplicated across BaseTab, ChatTab,
+        and AnalysisTab.
+        """
+        if not self.project_manager:
+            return {}
+
+        from gui.utils.document_helpers import prune_doc_names
+
+        def _metadata_json(key: str, default):
+            raw = self.project_manager.get_metadata(key, json.dumps(default))
+            if isinstance(raw, list):
+                return raw
+            try:
+                parsed = json.loads(raw)
+                return parsed if isinstance(parsed, list) else default
+            except Exception:
+                return default
+
+        payload: dict = {
+            "project_manifest": self.project_manager.get_metadata("project_manifest", "{}"),
+            "active_rag_docs": prune_doc_names(self.project_manager, _metadata_json("active_rag_docs", [])),
+            "active_rag_tags": _metadata_json("active_rag_tags", []),
+            "active_rag_tag_logic": self.project_manager.get_metadata("active_rag_tag_logic", "OR"),
+        }
+
+        try:
+            from core.api.workspace_ai import WorkspaceAIApi
+            ws_data = self.project_manager.get_workspace_data()
+            api = WorkspaceAIApi(self.project_manager)
+            payload["workspace_data"] = api.build_ai_context(ws_data)
+        except Exception:
+            payload["workspace_data"] = "{}"
+
+        try:
+            settings = json.loads(self.project_manager.get_metadata("global_ai_settings", "{}"))
+            payload["_global_ai_settings"] = settings
+        except Exception:
+            pass
+
+        return payload
 
     @classmethod
     def from_core(cls, core: "PapyrusCore") -> "AppContext":
@@ -113,7 +210,14 @@ class AppContext:
             research_agent_service=core.research_agent_service,
             data_dock_service=getattr(core, "data_dock_service", None),
             data_provider_registry=getattr(core, "data_provider_registry", None),
+            video_transcription_service=getattr(core, "video_transcription_service", None),
             plugin_extension_registry=getattr(core, "plugin_extension_registry", None),
             pack_service=getattr(core, "pack_service", None),
             help_service=getattr(core, "help_service", None),
+            deterministic_extractor_service=getattr(core, "deterministic_extractor_service", None),
+            source_evaluation_service=getattr(core, "source_evaluation_service", None),
+            llm_backend_registry=getattr(core, "llm_backend_registry", None),
+            ai_setup_service=getattr(core, "ai_setup_service", None),
+            prompt_app_service=getattr(core, "prompt_app_service", None),
+            core=core,
         )

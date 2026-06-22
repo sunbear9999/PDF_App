@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import re
 
+from PySide6.QtCore import QTimer
+
 from core.models.workspace_models import NodeModel
 from core.utils.workspace_utils import compute_node_dimensions, normalize_annotation_text
 from core.events.domains.document_events import DocumentEvent, DocumentEventPayload, DocumentIntent, DocumentPayload
@@ -46,12 +48,34 @@ class WorkspaceAnnotationService:
         annot_id = getattr(node, "highlight_id", None) or getattr(node, "node_id", None)
         if source and source.get("id"):
             annot_id = source["id"]
+        source_type = ""
+        if getattr(node, "pdf_path", None) and self.pm and hasattr(self.pm, "get_source_type"):
+            source_type = self.pm.get_source_type(node.pdf_path)
+
+        if source_type == "video":
+            source_id = getattr(node, "source_id", None)
+            if not source_id and self.pm and hasattr(self.pm, "get_source_entity_by_path"):
+                source_entity = self.pm.get_source_entity_by_path(getattr(node, "pdf_path", None))
+                source_id = source_entity.id if source_entity else None
+            if hasattr(main_win, "viewer") and hasattr(main_win.viewer, "jump_to_video"):
+                main_win.viewer.jump_to_video(
+                    source_id=source_id,
+                    path=getattr(node, "pdf_path", None),
+                    timestamp=getattr(node, "page_num", 0) or 0,
+                )
+            return
+
         if getattr(node, "highlight_id", None) and getattr(node, "page_num", None) is not None:
+            if getattr(node, "pdf_path", None) and self.bus:
+                self.bus.document_action_requested.emit(
+                    DocumentIntent.OPEN,
+                    DocumentPayload(path=node.pdf_path, source_id=getattr(node, "source_id", None), source_type="pdf"),
+                )
             if hasattr(main_win, "viewer") and hasattr(main_win.viewer, "jump_to_annotation"):
-                main_win.viewer.jump_to_annotation(node.page_num, annot_id)
+                QTimer.singleShot(75, lambda: main_win.viewer.jump_to_annotation(node.page_num, annot_id))
                 return
             if hasattr(main_win, "viewer"):
-                main_win.viewer.jump_to_page(node.page_num)
+                QTimer.singleShot(75, lambda: main_win.viewer.jump_to_page(node.page_num))
                 return
 
         if quote and hasattr(main_win, "viewer") and hasattr(main_win.viewer, "jump_to_source"):

@@ -19,9 +19,9 @@ from core.events.domains.research_agent_events import ResearchAgentEvent, Resear
 
 
 class ResearchAgentTab(BaseTab):
-    def __init__(self, main_window, parent=None):
-        super().__init__(main_window, target_id="research_agent", parent=parent)
-        self.agent_service = getattr(main_window, "research_agent_service", None)
+    def __init__(self, app_context, parent=None):
+        super().__init__(app_context, target_id="research_agent", parent=parent)
+        self.agent_service = getattr(app_context, "research_agent_service", None)
         self._rendered_keys = set()
         self._build_ui()
         self._connect_service()
@@ -63,6 +63,7 @@ class ResearchAgentTab(BaseTab):
 
         self.input_wrapper = QFrame()
         self.input_wrapper.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        self.input_wrapper.setMinimumHeight(122)
         input_layout = QVBoxLayout(self.input_wrapper)
         input_layout.setContentsMargins(8, 8, 8, 8)
 

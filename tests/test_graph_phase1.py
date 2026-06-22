@@ -271,6 +271,54 @@ class TestGraphPhase1(unittest.TestCase):
             self.assertEqual(source.entity_type, EntityType.SOURCE.value)
             self.assertEqual(pm.get_source_path(source.id), pdf_path)
 
+    def test_add_video_creates_source_record_and_entity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pm = self._new_project(os.path.join(tmp, "video.pdfproj"))
+            video_path = os.path.join(tmp, "lecture.mp4")
+            open(video_path, "wb").close()
+
+            self.assertTrue(pm.add_source(video_path, "video"))
+            self.assertNotIn(video_path, pm.pdfs)
+            sources = pm.list_sources("video")
+            self.assertEqual(len(sources), 1)
+            self.assertEqual(sources[0]["path"], video_path)
+            self.assertEqual(sources[0]["source_type"], "video")
+            source = pm.get_source_entity_by_path(video_path)
+            self.assertIsNotNone(source)
+            self.assertEqual(source.properties.get("source_type"), "video")
+
+    def test_video_transcript_persistence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pm = self._new_project(os.path.join(tmp, "transcript.pdfproj"))
+            video_path = os.path.join(tmp, "lecture.mp4")
+            open(video_path, "wb").close()
+            pm.add_source(video_path, "video")
+            source = pm.get_source_entity_by_path(video_path)
+
+            segments = [{"start": 1.0, "end": 3.5, "text": "hello video"}]
+            pm.save_video_transcript(source.id, video_path, segments, "hello video", model="small", language="en")
+            loaded = pm.get_video_transcript(source.id)
+
+            self.assertEqual(loaded["status"], "completed")
+            self.assertEqual(loaded["segments"], segments)
+            self.assertEqual(loaded["full_text"], "hello video")
+
+    def test_legacy_pdfs_are_migrated_to_sources_on_load(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = os.path.join(tmp, "legacy_sources.pdfproj")
+            conn = sqlite3.connect(db_path)
+            conn.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT)")
+            conn.execute("CREATE TABLE pdfs (path TEXT PRIMARY KEY)")
+            conn.execute("INSERT INTO pdfs (path) VALUES ('/tmp/legacy.pdf')")
+            conn.commit()
+            conn.close()
+
+            pm = ProjectManager()
+            self.assertTrue(pm.load_project(db_path))
+            sources = pm.list_sources("pdf")
+            self.assertEqual(len(sources), 1)
+            self.assertEqual(sources[0]["path"], "/tmp/legacy.pdf")
+
     def test_existing_graph_tables_without_updated_at_are_upgraded(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = os.path.join(tmp, "old_graph.pdfproj")

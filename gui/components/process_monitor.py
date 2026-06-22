@@ -3,11 +3,11 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushBu
 from PySide6.QtCore import Qt, QPoint
 
 class ProcessMonitorPopup(QFrame):
-    def __init__(self, registry, theme, parent=None):
+    def __init__(self, registry, theme, app_context=None, parent=None):
         super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
         self.registry = registry
         self.theme = theme
-        self.main_window = parent
+        self._ctx = app_context
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
         self.setMinimumWidth(340)
         self.setMaximumWidth(400)
@@ -141,7 +141,7 @@ class ProcessMonitorPopup(QFrame):
         if trace_id:
             from gui.components.prompt_trace_button import PromptTraceButton
             trace_record = getattr(getattr(job, "runner", None), "prompt_trace", None)
-            btn_trace = PromptTraceButton(trace_id=trace_id, trace_record=trace_record, main_window=self.main_window, theme=self.theme, parent=w)
+            btn_trace = PromptTraceButton(trace_id=trace_id, trace_record=trace_record, app_context=self._ctx, theme=self.theme, parent=w)
             lyt.addWidget(btn_trace)
             
         if not is_recent:
@@ -157,18 +157,18 @@ class ProcessMonitorPopup(QFrame):
 
 class ProcessMonitorWidget(QPushButton):
     """The visible button on the main toolbar that dynamically scales and opens the popup."""
-    def __init__(self, registry, theme=None, parent=None):
+    def __init__(self, registry, theme=None, app_context=None, parent=None):
         super().__init__()
         self.registry = registry
         self.theme = theme
         self.setObjectName("ProcessTrackerDropdown")
         self.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
-        
+
         self.registry.job_added.connect(self._update_ui)
         self.registry.job_removed.connect(self._update_ui)
         self.registry.queue_updated.connect(self._update_ui)
-        
-        self.popup = ProcessMonitorPopup(registry, theme, parent or self.window())
+
+        self.popup = ProcessMonitorPopup(registry, theme, app_context=app_context, parent=parent or self.window())
         self.clicked.connect(self._toggle_popup)
         self._update_ui()
 

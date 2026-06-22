@@ -6,6 +6,8 @@ import shutil
 import tempfile
 import fitz
 import sys
+import mimetypes
+import uuid
 from core.models.workspace_models import NodeModel, EdgeModel, WorkspaceModel
 
 # Import the refactored DB modules
@@ -25,6 +27,7 @@ class ProjectManager:
         self.project_filepath = None
         self.project_name = "Untitled Project"
         self.pdfs = []
+        self.sources = []
 
         self.open_docs = {}
         self.dirty_docs = set()
@@ -141,6 +144,8 @@ class ProjectManager:
                 cursor = self._conn.cursor()
                 cursor.execute("SELECT path FROM pdfs")
                 self.pdfs = [row[0] for row in cursor.fetchall()]
+                self._migrate_pdfs_to_sources()
+                self.sources = self.list_sources()
             except sqlite3.DatabaseError:
                 print("Legacy JSON project detected. Migrating to SQLite...")
                 with open(filepath, 'r') as f:
@@ -156,6 +161,7 @@ class ProjectManager:
                 cursor = self._conn.cursor()
                 for p in self.pdfs:
                     cursor.execute("INSERT OR IGNORE INTO pdfs (path) VALUES (?)", (p,))
+                    self._upsert_source_row(p, "pdf", commit=False)
 
                 # For migration bridging
                 dummy_ws = WorkspaceModel(workspace_id=1)
@@ -215,22 +221,225 @@ class ProjectManager:
         tf.close()
         return temp_path
 
+    def detect_source_type(self, path):
+        ext = os.path.splitext(path or "")[1].lower()
+        if ext == ".pdf":
+            return "pdf"
+        if ext in {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}:
+            return "video"
+        mime = self._guess_mime_type(path)
+        if mime.startswith("video/"):
+            return "video"
+        return "pdf"
+
+    def _guess_mime_type(self, path):
+        return mimetypes.guess_type(path or "")[0] or ""
+
+    def _source_row_id(self, path):
+        return f"source:{uuid.uuid5(uuid.NAMESPACE_URL, path or '')}"
+
+    def _upsert_source_row(self, path, source_type, metadata=None, state=None, commit=True):
+        if not self._conn or not path:
+            return None
+        source_id = self._source_row_id(path)
+        self._conn.execute(
+            """
+            INSERT INTO sources (id, path, source_type, mime_type, title, metadata_json, state_json, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(path) DO UPDATE SET
+                source_type=excluded.source_type,
+                mime_type=excluded.mime_type,
+                title=excluded.title,
+                metadata_json=excluded.metadata_json,
+                state_json=excluded.state_json,
+                updated_at=CURRENT_TIMESTAMP
+            """,
+            (
+                source_id,
+                path,
+                source_type,
+                self._guess_mime_type(path),
+                os.path.basename(path),
+                json.dumps(metadata or {}, ensure_ascii=False),
+                json.dumps(state or {"is_removed": False}, ensure_ascii=False),
+            ),
+        )
+        if commit:
+            self._conn.commit()
+        return source_id
+
+    def _migrate_pdfs_to_sources(self):
+        if not self._conn:
+            return
+        for path in list(self.pdfs or []):
+            self._upsert_source_row(path, "pdf", commit=False)
+            self.db_graph.ensure_source_entity(path, properties={"source_type": "pdf"}, commit=False)
+        self._conn.commit()
+
+    def list_sources(self, source_type=None, include_removed=False):
+        if not self._conn:
+            return []
+        try:
+            cursor = self._conn.cursor()
+            if source_type:
+                cursor.execute(
+                    "SELECT id, path, source_type, mime_type, title, metadata_json, state_json FROM sources WHERE source_type = ? ORDER BY title",
+                    (source_type,),
+                )
+            else:
+                cursor.execute("SELECT id, path, source_type, mime_type, title, metadata_json, state_json FROM sources ORDER BY title")
+            rows = []
+            for row in cursor.fetchall():
+                state = self._json_obj(row[6])
+                if state.get("is_removed") and not include_removed:
+                    continue
+                rows.append({
+                    "id": row[0],
+                    "path": row[1],
+                    "source_type": row[2] or "pdf",
+                    "mime_type": row[3] or "",
+                    "title": row[4] or os.path.basename(row[1] or ""),
+                    "metadata": self._json_obj(row[5]),
+                    "state": state,
+                })
+            return rows
+        except sqlite3.Error as e:
+            print(f"Error listing sources: {e}")
+            return []
+
+    def get_source_record_by_path(self, path):
+        return next((s for s in self.list_sources(include_removed=True) if s.get("path") == path), None)
+
+    def get_source_type(self, path):
+        rec = self.get_source_record_by_path(path)
+        return rec.get("source_type") if rec else self.detect_source_type(path)
+
+    def get_source_path(self, source_id):
+        path = self.db_graph.get_source_path(source_id)
+        if path:
+            return path
+        if not self._conn or not source_id:
+            return None
+        cursor = self._conn.cursor()
+        cursor.execute("SELECT path FROM sources WHERE id = ?", (source_id,))
+        row = cursor.fetchone()
+        return row[0] if row else None
+
+    def save_video_transcript_status(self, source_id, path, status, model="", language="", error_text=""):
+        if not self._conn or not source_id:
+            return
+        self._conn.execute(
+            """
+            INSERT INTO video_transcripts (source_id, path, status, model, language, error_text, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(source_id) DO UPDATE SET
+                path=excluded.path,
+                status=excluded.status,
+                model=COALESCE(NULLIF(excluded.model, ''), video_transcripts.model),
+                language=COALESCE(NULLIF(excluded.language, ''), video_transcripts.language),
+                error_text=excluded.error_text,
+                updated_at=CURRENT_TIMESTAMP
+            """,
+            (source_id, path, status, model or "", language or "", error_text or ""),
+        )
+        self._conn.commit()
+
+    def save_video_transcript(self, source_id, path, segments, full_text, model="", language=""):
+        if not self._conn or not source_id:
+            return
+        self._conn.execute(
+            """
+            INSERT INTO video_transcripts (
+                source_id, path, status, language, model, full_text, segments_json, error_text, updated_at
+            ) VALUES (?, ?, 'completed', ?, ?, ?, ?, '', CURRENT_TIMESTAMP)
+            ON CONFLICT(source_id) DO UPDATE SET
+                path=excluded.path,
+                status='completed',
+                language=excluded.language,
+                model=excluded.model,
+                full_text=excluded.full_text,
+                segments_json=excluded.segments_json,
+                error_text='',
+                updated_at=CURRENT_TIMESTAMP
+            """,
+            (source_id, path, language or "", model or "", full_text or "", json.dumps(segments or [], ensure_ascii=False)),
+        )
+        self._conn.commit()
+
+    def get_video_transcript(self, source_id):
+        if not self._conn or not source_id:
+            return {}
+        cursor = self._conn.cursor()
+        cursor.execute(
+            "SELECT source_id, path, status, language, model, full_text, segments_json, error_text FROM video_transcripts WHERE source_id = ?",
+            (source_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return {}
+        return {
+            "source_id": row[0],
+            "path": row[1],
+            "status": row[2],
+            "language": row[3] or "",
+            "model": row[4] or "",
+            "full_text": row[5] or "",
+            "segments": self._json_list(row[6]),
+            "error": row[7] or "",
+        }
+
+    def _json_obj(self, raw):
+        try:
+            data = json.loads(raw or "{}")
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _json_list(self, raw):
+        try:
+            data = json.loads(raw or "[]")
+            return data if isinstance(data, list) else []
+        except Exception:
+            return []
+
     # File and DB synchrony logic maintained in Manager
     def add_pdf(self, pdf_path):
-        if pdf_path not in self.pdfs:
-            self.pdfs.append(pdf_path)
-            if self._conn:
-                try:
-                    self._conn.execute("INSERT OR IGNORE INTO pdfs (path) VALUES (?)", (pdf_path,))
-                    self.db_graph.ensure_source_entity(pdf_path, commit=False)
-                    self._conn.commit()
-                except sqlite3.Error as e:
-                    self._conn.rollback()
-                    print(f"Error adding PDF to DB: {e}")
-            return True
-        return False
+        return self.add_source(pdf_path, "pdf")
+
+    def add_source(self, path, source_type=None, metadata=None):
+        if not path:
+            return False
+        source_type = source_type or self.detect_source_type(path)
+        if source_type == "pdf" and path not in self.pdfs:
+            self.pdfs.append(path)
+        elif source_type == "video" and path in {s.get("path") for s in self.list_sources()}:
+            return False
+        elif source_type == "pdf" and path in {s.get("path") for s in self.list_sources()}:
+            return False
+
+        if self._conn:
+            try:
+                if source_type == "pdf":
+                    self._conn.execute("INSERT OR IGNORE INTO pdfs (path) VALUES (?)", (path,))
+                self._upsert_source_row(path, source_type, metadata=metadata, commit=False)
+                self.db_graph.ensure_source_entity(path, properties={
+                    "source_type": source_type,
+                    "mime_type": self._guess_mime_type(path),
+                }, commit=False)
+                self._conn.commit()
+            except sqlite3.Error as e:
+                self._conn.rollback()
+                print(f"Error adding source to DB: {e}")
+                return False
+        self.sources = self.list_sources()
+        return True
 
     def remove_pdf(self, pdf_path):
+        return self.remove_source(pdf_path)
+
+    def remove_source(self, pdf_path):
+        source = self.get_source_entity_by_path(pdf_path) if self._conn else None
+        source_type = self.get_source_type(pdf_path)
         self._halt_viewer_if_active(pdf_path)
         if pdf_path in self.open_docs:
             doc = self.open_docs.pop(pdf_path)
@@ -246,6 +455,9 @@ class ProjectManager:
                 cursor = self._conn.cursor()
                 cursor.execute("BEGIN TRANSACTION")
                 cursor.execute("DELETE FROM pdfs WHERE path = ?", (pdf_path,))
+                cursor.execute("DELETE FROM sources WHERE path = ?", (pdf_path,))
+                if source:
+                    cursor.execute("DELETE FROM video_transcripts WHERE source_id = ?", (source.id,))
                 cursor.execute("DELETE FROM highlights WHERE doc_id = ?", (pdf_path,))
                 cursor.execute("DELETE FROM nodes WHERE pdf_path = ?", (pdf_path,))
                 cursor.execute("DELETE FROM citations WHERE doc_id = ?", (pdf_path,))
@@ -257,10 +469,15 @@ class ProjectManager:
 
         if self.active_file == pdf_path:
             self.active_file = None
+        self.sources = self.list_sources()
         return True
 
     def rename_pdf(self, old_path, new_path):
-        if old_path not in self.pdfs:
+        return self.rename_source(old_path, new_path)
+
+    def rename_source(self, old_path, new_path):
+        source_type = self.get_source_type(old_path)
+        if source_type == "pdf" and old_path not in self.pdfs:
             return False
 
         if old_path in self.open_docs:
@@ -277,17 +494,25 @@ class ProjectManager:
             print(f"OS Rename failed: {e}")
             return False
 
-        idx = self.pdfs.index(old_path)
-        self.pdfs[idx] = new_path
+        if old_path in self.pdfs:
+            idx = self.pdfs.index(old_path)
+            self.pdfs[idx] = new_path
 
         if self._conn:
             try:
                 cursor = self._conn.cursor()
                 cursor.execute("BEGIN TRANSACTION")
                 cursor.execute("UPDATE pdfs SET path = ? WHERE path = ?", (new_path, old_path))
+                cursor.execute(
+                    "UPDATE sources SET path = ?, title = ?, updated_at = CURRENT_TIMESTAMP WHERE path = ?",
+                    (new_path, os.path.basename(new_path), old_path),
+                )
                 cursor.execute("UPDATE highlights SET doc_id = ? WHERE doc_id = ?", (new_path, old_path))
                 cursor.execute("UPDATE nodes SET pdf_path = ? WHERE pdf_path = ?", (new_path, old_path))
                 cursor.execute("UPDATE doc_tags SET doc_id = ? WHERE doc_id = ?", (new_path, old_path))
+                source = self.db_graph.get_source_entity_by_path(old_path)
+                if source:
+                    cursor.execute("UPDATE video_transcripts SET path = ? WHERE source_id = ?", (new_path, source.id))
                 self.db_graph.rename_source_entity(old_path, new_path, commit=False)
                 self._conn.commit()
             except sqlite3.Error as e:
@@ -297,6 +522,7 @@ class ProjectManager:
 
         if self.active_file == old_path:
             self.active_file = new_path
+        self.sources = self.list_sources()
         return True
 
     # ---------------------------------------------------------
@@ -434,8 +660,11 @@ class ProjectManager:
     def ensure_source_entity(self, pdf_path, properties=None): return self.db_graph.ensure_source_entity(pdf_path, properties)
     def get_source_entity(self, source_id): return self.db_graph.get_source_entity(source_id)
     def get_source_entity_by_path(self, pdf_path): return self.db_graph.get_source_entity_by_path(pdf_path)
-    def get_source_path(self, source_id): return self.db_graph.get_source_path(source_id)
-    def list_source_entities(self): return self.db_graph.list_source_entities(self.pdfs)
+    def list_source_entities(self):
+        paths = [s.get("path") for s in self.list_sources() if s.get("path")]
+        if not paths:
+            paths = self.pdfs
+        return self.db_graph.list_source_entities(paths)
 
     # --- Data Dock ---
     def list_data_dock_datasets(self): return self.db_data_dock.list_datasets()

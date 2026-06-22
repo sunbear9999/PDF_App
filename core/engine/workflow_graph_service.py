@@ -9,7 +9,15 @@ from core.engine.action_model import ActionStep, AIActionBlueprint
 from core.engine.workflow_model import WorkflowEdge, WorkflowGraph, WorkflowNode
 
 
-GUI_COMPONENTS = {
+# GUI output components — plugins can extend this dict to add custom output widgets.
+# Each entry: { label, ui_format, ui_target, description, output_schema? }
+GUI_COMPONENTS: Dict[str, dict] = {
+    "workflow.ui.status": {
+        "label": "Status Only",
+        "ui_format": "status",
+        "ui_target": "chat_dock",
+        "description": "Show step progress without rendering the raw result.",
+    },
     "workflow.ui.live_stream": {
         "label": "Live Text",
         "ui_format": "live_stream",
@@ -27,19 +35,19 @@ GUI_COMPONENTS = {
         "label": "Citation Bubbles",
         "ui_format": "chat_widgets",
         "ui_target": "chat_dock",
-        "description": "Render source quote cards.",
+        "description": "Render source quote cards in the chat panel.",
     },
     "workflow.ui.data_table": {
         "label": "Data Table",
         "ui_format": "data_table",
         "ui_target": "custom_tools_tab",
-        "description": "Render a flat JSON array as a table.",
+        "description": "Render a flat JSON array as a sortable table.",
     },
     "workflow.ui.card_grid": {
         "label": "Card Grid",
         "ui_format": "card_grid",
         "ui_target": "custom_tools_tab",
-        "description": "Render JSON objects as cards.",
+        "description": "Render JSON objects as a grid of cards.",
     },
     "workflow.ui.workspace_graph": {
         "label": "Workspace Graph",
@@ -51,23 +59,59 @@ GUI_COMPONENTS = {
         "label": "Floating Overlay",
         "ui_format": "nested_outline",
         "ui_target": "floating",
-        "description": "Show the result in the floating overlay.",
+        "description": "Show the result in the floating overlay panel.",
+    },
+    "workflow.ui.results_dialog": {
+        "label": "Results Dialog",
+        "ui_format": "results_dialog",
+        "ui_target": "floating",
+        "description": "Show document search results in a browse-and-jump dialog.",
+    },
+    "workflow.ui.bias_metrics": {
+        "label": "Bias Metrics",
+        "ui_format": "bias_metrics",
+        "ui_target": "custom_tools_tab",
+        "description": "Render bias assessment metrics as a scored card.",
     },
 }
 
 
-STEP_TYPE_TO_NODE_TYPE = {
+# Step type → canonical node type ID. Plugins can extend this to add new step types.
+STEP_TYPE_TO_NODE_TYPE: Dict[str, str] = {
     "LLM_QUERY": "workflow.llm_query",
+    "LLM_SCHEMA_QUERY": "workflow.llm_schema_query",
     "RAG_SEARCH": "workflow.rag_search",
+    "SOURCE_STATISTICS": "workflow.source_statistics",
+    "ONTOLOGY_CATALOG": "workflow.ontology_catalog",
     "FOREACH": "workflow.foreach",
     "BRANCH": "workflow.branch",
     "PYTHON_SCRIPT": "workflow.python_script",
     "USER_INPUT": "workflow.user_input",
     "DATABASE_WRITE": "workflow.database_write",
+    "ANALYSIS_CONTRACT": "workflow.analysis_contract",
+    "DOCUMENT_CHUNK": "workflow.document_chunk",
+    "ANALYSIS_COMPACT": "workflow.analysis_compact",
+    "ANALYSIS_FINALIZE": "workflow.analysis_finalize",
+    "ANALYSIS_SEND_TO_WORKSPACE": "workflow.analysis_send_to_workspace",
+    "GRAPH_VALIDATOR": "workflow.graph_validator",
+    "ONTOLOGY_UPSERT": "workflow.ontology_upsert",
+    "DISPATCH_EVENT": "workflow.dispatch_event",
+    "AWAIT_EVENT": "workflow.await_event",
     "LIBRARY_REF": "workflow.library_ref",
 }
 
-NODE_TYPE_TO_STEP_TYPE = {value: key for key, value in STEP_TYPE_TO_NODE_TYPE.items()}
+NODE_TYPE_TO_STEP_TYPE: Dict[str, str] = {value: key for key, value in STEP_TYPE_TO_NODE_TYPE.items()}
+
+
+def register_plugin_step_type(step_type: str, node_type_id: str) -> None:
+    """Register a plugin-contributed step type so the canvas can display and edit it."""
+    STEP_TYPE_TO_NODE_TYPE[step_type] = node_type_id
+    NODE_TYPE_TO_STEP_TYPE[node_type_id] = step_type
+
+
+def register_plugin_gui_component(component_id: str, spec: dict) -> None:
+    """Register a plugin-contributed GUI output component for use in the canvas."""
+    GUI_COMPONENTS[component_id] = spec
 
 
 class WorkflowGraphService:

@@ -3,12 +3,12 @@ from PySide6.QtCore import Qt
 
 class UniversalInternalOverlay(QFrame):
     """A frameless overlay that darkens the app and displays dynamic AI results natively."""
-    def __init__(self, main_window, theme):
-        super().__init__(main_window)
-        self.main_window = main_window
+    def __init__(self, app_context, theme, parent=None):
+        super().__init__(parent)
+        self._ctx = app_context
         self.theme = theme
         self.setObjectName("UniversalInternalOverlay")
-        
+
         # Dim the rest of the application
         self.setStyleSheet("QFrame#UniversalInternalOverlay { background-color: rgba(0, 0, 0, 180); }")
         self.hide()
@@ -55,7 +55,8 @@ class UniversalInternalOverlay(QFrame):
         if payload_type == "outline":
             from gui.docks.unified_research.components.dynamic_outlines import UniversalOutlineWidget
             self.lbl_title.setText(payload.get("title", "AI Result"))
-            annot_manager = self.main_window.viewer.annot_manager if hasattr(self.main_window, "viewer") else None
+            viewer = getattr(self._ctx, 'viewer', None) if self._ctx else None
+            annot_manager = getattr(viewer, 'annot_manager', None) if viewer else None
             widget = UniversalOutlineWidget(payload.get("title", "AI Result"), payload.get("content", ""), self.theme, annot_manager)
             widget._raw_ai_data = payload.get("raw_ai_data", payload.get("content", ""))
         elif payload_type == "data_table":
@@ -69,14 +70,21 @@ class UniversalInternalOverlay(QFrame):
             widget = ChatMessageWidget("AI Agent", theme=self.theme)
             for item in payload.get("items", []):
                 if isinstance(item, dict):
+                    source_meta = {
+                        "source_type": item.get("source_type", "pdf"),
+                        "source_id": item.get("source_id", ""),
+                        "start": item.get("start", 0),
+                        "end": item.get("end", 0),
+                    }
                     widget.add_bubble(
                         doc_name=item.get("doc_name", "Unknown Document"),
                         quote=item.get("quote", item.get("text", "")),
-                        note=item.get("note", item.get("reason", ""))
+                        note=item.get("note", item.get("reason", "")),
+                        source_meta=source_meta,
                     )
         elif payload_type == "results_dialog":
             from gui.components.dialogs.tag_relatives_dialog import AIResultsDialog
-            dlg = AIResultsDialog(payload.get("title", "AI Results"), payload.get("items", []), self.main_window, self.main_window)
+            dlg = AIResultsDialog(payload.get("title", "AI Results"), payload.get("items", []), self._ctx, self)
             dlg.show()
             return
         elif payload_type == "error":
@@ -89,8 +97,9 @@ class UniversalInternalOverlay(QFrame):
         self.receive_ai_widget(widget)
 
     def resizeEvent(self, event):
-        # Always stretch to fill the main window exactly
-        self.resize(self.main_window.size())
+        # Stretch to fill the parent widget
+        if self.parent():
+            self.resize(self.parent().size())
         # Keep panel centered, occupying 60% of width, 80% of height
         pw, ph = int(self.width() * 0.6), int(self.height() * 0.8)
         self.panel.setFixedSize(pw, ph)

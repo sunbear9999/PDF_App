@@ -1,20 +1,20 @@
 # gui/docks/unified_research/components/chat_streamer.py
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTextBrowser, QLabel
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QCursor
 from gui.docks.unified_research.components.note_bubble import NoteBubbleWidget
 
 class ChatMessageWidget(QWidget):
-    def __init__(self, sender_name, theme=None, is_user=False, parent=None):
+    def __init__(self, sender_name, theme=None, is_user=False, app_context=None, parent=None):
         super().__init__(parent)
         self.raw_buffer = ""
         self.theme = theme
         self.is_user = is_user
-        
+
         self.layout = QVBoxLayout(self)
         # Tighten the margins to remove the weird gaps between messages
-        self.layout.setContentsMargins(8, 4, 8, 4) 
-        
+        self.layout.setContentsMargins(8, 4, 8, 4)
+
         # 2. Shrink the gap between the sender name and the message text
         self.layout.setSpacing(2)
 
@@ -26,7 +26,7 @@ class ChatMessageWidget(QWidget):
         self.trace_button = None
         if not is_user:
             from gui.components.prompt_trace_button import PromptTraceButton
-            self.trace_button = PromptTraceButton(theme=self.theme, parent=self)
+            self.trace_button = PromptTraceButton(theme=self.theme, app_context=app_context, parent=self)
             self.trace_button.hide()
             header_layout.addWidget(self.trace_button)
         self.layout.addLayout(header_layout)
@@ -35,6 +35,7 @@ class ChatMessageWidget(QWidget):
             # BUG FIX 1: Use a standard Label for the user. It never fails to size correctly.
             self.user_text = QLabel()
             self.user_text.setWordWrap(True)
+            self.user_text.setTextFormat(Qt.TextFormat.PlainText)
             self.user_text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             self.layout.addWidget(self.user_text)
         else:
@@ -50,13 +51,13 @@ class ChatMessageWidget(QWidget):
             self.layout.addWidget(self.btn_thought)
             
             self.thought_browser = QTextBrowser()
-            self.thought_browser.setOpenExternalLinks(False)
+            self.thought_browser.setOpenExternalLinks(True)
             self.thought_browser.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             self.thought_browser.hide()
             self.layout.addWidget(self.thought_browser)
 
             self.main_browser = QTextBrowser()
-            self.main_browser.setOpenExternalLinks(False)
+            self.main_browser.setOpenExternalLinks(True)
             self.main_browser.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             self.layout.addWidget(self.main_browser)
 
@@ -71,7 +72,6 @@ class ChatMessageWidget(QWidget):
     def set_prompt_trace(self, trace_id):
         if self.trace_button:
             self.trace_button.theme = self.theme or {}
-            self.trace_button.main_window = self.window()
             self.trace_button.set_trace_id(trace_id)
 
     def update_status(self, text):
@@ -120,17 +120,73 @@ class ChatMessageWidget(QWidget):
             self.user_text.setText(self.raw_buffer)
             return
         self.hide_status()
-        self.main_browser.setMarkdown(self.raw_buffer.strip())
-        self._resize_browser(self.main_browser)
+        self._render_ai_text()
 
-    def add_bubble(self, doc_name, quote, note):
-        bubble = NoteBubbleWidget(doc_name, quote, note, self.theme, parent=self)
-        if hasattr(self.window(), 'viewer'): 
-            bubble.jump_requested.connect(self.window().viewer.jump_to_source)
-            bubble.save_requested.connect(lambda: self.window().add_ai_annotation(quote, note, doc_name))
-            bubble.search_requested.connect(lambda: self.window().viewer.annot_manager.trigger_similar_context(quote))
+    def add_notice(self, text):
+        """Show a compact system acknowledgement outside the answer body."""
+        notice = QLabel(f"✓ {text}")
+        notice.setStyleSheet(
+            f"color: {(self.theme or {}).get('text_muted', '#aaa')}; "
+            "font-size: 11px; padding: 3px 0;"
+        )
+        self.bubbles_layout.addWidget(notice)
+
+    def add_manifest_update(self, changes, open_callback=None):
+        from gui.docks.unified_research.components.manifest_bubble import ManifestUpdateWidget
+
+        update_widget = ManifestUpdateWidget(changes or {}, self.theme, parent=self)
+        if open_callback:
+            update_widget.btn_open.clicked.connect(open_callback)
+        if hasattr(self, "main_browser") and not self.raw_buffer.strip():
+            self.main_browser.hide()
+        self.bubbles_layout.addWidget(update_widget)
+        return update_widget
+
+    def add_bubble(self, doc_name, quote, note, source_meta=None):
+        bubble = NoteBubbleWidget(doc_name, quote, note, self.theme, parent=self, source_meta=source_meta)
+        viewer = getattr(self.window(), "viewer", None)
+        if viewer:
+            bubble.jump_requested.connect(viewer.jump_to_source)
+            bubble.source_jump_requested.connect(
+                lambda meta: viewer.jump_to_video(
+                    source_id=meta.get("source_id"),
+                    timestamp=meta.get("start", 0),
+                )
+            )
+            bubble.save_requested.connect(lambda q, n, d, meta=source_meta: self._save_bubble_note(q, n, d, meta))
+            bubble.search_requested.connect(
+                lambda selected_quote: viewer.annot_manager.trigger_similar_context(selected_quote)
+            )
+        if hasattr(self, "main_browser") and not self.raw_buffer.strip():
+            self.main_browser.hide()
         self.bubbles_layout.addWidget(bubble)
         return bubble
+
+    def _save_bubble_note(self, quote, note, doc_name, source_meta=None):
+        source_meta = source_meta or {}
+        if source_meta.get("source_type") == "video" and hasattr(self.window(), "viewer"):
+            viewer = self.window().viewer
+            path = ""
+            pm = getattr(getattr(self.window(), "app_context", None), "project_manager", None)
+            if pm and source_meta.get("source_id") and hasattr(pm, "get_source_path"):
+                path = pm.get_source_path(source_meta.get("source_id")) or ""
+            if hasattr(viewer, "video_player"):
+                player = viewer.video_player
+                if path:
+                    player.video_path = path
+                player.source_id = source_meta.get("source_id", "")
+                player.save_quote_note(
+                    quote,
+                    note,
+                    timestamp=source_meta.get("start", 0),
+                    path=path,
+                    source_id=source_meta.get("source_id", ""),
+                )
+            return
+        app_context = getattr(self.window(), "app_context", None)
+        annotation_service = getattr(app_context, "workspace_annotation_service", None)
+        if annotation_service and hasattr(annotation_service, "add_ai_annotation"):
+            annotation_service.add_ai_annotation(quote, note, doc_name)
     
     def _toggle_thought(self):
         visible = not self.thought_browser.isVisible()
@@ -150,6 +206,35 @@ class ChatMessageWidget(QWidget):
         if new_height > 15:  
             browser.setMinimumHeight(new_height)
             browser.setMaximumHeight(new_height)
+
+    def _render_ai_text(self):
+        text = self.raw_buffer.strip()
+        if not text:
+            self.main_browser.hide()
+            return
+        self.main_browser.show()
+        if "<think>" in text:
+            self.btn_thought.show()
+            thought, separator, answer = text.partition("</think>")
+            self.thought_browser.setMarkdown(thought.replace("<think>", "").strip())
+            self._resize_browser(self.thought_browser)
+            self.main_browser.setMarkdown(answer.strip() if separator else "")
+        else:
+            self.main_browser.setMarkdown(text)
+        self._resize_browser(self.main_browser)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not self.is_user:
+            QTimer.singleShot(0, self._resize_rendered_content)
+
+    def _resize_rendered_content(self):
+        if self.is_user:
+            return
+        if self.main_browser.isVisible():
+            self._resize_browser(self.main_browser)
+        if self.thought_browser.isVisible():
+            self._resize_browser(self.thought_browser)
 
     def update_theme(self, theme):
         self.theme = theme
@@ -175,4 +260,6 @@ class ChatMessageWidget(QWidget):
         for i in range(self.bubbles_layout.count()):
             widget = self.bubbles_layout.itemAt(i).widget()
             if isinstance(widget, NoteBubbleWidget):
+                widget.update_theme(theme)
+            elif hasattr(widget, "update_theme"):
                 widget.update_theme(theme)

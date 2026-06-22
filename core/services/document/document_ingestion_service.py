@@ -100,10 +100,17 @@ class DocumentIngestionTask(QRunnable):
         self._page_offsets: List[int] = []
         self._metadata: Dict[str, str] = {}
 
+    def _status(self, msg: str, ms: int = 4000) -> None:
+        """Emit a status message, silently ignoring a deleted or unavailable bus signal."""
+        try:
+            self.bus.status_message_requested.emit(msg, ms)
+        except (RuntimeError, AttributeError):
+            pass
+
     @Slot()
     def run(self):
         try:
-            self.bus.status_message_requested.emit(f"Indexing '{self.doc_name}'...", 4000)
+            self._status(f"Indexing '{self.doc_name}'...", 4000)
             if self.llm_manager and getattr(self.llm_manager, "ai_enabled", False):
                 self.llm_manager.index_documents([self.path])
 
@@ -111,7 +118,7 @@ class DocumentIngestionTask(QRunnable):
             full_text = "\f".join(page.text for page in pages)
             self._page_offsets = self._compute_page_offsets(pages)
             self._emit_parent_source_metadata(full_text)
-            self.bus.status_message_requested.emit("Discovering citations, dates, and people...", 4000)
+            self._status("Discovering citations, dates, and people...", 4000)
 
             bibliography_spans = self._bibliography_spans(full_text)
             bibliography_text = self._slice_spans(full_text, bibliography_spans)
@@ -126,10 +133,10 @@ class DocumentIngestionTask(QRunnable):
 
             if self.signals:
                 self.signals.finished.emit(self._result)
-            self.bus.status_message_requested.emit(f"Finished processing '{self.doc_name}'.", 4000)
+            self._status(f"Finished processing '{self.doc_name}'.", 4000)
         except Exception as e:
             print(f"[Ingestion Service] Failed to process {self.path}: {e}")
-            self.bus.status_message_requested.emit(f"Failed to process '{self.doc_name}'.", 5000)
+            self._status(f"Failed to process '{self.doc_name}'.", 5000)
 
     def _load_pages(self) -> List[PageText]:
         doc = fitz.open(self.path)
@@ -785,7 +792,7 @@ class DocumentIngestionService(QObject):
         self.bus.document_added.connect(self._on_document_added)
 
     def _on_document_added(self, event: DocumentEvent, payload: DocumentEventPayload):
-        if event == DocumentEvent.DOCUMENT_ADDED:
+        if event == DocumentEvent.DOCUMENT_ADDED and (payload.source_type or "pdf") == "pdf":
             signals = IngestionWorkerSignals()
             signals.finished.connect(self._queue_ingestion_result)
             task = DocumentIngestionTask(

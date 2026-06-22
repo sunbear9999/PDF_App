@@ -73,8 +73,9 @@ class PDFViewer(QGraphicsView):
             return result
     annotation_clicked = Signal(str,int)
 
-    def __init__(self, parent=None):
+    def __init__(self, app_context=None, parent=None):
         super().__init__(parent)
+        self._app_ctx = app_context
         self.bus = EventBus.get_instance()
         self.scene = QGraphicsScene(self)
         self.setScene(self.scene)
@@ -92,7 +93,7 @@ class PDFViewer(QGraphicsView):
         self.page_placeholders = []  # QGraphicsRectItem for each page
         self.page_pixmaps = [None] * 0  # QGraphicsPixmapItem for each page, or None
         self.worker = None
-        self.annot_manager = AnnotationManager(self)
+        self.annot_manager = AnnotationManager(self, app_context)
         self._data_select_active = False
         self._data_select_start = None
         self._data_select_rect_item = None
@@ -206,17 +207,12 @@ class PDFViewer(QGraphicsView):
             self._jump_to_location(payload.page_num, payload.rects)
 
     def _on_document_opened_event(self, event: DocumentEvent, payload: DocumentEventPayload):
-        if event == DocumentEvent.DOCUMENT_OPENED:
+        if event == DocumentEvent.DOCUMENT_OPENED and (payload.source_type or "pdf") == "pdf":
             self._on_document_opened(payload.path, payload.doc, payload.needs_ocr)
 
     def _on_document_opened(self, path: str, doc: object, needs_ocr: bool):
         """Catches the document from the background service and renders it."""
-        # --- FIX: Give the Viewer the string path so the RenderWorker thread can open it! ---
         self.pdf_path = path
-        main_window = self.window()
-        if main_window and hasattr(main_window, "current_file_path"):
-            main_window.current_file_path = path
-
         self.load_document(doc)
 
         if needs_ocr:
@@ -231,8 +227,16 @@ class PDFViewer(QGraphicsView):
 
     def _clear_viewer(self):
         """Wipes the viewer cleanly when a new project loads."""
+        self.annot_manager.clear_selection()
+        self.clear_search_highlights()
         if hasattr(self, 'scene') and self.scene:
             self.scene.clear()
+        self.page_placeholders.clear()
+        self.page_pixmaps.clear()
+        self.page_rects = []
+        self.current_links = []
+        self.page_links = {}
+        self.search_hits.clear()
         self.doc = None
 
     def _doc_valid(self):
@@ -314,21 +318,23 @@ class PDFViewer(QGraphicsView):
             self.search_bar.update_hits(0, 0)
             return
 
-        main_window = self.window()
         pdfs_to_search = []
         if scope == "Entire Project":
             from gui.utils.document_helpers import active_pdf_paths
-            pdfs_to_search = active_pdf_paths(main_window.project_manager)
+            pm = self._app_ctx.project_manager if self._app_ctx else None
+            if pm:
+                pdfs_to_search = active_pdf_paths(pm)
         else:
-            if main_window.current_file_path:
-                pdfs_to_search = [main_window.current_file_path]
+            if getattr(self, "pdf_path", None):
+                pdfs_to_search = [self.pdf_path]
 
         flags = fitz.TEXT_PRESERVE_LIGATURES | fitz.TEXT_PRESERVE_WHITESPACE
         if match_case:
             flags |= getattr(fitz, "TEXT_MATCH_CASE", 4)
 
+        pm = self._app_ctx.project_manager if self._app_ctx else None
         for pdf_path in pdfs_to_search:
-            doc = main_window.project_manager.get_doc(pdf_path)
+            doc = pm.get_doc(pdf_path) if pm else None
             if not doc:
                 continue
             for page_num in range(len(doc)):
@@ -370,9 +376,8 @@ class PDFViewer(QGraphicsView):
         if not self.search_hits or self.current_hit_index < 0: return
 
         hit = self.search_hits[self.current_hit_index]
-        main_window = self.window()
 
-        if hit['pdf'] != getattr(main_window, "current_file_path", None):
+        if hit['pdf'] != getattr(self, "pdf_path", None):
             self.pending_search_jump = hit
             # 🔥 FIX: Use the Event Bus instead of the deprecated main_window method
             self.bus.document_action_requested.emit(
@@ -403,7 +408,7 @@ class PDFViewer(QGraphicsView):
             self._apply_search_highlights_to_page(page_num, self.page_pixmaps[page_num])
 
     def _apply_search_highlights_to_page(self, page_num, page_item):
-        current_pdf = self.window().current_file_path
+        current_pdf = getattr(self, "pdf_path", "")
 
         for i, hit in enumerate(self.search_hits):
             if hit['pdf'] == current_pdf and hit['page'] == page_num:

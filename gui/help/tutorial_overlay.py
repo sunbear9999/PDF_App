@@ -5,20 +5,22 @@ Spotlight overlay and tutorial card for interactive tutorials.
 
 Architecture
 ------------
-Both TutorialOverlay and TutorialCard are top-level Tool windows parented to
-MainWindow.  Qt guarantees Tool windows always stay above their parent,
-including QDockWidget children, so the card is always visible and clickable
-regardless of which docks are open.
+TutorialOverlay  — embedded child QWidget of MainWindow (NOT a separate OS
+                   window).  Qt renders it above all dock/content children
+                   when raise_() is called.  Because it is an in-process child
+                   widget, WA_TransparentForMouseEvents correctly passes all
+                   pointer events through to the dock/viewer content beneath it.
+                   This avoids the Wayland "separate surface" problem where two
+                   xdg_toplevel surfaces with WA_TransparentForMouseEvents could
+                   silently swallow clicks.
 
-TutorialOverlay  — frameless, fully transparent for mouse events, covers the
-                   entire main-window area, draws dim + spotlight cutout.
+TutorialCard     — frameless Tool window parented to MainWindow.  It is the
+                   ONLY separate OS surface, so the Wayland compositor routes
+                   pointer events directly to it with no ambiguity.  The card
+                   is positioned in screen (global) coordinates.
 
-TutorialCard     — frameless, interactive (buttons fire engine methods),
-                   positioned near the spotlight in screen coordinates.
-
-Because both are tool windows their positions are in screen (global)
-coordinates.  Calls to mapToGlobal() convert main-window-local rects to
-screen coords for placement.
+The overlay uses main-window-local coordinates throughout; the card converts to
+global coords via mapToGlobal when placing itself.
 """
 from __future__ import annotations
 
@@ -29,7 +31,7 @@ from typing import Optional, TYPE_CHECKING
 from PySide6.QtCore import QEvent, QPoint, Qt, QRect, Signal
 from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea,
+    QApplication, QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea,
     QSizePolicy, QVBoxLayout, QWidget,
 )
 
@@ -53,8 +55,9 @@ class TutorialCard(QFrame):
     """
     Interactive floating card showing step text and Next/Back/Exit buttons.
 
-    Created as a Tool window so Qt keeps it above all parent-window contents,
-    including dock widgets.
+    Created as a plain frameless Tool window (no WindowDoesNotAcceptFocus so
+    mouse events are delivered normally).  Parented to MainWindow so the WM
+    treats it as transient-for the main surface.
     """
 
     next_clicked = Signal()
@@ -65,9 +68,7 @@ class TutorialCard(QFrame):
     def __init__(self, theme: dict, parent=None) -> None:
         super().__init__(
             parent,
-            Qt.WindowType.Tool
-            | Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowDoesNotAcceptFocus,
+            Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint,
         )
         self.setObjectName("TutorialCard")
         self._build_ui()
@@ -174,15 +175,22 @@ class TutorialCard(QFrame):
 
 
 # ---------------------------------------------------------------------------
-# Overlay (paint layer)
+# Overlay (paint layer) — embedded child widget, NOT a separate OS window
 # ---------------------------------------------------------------------------
 
 class TutorialOverlay(QWidget):
     """
-    Full-window dim + spotlight paint layer.
+    Full-window dim + spotlight paint layer embedded directly in MainWindow.
 
-    Rendered as a frameless Tool window with WA_TransparentForMouseEvents so it
-    sits above all dock widgets visually but never consumes any input.
+    Being an ordinary child widget (no Tool/top-level flags) means:
+    * WA_TransparentForMouseEvents correctly forwards pointer events to the
+      dock/viewer widgets that are stacked below it — on both X11 and Wayland.
+    * No new Wayland xdg_toplevel surface is created, so the GNOME dock does
+      not surface when the tutorial starts.
+    * raise_() places it above all other QMainWindow children reliably.
+
+    The TutorialCard (separate Tool window) is the only new OS-level surface;
+    the compositor routes its pointer events directly with no ambiguity.
     """
 
     def __init__(
@@ -191,15 +199,13 @@ class TutorialOverlay(QWidget):
         engine: "TutorialEngine",
         theme: dict,
     ) -> None:
-        super().__init__(
-            main_window,
-            Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint,
-        )
+        # NO window-type flags → embedded child widget of main_window
+        super().__init__(main_window)
         self._main_window = main_window
         self._engine = engine
-        self._spotlight_rect: Optional[QRect] = None   # in overlay-local coords
+        self._spotlight_rect: Optional[QRect] = None   # main-window-local coords
 
-        # Card is also a tool window (separate from this overlay)
+        # Card is still a separate tool window so it receives pointer events
         self._card = TutorialCard(theme, parent=main_window)
         self._card.next_clicked.connect(engine.advance)
         self._card.back_clicked.connect(engine.go_back)
@@ -212,14 +218,12 @@ class TutorialOverlay(QWidget):
         engine.tutorial_cancelled.connect(lambda _: self._hide_overlay())
         engine.tutorial_failed.connect(self._on_tutorial_failed)
 
-        # Click-through transparent paint layer
+        # Transparent to mouse so the underlying docks/viewer are still usable
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
         self.setObjectName("TutorialOverlay")
         self.hide()
 
-        # Track parent window moves and resizes
         main_window.installEventFilter(self)
 
     # ------------------------------------------------------------------
@@ -228,7 +232,7 @@ class TutorialOverlay(QWidget):
 
     def _on_step_ready(self, step: "TutorialStep", target_widget) -> None:
         self._spotlight_rect = (
-            self._widget_rect_in_overlay(target_widget)
+            self._local_widget_rect(target_widget)
             if target_widget is not None
             else None
         )
@@ -236,6 +240,7 @@ class TutorialOverlay(QWidget):
         self._sync_overlay_geometry()
         self._position_card()
         self.show()
+        self.raise_()          # above all main-window child widgets
         self.update()
         self._card.show()
         self._card.raise_()
@@ -257,84 +262,101 @@ class TutorialOverlay(QWidget):
         self._spotlight_rect = None
 
     # ------------------------------------------------------------------
-    # Geometry helpers (all positions are in screen/global coordinates)
+    # Geometry helpers
     # ------------------------------------------------------------------
 
-    def _mw_global_origin(self) -> QPoint:
-        """Top-left of main_window in screen coordinates."""
-        return self._main_window.mapToGlobal(QPoint(0, 0))
-
     def _sync_overlay_geometry(self) -> None:
-        """Make overlay exactly cover the main window."""
-        origin = self._mw_global_origin()
-        self.move(origin)
-        self.resize(self._main_window.size())
+        """Stretch overlay to fill main window using LOCAL coordinates."""
+        self.setGeometry(0, 0, self._main_window.width(), self._main_window.height())
 
-    def _widget_rect_in_overlay(self, widget: QWidget) -> QRect:
+    def _local_widget_rect(self, widget: QWidget) -> QRect:
         """
-        Return the rect of `widget` in overlay-local coordinates.
-        The overlay is positioned at mw_global_origin, so:
-          local = global_widget_pos - mw_global_origin
+        Return the rect of *widget* in main-window-local coordinates.
+        We map the widget's top-left to global then back to main-window-local.
         """
-        widget_global = widget.mapToGlobal(QPoint(0, 0))
-        origin = self._mw_global_origin()
-        return QRect(
-            widget_global.x() - origin.x(),
-            widget_global.y() - origin.y(),
-            widget.width(),
-            widget.height(),
-        )
+        global_pos = widget.mapToGlobal(QPoint(0, 0))
+        local_pos = self._main_window.mapFromGlobal(global_pos)
+        return QRect(local_pos.x(), local_pos.y(), widget.width(), widget.height())
 
     def _position_card(self) -> None:
-        """Place the card near the spotlight in screen coordinates."""
+        """Place the card near the spotlight in screen (global) coordinates."""
         self._card.adjustSize()
         hint = self._card.sizeHint()
         cw = max(_CARD_MIN_W, min(_CARD_MAX_W, hint.width()))
-        ch = max(200, min(int(self._main_window.height() * 0.45), hint.height() + 20))
 
         mw = self._main_window
         win_w, win_h = mw.width(), mw.height()
-        origin = self._mw_global_origin()
+
+        # Use screen available geometry to avoid the OS taskbar
+        origin = mw.mapToGlobal(QPoint(0, 0))
+        screen = QApplication.screenAt(origin) or QApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen else None
+
+        max_ch = int(win_h * 0.45)
+        if avail:
+            max_screen_ch = max(100, avail.bottom() - origin.y() - 12)
+            max_ch = min(max_ch, max_screen_ch)
+        ch = max(220, min(max_ch, hint.height() + 20))
 
         if self._spotlight_rect:
-            sr = self._spotlight_rect          # overlay-local coords
+            sr = self._spotlight_rect          # local coords
             cx = sr.left()
             cy = sr.bottom() + 16
             cx = min(cx, win_w - cw - 12)
             cx = max(cx, 12)
             if cy + ch > win_h - 12:
                 cy = sr.top() - ch - 16
-            if cy < 12:                        # no room above or below → corner
+            if cy < 12:                        # no room → bottom-right corner
                 cx = win_w - cw - 12
                 cy = win_h - ch - 12
         else:
             cx = (win_w - cw) // 2
             cy = (win_h - ch) // 2
 
+        # Hard clamp within the window area
+        cx = max(4, min(cx, win_w - cw - 4))
+        cy = max(4, min(cy, win_h - ch - 4))
+
         self._card.setFixedSize(cw, ch)
-        # Card is a top-level window → needs global screen coords
-        self._card.move(origin.x() + cx, origin.y() + cy)
+
+        # Convert local → global for the separate card window
+        card_x = origin.x() + cx
+        card_y = origin.y() + cy
+
+        # Clamp against screen available geometry (OS taskbar safety)
+        if avail:
+            card_x = max(avail.left() + 4, min(card_x, avail.right() - cw - 4))
+            card_y = max(avail.top() + 4, min(card_y, avail.bottom() - ch - 4))
+
+        self._card.move(card_x, card_y)
 
     def _refresh_spotlight(self) -> None:
         """Re-map the spotlight rect after window move/resize."""
-        if self._engine.current_step:
-            target = self._engine._targets.resolve(self._engine.current_step.target_id)
+        step = self._engine.current_step
+        if step:
+            target = self._engine._targets.resolve(step.target_id)
             if target:
-                self._spotlight_rect = self._widget_rect_in_overlay(target)
+                self._spotlight_rect = self._local_widget_rect(target)
 
     # ------------------------------------------------------------------
     # Qt overrides
     # ------------------------------------------------------------------
 
     def eventFilter(self, obj, event) -> bool:
-        """Track main-window resize and move to keep overlay and card in sync."""
+        """Resize/reposition overlay and card when the main window changes."""
         if obj is self._main_window and self.isVisible():
             t = event.type()
             if t in (QEvent.Type.Resize, QEvent.Type.Move):
                 self._sync_overlay_geometry()
                 self._refresh_spotlight()
                 self._position_card()
+                self.raise_()
+                self._card.raise_()
                 self.update()
+            elif t in (QEvent.Type.ChildAdded, QEvent.Type.ZOrderChange):
+                # A dock/dialog opened — keep overlay and card on top
+                self.raise_()
+                self._card.raise_()
         return False
 
     def paintEvent(self, event) -> None:

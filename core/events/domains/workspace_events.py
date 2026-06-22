@@ -49,6 +49,7 @@ class WorkspaceIntent(Enum):
     DECLUTTER_TRIGGERED = auto()
     CALCULATE_LAYOUT = auto()
     IMPORT_GRAPH = auto()
+    SOURCE_FILTER = auto()
 
 
 @dataclass

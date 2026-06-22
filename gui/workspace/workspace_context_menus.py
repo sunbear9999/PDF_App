@@ -2,12 +2,12 @@
 from PySide6.QtWidgets import QMenu
 from core.utils.workspace_utils import build_pdf_display_name
 from core.events.event_bus import EventBus
-from core.events.domains.workspace_events import WorkspaceEvent, WorkspaceEventPayload
+from core.events.domains.workspace_events import WorkspaceEvent, WorkspaceEventPayload, WorkspaceIntent, WorkspacePayload
 
 
 def _inject_workspace_plugin_items(menu: QMenu, view, context_type: str) -> None:
     """Append plugin-contributed workspace context menu items via ActionRegistry."""
-    app_context = getattr(getattr(view, "main_window", None), "app_context", None)
+    app_context = getattr(view, "_ctx", None)
     action_registry = getattr(app_context, "action_registry", None)
     if not action_registry:
         return
@@ -48,7 +48,6 @@ def build_ai_menu(view, parent_widget):
     menu = QMenu("🤖 AI Tools", parent_widget)
     menu.setTitle("🤖 AI Tools")
 
-    # 1. Reliably check AI status using the view's explicitly passed main_window reference
     ai_enabled = False
     try:
         llm = view._llm()
@@ -63,8 +62,8 @@ def build_ai_menu(view, parent_widget):
         menu.setToolTip("Run the installer to download local AI models.")
         return menu
 
-    # 2. Fetch the newly centralized registry from MainWindow, not the View!
-    registry = getattr(view.main_window, "workspace_ai_tools_registry", None)
+    ctx = getattr(view, "_ctx", None)
+    registry = getattr(ctx, "workspace_ai_tools_registry", None) if ctx else None
 
     if registry:
         bus = EventBus.get_instance()
@@ -162,6 +161,31 @@ def build_node_context_menu(view, parent_widget, node, selected_nodes, connect_s
     manage_tags_action = menu.addAction("🏷️ Manage Tags")
     cite_action = menu.addAction("📋 Copy In-Text Citation")
     connect_action = menu.addAction("🔗 Connect to Selected Node") if connect_source else None
+
+    # Source node: filter workspace to connected nodes + view metrics
+    if getattr(node, "entity_type", "") == "entity.source":
+        menu.addSeparator()
+        _all_source_ids = [
+            n.node_id for n in selected_nodes
+            if getattr(n, "entity_type", "") == "entity.source"
+        ] or [node.node_id]
+        filter_source_action = menu.addAction("🔎 Filter Workspace by Source")
+        filter_source_action.triggered.connect(
+            lambda: view.bus.workspace_action_requested.emit(
+                WorkspaceIntent.SOURCE_FILTER,
+                WorkspacePayload(node_ids=_all_source_ids),
+            )
+        )
+        metrics_action = menu.addAction("📊 View Source Metrics")
+        _node_pdf = getattr(node, "pdf_path", None) or (node.entity_properties or {}).get("path")
+        if _node_pdf:
+            metrics_action.triggered.connect(
+                lambda checked=False, p=_node_pdf, v=view: _open_source_metrics_for_node(p, v)
+            )
+        else:
+            metrics_action.setEnabled(False)
+        menu.addSeparator()
+
     remove_action = menu.addAction("🗑️ Remove Selected from Workspace")
     delete_highlight_action = menu.addAction("🔥 Delete Highlight Permanently") if node.highlight_id else None
     declutter_action = menu.addAction("🧹 Declutter Selected Node")
@@ -195,6 +219,11 @@ def build_edge_context_menu(view, parent_widget, edge):
 def build_canvas_context_menu(view, parent_widget):
     menu = QMenu(parent_widget)
     declutter_action = menu.addAction("🧹 Declutter All Notes")
+
+    # Add saved citation sources as workspace nodes
+    add_source_action = menu.addAction("📌 Add Source from Library…")
+    add_source_action.triggered.connect(lambda: _open_source_picker(view))
+
     analysis_menu = menu.addMenu("Related to Tag")
 
     pm = view._pm()
@@ -213,3 +242,153 @@ def build_canvas_context_menu(view, parent_widget):
     menu.addMenu(build_ai_menu(view, menu))
     _inject_workspace_plugin_items(menu, view, "canvas")
     return menu, declutter_action
+
+
+def _open_source_picker(view):
+    """Open a dialog listing saved citation sources and add selected ones to workspace."""
+    from PySide6.QtWidgets import (QDialog, QVBoxLayout, QListWidget, QListWidgetItem,
+                                   QDialogButtonBox, QLabel, QLineEdit, QAbstractItemView)
+    import uuid as _uuid
+
+    ctx = getattr(view, "_ctx", None)
+    pm = view._pm()
+    db = getattr(pm, "db_graph", None) if pm else None
+    if not db:
+        return
+
+    entities = db.get_entities_by_type("entity.source")
+    sources = [e for e in entities if e.properties.get("citation_key")]
+    if not sources:
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.information(view, "No Sources", "No citation sources saved yet. Extract citations from the Discovery dock first.")
+        return
+
+    dlg = QDialog(view)
+    dlg.setWindowTitle("Add Source to Workspace")
+    dlg.setMinimumSize(480, 400)
+    layout = QVBoxLayout(dlg)
+
+    layout.addWidget(QLabel("Select one or more saved sources to add as workspace nodes:"))
+
+    search = QLineEdit()
+    search.setPlaceholderText("Filter sources…")
+    layout.addWidget(search)
+
+    lst = QListWidget()
+    lst.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+
+    def _populate(filter_text=""):
+        lst.clear()
+        for ent in sources:
+            title = ent.properties.get("title") or ent.properties.get("citation_key", "")
+            authors = ", ".join(ent.properties.get("authors") or [])[:60]
+            year = ent.properties.get("year", "")
+            display = f"{title[:60]}"
+            if authors or year:
+                display += f"  —  {authors} ({year})"
+            if filter_text and filter_text.lower() not in display.lower():
+                continue
+            item = QListWidgetItem(display)
+            item.setData(256, ent)
+            lst.addItem(item)
+
+    _populate()
+    search.textChanged.connect(_populate)
+    layout.addWidget(lst)
+
+    btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+    btns.accepted.connect(dlg.accept)
+    btns.rejected.connect(dlg.reject)
+    layout.addWidget(btns)
+
+    if dlg.exec() != QDialog.DialogCode.Accepted:
+        return
+
+    selected = lst.selectedItems()
+    if not selected:
+        return
+
+    entities_to_add = []
+    for item in selected:
+        ent = item.data(256)
+        props = ent.properties
+        title = props.get("title") or props.get("citation_key", "")
+        authors = ", ".join(props.get("authors") or [])
+        year = props.get("year", "")
+        label = f"{authors} ({year}). {title}" if authors else f"({year}) {title}"
+        entities_to_add.append({
+            "id": ent.id,
+            "type": "entity.source",
+            "text": label[:120],
+            "title": title,
+            "authors": authors,
+            "year": year,
+            "journal": props.get("journal", ""),
+            "citation_key": props.get("citation_key", ""),
+            "in_project": props.get("in_project", False),
+        })
+
+    view.bus.workspace_action_requested.emit(
+        WorkspaceIntent.IMPORT_GRAPH,
+        WorkspacePayload(extra={"graph": {"entities": entities_to_add, "relations": []}}),
+    )
+
+
+def _open_source_metrics_for_node(pdf_path: str, view) -> None:
+    """Open the SourceMetricsDialog for a workspace source node."""
+    ctx = getattr(view, "_ctx", None)
+    eval_svc = getattr(ctx, "source_evaluation_service", None)
+    if not eval_svc:
+        return
+
+    from core.events.domains.evaluation_events import (
+        SourceEvalEvent, SourceEvalIntent, SourceEvalPayload,
+    )
+    from gui.components.dialogs.source_metrics_dialog import SourceMetricsDialog
+
+    def _get_theme():
+        tm = getattr(ctx, "theme_manager", None)
+        try:
+            return tm.get_theme() if tm else None
+        except Exception:
+            return None
+
+    score = eval_svc.get_score_for_path(pdf_path)
+    ledger = eval_svc.get_ledger_for_path(pdf_path)
+
+    if score is not None and ledger is not None:
+        dlg = SourceMetricsDialog(score, ledger, pdf_path, theme=_get_theme(), parent=view)
+        from gui.managers.dialog_manager import get_for_widget
+        dm = get_for_widget(view)
+        if dm:
+            dm.show_instance(dlg)
+        else:
+            dlg.show()
+        return
+
+    bus = EventBus.get_instance()
+    bus.source_eval_action_requested.emit(
+        SourceEvalIntent.RUN_EVALUATION,
+        SourceEvalPayload(pdf_path=pdf_path),
+    )
+    bus.status_message_requested.emit("Evaluating source… please wait.", 4000)
+
+    def _on_complete(event, payload):
+        if event == SourceEvalEvent.EVALUATION_COMPLETE and getattr(payload, "pdf_path", "") == pdf_path:
+            bus.source_eval_state_changed.disconnect(_on_complete)
+            if payload.score is not None:
+                dlg = SourceMetricsDialog(
+                    payload.score, payload.ledger, pdf_path,
+                    is_retracted=payload.is_retracted,
+                    needs_manual_review=payload.needs_manual_review,
+                    theme=_get_theme(),
+                    parent=view,
+                )
+                from gui.managers.dialog_manager import get_for_widget
+                _dm = get_for_widget(view)
+                if _dm:
+                    _dm.show_instance(dlg)
+                else:
+                    dlg.show()
+
+    bus.source_eval_state_changed.connect(_on_complete)

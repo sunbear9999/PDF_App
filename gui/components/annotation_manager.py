@@ -1,7 +1,8 @@
 # gui/components/annotation_manager.py
-from PySide6.QtWidgets import QGraphicsRectItem, QInputDialog, QWidget, QMenu, QDialog, QVBoxLayout, QTextEdit, QPushButton
+from PySide6.QtWidgets import QGraphicsRectItem, QInputDialog, QWidget, QMenu, QVBoxLayout, QTextEdit, QPushButton
 from PySide6.QtGui import QColor, QBrush, QPen, QAction, QTextCursor, QDesktopServices
 from PySide6.QtCore import Qt, QRectF, QObject, Signal, QThread, QUrl
+import shiboken6
 import re
 from core.events.event_bus import EventBus
 from core.events.domains.document_events import DocumentIntent, DocumentPayload
@@ -11,9 +12,10 @@ class AnnotationManager(QObject):
     note_added = Signal()
     highlight_created = Signal(object, object)
 
-    def __init__(self, viewer):
+    def __init__(self, viewer, app_context=None):
         super().__init__()
         self.viewer = viewer
+        self._ctx = app_context
         self.bus = EventBus.get_instance()
         self.is_selecting = False
         self.start_word_idx = None
@@ -35,8 +37,11 @@ class AnnotationManager(QObject):
         else:
             return -1, None
         for i, item in enumerate(items):
-            if item is not None and item.sceneBoundingRect().contains(scene_pos):
-                return i, item
+            try:
+                if item is not None and shiboken6.isValid(item) and item.sceneBoundingRect().contains(scene_pos):
+                    return i, item
+            except RuntimeError:
+                continue
         return -1, None
 
     def _get_word_at_pos(self, local_pos, zoom):
@@ -172,7 +177,6 @@ class AnnotationManager(QObject):
                     except Exception:
                         pass
 
-   # gui/components/annotation_manager.py -> AnnotationManager class
     def show_context_menu(self, global_pos):
         menu = QMenu(self.viewer)
         menu.setStyleSheet("""
@@ -197,7 +201,7 @@ class AnnotationManager(QObject):
             action.triggered.connect(lambda checked, c=rgb: self.apply_highlight(c))
             hl_menu.addAction(action)
 
-        # 🔥 PHASE 2: Regex URL Extractor
+        # Regex URL Extractor
         if extracted_text:
             urls = []
 
@@ -252,6 +256,7 @@ class AnnotationManager(QObject):
         data_action.triggered.connect(lambda: self.send_selection_to_data_dock(extracted_text))
 
         self._inject_plugin_items(menu, extracted_text)
+        self._inject_dock_actions(menu, extracted_text)
         menu.exec(global_pos)
 
     def send_selection_to_data_dock(self, selected_text: str):
@@ -269,9 +274,8 @@ class AnnotationManager(QObject):
             },
         )
         self.bus.pdf_data_selection_ready.emit(None, payload)
-        main_window = self.viewer.window()
-        if main_window and hasattr(main_window, "dock_manager"):
-            main_window.dock_manager.spawn("data_dock")
+        if self._ctx and self._ctx.dock_manager:
+            self._ctx.dock_manager.spawn("data_dock")
         self.bus.data_dock_action_requested.emit(
             DataDockIntent.LOAD_SELECTION,
             DataDockPayload(selection=payload),
@@ -280,10 +284,7 @@ class AnnotationManager(QObject):
 
     def _inject_plugin_items(self, menu, selected_text: str = "") -> None:
         """Append plugin-registered PDF context menu actions to an existing menu."""
-        main_window = self.viewer.window()
-        action_registry = getattr(
-            getattr(main_window, "app_context", None), "action_registry", None
-        )
+        action_registry = self._ctx.action_registry if self._ctx else None
         if not action_registry:
             return
         from gui.registry.context_menu_registry import ContextMenuContext
@@ -291,7 +292,7 @@ class AnnotationManager(QObject):
             context_type="pdf:text_selection",
             selected_ids=[],
             payload={"text": selected_text},
-            event_bus=getattr(main_window, "bus", None),
+            event_bus=self._ctx.bus if self._ctx else None,
         )
         specs = list(action_registry.iter_mount("context_menu:pdf:text_selection"))
         if not specs:
@@ -307,18 +308,30 @@ class AnnotationManager(QObject):
             if spec.callback:
                 action.triggered.connect(lambda checked=False, cb=spec.callback, c=ctx: cb(c))
 
-    def copy_in_text_citation(self):
-        main_window = self.viewer.window()
-        current_doc = main_window.current_file_path
+    def _inject_dock_actions(self, menu, selected_text: str = "") -> None:
+        """Append DockActionSpec-registered actions for the SOURCE_VIEWER_TEXT_SELECTION mount."""
+        from core.engine.dock_mounts import SOURCE_VIEWER_TEXT_SELECTION
+        from gui.components.dock_action_mixin import inject_dock_actions_into_menu
+        inject_dock_actions_into_menu(
+            menu,
+            SOURCE_VIEWER_TEXT_SELECTION,
+            dock_id="source_viewer",
+            zone="context_menu:text_selection",
+            app_context=self._ctx,
+            selection=selected_text,
+            source_path=getattr(self.viewer, "pdf_path", None) or getattr(self.viewer, "current_pdf_path", None),
+        )
 
-        if current_doc and self.current_page_idx >= 0:
-            cm = main_window.citation_manager
+    def copy_in_text_citation(self):
+        current_doc = getattr(self.viewer, "pdf_path", None)
+        if current_doc and self.current_page_idx >= 0 and self._ctx:
+            cm = self._ctx.citation_manager
             citation_text = cm.format_in_text(current_doc, self.current_page_idx)
             from PySide6.QtWidgets import QApplication
             QApplication.clipboard().setText(citation_text)
-            main_window.statusBar().showMessage(f"Copied citation: {citation_text}", 3000)
-
+            self._ctx.bus.status_message_requested.emit(f"Copied citation: {citation_text}", 3000)
         self.clear_selection()
+
     def reword_selection(self):
         if not self.selected_words: return
         extracted_text = " ".join(w[4] for w in self.selected_words)
@@ -337,15 +350,13 @@ class AnnotationManager(QObject):
 
     def _dispatch_ai_blueprint(self, action_type: str, text: str):
         """Universal dispatcher that routes context menu actions through workflow events."""
-        main_window = self.viewer.window()
         from core.engine.default_blueprints import DefaultBlueprints
-        from core.events.event_bus import EventBus
         from core.events.domains.workflow_events import WorkflowIntent, WorkflowPayload
 
         allowed_docs = []
-        if hasattr(main_window, 'project_manager') and main_window.project_manager:
+        if self._ctx and self._ctx.project_manager:
             from gui.utils.document_helpers import active_pdf_names
-            allowed_docs = active_pdf_names(main_window.project_manager)
+            allowed_docs = active_pdf_names(self._ctx.project_manager)
 
         if action_type == "reword":
             blueprint = DefaultBlueprints.get_reword_blueprint(text)
@@ -356,9 +367,9 @@ class AnnotationManager(QObject):
         else:
             return
 
-        active_model = main_window._get_active_ai_model() if hasattr(main_window, "_get_active_ai_model") else "gemma4:e2b"
+        active_model = self._ctx.get_active_ai_model() if self._ctx else ""
 
-        EventBus.get_instance().workflow_action_requested.emit(
+        self.bus.workflow_action_requested.emit(
             WorkflowIntent.RUN_BLUEPRINT,
             WorkflowPayload(
                 blueprint=blueprint,
@@ -366,7 +377,6 @@ class AnnotationManager(QObject):
                 job_name=blueprint.name,
             ),
         )
-
 
     def define_selection(self):
         if not self.selected_words: return
@@ -376,19 +386,17 @@ class AnnotationManager(QObject):
         import string
         extracted_text = extracted_text.strip(string.punctuation)
 
-        # Optional: Limit the dictionary lookup to a maximum of 3-4 words
+        # Limit the dictionary lookup to a maximum of 3-4 words
         # so users don't accidentally try to "define" a whole paragraph
         words = extracted_text.split()
         if len(words) > 4:
             extracted_text = " ".join(words[:4])
 
-        main_window = self.viewer.window()
+        # Force the Dictionary Dock to spawn or revive
+        if self._ctx and self._ctx.dock_manager:
+            self._ctx.dock_manager.spawn("dicts")
 
-        # 1. Force the Dictionary Dock to spawn or revive
-        if hasattr(main_window, 'dock_manager'):
-            main_window.dock_manager.spawn("dicts")
-
-        # 2. Push the text into the dictionary service.
+        # Push the text into the dictionary service.
         self.bus.dictionary_action_requested.emit(DictionaryIntent.PUBLIC_SEARCH, DictionaryPayload(query=extracted_text))
 
         self.clear_selection()
@@ -404,9 +412,7 @@ class AnnotationManager(QObject):
         current_page = self.current_page_idx
 
         def _commit(note_text: str) -> None:
-            pdf_path = getattr(self.viewer, "pdf_path", None) or getattr(
-                self.viewer.window(), "current_file_path", None
-            )
+            pdf_path = getattr(self.viewer, "pdf_path", None)
             self.bus.document_action_requested.emit(
                 DocumentIntent.CREATE_HIGHLIGHT,
                 DocumentPayload(
@@ -423,11 +429,10 @@ class AnnotationManager(QObject):
         dm = get_for_widget(self.viewer)
         if dm:
             from PySide6.QtWidgets import (
-                QDialog, QHBoxLayout, QLabel, QLineEdit,
-                QPushButton, QVBoxLayout,
+                QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout,
             )
-            dialog = QDialog()
-            dialog.setWindowTitle("Add Note")
+            from gui.base import BaseDialog
+            dialog = BaseDialog("Add Note", parent=self.viewer)
             layout = QVBoxLayout(dialog)
             layout.addWidget(QLabel("Enter a note for this highlight (Optional):"))
             text_field = QLineEdit()
@@ -457,23 +462,19 @@ class AnnotationManager(QObject):
         if not self.selected_words: return
         extracted_text = " ".join(w[4] for w in self.selected_words)
 
-        main_window = self.viewer.window()
-
-        # 1. Force the AI/research dock to spawn or revive.
-        if hasattr(main_window, "dock_manager"):
+        # Force the AI/research dock to spawn or revive.
+        if self._ctx and self._ctx.dock_manager:
             try:
-                main_window.dock_manager.spawn("research")
+                self._ctx.dock_manager.spawn("research")
             except Exception:
                 pass
 
-
-        # 2. Push the extracted text into the input field
-        research_docks = main_window.dock_manager.get_inner_widgets("research") if hasattr(main_window, "dock_manager") else []
-        legacy_chat_docks = getattr(main_window, "chat_docks", [])
-        if research_docks or legacy_chat_docks:
-            llm_dock = (research_docks or legacy_chat_docks)[0]
-            if hasattr(llm_dock, "chat_input"):
-                llm_dock.chat_input.setText(f"Explain this text: \"{extracted_text}\"")
-                llm_dock.chat_input.setFocus()
+        # Push the extracted text into the input field
+        research_docks = self._ctx.dock_manager.get_inner_widgets("research") if (self._ctx and self._ctx.dock_manager) else []
+        for dock in research_docks:
+            if hasattr(dock, "chat_input"):
+                dock.chat_input.setText(f"Explain this text: \"{extracted_text}\"")
+                dock.chat_input.setFocus()
+                break
 
         self.clear_selection()

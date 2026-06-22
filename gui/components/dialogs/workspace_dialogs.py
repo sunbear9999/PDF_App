@@ -64,7 +64,9 @@ class OutlineDialog(QDialog):
         
         self.workspace_view.scene_obj.addItem(node)
         self.workspace_view.nodes[node_id] = node
-        self.workspace_view.main_window.project_manager.mark_dirty("workspace")
+        pm = self.workspace_view._pm()
+        if pm:
+            pm.mark_dirty("workspace")
         
         QMessageBox.information(self, "Success", "Outline added as a new node to the workspace!")
         self.accept()
@@ -111,8 +113,8 @@ class DeclutterSettingsDialog(QDialog):
 
         # Apply theme colors if available from parent
         try:
-            if hasattr(parent, 'main_window') and hasattr(parent.main_window, 'theme_manager'):
-                theme = parent.main_window.theme_manager.get_theme()
+            if hasattr(parent, '_ctx') and hasattr(parent._ctx, 'theme_manager') and parent._ctx.theme_manager:
+                theme = parent._ctx.theme_manager.get_theme()
                 self.setStyleSheet(f"background-color: {theme['bg_main']}; color: {theme['text_main']};")
                 self.btn_run.setStyleSheet(f"background-color: {theme['accent']}; color: white; border-radius: 4px; padding: 6px;")
                 self.btn_cancel.setStyleSheet(f"background-color: {theme['bg_panel']}; color: {theme['text_main']}; border: 1px solid {theme['border']}; border-radius: 4px; padding: 6px;")
@@ -191,7 +193,9 @@ class WeakpointsDialog(QDialog):
         
         self.workspace_view.scene_obj.addItem(node)
         self.workspace_view.nodes[node_id] = node
-        self.workspace_view.main_window.project_manager.mark_dirty("workspace")
+        pm = self.workspace_view._pm()
+        if pm:
+            pm.mark_dirty("workspace")
         
         QMessageBox.information(self, "Success", "Analysis added as a new node to the workspace!")
         self.accept()

@@ -6,8 +6,8 @@ from gui.docks.unified_research.components.dynamic_inputs import DynamicInputWid
 from gui.docks.unified_research.tabs.base_tab import BaseTab
 
 class BrainstormTab(BaseTab):
-    def __init__(self, main_window, parent=None):
-        super().__init__(main_window, target_id="brainstorm_dock", parent=parent)
+    def __init__(self, app_context, parent=None):
+        super().__init__(app_context, target_id="brainstorm_dock", parent=parent)
         self.active_blueprint = None
         self._build_ui()
         self._load_blueprint()
@@ -62,6 +62,7 @@ class BrainstormTab(BaseTab):
 
         self.input_wrapper = QFrame()
         self.input_wrapper.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        self.input_wrapper.setMinimumHeight(70)
         input_layout = QHBoxLayout(self.input_wrapper)
         input_layout.setContentsMargins(8, 8, 8, 8)
         

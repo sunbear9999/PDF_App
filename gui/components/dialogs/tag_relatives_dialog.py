@@ -7,11 +7,10 @@ from core.events.domains.document_events import AnnotationIntent, AnnotationPayl
 from gui.utils.document_helpers import active_pdf_paths
 
 class AIResultsDialog(QDialog):
-    # Added 'window_title' to handle both Tags and Opposing Views dynamically
-    def __init__(self, window_title, matches, main_window, parent=None):
+    def __init__(self, window_title, matches, app_context, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        self.main_window = main_window
+        self._ctx = app_context
         self.matches = matches
         self.bus = EventBus.get_instance()
         self.setWindowTitle(window_title)
@@ -27,8 +26,8 @@ class AIResultsDialog(QDialog):
         self.content_layout = QVBoxLayout(content_widget)
         self.content_layout.setSpacing(15)
 
-        theme = getattr(main_window, 'theme_manager', None)
-        theme_dict = theme.get_theme() if theme else {'bg_panel': '#2b2b2b', 'border': '#444', 'text_main': '#fff', 'accent': '#0078D7'}
+        tm = getattr(app_context, 'theme_manager', None) if app_context else None
+        theme_dict = tm.get_theme() if tm else {'bg_panel': '#2b2b2b', 'border': '#444', 'text_main': '#fff', 'accent': '#0078D7'}
 
         for match in matches:
             self._build_bubble(match, theme_dict)
@@ -85,7 +84,8 @@ class AIResultsDialog(QDialog):
         self.content_layout.addWidget(bubble)
 
     def _jump_to_match(self, match):
-        pdf_path = next((p for p in active_pdf_paths(self.main_window.project_manager) if os.path.basename(p) == match['doc_name']), None)
+        pm = getattr(self._ctx, 'project_manager', None) if self._ctx else None
+        pdf_path = next((p for p in active_pdf_paths(pm) if os.path.basename(p) == match['doc_name']), None) if pm else None
         if not pdf_path:
             QMessageBox.warning(self, "Error", "Document not found in project.")
             return
@@ -106,7 +106,8 @@ class AIResultsDialog(QDialog):
         note, ok = QInputDialog.getText(self, "Save Note", "Enter a note for this highlight:")
         if not ok: return
 
-        pdf_path = next((p for p in active_pdf_paths(self.main_window.project_manager) if os.path.basename(p) == match['doc_name']), None)
+        pm = getattr(self._ctx, 'project_manager', None) if self._ctx else None
+        pdf_path = next((p for p in active_pdf_paths(pm) if os.path.basename(p) == match['doc_name']), None) if pm else None
         if not pdf_path:
             QMessageBox.warning(self, "Error", "Document not found in project.")
             return

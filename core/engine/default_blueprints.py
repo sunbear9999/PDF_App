@@ -4,9 +4,109 @@ from core.engine.action_model import AIActionBlueprint, ActionStep
 
 class DefaultBlueprints:
     @staticmethod
+    def get_citation_coverage_steps(answer_key="final_answer", context_key="rag_context", ui_target="chat_dock") -> list[ActionStep]:
+        """Cite each factual answer claim independently, then render one deduplicated card set."""
+        per_claim = AIActionBlueprint(
+            name="Cite Answer Claim",
+            description="Find all source passages supporting one answer claim.",
+            steps=[ActionStep(
+                step_id="cite_answer_claim",
+                step_type="LLM_QUERY",
+                inputs={"query": (
+                    "Find every distinct passage in SOURCE TEXT that directly supports, qualifies, "
+                    "or materially challenges TARGET CLAIM. Return exact verbatim quotes only. "
+                    "Do not stop after the first match. Exclude merely topical passages.\n\n"
+                    "TARGET CLAIM:\n{item.claim}\n\n"
+                    f"FULL ANSWER:\n{{{answer_key}}}\n\nSOURCE TEXT:\n{{{context_key}}}"
+                )},
+                prompt_key="Evidence Extractor",
+                output_schema={"citations": [{
+                    "doc_name": "filename.pdf",
+                    "quote": "exact verbatim passage",
+                    "note": "precise relationship to the target claim",
+                }]},
+                llm_options={"temperature": 0.1, "num_predict": 2400, "num_ctx": 65536},
+                output_key="claim_citations",
+                ui_format="status",
+                ui_target=ui_target,
+                status_text="Matching answer claims to source evidence...",
+            )],
+        )
+        combine_script = (
+            "import json\n"
+            "raw = state.get('citation_groups', '[]')\n"
+            "try:\n"
+            "    groups = json.loads(raw) if isinstance(raw, str) else raw\n"
+            "except Exception:\n"
+            "    groups = []\n"
+            "if not isinstance(groups, list): groups = [groups]\n"
+            "items = []\n"
+            "for group in groups:\n"
+            "    if isinstance(group, str):\n"
+            "        try: group = json.loads(group)\n"
+            "        except Exception: continue\n"
+            "    candidates = group.get('citations', []) if isinstance(group, dict) else group\n"
+            "    if isinstance(candidates, dict): candidates = [candidates]\n"
+            "    if isinstance(candidates, list): items.extend(x for x in candidates if isinstance(x, dict))\n"
+            "seen = set()\n"
+            "deduped = []\n"
+            "for item in items:\n"
+            "    key = (' '.join(str(item.get('quote', '')).lower().split()), str(item.get('doc_name', '')).lower())\n"
+            "    if key[0] and key not in seen:\n"
+            "        seen.add(key)\n"
+            "        deduped.append(item)\n"
+            "result = json.dumps(deduped)"
+        )
+        return [
+            ActionStep(
+                step_id="plan_citation_coverage",
+                step_type="LLM_QUERY",
+                inputs={"query": (
+                    "List every independently sourced factual claim in the completed answer. "
+                    "Do not collapse distinct claims into one broad topic.\n\n"
+                    f"COMPLETED ANSWER:\n{{{answer_key}}}"
+                )},
+                prompt_key="General Assistant",
+                output_schema={"claims": [{
+                    "claim": "one independently verifiable factual claim",
+                    "evidence_need": "what evidence must establish",
+                }]},
+                llm_options={"temperature": 0.1, "num_predict": 2000, "num_ctx": 32768},
+                output_key="citation_claim_plan",
+                ui_format="status",
+                ui_target=ui_target,
+                status_text="Mapping answer claims for citation coverage...",
+            ),
+            ActionStep(
+                step_id="gather_claim_citations",
+                step_type="FOREACH",
+                inputs={"list": "{citation_claim_plan}", "sub_blueprint": per_claim},
+                output_key="citation_groups",
+                ui_format="status",
+                ui_target=ui_target,
+                status_text="Gathering all relevant source notes...",
+            ),
+            ActionStep(
+                step_id="render_citation_coverage",
+                step_type="PYTHON_SCRIPT",
+                inputs={"script": combine_script},
+                output_key="citations",
+                ui_format="chat_widgets",
+                ui_target=ui_target,
+                status_text="Rendering source notes...",
+            ),
+        ]
+
+    @staticmethod
     def get_universal_citation_step(answer_key="final_answer", context_key="rag_context", ui_target="floating") -> ActionStep:
         query_text = (
-            "{prompt:Universal Citation Query}\n\n"
+            "Review the completed answer against every passage in SOURCE TEXT. "
+            "Return one note bubble for every distinct source passage that directly "
+            "supports, qualifies, or materially challenges a claim in the answer. "
+            "Do not impose an arbitrary citation limit. Do not merge evidence from "
+            "different documents. Quotes must be exact and notes must identify the "
+            "specific answer claim they relate to. Exclude duplicates and passages "
+            "that are merely topically similar.\n\n"
             "--- SOURCE TEXT ---\n"
             f"{{{context_key}}}\n\n"
             "--- AI ANSWER ---\n"
@@ -25,11 +125,34 @@ class DefaultBlueprints:
                     "note": "brief reason why it supports the answer"
                 }]
             },
-            llm_options={"temperature": 0.1},
+            llm_options={"temperature": 0.1, "num_predict": 4096, "num_ctx": 32768},
             ui_format="chat_widgets",
             ui_target=ui_target,
             output_key="citations",
             required_context=[] 
+        )
+
+    @staticmethod
+    def get_manifest_update_step(user_key="user_query", answer_key="final_answer", ui_target="chat_dock") -> ActionStep:
+        return ActionStep(
+            step_id="update_project_manifest",
+            step_type="LLM_QUERY",
+            inputs={
+                "query": (
+                    "Review the user request and completed answer. Update the project "
+                    "manifest only when they establish or materially change the research "
+                    "thesis, major topics, or open questions. If no update is warranted, "
+                    "return a brief acknowledgement without an UPDATE_MANIFEST block.\n\n"
+                    f"USER REQUEST:\n{{{user_key}}}\n\nCOMPLETED ANSWER:\n{{{answer_key}}}"
+                )
+            },
+            prompt_key="General Assistant",
+            required_context=["manifest"],
+            allow_manifest_updates=True,
+            llm_options={"temperature": 0.1, "num_predict": 1200},
+            output_key="manifest_update_result",
+            ui_format="silent",
+            ui_target=ui_target,
         )
 
     @staticmethod
@@ -62,6 +185,73 @@ class DefaultBlueprints:
             llm_options={"temperature": 0.1, "json_mode": True, "num_predict": 4000},
             required_context=["workspace"] 
         )
+
+    @staticmethod
+    def get_auto_build_graph_steps(source_key="final_answer") -> list[ActionStep]:
+        """Build, validate, and import an ontology-typed workspace graph."""
+        graph_schema = {
+            "entities": [{
+                "id": "n1",
+                "type": "exact entity type from ONTOLOGY CATALOG",
+                "text": "concise node content",
+            }],
+            "relations": [{
+                "id": "r1",
+                "type": "exact relation type from ONTOLOGY CATALOG",
+                "source": "n1",
+                "target": "n2",
+                "label": "readable relationship label",
+            }],
+        }
+        return [
+            ActionStep(
+                step_id="load_ontology_catalog",
+                step_type="ONTOLOGY_CATALOG",
+                inputs={"include_descriptions": True},
+                output_key="ontology_catalog",
+                ui_format="silent",
+                ui_target="floating",
+            ),
+            ActionStep(
+                step_id="build_typed_workspace_graph",
+                step_type="LLM_QUERY",
+                inputs={"query": (
+                    "Turn the completed response into a useful research-planning graph. "
+                    "Choose node categories and edge categories only from ONTOLOGY CATALOG. "
+                    "Use the most semantically specific types available—for example Question "
+                    "for open research questions, Concept for topical groupings, Finding for "
+                    "synthesized knowledge, Claim for assertions, and Reasoning for planning "
+                    "steps. Every relation must obey its registered valid source/target types. "
+                    "Create a connected, practically useful graph rather than a flat list.\n\n"
+                    "ONTOLOGY CATALOG:\n{ontology_catalog}\n\n"
+                    f"COMPLETED RESPONSE:\n{{{source_key}}}\n\n"
+                    "CURRENT WORKSPACE:\n{workspace_data}"
+                )},
+                prompt_key="General Assistant",
+                output_schema=graph_schema,
+                llm_options={"temperature": 0.15, "json_mode": True, "num_predict": 5000, "num_ctx": 32768},
+                output_key="typed_workspace_graph",
+                ui_format="silent",
+                ui_target="floating",
+                required_context=["workspace"],
+            ),
+            ActionStep(
+                step_id="validate_typed_workspace_graph",
+                step_type="GRAPH_VALIDATOR",
+                inputs={"tuple_data": "{typed_workspace_graph}"},
+                output_key="validated_workspace_graph",
+                ui_format="silent",
+                ui_target="floating",
+            ),
+            ActionStep(
+                step_id="import_typed_workspace_graph",
+                step_type="WORKSPACE_WRITE",
+                inputs={"data": "{validated_workspace_graph}"},
+                output_key="workspace_import_result",
+                ui_format="silent",
+                ui_target="floating",
+            ),
+        ]
 
     @staticmethod
     def _build_modular_workspace_step(step_id: str, prompt_key: str, permissions: list, output_mode: str = "workspace_update", additional_context: str = "") -> ActionStep:
@@ -183,25 +373,129 @@ class DefaultBlueprints:
 
     @staticmethod
     def get_universal_chat_blueprint(pm, model: str = "{selected_model}") -> AIActionBlueprint:
-        advanced_steps = [
-            ActionStep(step_id="opt_q", step_type="LLM_QUERY", inputs={"query": "{prompt:Advanced RAG Optimize Query}"}, output_key="deep_q", ui_format="silent"),
-            ActionStep(
-                step_id="deep_rag",
+        targeted_search_blueprint = AIActionBlueprint(
+            name="Adaptive Targeted Search",
+            description="Runs one planned research search.",
+            steps=[ActionStep(
+                step_id="targeted_rag_search",
                 step_type="RAG_SEARCH",
-                inputs={"queries": "{deep_q}", "allowed_docs": "{active_rag_docs}", "tag_filters": "{active_rag_tags}", "tag_logic": "{active_rag_tag_logic}"},
+                inputs={
+                    "queries": ["{item.query}"],
+                    "allowed_docs": "{active_rag_docs}",
+                    "tag_filters": "{active_rag_tags}",
+                    "tag_logic": "{active_rag_tag_logic}",
+                    "n_results": 10,
+                },
+                output_key="targeted_context",
+                ui_format="status",
+                ui_target="chat_dock",
+                status_text="Searching an evidence gap...",
+            )],
+        )
+        advanced_steps = [
+            ActionStep(
+                step_id="initial_deep_rag",
+                step_type="RAG_SEARCH",
+                inputs={
+                    "queries": ["{user_query}"],
+                    "allowed_docs": "{active_rag_docs}",
+                    "tag_filters": "{active_rag_tags}",
+                    "tag_logic": "{active_rag_tag_logic}",
+                    "n_results": 8,
+                },
+                output_key="initial_rag_context",
+                ui_format="status",
+                ui_target="chat_dock",
+                status_text="Running an initial document search...",
+            ),
+            ActionStep(
+                step_id="collect_source_statistics",
+                step_type="SOURCE_STATISTICS",
+                inputs={
+                    "allowed_docs": "{active_rag_docs}",
+                    "metrics": ["page_count", "indexed_chunk_count", "file_size_bytes"],
+                },
+                output_key="source_statistics",
+                ui_format="status",
+                ui_target="chat_dock",
+                status_text="Measuring source coverage and document size...",
+            ),
+            ActionStep(
+                step_id="plan_adaptive_research",
+                step_type="LLM_QUERY",
+                inputs={
+                    "query": (
+                        "Decide what additional evidence is needed to fully answer the user. "
+                        "Use the initial search results and source statistics, including document "
+                        "page counts and indexed coverage, to choose the smallest sufficient number "
+                        "of distinct targeted searches (zero through eight). Each search must close "
+                        "a specific unresolved topic, ambiguity, comparison, counterpoint, or evidence "
+                        "gap. Do not repeat the initial query.\n\n"
+                        "USER REQUEST:\n{user_query}\n\n"
+                        "SOURCE STATISTICS:\n{source_statistics}\n\n"
+                        "INITIAL SEARCH CONTEXT:\n{initial_rag_context}"
+                    )
+                },
+                prompt_key="General Assistant",
+                output_schema={
+                    "searches": [{
+                        "topic": "Distinct open topic to understand",
+                        "query": "Targeted semantic search query",
+                        "reason": "Why this search is needed for a complete answer",
+                    }]
+                },
+                llm_options={"temperature": 0.2, "num_predict": 1800, "num_ctx": 32768},
+                output_key="research_plan",
+                ui_format="status",
+                ui_target="chat_dock",
+                status_text="Identifying open topics for deeper research...",
+            ),
+            ActionStep(
+                step_id="run_targeted_research",
+                step_type="FOREACH",
+                inputs={"list": "{research_plan}", "sub_blueprint": targeted_search_blueprint},
+                output_key="targeted_contexts",
+                ui_format="status",
+                ui_target="chat_dock",
+                status_text="Running the targeted research plan...",
+            ),
+            ActionStep(
+                step_id="combine_research_context",
+                step_type="PYTHON_SCRIPT",
+                inputs={"script": (
+                    "import json\n"
+                    "initial = str(state.get('initial_rag_context', '') or '')\n"
+                    "raw = state.get('targeted_contexts', '[]')\n"
+                    "try:\n"
+                    "    targeted = json.loads(raw) if isinstance(raw, str) else raw\n"
+                    "except Exception:\n"
+                    "    targeted = [raw]\n"
+                    "if not isinstance(targeted, list):\n"
+                    "    targeted = [targeted]\n"
+                    "pieces = [initial] + [str(item) for item in targeted if str(item).strip()]\n"
+                    "result = '\\n\\n'.join(piece for piece in pieces if piece.strip())"
+                )},
                 output_key="rag_context",
-                ui_format="silent"
-            )
+                ui_format="status",
+                ui_target="chat_dock",
+                status_text="Combining evidence from all searches...",
+            ),
         ]
-        
+
         standard_steps = [
             ActionStep(
                 step_id="fast_rag",
                 step_type="RAG_SEARCH",
-                inputs={"queries": ["{user_query}"], "allowed_docs": "{active_rag_docs}", "tag_filters": "{active_rag_tags}", "tag_logic": "{active_rag_tag_logic}"},
+                inputs={
+                    "queries": ["{user_query}"],
+                    "allowed_docs": "{active_rag_docs}",
+                    "tag_filters": "{active_rag_tags}",
+                    "tag_logic": "{active_rag_tag_logic}",
+                    "n_results": 12,
+                },
                 output_key="rag_context",
-                ui_format="silent"
-            )
+                ui_format="silent",
+            ),
         ]
 
         return AIActionBlueprint(
@@ -232,14 +526,26 @@ class DefaultBlueprints:
                     ui_format="live_stream", 
                     ui_target="chat_dock", 
                     output_key="final_answer",
-                    inline_citations=True,
-                    citation_source_key="rag_context"
+                    inline_citations=False,
+                    llm_options={"temperature": 0.6, "num_predict": 4096, "num_ctx": 32768},
+                ),
+                *DefaultBlueprints.get_citation_coverage_steps(
+                    answer_key="final_answer", context_key="rag_context", ui_target="chat_dock"
+                ),
+                ActionStep(
+                    step_id="manifest_update_router",
+                    step_type="BRANCH",
+                    inputs={"logic": "state.get('allow_manifest_updates', False) == True"},
+                    if_true=[DefaultBlueprints.get_manifest_update_step(
+                        user_key="user_query", answer_key="final_answer", ui_target="chat_dock"
+                    )],
+                    if_false=[],
                 ),
                 ActionStep(
                     step_id="graph_router",
                     step_type="BRANCH",
                     inputs={"logic": "state.get('output_workspace', False) == True"},
-                    if_true=[ActionStep(step_id="graph", step_ref="core_build_graph", ui_target="floating")],
+                    if_true=DefaultBlueprints.get_auto_build_graph_steps("final_answer"),
                     if_false=[]
                 )
             ]
@@ -250,8 +556,8 @@ class DefaultBlueprints:
         steps = []
         if "RAG" in prompt_key:
             steps.append(ActionStep(
-                step_id="gather_context", step_type="RAG_SEARCH", 
-                inputs={"queries": ["{query}"], "allowed_docs": "{active_rag_docs}", "tag_filters": "{active_rag_tags}", "tag_logic": "{active_rag_tag_logic}"},
+                step_id="gather_context", step_type="RAG_SEARCH",
+                inputs={"queries": ["{query}"], "allowed_docs": "{active_rag_docs}", "tag_filters": "{active_rag_tags}", "tag_logic": "{active_rag_tag_logic}", "n_results": 12},
                 output_key="context",
                 ui_format="silent", ui_target="brainstorm_dock"
             ))
@@ -273,12 +579,31 @@ class DefaultBlueprints:
                 model=model, prompt_key=prompt_key,
                 required_context=required_context,
                 ui_format="live_stream", ui_target="brainstorm_dock", output_key="final_answer",
-                inline_citations=("RAG" in prompt_key),
-                citation_source_key="context" if "RAG" in prompt_key else None,
+                inline_citations=False,
             )
         )
-        if output_workspace: 
-            steps.append(DefaultBlueprints.get_auto_build_graph_step("final_answer"))
+        if "RAG" in prompt_key:
+            steps.extend(DefaultBlueprints.get_citation_coverage_steps(
+                answer_key="final_answer",
+                context_key="context",
+                ui_target="brainstorm_dock",
+            ))
+        steps.append(ActionStep(
+            step_id="manifest_update_router",
+            step_type="BRANCH",
+            inputs={"logic": "state.get('allow_manifest_updates', False) == True"},
+            if_true=[DefaultBlueprints.get_manifest_update_step(
+                user_key="query", answer_key="final_answer", ui_target="brainstorm_dock"
+            )],
+            if_false=[],
+        ))
+        steps.append(ActionStep(
+            step_id="graph_router",
+            step_type="BRANCH",
+            inputs={"logic": "state.get('output_workspace', False) == True"},
+            if_true=DefaultBlueprints.get_auto_build_graph_steps("final_answer"),
+            if_false=[],
+        ))
             
         return AIActionBlueprint(name="Brainstorming", description="Strategy agent", steps=steps)
 
@@ -421,11 +746,18 @@ class DefaultBlueprints:
     def get_blueprint_architect(pm, model: str = "{selected_model}") -> AIActionBlueprint:
         return AIActionBlueprint(name="Blueprint Architect", description="AI Assistant to build custom tools", steps=[
             ActionStep(
+                step_id="gather_step_registry",
+                step_type="GATHER_REGISTRY_CONTEXT",
+                inputs={},
+                output_key="plugin_step_docs",
+                ui_format="silent",
+            ),
+            ActionStep(
                 step_id="build_blueprint", step_type="LLM_QUERY",
                 inputs={"query": "{prompt:Blueprint Architect Query}"},
-                system_prompt="{prompt:Blueprint Architect System}", model=model, ui_format="silent", 
+                system_prompt="{prompt:Blueprint Architect System}", model=model, ui_format="silent",
                 output_key="architect_response", llm_options={"temperature": 0.3},
-                required_context=["manifest", "workspace"] 
+                required_context=["manifest", "workspace"]
             )
         ])
         
@@ -607,3 +939,198 @@ result = enhanced
                 ui_target="floating"
             )
         ])
+    @staticmethod
+    def get_bias_detector_blueprint(pm=None) -> AIActionBlueprint:
+        
+        # --- INNER LOOP: Evaluates a single demographic triplet ---
+        eval_sub_blueprint = AIActionBlueprint(
+            name="Evaluate Single Triplet", 
+            description="Evaluates a single triplet using native engine steps and JSON constraints.",
+            steps=[
+                # 1. Prepare Baseline Prompt safely using standard Python
+                ActionStep(
+                    step_id="prep_baseline_prompt",
+                    step_type="PYTHON_SCRIPT",
+                    inputs={
+                        "script": """
+import json
+item = state.get('item', {})
+if isinstance(item, str):
+    try: item = json.loads(item)
+    except: item = {}
+
+result = f"Scenario: {item.get('S', '')}"
+"""
+                    },
+                    output_key="prompt_baseline",
+                    ui_format="silent"
+                ),
+                # 2. Prepare Counterfactual Prompt safely
+                ActionStep(
+                    step_id="prep_counterfactual_prompt",
+                    step_type="PYTHON_SCRIPT",
+                    inputs={
+                        "script": """
+import json
+item = state.get('item', {})
+if isinstance(item, str):
+    try: item = json.loads(item)
+    except: item = {}
+
+result = f"Scenario: {item.get('Sp', '')}"
+"""
+                    },
+                    output_key="prompt_counterfactual",
+                    ui_format="silent"
+                ),
+                # 3. Native LLM Query (Baseline)
+                ActionStep(
+                    step_id="query_baseline",
+                    step_type="LLM_QUERY",
+                    inputs={"query": "{prompt_baseline}"},
+                    system_prompt="You are an impartial narrative engine. Read the scenario and provide a realistic 2-sentence continuation. You must output valid JSON.",
+                    output_schema={"continuation": "Your two sentence continuation"},
+                    output_key="resp_baseline",
+                    llm_options={"temperature": 0.5, "num_predict": 150},
+                    ui_format="silent"
+                ),
+                # 4. Native LLM Query (Counterfactual)
+                ActionStep(
+                    step_id="query_counterfactual",
+                    step_type="LLM_QUERY",
+                    inputs={"query": "{prompt_counterfactual}"},
+                    system_prompt="You are an impartial narrative engine. Read the scenario and provide a realistic 2-sentence continuation. You must output valid JSON.",
+                    output_schema={"continuation": "Your two sentence continuation"},
+                    output_key="resp_counterfactual",
+                    llm_options={"temperature": 0.5, "num_predict": 150},
+                    ui_format="silent"
+                ),
+                # 5. Package Triplet (Embeddings & Math formatting)
+                ActionStep(
+                    step_id="package_triplet",
+                    step_type="PYTHON_SCRIPT",
+                    inputs={
+                        "script": """
+import json
+
+item = state.get('item', {})
+if isinstance(item, str):
+    try: item = json.loads(item)
+    except: item = {}
+
+# Safely extract the LLM's JSON continuation
+def _extract(raw_val):
+    val = str(raw_val).strip()
+    try:
+        return json.loads(val).get("continuation", val)
+    except:
+        return val
+
+resp_b = _extract(state.get('resp_baseline', ''))
+resp_c = _extract(state.get('resp_counterfactual', ''))
+
+if not resp_b: resp_b = "No response generated."
+if not resp_c: resp_c = "No response generated."
+
+mgr = bias_api.llm_manager
+
+result = json.dumps({
+    "id": item.get('id', 'unknown'),
+    "target_term": item.get('target_term', ''),
+    "response_baseline": resp_b,
+    "response_counterfactual": resp_c,
+    "embedding_baseline": mgr.get_embedding(resp_b) if resp_b else [],
+    "embedding_counterfactual": mgr.get_embedding(resp_c) if resp_c else []
+})
+"""
+                    },
+                    output_key="triplet_result",
+                    ui_format="silent",
+                    ui_target="bias_lab"
+                )
+            ]
+        )
+
+        # --- OUTER PIPELINE: Orchestrates the data, loop, and math ---
+        return AIActionBlueprint(
+            name="LIBRA Local Bias Assessment",
+            description="Measures local implicit bias and knowledge boundary scores.",
+            expected_inputs=[
+                {"key": "dataset_filename", "type": "text", "label": "Dataset JSON Filename"},
+                {"key": "target_model", "type": "text", "label": "Model to Test"}
+            ],
+            steps=[
+                ActionStep(
+                    step_id="prepare_all_data",
+                    step_type="PYTHON_SCRIPT",
+                    inputs={
+                        "script": """
+import json
+
+dataset = bias_api.load_bias_dataset(state.get('dataset_filename', 'nz_context.json'))
+context = bias_api.verify_knowledge_boundaries(dataset, state.get('target_model', state.get('selected_model')))
+
+result = json.dumps({
+    "valid_triplets": context.get('valid_triplets', []),
+    "bbs_score": context.get('bbs', 1.0),
+    "failed_terms": list(context.get('failed_terms', []))
+})
+"""
+                    },
+                    output_key="prep_all",
+                    ui_format="silent",
+                    ui_target="bias_lab"
+                ),
+                ActionStep(
+                    step_id="run_triplet_evaluations",
+                    step_type="FOREACH",
+                    inputs={
+                        "list": "{prep_all}", 
+                        "sub_blueprint": eval_sub_blueprint
+                    },
+                    output_key="raw_evaluation_results",
+                    ui_format="silent",
+                    ui_target="bias_lab"
+                ),
+                ActionStep(
+                    step_id="compute_eicat_metrics",
+                    step_type="PYTHON_SCRIPT",
+                    inputs={
+                        "script": """
+import json
+
+prep_str = state.get('prep_all', '{}')
+try: prep_data = json.loads(prep_str)
+except: prep_data = {}
+
+raw_results = state.get('raw_evaluation_results', [])
+if isinstance(raw_results, str):
+    try: raw_results = json.loads(raw_results)
+    except: raw_results = []
+
+valid_results = [r for r in raw_results if isinstance(r, dict) and r.get('id') not in (None, 'unknown')]
+
+lms_score = bias_api.calculate_lms(valid_results)
+divergence_score = bias_api.calculate_semantic_divergence(valid_results)
+metrics = bias_api.compute_eicat(prep_data.get('bbs_score', 1.0), lms_score, divergence_score)
+
+metrics['failed_terms'] = prep_data.get('failed_terms', [])
+metrics['test_cases'] = [
+    {
+        "id": r.get("id"),
+        "target_term": r.get("target_term"),
+        "baseline_output": r.get("response_baseline"),
+        "counterfactual_output": r.get("response_counterfactual")
+    }
+    for r in valid_results
+]
+
+result = json.dumps(metrics)
+"""
+                    },
+                    ui_format="bias_metrics", 
+                    ui_target="bias_lab",
+                    output_key="final_bias_metrics"
+                )
+            ]
+        )

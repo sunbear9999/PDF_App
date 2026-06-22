@@ -2,26 +2,30 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QTextEdit
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QCursor
 from gui.components.base import BaseCard
+from html import escape
 
 
 class NoteBubbleWidget(BaseCard):
     save_requested = Signal(str, str, str) # quote, note, doc_name
     jump_requested = Signal(str, str)      # doc_name, quote
+    source_jump_requested = Signal(dict)
     search_requested = Signal(str)         # quote (for finding similar context)
 
-    def __init__(self, doc_name, quote, note="", theme=None, parent=None):
+    def __init__(self, doc_name, quote, note="", theme=None, parent=None, source_meta=None):
         super().__init__(theme=theme, accent_color=(theme or {}).get("accent", "#b366ff"), parent=parent)
         self.doc_name = doc_name
         self.quote = quote
         self.current_note = note
+        self.source_meta = source_meta or {}
 
         self.setObjectName("UniversalNoteBubble")
 
         # Header: Document Name
-        self.lbl_doc = self.add_title(f"<b>📄 {doc_name}</b>")
+        icon = "🎬" if self.source_meta.get("source_type") == "video" else "📄"
+        self.lbl_doc = self.add_title(f"<b>{icon} {escape(str(doc_name))}</b>")
 
         # Body: The Exact Quote (Styled as a blockquote)
-        self.lbl_quote = self.add_body_text(f"<i>\"{quote}\"</i>", muted=True)
+        self.lbl_quote = self.add_body_text(f"<i>\"{escape(str(quote))}\"</i>", muted=True)
         self.lbl_quote.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
         # Editable Note Area
@@ -41,7 +45,7 @@ class NoteBubbleWidget(BaseCard):
 
         self.btn_jump = QPushButton("🔗 Jump to Source")
         self.btn_jump.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.btn_jump.clicked.connect(lambda: self.jump_requested.emit(self.doc_name, self.quote))
+        self.btn_jump.clicked.connect(self._emit_jump)
 
         self.btn_similar = QPushButton("🔍 Find Similar")
         self.btn_similar.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -54,6 +58,12 @@ class NoteBubbleWidget(BaseCard):
 
         self.body_layout.addLayout(toolbar)
         self.update_theme(self.theme)
+
+    def _emit_jump(self):
+        if self.source_meta.get("source_type") == "video":
+            self.source_jump_requested.emit(dict(self.source_meta))
+        else:
+            self.jump_requested.emit(self.doc_name, self.quote)
 
     def update_theme(self, theme):
         super().update_theme(theme)

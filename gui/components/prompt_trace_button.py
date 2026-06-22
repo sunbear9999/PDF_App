@@ -3,11 +3,11 @@ from gui.managers.dialog_manager import exec_as_modal, get_for_widget
 
 
 class PromptTraceButton(QPushButton):
-    def __init__(self, trace_id=None, trace_record=None, main_window=None, theme=None, parent=None):
+    def __init__(self, trace_id=None, trace_record=None, app_context=None, theme=None, parent=None):
         super().__init__("Trace", parent)
         self.trace_id = trace_id
         self.trace_record = trace_record
-        self.main_window = main_window
+        self._ctx = app_context
         self.theme = theme or {}
         self.setToolTip("View prompt trace")
         self.setFixedHeight(24)
@@ -46,25 +46,35 @@ class PromptTraceButton(QPushButton):
             }}
         """)
 
-    def _resolve_main_window(self):
-        if self.main_window and hasattr(self.main_window, "prompt_manager"):
-            return self.main_window
+    def _resolve_app_context(self):
+        if self._ctx:
+            return self._ctx
+        for candidate in (self.window(), QApplication.activeWindow()):
+            if candidate and hasattr(candidate, "app_context"):
+                return candidate.app_context
+        return None
+
+    def _resolve_prompt_manager(self):
+        ctx = self._resolve_app_context()
+        if ctx and getattr(ctx, 'prompt_manager', None):
+            return ctx.prompt_manager
         window = self.window()
         if window and hasattr(window, "prompt_manager"):
-            return window
+            return window.prompt_manager
         active = QApplication.activeWindow()
         if active and hasattr(active, "prompt_manager"):
-            return active
+            return active.prompt_manager
         return None
 
     def open_trace(self):
-        main_window = self._resolve_main_window()
-        if not main_window or not (self.trace_id or self.trace_record):
+        pm = self._resolve_prompt_manager()
+        if not pm or not (self.trace_id or self.trace_record):
             return
         from gui.components.dialogs.prompt_editor_dialog import PromptEditorDialog
         dialog = PromptEditorDialog(
-            main_window.prompt_manager,
-            main_window,
+            pm,
+            self.window(),
+            app_context=self._resolve_app_context(),
             trace_id=self.trace_id,
             trace_record=self.trace_record,
         )

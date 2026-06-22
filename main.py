@@ -42,29 +42,43 @@ if getattr(sys, 'frozen', False) and len(sys.argv) > 1 and sys.argv[1] == "--run
 
 def global_exception_handler(exc_type, exc_value, exc_traceback):
     """
-    A universal safety net for the application. 
+    A universal safety net for the application.
     Intercepts unhandled exceptions before they crash the app.
     """
+    import datetime
     error_msg = str(exc_value)
-    
+
     # Check if this is the notorious PyQt C++ deletion error
     if issubclass(exc_type, RuntimeError) and "wrapped C/C++ object" in error_msg:
         print(f"🛡️ [Global Error Handler] Caught deleted C++ object access. Ignoring safely: {error_msg}")
         return
-        
+
+    tb_text = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+
     print("\n--- UNHANDLED EXCEPTION ---", file=sys.stderr)
-    traceback.print_exception(exc_type, exc_value, exc_traceback)
+    print(tb_text, file=sys.stderr)
     print("---------------------------\n", file=sys.stderr)
-    
+
+    # Always log to file so it's visible even when not launched from terminal
+    try:
+        log_path = os.path.join(os.path.expanduser("~"), ".papyrus_data", "crash.log")
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"\n[{datetime.datetime.now().isoformat()}]\n")
+            f.write(tb_text)
+            f.write("\n")
+    except Exception:
+        pass
+
     # Attempt to show a critical error dialog instead of just crashing silently
     try:
         app = QApplication.instance()
         if app:
             msg = QMessageBox()
             msg.setIcon(QMessageBox.Icon.Critical)
-            msg.setWindowTitle("Critical Error")
-            msg.setText("An unexpected error occurred. The application will try to continue.")
-            msg.setDetailedText("".join(traceback.format_exception(exc_type, exc_value, exc_traceback)))
+            msg.setWindowTitle("Papyrus — Critical Error")
+            msg.setText("An unexpected error occurred. The application will try to continue.\n\nFull error saved to: ~/.papyrus_data/crash.log")
+            msg.setDetailedText(tb_text)
             msg.exec()
     except Exception:
         pass # If the UI is completely dead, just pass to system handler
@@ -81,6 +95,7 @@ def main():
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
     
     app = QApplication(sys.argv)
+    app.setApplicationName("Papyrus")
     app.setWindowIcon(QIcon("icon.png"))
     app.setStyle("Fusion")
     theme_manager = ThemeManager()

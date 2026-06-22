@@ -8,7 +8,7 @@ from PySide6.QtGui import QShortcut, QKeySequence
 from PySide6.QtCore import Qt, QSettings, QTimer
 
 from core.engine.ui_router import BlueprintUIRouter
-from gui.components.pdf_viewer import PDFViewer
+from gui.components.source_viewer_host import SourceViewerHost
 from gui.components.process_monitor import ProcessMonitorWidget
 from gui.theme.theme import ThemeManager
 from gui.components.dialogs.prompt_editor_dialog import PromptEditorDialog
@@ -77,12 +77,14 @@ class MainWindow(QMainWindow):
             event_bus=self.bus,
             parent=self,
         )
+        self.app_context.workspace_annotation_service = self.workspace_annotation_service
+        self.app_context.workspace_ai_service = self.workspace_ai_service
         self.workspace_ai_service.error.connect(lambda msg: QMessageBox.warning(self, "AI Error", msg))
 
         from core.services.gui_bridge.ai_bootstrap_service import AIBootstrapService
         self.ai_bootstrap_service = AIBootstrapService(self)
 
-        self.viewer = PDFViewer()
+        self.viewer = SourceViewerHost(app_context=self.app_context)
 
 
         # 3. CONFIGURE DOCKS
@@ -102,7 +104,7 @@ class MainWindow(QMainWindow):
 
 
         # 6. BUILD UI
-        self.process_monitor = ProcessMonitorWidget(self.process_registry, self.theme_manager.get_theme(), self)
+        self.process_monitor = ProcessMonitorWidget(self.process_registry, self.theme_manager.get_theme(), app_context=self.app_context, parent=self)
         self.top_toolbar = MainToolbar(self)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.top_toolbar)
         from gui.managers.workspace_builder import WorkspaceBuilder
@@ -137,7 +139,7 @@ class MainWindow(QMainWindow):
         # DELAY THE STARTUP: Wait 50ms for the 0x0 window to physically draw on screen
         # before attempting to calculate tabbed dock layouts.
         QTimer.singleShot(50, self._run_startup_sequence)
-        self.universal_overlay = UniversalInternalOverlay(self, self.theme_manager.get_theme())
+        self.universal_overlay = UniversalInternalOverlay(self.app_context, self.theme_manager.get_theme(), self)
         self.ui_router = BlueprintUIRouter(self)
         self.ui_router.register_target("floating", self.universal_overlay)
 
@@ -146,6 +148,10 @@ class MainWindow(QMainWindow):
         self.app_context.theme_manager = self.theme_manager
         self.app_context.viewer = self.viewer
         self.app_context.dialog_manager = self.dialog_manager
+        self.app_context.dock_manager = self.dock_manager
+        self.app_context.workspace_annotation_service = self.workspace_annotation_service
+        self.app_context.workspace_ai_service = self.workspace_ai_service
+        self.app_context.active_model = self._get_active_ai_model()
         # plugin_extension_registry is already set from from_core(), but sync it in case
         # plugins registered dock specs before app_context was created
         if not self.app_context.plugin_extension_registry:
@@ -224,6 +230,9 @@ class MainWindow(QMainWindow):
         from gui.components.toast_manager import ToastManager
         self._toast_manager = ToastManager(self)
         self.bus.plugin_notification_requested.connect(self._toast_manager._on_notification)
+
+        # Source evaluation — show the metadata prompt dialog on the main thread
+        self.bus.source_eval_state_changed.connect(self._on_source_eval_state_changed)
 
         # Plugin lifecycle: sweep widgets when a plugin is unloaded (hot-reload)
         self.bus.plugin_unloaded.connect(self.dock_manager.remove_plugin_docks)
@@ -315,8 +324,22 @@ class MainWindow(QMainWindow):
         reg.register_resolver(
             "dock.research.blueprint_editor",
             lambda: getattr(_research(), "tab_editor", None),
-            topic_id="core.workflow.builder",
+            topic_id="core.blueprint.overview",
         )
+
+    def show_source_viewer(self) -> None:
+        dock = getattr(self, "pdf_dock", None)
+        if dock:
+            dock.show()
+            dock.raise_()
+
+    def toggle_source_viewer(self) -> None:
+        dock = getattr(self, "pdf_dock", None)
+        if not dock:
+            return
+        dock.setVisible(not dock.isVisible())
+        if dock.isVisible():
+            dock.raise_()
 
     def _halt_pdf_viewer(self, path):
         """Called by ProjectManager before saving the active PDF to stop the render worker."""
@@ -386,6 +409,28 @@ class MainWindow(QMainWindow):
         x = available.x() + (available.width() - width) // 2
         y = available.y() + (available.height() - height) // 2
         self.setGeometry(x, y, width, height)
+
+    def _on_source_eval_state_changed(self, event, payload) -> None:
+        from core.events.domains.evaluation_events import SourceEvalEvent
+        if event != SourceEvalEvent.METADATA_REQUESTED:
+            return
+        from gui.components.dialogs.metadata_request_dialog import MetadataRequestDialog
+        theme = None
+        try:
+            theme = self.theme_manager.get_theme()
+        except Exception:
+            pass
+        dlg = MetadataRequestDialog(
+            pdf_path=getattr(payload, "pdf_path", ""),
+            correlation_id=getattr(payload, "correlation_id", ""),
+            missing_fields=getattr(payload, "missing_fields", []),
+            prefill_doi=getattr(payload, "doi", None),
+            prefill_journal=getattr(payload, "journal", None),
+            theme=theme,
+            parent=self,
+        )
+        from gui.managers.dialog_manager import exec_as_modal
+        exec_as_modal(dlg)
 
     def _register_plugin_themes(self, plugin_id: str = "") -> None:
         """Re-register plugin themes from the extension registry (called after hot-reload)."""
@@ -457,7 +502,7 @@ class MainWindow(QMainWindow):
             PromptEditorDialog,
             key="prompt_editor",
             singleton=True,
-            factory=lambda: PromptEditorDialog(self.prompt_manager, self),
+            factory=lambda: PromptEditorDialog(self.prompt_manager, self, app_context=self.app_context),
         )
 
     def _open_tag_manager(self):

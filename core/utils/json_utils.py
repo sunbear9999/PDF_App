@@ -2,6 +2,62 @@
 import json
 import re
 
+
+def strip_tagged_block(raw_text: str, tag_name: str) -> str:
+    """Remove machine-readable XML-style blocks from user-visible text."""
+    if not isinstance(raw_text, str):
+        return raw_text
+    return re.sub(
+        rf"\s*<\s*{re.escape(tag_name)}\s*>.*?</\s*{re.escape(tag_name)}\s*>\s*",
+        "\n",
+        raw_text,
+        flags=re.DOTALL | re.IGNORECASE,
+    ).strip()
+
+
+class TaggedBlockStreamFilter:
+    """Incrementally hide tagged protocol data without leaking partial tags."""
+
+    def __init__(self, tag_name: str):
+        self.start_tag = f"<{tag_name}>"
+        self.end_tag = f"</{tag_name}>"
+        self._buffer = ""
+        self._hidden = False
+
+    @staticmethod
+    def _partial_prefix_length(text: str, marker: str) -> int:
+        limit = min(len(text), len(marker) - 1)
+        for size in range(limit, 0, -1):
+            if text.endswith(marker[:size]):
+                return size
+        return 0
+
+    def feed(self, chunk: str) -> str:
+        self._buffer += chunk or ""
+        visible = []
+        while self._buffer:
+            marker = self.end_tag if self._hidden else self.start_tag
+            index = self._buffer.find(marker)
+            if index >= 0:
+                if not self._hidden:
+                    visible.append(self._buffer[:index])
+                self._buffer = self._buffer[index + len(marker):]
+                self._hidden = not self._hidden
+                continue
+
+            keep = self._partial_prefix_length(self._buffer, marker)
+            safe = self._buffer[:-keep] if keep else self._buffer
+            if not self._hidden:
+                visible.append(safe)
+            self._buffer = self._buffer[-keep:] if keep else ""
+            break
+        return "".join(visible)
+
+    def flush(self) -> str:
+        visible = "" if self._hidden else self._buffer
+        self._buffer = ""
+        return visible
+
 def extract_and_heal_json(raw_text: str) -> tuple[bool, dict | list | str]:
     """
     Attempts to extract and parse JSON from a raw LLM output string.
@@ -59,14 +115,13 @@ def extract_json_from_tags(raw_text: str, tag_name: str) -> tuple[bool, dict | l
     """
     Extracts JSON wrapped in specific XML-style tags, ignoring all outside text.
     """
-    start_tag = f"<{tag_name}>"
-    end_tag = f"</{tag_name}>"
-    
-    start_idx = raw_text.find(start_tag)
-    end_idx = raw_text.find(end_tag)
-    
-    if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-        content = raw_text[start_idx + len(start_tag):end_idx]
-        return extract_and_heal_json(content)
+    if isinstance(raw_text, str):
+        match = re.search(
+            rf"<\s*{re.escape(tag_name)}\s*>(.*?)</\s*{re.escape(tag_name)}\s*>",
+            raw_text,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        if match:
+            return extract_and_heal_json(match.group(1))
         
     return False, raw_text

@@ -1,7 +1,7 @@
 import json
 
 from core.utils.citation_utils import extract_inline_citations, strip_inline_citation_block
-from core.utils.json_utils import extract_and_heal_json
+from core.utils.json_utils import extract_and_heal_json, strip_tagged_block
 
 
 RESTORABLE_UI_FORMATS = {
@@ -11,6 +11,7 @@ RESTORABLE_UI_FORMATS = {
     "card_grid",
     "nested_outline",
     "search_terms",
+    "bias_metrics",
 }
 
 
@@ -55,6 +56,8 @@ def build_ui_payloads(ui_format, result_str, *, step=None, trace_id=None, title=
 
     elif ui_format == "chat_widgets":
         success, items = extract_and_heal_json(result_str)
+        if not success:
+            success, items = extract_inline_citations(result_str)
         if success:
             payloads.append({
                 "type": "citation_cards",
@@ -63,6 +66,7 @@ def build_ui_payloads(ui_format, result_str, *, step=None, trace_id=None, title=
             })
 
     elif ui_format == "live_stream":
+        result_str = strip_tagged_block(result_str, "UPDATE_MANIFEST")
         should_extract = getattr(step, "inline_citations", False) if step is not None else True
         success, citations = extract_inline_citations(result_str) if should_extract else (False, [])
         text = strip_inline_citation_block(result_str) if success else result_str
@@ -73,6 +77,12 @@ def build_ui_payloads(ui_format, result_str, *, step=None, trace_id=None, title=
                 "items": citations,
                 "trace_id": trace_id,
             })
+    elif ui_format == "bias_metrics":
+        success, parsed_data = extract_and_heal_json(result_str)
+        payloads.append({
+            "type": "bias_metrics",
+            "metrics": parsed_data if success else {}
+        })
 
     if trace_id and ui_format in {"live_stream", "chat_widgets"}:
         payloads.append({"type": "prompt_trace_available", "trace_id": trace_id})

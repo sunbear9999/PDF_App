@@ -9,6 +9,8 @@ class TagAppService(QObject):
         self.bus.tag_action_requested.connect(self._handle_intent)
 
     def list_pdf_paths(self) -> list:
+        if hasattr(self.pm, "list_sources"):
+            return [s.get("path") for s in self.pm.list_sources() if s.get("path")]
         return list(getattr(self.pm, "pdfs", []) or [])
 
     def _handle_intent(self, intent: TagIntent, payload: TagPayload):

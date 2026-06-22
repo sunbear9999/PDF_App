@@ -34,6 +34,9 @@ class ProcessRegistry(QObject):
         self.pending_queue = []
         self.express_jobs = []  # <-- NEW TRACKER FOR CONCURRENT JOBS
         self.recent_jobs = []
+        # Keep QThread wrappers alive until Qt has emitted finished on the UI
+        # thread. Dropping the last wrapper while run() is unwinding is fatal.
+        self._retiring_runners = set()
 
     def enqueue_runner(self, runner, job_name, job_type="Agent", is_express=False):
         """Takes an instantiated MasterActionRunner, assigns it a job, and queues or runs it."""
@@ -91,6 +94,9 @@ class ProcessRegistry(QObject):
         runner = getattr(job, "runner", None)
         if runner is None:
             return
+        if runner.isRunning():
+            self._retiring_runners.add(runner)
+            runner.finished.connect(self._release_finished_runners)
         for signal_name in (
             "progress_update", "step_started", "step_complete",
             "action_complete", "error", "state_snapshot", "user_input_requested",
@@ -102,6 +108,11 @@ class ProcessRegistry(QObject):
                 except RuntimeError:
                     pass
         job.runner = None
+
+    def _release_finished_runners(self):
+        self._retiring_runners = {
+            runner for runner in self._retiring_runners if runner.isRunning()
+        }
 
     def complete_job(self, job_id):
         if self.active_job and self.active_job.id == job_id:
@@ -140,6 +151,9 @@ class ProcessRegistry(QObject):
         for i, job in enumerate(self.express_jobs):
             if job.id == job_id:
                 job.kill()
+                if job.runner and job.runner.isRunning():
+                    self._retiring_runners.add(job.runner)
+                    job.runner.finished.connect(self._release_finished_runners)
                 self.express_jobs.pop(i)
                 self.job_removed.emit(job_id)
                 return
@@ -169,7 +183,11 @@ class ProcessRegistry(QObject):
     def kill_all(self):
         if self.active_job: self.active_job.kill()
         for job in self.pending_queue: job.kill()
-        for job in self.express_jobs: job.kill()
+        for job in self.express_jobs:
+            job.kill()
+            if job.runner and job.runner.isRunning():
+                self._retiring_runners.add(job.runner)
+                job.runner.finished.connect(self._release_finished_runners)
         self.pending_queue.clear()
         self.express_jobs.clear()
         self.queue_updated.emit()

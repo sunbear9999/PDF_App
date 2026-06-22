@@ -34,11 +34,13 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, Optional, Union, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from core.project_manager import ProjectManager
     from core.llm_manager import LocalLLMManager
+    from core.engine.execution_result import ExecutionResult
+    from core.engine.workflow_step_api import WorkflowStepAPI
 
 
 @dataclass
@@ -47,12 +49,28 @@ class StepContext:
 
     Provides access to the project database, LLM, and the current workflow
     state.  Do not store references to this object across calls.
+
+    All fields added after the original four are Optional and default to None
+    so that existing plugin steps that construct StepContext directly remain
+    unaffected.
     """
 
+    # ---- original fields (DO NOT reorder — positional compat) ----
     project_manager: "Optional[ProjectManager]" = None
     llm_manager: "Optional[LocalLLMManager]" = None
     state: Dict[str, Any] = field(default_factory=dict)
     abort_check: Optional[Callable[[], bool]] = None
+
+    # ---- enriched fields (Phase A1) ----
+    api: "Optional[WorkflowStepAPI]" = None         # sandbox API for PYTHON_SCRIPT
+    prompt_manager: Optional[Any] = None            # PromptManager for {prompt:Key} resolution
+    ontology_registry: Optional[Any] = None         # OntologyRegistry for graph-aware steps
+    trace_id: Optional[str] = None                  # propagated to ui_payloads for trace linking
+    node_type_registry: Optional[Any] = None        # BlueprintNodeTypeRegistry (meta-steps)
+    # pause primitives forwarded from the runner for USER_INPUT / AWAIT_EVENT steps
+    _pause_mutex: Optional[Any] = None              # QMutex
+    _wait_condition: Optional[Any] = None           # QWaitCondition
+    _user_response_holder: Optional[list] = None    # [response_value] single-element list
 
     def is_aborted(self) -> bool:
         """Return True if the running workflow job has been cancelled."""
@@ -86,14 +104,15 @@ class CustomExecutionStep(ABC):
     plugin_id: str = ""
 
     @abstractmethod
-    def execute(self, context: StepContext, inputs: dict) -> dict:
+    def execute(self, context: StepContext, inputs: dict) -> "Union[dict, ExecutionResult]":
         """Execute the step.
 
         Runs inside a QThread (background).  Must be thread-safe.
         Check ``context.is_aborted()`` periodically for cancellation.
 
-        :param context: Workflow context (project, LLM, state).
+        :param context: Workflow context (project, LLM, state, optional services).
         :param inputs: Resolved input values for this step invocation.
-        :returns: Dict of outputs; the value stored in workflow state is
-                  determined by the step's ``output_key`` field.
+        :returns: Either a plain dict (legacy — wrapped by the runner shim) or a
+                  fully structured ExecutionResult.  New step implementations should
+                  always return ExecutionResult.
         """

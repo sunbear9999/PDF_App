@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import copy
+import re
 import uuid
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from core.models.data_dock_models import ChartConfig, DataGridState, DataProvenance, utc_now_iso
 from core.registries.data_provider_registry import DataProviderRegistry
+from core.events.domains.project_events import ProjectIntent
 
 
 class DataDockService:
@@ -15,6 +17,12 @@ class DataDockService:
         self.bus = event_bus
         self._open: Dict[str, DataGridState] = {}
         self._active_dataset_id: Optional[str] = None
+        if self.bus is not None and hasattr(self.bus, "project_action_requested"):
+            self.bus.project_action_requested.connect(self._handle_project_intent)
+
+    def _handle_project_intent(self, intent, payload) -> None:
+        if intent == ProjectIntent.FLUSH_UI_STATES:
+            self.save_all_open_datasets()
 
     def clear_memory(self) -> None:
         self._open.clear()
@@ -59,10 +67,14 @@ class DataDockService:
         context = self._payload_value(selection_payload, "context", {}) or {}
         provenance = DataProvenance(
             source_pdf_id=self._payload_value(selection_payload, "source_id", None) or context.get("source_id"),
+            source_id=self._payload_value(selection_payload, "source_id", None) or context.get("source_id"),
+            source_path=self._payload_value(selection_payload, "path", None) or context.get("doc_path") or context.get("pdf_path"),
+            source_type=context.get("source_type") or "pdf",
             pdf_path=self._payload_value(selection_payload, "path", None) or context.get("doc_path") or context.get("pdf_path"),
             page_number=context.get("page_num"),
             bounding_box_coordinates=context.get("rects") or [],
             selection_text=self._payload_value(selection_payload, "text", "") or "",
+            selection_ref=context.get("selection_ref"),
         )
         matrix = context.get("matrix") or self._matrix_from_words(context.get("words") or [], lax=True)
         state = self._state_from_matrix(matrix, "Extracted Dataset", provenance.page_number or 0, provenance.pdf_path or "", provenance.bounding_box_coordinates[0] if provenance.bounding_box_coordinates else None)
@@ -97,6 +109,33 @@ class DataDockService:
         saved = self.project_manager.save_data_dock_dataset(state)
         self._track(saved)
         return saved
+
+    def save_all_open_datasets(self) -> List[DataGridState]:
+        if not self.project_manager or not hasattr(self.project_manager, "save_data_dock_dataset"):
+            return list(self._open.values())
+        saved_states: List[DataGridState] = []
+        for dataset_id in list(self._open.keys()):
+            state = self._open.get(dataset_id)
+            if not state:
+                continue
+            if state.dirty or not state.is_persisted:
+                saved = self.save_dataset(dataset_id)
+                if saved:
+                    saved_states.append(saved)
+            else:
+                saved_states.append(state)
+        return saved_states
+
+    def rename_dataset(self, dataset_id: str, name: str, save: bool = False) -> Optional[DataGridState]:
+        state = self._open.get(dataset_id) or self.load_dataset(dataset_id)
+        if not state:
+            return None
+        state.name = (name or state.name).strip() or state.name
+        state.version += 1
+        state.dirty = True
+        state.updated_at = utc_now_iso()
+        self._record_history(state, "rename_dataset", {"name": state.name})
+        return self.save_dataset(dataset_id) if save and state.is_persisted else state
 
     def save_dataset_as(self, source_dataset_id: str, name: str) -> Optional[DataGridState]:
         source = self._open.get(source_dataset_id) or self.load_dataset(source_dataset_id)
@@ -163,6 +202,33 @@ class DataDockService:
         state.updated_at = utc_now_iso()
         return state
 
+    def update_cell(self, dataset_id: str, row: int, column: int, value: Any) -> Optional[DataGridState]:
+        state = self._open.get(dataset_id)
+        if not state or row < 0 or column < 0:
+            return None
+        self._ensure_shape(state, row + 1, column + 1)
+        state.rows[row][column] = "" if value is None else str(value)
+        state.version += 1
+        state.dirty = True
+        state.updated_at = utc_now_iso()
+        return state
+
+    def update_header(self, dataset_id: str, orientation: str, index: int, value: Any) -> Optional[DataGridState]:
+        state = self._open.get(dataset_id)
+        if not state or index < 0:
+            return None
+        text = "" if value is None else str(value)
+        if orientation == "column":
+            self._ensure_shape(state, len(state.rows), index + 1)
+            state.headers[index] = text or f"Column {index + 1}"
+        else:
+            self._ensure_shape(state, index + 1, len(state.headers))
+            state.row_headers[index] = text or str(index + 1)
+        state.version += 1
+        state.dirty = True
+        state.updated_at = utc_now_iso()
+        return state
+
     def transpose(self, dataset_id: str) -> Optional[DataGridState]:
         state = self._open.get(dataset_id)
         if not state:
@@ -195,21 +261,374 @@ class DataDockService:
         headers = [state.headers[idx] for idx in keep_cols]
         cleaned_rows = [[row[idx] if idx < len(row) else "" for idx in keep_cols] for row in rows]
         column_types = {h: t for h, t in state.column_types.items() if h in headers}
-        return self.update_grid(dataset_id, headers, cleaned_rows, column_types, row_headers=row_headers)
+        updated = self.update_grid(dataset_id, headers, cleaned_rows, column_types, row_headers=row_headers)
+        if updated:
+            self._record_history(updated, "drop_empty", {})
+        return updated
 
     def selection_summary(self, values: Iterable[Any]) -> Dict[str, Any]:
-        nums = []
+        nums: List[float] = []
+        total_values = 0
         for value in values:
-            try:
-                nums.append(float(str(value).replace(",", "").replace("$", "").replace("%", "")))
-            except Exception:
-                pass
+            total_values += 1
+            parsed = self.coerce_number(value)
+            if parsed is not None:
+                nums.append(parsed)
         total = sum(nums)
         return {
+            "count": total_values,
+            "numeric_count": len(nums),
             "sum": total,
             "average": total / len(nums) if nums else 0,
-            "count": len(nums),
+            "min": min(nums) if nums else None,
+            "max": max(nums) if nums else None,
         }
+
+    def coerce_number(self, value: Any) -> Optional[float]:
+        text = str(value if value is not None else "").strip()
+        if not text:
+            return None
+        negative = text.startswith("(") and text.endswith(")")
+        if negative:
+            text = text[1:-1].strip()
+        text = text.replace(",", "").replace("$", "").replace("€", "").replace("£", "")
+        is_percent = text.endswith("%")
+        if is_percent:
+            text = text[:-1].strip()
+        text = re.sub(r"\s+", "", text)
+        if not re.fullmatch(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)", text):
+            return None
+        try:
+            number = float(text)
+        except Exception:
+            return None
+        if negative:
+            number = -abs(number)
+        return number
+
+    def trim_whitespace(self, dataset_id: str) -> Optional[DataGridState]:
+        state = self._open.get(dataset_id)
+        if not state:
+            return None
+        rows = [[str(cell).strip() for cell in row] for row in state.rows]
+        headers = [str(header).strip() or f"Column {idx + 1}" for idx, header in enumerate(state.headers)]
+        row_headers = [str(header).strip() or str(idx + 1) for idx, header in enumerate(state.row_headers)]
+        updated = self.update_grid(dataset_id, headers, rows, state.column_types, row_headers=row_headers)
+        if updated:
+            self._record_history(updated, "trim_whitespace", {})
+        return updated
+
+    def normalize_numbers(self, dataset_id: str, columns: Optional[List[int]] = None) -> Optional[DataGridState]:
+        state = self._open.get(dataset_id)
+        if not state:
+            return None
+        targets = set(columns if columns is not None else range(len(state.headers)))
+        rows = []
+        for row in state.rows:
+            next_row = list(row)
+            for col in targets:
+                if col < len(next_row):
+                    number = self.coerce_number(next_row[col])
+                    if number is not None:
+                        next_row[col] = ("%g" % number)
+            rows.append(next_row)
+        updated = self.update_grid(dataset_id, state.headers, rows, state.column_types, row_headers=state.row_headers)
+        if updated:
+            self._record_history(updated, "normalize_numbers", {"columns": sorted(targets)})
+        return updated
+
+    def promote_row_to_headers(self, dataset_id: str, row_index: int, remove_row: bool = True) -> Optional[DataGridState]:
+        state = self._open.get(dataset_id)
+        if not state or row_index < 0 or row_index >= len(state.rows):
+            return None
+        width = max(len(state.headers), len(state.rows[row_index]))
+        header_row = state.rows[row_index] + [""] * (width - len(state.rows[row_index]))
+        headers = [str(value).strip() or f"Column {idx + 1}" for idx, value in enumerate(header_row)]
+        rows = [list(row) for idx, row in enumerate(state.rows) if not remove_row or idx != row_index]
+        row_headers = [h for idx, h in enumerate(state.row_headers) if not remove_row or idx != row_index]
+        updated = self.update_grid(dataset_id, headers, rows, {}, row_headers=row_headers)
+        if updated:
+            self._record_history(updated, "promote_row_to_headers", {"row": row_index})
+        return updated
+
+    def promote_column_to_row_headers(self, dataset_id: str, column_index: int, remove_column: bool = True) -> Optional[DataGridState]:
+        state = self._open.get(dataset_id)
+        if not state or column_index < 0:
+            return None
+        row_headers = []
+        rows = []
+        for idx, row in enumerate(state.rows):
+            padded = row + [""] * (len(state.headers) - len(row))
+            row_headers.append(str(padded[column_index]).strip() or str(idx + 1) if column_index < len(padded) else str(idx + 1))
+            rows.append([cell for col, cell in enumerate(padded) if not remove_column or col != column_index])
+        headers = [h for col, h in enumerate(state.headers) if not remove_column or col != column_index]
+        updated = self.update_grid(dataset_id, headers, rows, {}, row_headers=row_headers)
+        if updated:
+            self._record_history(updated, "promote_column_to_row_headers", {"column": column_index})
+        return updated
+
+    def fill_down(self, dataset_id: str, columns: Optional[List[int]] = None) -> Optional[DataGridState]:
+        state = self._open.get(dataset_id)
+        if not state:
+            return None
+        targets = set(columns if columns is not None else range(len(state.headers)))
+        rows = [list(row) + [""] * (len(state.headers) - len(row)) for row in state.rows]
+        for col in targets:
+            last = ""
+            for row in rows:
+                if col >= len(row):
+                    continue
+                if str(row[col]).strip():
+                    last = row[col]
+                elif last:
+                    row[col] = last
+        updated = self.update_grid(dataset_id, state.headers, rows, state.column_types, row_headers=state.row_headers)
+        if updated:
+            self._record_history(updated, "fill_down", {"columns": sorted(targets)})
+        return updated
+
+    def replace_text(self, dataset_id: str, find_text: str, replace_with: str, columns: Optional[List[int]] = None) -> Optional[DataGridState]:
+        state = self._open.get(dataset_id)
+        if not state or find_text == "":
+            return state
+        targets = set(columns if columns is not None else range(len(state.headers)))
+        rows = []
+        for row in state.rows:
+            next_row = list(row)
+            for col in targets:
+                if col < len(next_row):
+                    next_row[col] = str(next_row[col]).replace(find_text, replace_with)
+            rows.append(next_row)
+        updated = self.update_grid(dataset_id, state.headers, rows, state.column_types, row_headers=state.row_headers)
+        if updated:
+            self._record_history(updated, "replace_text", {"find": find_text, "columns": sorted(targets)})
+        return updated
+
+    def split_column(self, dataset_id: str, column_index: int, delimiter: str) -> Optional[DataGridState]:
+        state = self._open.get(dataset_id)
+        if not state or column_index < 0 or column_index >= len(state.headers) or delimiter == "":
+            return state
+        split_rows = []
+        max_parts = 1
+        for row in state.rows:
+            parts = str(row[column_index] if column_index < len(row) else "").split(delimiter)
+            max_parts = max(max_parts, len(parts))
+            split_rows.append(parts)
+        headers = list(state.headers)
+        original = headers[column_index]
+        headers[column_index:column_index + 1] = [original if idx == 0 else f"{original} {idx + 1}" for idx in range(max_parts)]
+        rows = []
+        for row, parts in zip(state.rows, split_rows):
+            padded = row + [""] * (len(state.headers) - len(row))
+            rows.append(padded[:column_index] + parts + [""] * (max_parts - len(parts)) + padded[column_index + 1:])
+        updated = self.update_grid(dataset_id, headers, rows, {}, row_headers=state.row_headers)
+        if updated:
+            self._record_history(updated, "split_column", {"column": column_index, "delimiter": delimiter})
+        return updated
+
+    def merge_columns(self, dataset_id: str, columns: List[int], delimiter: str = " ") -> Optional[DataGridState]:
+        state = self._open.get(dataset_id)
+        columns = sorted(set(columns or []))
+        if not state or len(columns) < 2:
+            return state
+        first = columns[0]
+        headers = [h for idx, h in enumerate(state.headers) if idx not in columns[1:]]
+        headers[first] = " ".join(state.headers[idx] for idx in columns if idx < len(state.headers)).strip() or headers[first]
+        rows = []
+        for row in state.rows:
+            padded = row + [""] * (len(state.headers) - len(row))
+            merged = delimiter.join(str(padded[idx]) for idx in columns if idx < len(padded) and str(padded[idx]).strip())
+            next_row = [cell for idx, cell in enumerate(padded) if idx not in columns[1:]]
+            next_row[first] = merged
+            rows.append(next_row)
+        updated = self.update_grid(dataset_id, headers, rows, {}, row_headers=state.row_headers)
+        if updated:
+            self._record_history(updated, "merge_columns", {"columns": columns})
+        return updated
+
+    def infer_column_types(self, dataset_id: str) -> Optional[DataGridState]:
+        state = self._open.get(dataset_id)
+        if not state:
+            return None
+        types = {}
+        for idx, header in enumerate(state.headers):
+            values = [row[idx] for row in state.rows if idx < len(row) and str(row[idx]).strip()]
+            if values and sum(1 for value in values if self.coerce_number(value) is not None) >= max(1, len(values) * 0.8):
+                types[header] = "Number"
+            elif values and sum(1 for value in values if self._is_dateish(value)) >= max(1, len(values) * 0.8):
+                types[header] = "Date"
+            else:
+                types[header] = "Text"
+        state.column_types = types
+        state.version += 1
+        state.dirty = True
+        state.updated_at = utc_now_iso()
+        self._record_history(state, "infer_column_types", {"types": types})
+        return state
+
+    def add_metric(
+        self,
+        dataset_id: str,
+        axis: str,
+        metric: str,
+        indexes: Optional[List[int]] = None,
+        label: Optional[str] = None,
+    ) -> Optional[DataGridState]:
+        state = self._open.get(dataset_id)
+        if not state:
+            return None
+        metric_key = (metric or "average").lower().strip()
+        if axis == "column":
+            target_cols = indexes or list(range(len(state.headers)))
+            values = []
+            for row in state.rows:
+                nums = [
+                    self.coerce_number(row[col] if col < len(row) else "")
+                    for col in target_cols
+                ]
+                values.append(self._metric_value([num for num in nums if num is not None], metric_key))
+            state.headers.append(label or metric_key.title())
+            for row_idx, row in enumerate(state.rows):
+                row.append(values[row_idx] if row_idx < len(values) else "")
+        else:
+            target_rows = indexes or list(range(len(state.rows)))
+            row_values = []
+            for col in range(len(state.headers)):
+                nums = [
+                    self.coerce_number(state.rows[row][col] if row < len(state.rows) and col < len(state.rows[row]) else "")
+                    for row in target_rows
+                ]
+                row_values.append(self._metric_value([num for num in nums if num is not None], metric_key))
+            state.rows.append(row_values)
+            state.row_headers.append(label or metric_key.title())
+        state.version += 1
+        state.dirty = True
+        state.updated_at = utc_now_iso()
+        self._record_history(state, "add_metric", {"axis": axis, "metric": metric_key, "indexes": indexes or []})
+        return state
+
+    def add_metric_for_selection(
+        self,
+        dataset_id: str,
+        axis: str,
+        metric: str,
+        rows: Optional[List[int]] = None,
+        columns: Optional[List[int]] = None,
+        label: Optional[str] = None,
+    ) -> Optional[DataGridState]:
+        state = self._open.get(dataset_id)
+        if not state:
+            return None
+        metric_key = (metric or "average").lower().strip()
+        selected_rows = sorted({row for row in (rows or []) if 0 <= row < len(state.rows)})
+        selected_cols = sorted({col for col in (columns or []) if 0 <= col < len(state.headers)})
+        if not selected_rows:
+            selected_rows = list(range(len(state.rows)))
+        if not selected_cols:
+            selected_cols = list(range(len(state.headers)))
+
+        if axis == "column":
+            insert_at = min(len(state.headers), max(selected_cols) + 1 if selected_cols else len(state.headers))
+            values = []
+            for row_idx, row in enumerate(state.rows):
+                if row_idx not in selected_rows:
+                    values.append("")
+                    continue
+                nums = [
+                    self.coerce_number(row[col] if col < len(row) else "")
+                    for col in selected_cols
+                ]
+                values.append(self._metric_value([num for num in nums if num is not None], metric_key))
+            state.headers.insert(insert_at, label or metric_key.title())
+            for row_idx, row in enumerate(state.rows):
+                row.insert(insert_at, values[row_idx] if row_idx < len(values) else "")
+        else:
+            insert_at = min(len(state.rows), max(selected_rows) + 1 if selected_rows else len(state.rows))
+            row_values = []
+            for col_idx in range(len(state.headers)):
+                if col_idx not in selected_cols:
+                    row_values.append("")
+                    continue
+                nums = [
+                    self.coerce_number(state.rows[row][col_idx] if row < len(state.rows) and col_idx < len(state.rows[row]) else "")
+                    for row in selected_rows
+                ]
+                row_values.append(self._metric_value([num for num in nums if num is not None], metric_key))
+            state.rows.insert(insert_at, row_values)
+            state.row_headers.insert(insert_at, label or metric_key.title())
+
+        state.version += 1
+        state.dirty = True
+        state.updated_at = utc_now_iso()
+        self._record_history(
+            state,
+            "add_metric_for_selection",
+            {"axis": axis, "metric": metric_key, "rows": selected_rows, "columns": selected_cols},
+        )
+        return state
+
+    def _metric_value(self, nums: List[float], metric: str) -> str:
+        if metric in {"count", "numeric_count"}:
+            return str(len(nums))
+        if not nums:
+            return ""
+        if metric == "sum":
+            value = sum(nums)
+        elif metric in {"avg", "average", "mean"}:
+            value = sum(nums) / len(nums)
+        elif metric == "min":
+            value = min(nums)
+        elif metric == "max":
+            value = max(nums)
+        else:
+            value = sum(nums) / len(nums)
+        return self.format_number(value)
+
+    def format_number(self, value: Any, precision: int = 6) -> str:
+        try:
+            number = float(value)
+        except Exception:
+            return str(value)
+        text = f"{number:,.{precision}f}".rstrip("0").rstrip(".")
+        return "0" if text == "-0" else text
+
+    def selected_values(self, dataset_id: str, cells: Iterable[Tuple[int, int]]) -> List[Any]:
+        state = self._open.get(dataset_id)
+        if not state:
+            return []
+        values = []
+        for row, col in cells:
+            if 0 <= row < len(state.rows) and 0 <= col < len(state.headers):
+                values.append(state.rows[row][col] if col < len(state.rows[row]) else "")
+        return values
+
+    def chart_config_for_selection(
+        self,
+        dataset_id: str,
+        cells: Iterable[Tuple[int, int]],
+        chart_type: str = "bar",
+    ) -> Optional[ChartConfig]:
+        state = self._open.get(dataset_id) or self.load_dataset(dataset_id)
+        if not state:
+            return None
+        selected = sorted(set(cells or []))
+        columns = sorted({col for _, col in selected})
+        if not columns:
+            columns = list(range(min(2, len(state.headers))))
+        x_col = columns[0] if columns else 0
+        y_col = columns[1] if len(columns) > 1 else columns[0] if columns else 0
+        return ChartConfig(
+            chart_id=f"chart_{uuid.uuid4()}",
+            name=f"{state.name} Chart",
+            title=f"{state.name} Chart",
+            chart_type=chart_type,
+            dataset_id=state.dataset_id if state.is_persisted else None,
+            x_field=state.headers[x_col] if x_col < len(state.headers) else "",
+            y_field=state.headers[y_col] if y_col < len(state.headers) else "",
+            x_title=state.headers[x_col] if x_col < len(state.headers) else "",
+            y_title=state.headers[y_col] if y_col < len(state.headers) else "",
+            source_selection={"cells": [[row, col] for row, col in selected]},
+        )
 
     def chart_config_for_active(self, chart_type: str = "bar") -> Optional[ChartConfig]:
         state = self.active_dataset()
@@ -225,6 +644,7 @@ class DataDockService:
             y_field=headers[1] if len(headers) > 1 else (headers[0] if headers else ""),
             x_title=headers[0] if headers else "",
             y_title=headers[1] if len(headers) > 1 else "",
+            title=f"{state.name} Chart",
         )
 
     def extract_document(self, doc: Any, pdf_path: str = "") -> List[DataGridState]:
@@ -241,6 +661,9 @@ class DataDockService:
             except Exception:
                 continue
             extracted.extend(self._extract_page_tables(page, page_index, pdf_path))
+            chart_inventory = self._extract_page_chart_inventory(page, page_index, pdf_path)
+            if chart_inventory:
+                extracted.append(chart_inventory)
         for state in extracted:
             self._track(state)
         return extracted
@@ -261,12 +684,17 @@ class DataDockService:
                 return states
 
         # Step 2: Full-page PyMuPDF structural table detection.
+        # Try the default (line-based) strategy first, then fall back to text-alignment strategy
+        # for borderless tables.
         tables = []
-        try:
-            finder = page.find_tables()
-            tables = list(getattr(finder, "tables", []) or [])
-        except Exception:
-            tables = []
+        for kwargs in ({}, {"vertical_strategy": "text", "horizontal_strategy": "text"}):
+            try:
+                finder = page.find_tables(**kwargs)
+                tables = list(getattr(finder, "tables", []) or [])
+            except Exception:
+                tables = []
+            if tables:
+                break
         for table in tables:
             try:
                 matrix = table.extract()
@@ -284,12 +712,13 @@ class DataDockService:
         if states:
             return states
 
-        # Step 3: Whole-page word-based fallback (strict — no arbitrary paragraphs).
+        # Step 3: Whole-page word-based fallback.
+        # Uses structural consistency check only — works for text tables, not just numeric ones.
         try:
             words = [list(w[:5]) for w in page.get_text("words")]
         except Exception:
             words = []
-        matrix = self._matrix_from_words(words, require_table_like=True)
+        matrix = self._matrix_from_words(words)
         if matrix:
             state = self._state_from_matrix(
                 matrix,
@@ -342,7 +771,7 @@ class DataDockService:
         if not words:
             return None
         matrix = self._matrix_from_words(words, lax=lax)
-        if not matrix:
+        if not matrix or not self._matrix_quality_ok(matrix):
             return None
         return self._state_from_matrix(
             matrix,
@@ -434,6 +863,7 @@ class DataDockService:
             return None
         width = max(len(row) for row in rows)
         rows = [row + [""] * (width - len(row)) for row in rows]
+        rows = self._merge_wrapped_cells(rows)
         text = "\n".join("\t".join(row) for row in rows)
         state = self.provider_registry.parse_selection(
             text,
@@ -461,10 +891,13 @@ class DataDockService:
             return []
         matrix = self._align_cells_to_columns(row_cells)
         matrix = self._trim_empty_matrix(matrix)
-        if not lax and not self._looks_like_data_table(matrix):
-            return []
-        if not lax and require_table_like and not self._has_repeated_column_structure(row_cells, matrix):
-            return []
+        if not lax:
+            # Primary gate: structural consistency (rejects paragraphs, works for text AND numeric tables)
+            if not self._has_repeated_column_structure(row_cells, matrix):
+                return []
+            # Optional strict gate: also require numeric/date data (only when caller asks for it)
+            if require_table_like and not self._looks_like_data_table(matrix):
+                return []
         return matrix
 
     def _normalize_words(self, words: List[Any]) -> List[Dict[str, Any]]:
@@ -567,6 +1000,32 @@ class DataDockService:
             matrix.append(row)
         return matrix
 
+    def _merge_wrapped_cells(self, matrix: List[List[str]]) -> List[List[str]]:
+        """Absorb rows that are single-column continuations of the previous row's cell.
+
+        When a PDF cell contains wrapped text, word clustering treats each visual
+        line as a separate row.  Those rows have content in exactly one column
+        while the surrounding rows have multiple filled columns — a reliable signal
+        that the text belongs in the cell above.
+        """
+        if len(matrix) < 2:
+            return matrix
+        width = max((len(row) for row in matrix), default=0)
+        padded = [row + [""] * (width - len(row)) for row in matrix]
+        merged: List[List[str]] = [list(padded[0])]
+        for row in padded[1:]:
+            filled = [i for i, c in enumerate(row) if c.strip()]
+            prev = merged[-1]
+            prev_filled = [i for i, c in enumerate(prev) if c.strip()]
+            if len(filled) == 1 and len(prev_filled) > 1 and filled[0] in prev_filled:
+                col = filled[0]
+                new_row = list(prev)
+                new_row[col] = (prev[col] + " " + row[col]).strip()
+                merged[-1] = new_row
+            else:
+                merged.append(list(row))
+        return merged
+
     def _trim_empty_matrix(self, matrix: List[List[str]]) -> List[List[str]]:
         rows = [[str(cell).strip() for cell in row] for row in matrix if any(str(cell).strip() for cell in row)]
         if not rows:
@@ -621,6 +1080,22 @@ class DataDockService:
         self._open[state.dataset_id] = state
         self._active_dataset_id = state.dataset_id
         return state
+
+    def _ensure_shape(self, state: DataGridState, rows: int, columns: int) -> None:
+        if len(state.headers) < columns:
+            state.headers.extend(f"Column {idx + 1}" for idx in range(len(state.headers), columns))
+        if len(state.row_headers) < rows:
+            state.row_headers.extend(str(idx + 1) for idx in range(len(state.row_headers), rows))
+        while len(state.rows) < rows:
+            state.rows.append(["" for _ in range(len(state.headers))])
+        for row in state.rows:
+            if len(row) < len(state.headers):
+                row.extend("" for _ in range(len(state.headers) - len(row)))
+
+    def _record_history(self, state: DataGridState, action: str, details: Dict[str, Any]) -> None:
+        history = list(state.metadata.get("cleaning_history") or [])
+        history.append({"action": action, "details": dict(details or {}), "at": utc_now_iso()})
+        state.metadata["cleaning_history"] = history[-100:]
 
     def _summary(self, state: DataGridState) -> Dict[str, Any]:
         return {

@@ -47,6 +47,13 @@ class EventBus(QObject):
     # --- Document Intents ---
     document_action_requested = Signal(object, object) # Enum, Dataclass
     document_opened = Signal(object, object)
+    source_action_requested = Signal(object, object)
+    source_opened = Signal(object, object)
+    source_added = Signal(object, object)
+    source_switched = Signal(object, object)
+    source_renamed = Signal(object, object)
+    source_removed = Signal(object, object)
+    video_status_updated = Signal(object, object)
     document_text_selected = Signal(object, object)   # (event_enum, payload with .text/.context)
     editor_before_save = Signal(object, object)        # (event_enum, payload with .path/.content)
 
@@ -110,12 +117,25 @@ class EventBus(QObject):
     plugin_loaded = Signal(str)    # plugin_id
     plugin_unloaded = Signal(str)  # plugin_id
 
+    # --- AI Setup Domain ---
+    ai_setup_action_requested = Signal(object, object)  # AISetupIntent, AISetupPayload
+    ai_setup_state_changed    = Signal(object, object)  # AISetupEvent,  AISetupPayload
+    ai_availability_changed   = Signal(bool)            # True = at least one backend usable
+
     # --- Help / Tutorial Domain ---
     help_action_requested = Signal(object, object)  # HelpIntent, HelpPayload
     help_event_occurred = Signal(object, object)    # HelpEvent, HelpEventPayload
 
+    # --- Discovery / Deterministic Extraction Domain ---
+    discovery_action_requested = Signal(object, object)   # DiscoveryIntent, DiscoveryPayload
+    discovery_state_changed = Signal(object, object)      # DiscoveryEvent, DiscoveryEventPayload
+
     # --- Pack Import/Export Domain ---
     pack_action_requested = Signal(object, object)  # PackIntent, PackPayload
+
+    # --- Source Evaluation Domain ---
+    source_eval_action_requested = Signal(object, object)   # SourceEvalIntent, SourceEvalPayload
+    source_eval_state_changed = Signal(object, object)      # SourceEvalEvent, SourceEvalEventPayload
 
     # --- UI Render Domain ---
     # Emitted by BlueprintUIRouter to dispatch AI output to tabs without direct method calls.

@@ -56,7 +56,11 @@ class PromptAppService(QObject):
                 try:
                     blueprint = definition.create(pm=self.pm)
                 except TypeError:
-                    blueprint = definition.create(self.pm)
+                    try:
+                        blueprint = definition.create()
+                    except Exception as exc:
+                        print(f"[Prompt Editor] Failed to instantiate blueprint '{definition.id}': {exc}")
+                        continue
                 except Exception as exc:
                     print(f"[Prompt Editor] Failed to instantiate blueprint '{definition.id}': {exc}")
                     continue

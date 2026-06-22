@@ -8,6 +8,7 @@ class StateResolver:
 
         result = template_str
         start_idx = 0
+        replacement_count = 0
         while True:
             # Find the opening brace
             start = result.find('{', start_idx)
@@ -50,8 +51,17 @@ class StateResolver:
             # If we found the variable in the state, replace it!
             if valid and current is not None:
                 val_str = str(current) if not isinstance(current, (dict, list)) else json.dumps(current)
+                token = result[start:end + 1]
+                if val_str == token:
+                    start_idx = end + 1
+                    continue
                 result = result[:start] + val_str + result[end+1:]
-                start_idx = start + len(val_str)
+                # Re-scan injected text: saved prompt templates commonly contain
+                # nested variables such as {item.text} and {master_input}.
+                start_idx = start
+                replacement_count += 1
+                if replacement_count >= 1000:
+                    break
             else:
                 # If variable isn't in state, leave it as {variable} and move on
                 start_idx = end + 1

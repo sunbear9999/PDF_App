@@ -3,7 +3,15 @@ import os
 import uuid
 from PySide6.QtCore import QObject, QThread, Signal
 from core.events.event_bus import EventBus
-from core.events.domains.document_events import DocumentEvent, DocumentEventPayload, DocumentIntent, DocumentPayload
+from core.events.domains.document_events import (
+    DocumentEvent,
+    DocumentEventPayload,
+    DocumentIntent,
+    DocumentPayload,
+    SourceEvent,
+    SourceIntent,
+    SourcePayload,
+)
 from core.events.domains.project_events import ProjectEvent, ProjectEventPayload
 
 
@@ -72,12 +80,18 @@ class DocumentAppService(QObject):
         self.bus = EventBus.get_instance()
         self.extract_workers = []
         self.bus.document_action_requested.connect(self._handle_intent)
+        self.bus.source_action_requested.connect(self._handle_source_intent)
 
     def _handle_intent(self, intent: DocumentIntent, payload: DocumentPayload):
         if intent == DocumentIntent.ADD_FILES:
-            self._add_pdfs(payload.paths or [])
+            self._add_sources(payload.paths or [])
         elif intent == DocumentIntent.OPEN:
-            self._open_pdf(payload.path, source_id=payload.source_id)
+            self._open_source(payload.path, source_id=payload.source_id, timestamp=payload.timestamp, context=payload.context)
+        elif intent == DocumentIntent.TRANSCRIBE:
+            self.bus.source_action_requested.emit(
+                SourceIntent.TRANSCRIBE,
+                SourcePayload(path=payload.path, source_id=payload.source_id, source_type=payload.source_type),
+            )
         elif intent == DocumentIntent.EXTRACT_PAGES:
             self._extract_pages(payload)
         elif intent == DocumentIntent.CREATE_HIGHLIGHT:
@@ -91,29 +105,43 @@ class DocumentAppService(QObject):
         elif intent == DocumentIntent.DELETE_HIGHLIGHT:
             self._delete_highlight(payload)
 
-    def _add_pdfs(self, paths: list):
+    def _handle_source_intent(self, intent: SourceIntent, payload: SourcePayload):
+        if intent == SourceIntent.ADD_FILES:
+            self._add_sources(payload.paths or [])
+        elif intent == SourceIntent.OPEN:
+            self._open_source(payload.path, source_id=payload.source_id, timestamp=payload.timestamp, context=payload.context)
+        elif intent == SourceIntent.JUMP_TO_LOCATION:
+            self._open_source(payload.path, source_id=payload.source_id, timestamp=payload.timestamp, context=payload.context)
+
+    def _add_sources(self, paths: list):
         if not self.pm.project_filepath or not paths:
             return
             
         added = False
         last_source_id = None
+        last_path = None
         for path in paths:
-            if self.pm.add_pdf(path):
+            source_type = self.pm.detect_source_type(path) if hasattr(self.pm, "detect_source_type") else "pdf"
+            if self.pm.add_source(path, source_type):
                 added = True
                 source = self.pm.get_source_entity_by_path(path) if hasattr(self.pm, "get_source_entity_by_path") else None
                 last_source_id = source.id if source else last_source_id
+                last_path = path
                 
-                # <-- Emit the event so background workers catch it
+                payload = DocumentEventPayload(path=path, source_id=last_source_id, source_type=source_type)
+                self.bus.source_added.emit(SourceEvent.ADDED, payload)
                 self.bus.document_added.emit(
                     DocumentEvent.DOCUMENT_ADDED,
-                    DocumentEventPayload(path=path, source_id=last_source_id)
+                    payload
                 )
             
         if added:
-            self.bus.project_loaded.emit(ProjectEvent.LOADED, ProjectEventPayload())
-            self._open_pdf(paths[-1], source_id=last_source_id)
+            self._open_source(last_path or paths[-1], source_id=last_source_id)
 
     def _open_pdf(self, path: str = None, source_id: str = None):
+        self._open_source(path, source_id=source_id)
+
+    def _open_source(self, path: str = None, source_id: str = None, timestamp: float = None, context: dict = None):
         if source_id and hasattr(self.pm, "get_source_path"):
             path = self.pm.get_source_path(source_id) or path
         elif path and hasattr(self.pm, "get_source_entity_by_path"):
@@ -121,18 +149,34 @@ class DocumentAppService(QObject):
             source_id = source.id if source else None
 
         if not path or not os.path.exists(path): return
+        source_type = self.pm.get_source_type(path) if hasattr(self.pm, "get_source_type") else "pdf"
         
         self.pm.set_active_file(path)
+        if source_type == "video":
+            open_context = dict(context or {})
+            open_context["transcript"] = self.pm.get_video_transcript(source_id) if source_id and hasattr(self.pm, "get_video_transcript") else {}
+            payload = DocumentEventPayload(
+                path=path,
+                source_id=source_id,
+                source_type="video",
+                timestamp=timestamp,
+                context=open_context,
+            )
+            self.bus.source_opened.emit(SourceEvent.OPENED, payload)
+            self.bus.source_switched.emit(SourceEvent.SWITCHED, payload)
+            self.bus.document_opened.emit(DocumentEvent.DOCUMENT_OPENED, payload)
+            return
+
         doc = self.pm.get_doc(path)
         
         if doc:
             needs_ocr = self._check_needs_ocr(doc)
             # We emit the raw doc object to the bus. The PDFViewer will catch this and render it.
-            self.bus.document_opened.emit(
-                DocumentEvent.DOCUMENT_OPENED,
-                DocumentEventPayload(path=path, source_id=source_id, doc=doc, needs_ocr=needs_ocr),
-            )
-            self.bus.pdf_switched.emit(DocumentEvent.PDF_SWITCHED, DocumentEventPayload(path=path, source_id=source_id))
+            payload = DocumentEventPayload(path=path, source_id=source_id, source_type="pdf", doc=doc, needs_ocr=needs_ocr)
+            self.bus.source_opened.emit(SourceEvent.OPENED, payload)
+            self.bus.source_switched.emit(SourceEvent.SWITCHED, payload)
+            self.bus.document_opened.emit(DocumentEvent.DOCUMENT_OPENED, payload)
+            self.bus.pdf_switched.emit(DocumentEvent.PDF_SWITCHED, payload)
 
     def _check_needs_ocr(self, doc) -> bool:
         """Determines if the document requires OCR without touching the UI."""
@@ -158,8 +202,10 @@ class DocumentAppService(QObject):
 
     def _on_extraction_finished(self, save_path: str, page_count: int):
         if self.pm.add_pdf(save_path):
-            self.bus.document_added.emit(DocumentEvent.DOCUMENT_ADDED, DocumentEventPayload(path=save_path))
-            self.bus.project_loaded.emit(ProjectEvent.LOADED, ProjectEventPayload())
+            source = self.pm.get_source_entity_by_path(save_path) if hasattr(self.pm, "get_source_entity_by_path") else None
+            payload = DocumentEventPayload(path=save_path, source_id=source.id if source else None, source_type="pdf")
+            self.bus.source_added.emit(SourceEvent.ADDED, payload)
+            self.bus.document_added.emit(DocumentEvent.DOCUMENT_ADDED, payload)
         self.bus.status_message_requested.emit(f"Extracted {page_count} pages to {os.path.basename(save_path)}.", 5000)
         self.bus.document_action_requested.emit(DocumentIntent.OPEN, DocumentPayload(path=save_path))
 

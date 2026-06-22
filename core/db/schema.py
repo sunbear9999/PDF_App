@@ -13,12 +13,44 @@ class DatabaseSchema(BaseDB):
             if self.manager._conn:
                 self.manager._conn.close()
             
-            self.manager._conn = sqlite3.connect(self.manager.project_filepath, check_same_thread=False)
+            # The project connection is shared by background services. Autocommit
+            # keeps each statement atomic and prevents one thread from committing
+            # another thread's implicit transaction.
+            self.manager._conn = sqlite3.connect(
+                self.manager.project_filepath,
+                check_same_thread=False,
+                isolation_level=None,
+            )
             self.manager._conn.execute("PRAGMA foreign_keys = ON")
             cursor = self.manager._conn.cursor()
             
             cursor.execute('''CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT)''')
             cursor.execute('''CREATE TABLE IF NOT EXISTS pdfs (path TEXT PRIMARY KEY)''')
+            cursor.execute('''CREATE TABLE IF NOT EXISTS sources (
+                id TEXT PRIMARY KEY,
+                path TEXT UNIQUE NOT NULL,
+                source_type TEXT NOT NULL DEFAULT 'pdf',
+                mime_type TEXT,
+                title TEXT,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                state_json TEXT NOT NULL DEFAULT '{}',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )''')
+            cursor.execute('''CREATE TABLE IF NOT EXISTS video_transcripts (
+                source_id TEXT PRIMARY KEY,
+                path TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                language TEXT,
+                model TEXT,
+                full_text TEXT,
+                segments_json TEXT NOT NULL DEFAULT '[]',
+                error_text TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )''')
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_sources_type ON sources(source_type)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_sources_path ON sources(path)")
             cursor.execute('''CREATE TABLE IF NOT EXISTS highlights (
                 id TEXT PRIMARY KEY, doc_id TEXT, page_num INTEGER,
                 rect_coords TEXT, text_content TEXT, note_content TEXT, color TEXT

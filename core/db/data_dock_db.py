@@ -41,6 +41,8 @@ class DataDockDB(BaseDB):
             rows=[list(r) for r in grid.get("rows") or []],
             column_types=self._load_json(row[4], {}),
             provenance=DataProvenance.from_dict(self._load_json(row[3], {})),
+            cell_provenance=dict(grid.get("cell_provenance") or {}),
+            metadata=dict(grid.get("metadata") or {}),
             is_persisted=True,
             dirty=False,
             version=int(grid.get("version") or 1),
@@ -53,7 +55,14 @@ class DataDockDB(BaseDB):
         if not self._conn:
             return state
         grid_json = json.dumps(
-            {"headers": state.headers, "row_headers": state.row_headers, "rows": state.rows, "version": state.version},
+            {
+                "headers": state.headers,
+                "row_headers": state.row_headers,
+                "rows": state.rows,
+                "cell_provenance": state.cell_provenance,
+                "metadata": state.metadata,
+                "version": state.version,
+            },
             ensure_ascii=False,
         )
         provenance_json = json.dumps(state.provenance.to_dict(), ensure_ascii=False)

@@ -46,6 +46,21 @@ class TTSAppService(QObject):
         self.registry = VoiceRegistry()
         self.worker = None
         self.bus.tts_action_requested.connect(self._handle_intent)
+        # Refresh voice list when voices are downloaded/removed via AISetupService
+        self.bus.ai_setup_state_changed.connect(self._on_setup_state_changed)
+
+    def _on_setup_state_changed(self, event, payload) -> None:
+        from core.events.domains.ai_setup_events import AISetupEvent
+        if event == AISetupEvent.TTS_VOICE_LIST_CHANGED:
+            self.registry.reload()
+            self.bus.tts_status_updated.emit(
+                TTSStatus.VOICES_LOADED,
+                TTSStatusPayload(status=TTSStatus.VOICES_LOADED, voices=self.registry.get_available_voices()),
+            )
+
+    def _is_piper_available(self) -> bool:
+        from core.tts_engine import _resolve_piper_command
+        return _resolve_piper_command() is not None
 
     def _handle_intent(self, intent: TTSIntent, payload: TTSPayload):
         if intent == TTSIntent.FETCH_VOICES:

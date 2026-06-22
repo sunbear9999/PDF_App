@@ -1,7 +1,9 @@
 # gui/managers/dock_manager.py
 from dataclasses import dataclass
 from typing import Callable, List, Dict, Optional
-from PySide6.QtWidgets import QDockWidget
+import traceback
+
+from PySide6.QtWidgets import QDockWidget, QMessageBox
 from PySide6.QtCore import Qt, QTimer
 import shiboken6
 
@@ -35,7 +37,7 @@ class DockManager:
             features |= QDockWidget.DockWidgetFeature.DockWidgetClosable
         dock.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
         dock.setFeatures(features)
-        dock.setMinimumSize(280, 200)
+        dock.setMinimumSize(280, 250)
 
     def get_instances(self, dock_id: str) -> List[QDockWidget]:
         """Safely returns alive docks, automatically stripping out deleted C++ objects."""
@@ -66,7 +68,17 @@ class DockManager:
             return dock
 
         # 2. Instantiate via Factory
-        dock = defn.factory(self.window)
+        try:
+            dock = defn.factory(self.window)
+        except Exception as exc:
+            message = f"Could not open {defn.menu_name}: {exc}"
+            print(message)
+            traceback.print_exc()
+            status = self.window.statusBar() if hasattr(self.window, "statusBar") else None
+            if status:
+                status.showMessage(message, 6000)
+            QMessageBox.critical(self.window, "Dock Error", message)
+            raise
         if defn.plugin_id:
             dock.setProperty("papyrus_plugin_id", defn.plugin_id)
         self._inject_plugin_toolbar(dock, dock_id)
@@ -103,6 +115,9 @@ class DockManager:
 
     def _arrange_right_side(self, dock: QDockWidget, defn: DockDefinition):
         if not shiboken6.isValid(dock):
+            return
+        layout_manager = getattr(self.window, "layout_manager", None)
+        if getattr(layout_manager, "_restoring_layout", False):
             return
         self.configure_dock(dock, closable=True)
         dock.setFloating(False)

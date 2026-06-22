@@ -7,9 +7,8 @@ from core.pdf_utils import extract_filtered_blocks
 from core.utils.text_utils import sanitize_extracted_text
 from core.events.domains.tool_events import TTSIntent, TTSPayload, TTSStatus, TTSStatusPayload
 class TTSTab(QWidget):
-    def __init__(self, parent=None, main_window=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.main_window = main_window  # kept for theme fallback only
         self.bus = EventBus.get_instance()
         self.theme = None
         self.voice_mapping = {}

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Protocol
 
 from core.models.data_dock_models import DataGridState, DataProvenance
@@ -29,6 +29,36 @@ class GridHookProvider:
     on_cell_after_edit: Optional[Callable[..., Any]] = None
     register_grid_context_menu: Optional[Callable[..., Any]] = None
     override_formula_engine: Optional[Callable[..., Any]] = None
+
+
+@dataclass
+class DataCleanerSpec:
+    cleaner_id: str
+    label: str
+    description: str = ""
+    callback: Optional[Callable[[DataGridState, Dict[str, Any]], DataGridState]] = None
+    plugin_id: str = ""
+
+
+@dataclass
+class GridActionSpec:
+    action_id: str
+    label: str
+    description: str = ""
+    callback: Optional[Callable[..., Any]] = None
+    position: int = 50
+    plugin_id: str = ""
+
+
+@dataclass
+class ChartTypeSpec:
+    chart_type: str
+    label: str
+    description: str = ""
+    renderer_factory: Optional[Callable[..., Any]] = None
+    supports_series: bool = True
+    default_options: Dict[str, Any] = field(default_factory=dict)
+    plugin_id: str = ""
 
 
 class DefaultTableParserProvider:
@@ -94,12 +124,22 @@ class DataProviderRegistry:
         self._table_parsers: List[TableParserProvider] = [DefaultTableParserProvider()]
         self._vision_estimators: List[VisionEstimatorProvider] = [StubVisionEstimatorProvider()]
         self._grid_hooks: List[GridHookProvider] = []
+        self._cleaners: Dict[str, DataCleanerSpec] = {}
+        self._grid_actions: Dict[str, GridActionSpec] = {}
+        self._chart_types: Dict[str, ChartTypeSpec] = {}
         self._palettes: Dict[str, List[str]] = {
             "default": ["#2f80ed", "#27ae60", "#f2994a", "#eb5757", "#9b51e0"],
             "print": ["#111111", "#555555", "#888888", "#bbbbbb", "#dddddd"],
             "warm": ["#c2410c", "#f59e0b", "#be123c", "#7c2d12", "#f97316"],
             "cool": ["#0f766e", "#2563eb", "#0891b2", "#4f46e5", "#16a34a"],
         }
+        for chart_type, label in (
+            ("bar", "Bar"),
+            ("line", "Line"),
+            ("pie", "Pie"),
+            ("scatter", "Scatter"),
+        ):
+            self.register_chart_type(ChartTypeSpec(chart_type=chart_type, label=label))
 
     def register_table_parser(self, provider: TableParserProvider) -> None:
         self._table_parsers.insert(0, provider)
@@ -109,6 +149,15 @@ class DataProviderRegistry:
 
     def register_grid_hook(self, provider: GridHookProvider) -> None:
         self._grid_hooks.append(provider)
+
+    def register_cleaner(self, spec: DataCleanerSpec) -> None:
+        self._cleaners[spec.cleaner_id] = spec
+
+    def register_grid_action(self, spec: GridActionSpec) -> None:
+        self._grid_actions[spec.action_id] = spec
+
+    def register_chart_type(self, spec: ChartTypeSpec) -> None:
+        self._chart_types[spec.chart_type] = spec
 
     def register_palette(self, palette_id: str, colors: Iterable[str]) -> None:
         self._palettes[palette_id] = list(colors)
@@ -130,11 +179,37 @@ class DataProviderRegistry:
     def grid_hooks(self) -> List[GridHookProvider]:
         return list(self._grid_hooks)
 
+    def cleaners(self) -> Dict[str, DataCleanerSpec]:
+        return dict(self._cleaners)
+
+    def grid_actions(self) -> Dict[str, GridActionSpec]:
+        return dict(self._grid_actions)
+
+    def chart_types(self) -> Dict[str, ChartTypeSpec]:
+        return dict(self._chart_types)
+
+    def chart_type(self, chart_type: str) -> Optional[ChartTypeSpec]:
+        return self._chart_types.get(chart_type)
+
     def palettes(self) -> Dict[str, List[str]]:
         return {key: list(value) for key, value in self._palettes.items()}
 
     def palette(self, palette_id: str) -> List[str]:
         return list(self._palettes.get(palette_id) or self._palettes["default"])
+
+    def remove_plugin(self, plugin_id: str) -> None:
+        self._cleaners = {
+            key: spec for key, spec in self._cleaners.items()
+            if getattr(spec, "plugin_id", "") != plugin_id
+        }
+        self._grid_actions = {
+            key: spec for key, spec in self._grid_actions.items()
+            if getattr(spec, "plugin_id", "") != plugin_id
+        }
+        self._chart_types = {
+            key: spec for key, spec in self._chart_types.items()
+            if getattr(spec, "plugin_id", "") != plugin_id
+        }
 
 
 def _is_number(value: Any) -> bool:

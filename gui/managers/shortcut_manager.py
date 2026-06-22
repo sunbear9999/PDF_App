@@ -53,6 +53,7 @@ class ShortcutManager:
                 kr.bind("pdf.zoom_in_alt",viewer.zoom_in,    w)
                 kr.bind("pdf.zoom_out",   viewer.zoom_out,   w)
                 kr.bind("pdf.zoom_reset", viewer.zoom_reset, w)
+                kr.bind("pdf.toggle_viewer", w.toggle_source_viewer, w)
             else:
                 self._raw_bind("Ctrl+=",  viewer.zoom_in)
                 self._raw_bind("Ctrl++",  viewer.zoom_in)
@@ -63,6 +64,9 @@ class ShortcutManager:
                 kr.bind("pdf.search", viewer.annot_manager.toggle_search, w)
             elif hasattr(viewer, "annot_manager"):
                 self._raw_bind("Ctrl+F", viewer.annot_manager.toggle_search)
+
+            if hasattr(viewer, "register_shortcuts"):
+                viewer.register_shortcuts()
 
         # Global shortcuts
         save_cb = lambda: w.bus.project_action_requested.emit(

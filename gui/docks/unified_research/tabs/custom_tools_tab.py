@@ -11,10 +11,10 @@ from gui.docks.unified_research.tabs.base_tab import BaseTab
 from gui.utils.document_helpers import active_pdf_paths
 
 class CustomToolsTab(BaseTab):
-    def __init__(self, main_window, parent=None):
-        super().__init__(main_window, target_id="custom_tools_tab", parent=parent)
+    def __init__(self, app_context, parent=None):
+        super().__init__(app_context, target_id="custom_tools_tab", parent=parent)
         self.dynamic_widgets = {}
-        self.bus = EventBus.get_instance()
+        self.bus = app_context.bus
         self.bus.document_added.connect(self._on_document_list_changed)
         self.bus.pdf_removed.connect(self._on_document_list_changed)
         self.bus.pdf_renamed.connect(self._on_document_list_changed)

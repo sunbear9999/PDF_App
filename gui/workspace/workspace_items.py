@@ -341,6 +341,24 @@ class Node(QGraphicsRectItem):
                 except Exception as exc:
                     print(f"[ActiveController] get_custom_ui error for '{self.entity_type}': {exc}")
 
+        if self.proxy_custom_ui is None and self.node_type_id == "workspace.node.chart":
+            try:
+                from core.models.data_dock_models import ChartConfig, DataGridState
+                from gui.docks.data_dock_chart import DataChartWidget
+                dock_payload = self.entity_properties.get("data_dock") or {}
+                snapshot = dock_payload.get("snapshot") or {}
+                config_data = dock_payload.get("chart_config") or {}
+                if snapshot and config_data:
+                    custom_widget = DataChartWidget()
+                    custom_widget.setMinimumSize(300, 180)
+                    custom_widget.set_chart(DataGridState.from_dict(snapshot), ChartConfig.from_dict(config_data))
+                    self.proxy_custom_ui = QGraphicsProxyWidget(self)
+                    self.proxy_custom_ui.setWidget(custom_widget)
+                    self.proxy_custom_ui.setZValue(20)
+                    self._custom_ui_height = 190
+            except Exception as exc:
+                print(f"[DataDock] chart node render error: {exc}")
+
         if self.should_show_verify_action():
             self.btn_verify.clicked.connect(self.trigger_verify)
 
@@ -515,20 +533,20 @@ class Node(QGraphicsRectItem):
         return EntityType.TEXT.value
 
     def should_show_verify_action(self):
-        return not bool(self.entity_state.get("is_verified", self.is_verified))
+        ai_generated = bool(self.entity_state.get("ai_generated")) or self.node_origin == "ai" or str(self.highlight_id or self.node_id).startswith("AINote")
+        return ai_generated and not bool(self.entity_state.get("is_verified", self.is_verified))
 
     def refresh_verify_button(self):
         if not hasattr(self, "btn_verify"):
             return
+        if not self.should_show_verify_action():
+            self.btn_verify.hide()
+            return
+        self.btn_verify.show()
         theme = ThemeManager().get_theme()
-        if self.is_verified:
-            self.btn_verify.setText("✓")
-            self.btn_verify.setToolTip("Verified")
-            self.btn_verify.setStyleSheet(self._button_stylesheet(theme))
-        else:
-            self.btn_verify.setText("!")
-            self.btn_verify.setToolTip("Verify entity")
-            self.btn_verify.setStyleSheet(self._button_stylesheet(theme, alert=True))
+        self.btn_verify.setText("!")
+        self.btn_verify.setToolTip("Verify AI note")
+        self.btn_verify.setStyleSheet(self._button_stylesheet(theme, alert=True))
 
     def refresh_child_button(self):
         btn = self.toolbar_buttons.get("entity.toggle_children") if hasattr(self, "toolbar_buttons") else None
@@ -651,9 +669,11 @@ class Node(QGraphicsRectItem):
                 dock_payload = (self.entity_properties.get("data_dock") or {})
                 dataset_id = dock_payload.get("dataset_id")
                 snapshot = dock_payload.get("snapshot")
-                main_window = self.scene().views()[0].window() if self.scene() and self.scene().views() else None
-                if main_window and hasattr(main_window, "dock_manager"):
-                    main_window.dock_manager.spawn("data_dock")
+                views = self.scene().views() if self.scene() else []
+                ctx = getattr(views[0], '_ctx', None) if views else None
+                dm = getattr(ctx, 'dock_manager', None) if ctx else None
+                if dm:
+                    dm.spawn("data_dock")
                 self.bus.data_dock_action_requested.emit(
                     DataDockIntent.LOAD_DATASET,
                     DataDockPayload(dataset_id=dataset_id, node_id=self.node_id, extra={"snapshot": snapshot}),
@@ -731,6 +751,27 @@ class Node(QGraphicsRectItem):
         if self.proxy_custom_ui is not None:
             self.proxy_custom_ui.setPos(margin, margin + status_h + metric_h)
             self.proxy_custom_ui.show()
+
+        if self.node_type_id == "workspace.node.chart" and self.proxy_custom_ui is not None and not editing_note:
+            frame_margin = 6
+            content_w = max(80, self.base_width - frame_margin * 2)
+            content_h = max(60, self.base_height - frame_margin * 2 - status_h - metric_h)
+            try:
+                self.proxy_custom_ui.widget().setFixedSize(content_w, content_h)
+            except Exception:
+                pass
+            self.proxy_custom_ui.setPos(frame_margin, frame_margin + status_h + metric_h)
+            self.text_item.hide()
+            self.note_edit_item.hide()
+            self.proxy_toolbar.hide()
+            self.setRect(0, 0, self.base_width, self.base_height)
+            self.metric_badges = self._layout_metric_badges(metric_badges, self.rect().width(), margin, status_h)
+            self.resize_handle.show()
+            self.resize_handle.setPos(self.rect().width(), self.rect().height())
+            self.resize_handle.setZValue(10)
+            for edge in self.edges:
+                edge.update_position()
+            return
 
         expanded_text = self.build_ontology_display_text(expanded=True)
         collapsed_text = self.build_ontology_display_text(expanded=False)
@@ -913,6 +954,7 @@ class Node(QGraphicsRectItem):
 
         self._paint_type_badge(painter)
         self._paint_metric_badges(painter)
+        self._paint_score_badge(painter)
 
         if not self._tag_colors_loaded:
             self._load_tag_colors()
@@ -1064,6 +1106,11 @@ class Node(QGraphicsRectItem):
                 return f"{int(round(float(value) * 100))}%"
             except Exception:
                 return str(value)
+        if key == "source_score":
+            try:
+                return f"{int(value)}/100"
+            except Exception:
+                return str(value)
         return str(value)
 
     def _collect_metric_badges(self):
@@ -1147,6 +1194,36 @@ class Node(QGraphicsRectItem):
         painter.drawRoundedRect(rect, 4, 4)
         painter.setPen(QPen(QColor("#ffffff")))
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, badge_text)
+        painter.restore()
+
+    def _paint_score_badge(self, painter) -> None:
+        score = (self.entity_properties or {}).get("source_score")
+        if score is None or self.entity_type != "entity.source":
+            return
+        score = max(0, min(100, int(score)))
+        if score >= 65:
+            bg = QColor("#4CAF50")
+        elif score >= 40:
+            bg = QColor("#FF9800")
+        else:
+            bg = QColor("#F44336")
+        r = self.boundingRect()
+        cx = r.left() + 12
+        cy = r.top() + 12
+        radius = 11
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(QBrush(bg))
+        painter.setPen(QPen(bg.darker(130), 1))
+        from PySide6.QtCore import QRectF as _QRectF
+        painter.drawEllipse(_QRectF(cx - radius, cy - radius, radius * 2, radius * 2))
+        painter.setPen(QPen(QColor("white")))
+        painter.setFont(QFont("Arial", 7, QFont.Weight.Bold))
+        painter.drawText(
+            _QRectF(cx - radius, cy - radius, radius * 2, radius * 2),
+            Qt.AlignmentFlag.AlignCenter,
+            str(score),
+        )
         painter.restore()
 
     def _status_band_height(self):

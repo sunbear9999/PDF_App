@@ -604,6 +604,15 @@ class GlobalSettingsDialog(BaseDialog):
         else:
             self._shortcuts_tab = _NoRegistryPlaceholder()
 
+        from gui.components.dialogs.ai_setup_tab import AISetupSettingsTab
+        self._ai_setup_tab = AISetupSettingsTab(self._app_context, t, parent=self)
+        self.tabs.addTab(self._ai_setup_tab, "🤖  AI Setup")
+
+        # The local web companion is isolated under web/; this is its only GUI hook.
+        from web.settings_tab import WebAppSettingsTab
+        self._web_app_tab = WebAppSettingsTab(self._app_context, t, parent=self)
+        self.tabs.addTab(self._web_app_tab, "📱  Web App")
+
         self.tabs.addTab(self._shortcuts_tab, "⌨️  Shortcuts")
 
         from gui.components.dialogs.import_export_tab import ImportExportTab

@@ -75,7 +75,12 @@ class IndexAppService(QObject):
     def _run_indexing(self, pdf_paths=None):
         if self._worker and self._worker.isRunning():
             return
-        paths = pdf_paths or self.pm.pdfs
+        if pdf_paths:
+            paths = pdf_paths
+        elif hasattr(self.pm, "list_sources"):
+            paths = [s.get("path") for s in self.pm.list_sources("pdf") if s.get("path")]
+        else:
+            paths = self.pm.pdfs
         if not paths:
             self.bus.index_status_ready.emit(
                 IndexEvent.FAILED,
@@ -101,8 +106,11 @@ class IndexAppService(QObject):
     def _on_worker_finished(self, success: bool, error_msg: str):
         if success:
             if hasattr(self.pm, "_sync_doc_tags_for_llm"):
-                for pdf_path in self.pm.pdfs:
+                for pdf_path in getattr(self.pm, "pdfs", []):
                     self.pm._sync_doc_tags_for_llm(pdf_path)
+                if hasattr(self.pm, "list_sources"):
+                    for source in self.pm.list_sources("video"):
+                        self.pm._sync_doc_tags_for_llm(source.get("path"))
             self._check_status()
             self.bus.index_status_ready.emit(
                 IndexEvent.COMPLETE,

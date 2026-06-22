@@ -36,12 +36,12 @@ class AnalysisRuntime:
             "max_master_chars": int(raw.get("max_master_chars", template.get("max_master_chars", 36000)) or 36000),
             "num_ctx": int(raw.get("num_ctx", template.get("num_ctx", 24576)) or 24576),
             # INCREASED: Give the LLM enough room to output complete JSON graphs
-            "chunk_num_predict": int(raw.get("chunk_num_predict", template.get("chunk_num_predict", 1400)) or 1400),
-            "synthesis_num_predict": int(raw.get("synthesis_num_predict", template.get("synthesis_num_predict", 3500)) or 3500),
-            "master_num_predict": int(raw.get("master_num_predict", template.get("master_num_predict", 4000)) or 4000),
+            "chunk_num_predict": int(raw.get("chunk_num_predict", template.get("chunk_num_predict", 1600)) or 1600),
+            "synthesis_num_predict": int(raw.get("synthesis_num_predict", template.get("synthesis_num_predict", 5000)) or 5000),
+            "master_num_predict": int(raw.get("master_num_predict", template.get("master_num_predict", 7000)) or 7000),
             "max_entities_per_chunk": int(raw.get("max_entities_per_chunk", template.get("max_entities_per_chunk", 6)) or 6),
             "max_relations_per_chunk": int(raw.get("max_relations_per_chunk", template.get("max_relations_per_chunk", 10)) or 10),
-            "max_quotes_per_chunk": int(raw.get("max_quotes_per_chunk", template.get("max_quotes_per_chunk", 2)) or 2),
+            "max_quotes_per_chunk": int(raw.get("max_quotes_per_chunk", template.get("max_quotes_per_chunk", 4)) or 4),
             "quote_words": int(raw.get("quote_words", template.get("quote_words", 10)) or 10),
             "max_quote_words": int(raw.get("max_quote_words", template.get("max_quote_words", 18)) or 18),
             "explanation_words": int(raw.get("explanation_words", template.get("explanation_words", 10)) or 10),
@@ -248,6 +248,39 @@ class AnalysisRuntime:
             })
         result = json.dumps(compact, separators=(",", ":"))
         return result[:max_chars]
+
+    def validate_chunk_observation_quotes(self, observation: Any, source_text: str) -> Any:
+        """Drop generated quotes that cannot be found verbatim in the source chunk."""
+        if not isinstance(observation, dict):
+            return observation
+        key = "q" if isinstance(observation.get("q"), list) else (
+            "quotes" if isinstance(observation.get("quotes"), list) else None
+        )
+        if not key:
+            return observation
+
+        import re
+        import unicodedata
+
+        def normalized(value):
+            value = unicodedata.normalize("NFKC", str(value or ""))
+            value = value.replace("\u00ad", "").replace("‐", "-").replace("–", "-")
+            value = re.sub(r"(?<=\w)-\s+(?=\w)", "", value)
+            return re.sub(r"\s+", " ", value).strip().casefold()
+
+        haystack = normalized(source_text)
+        verified = []
+        for quote in observation[key]:
+            if not isinstance(quote, dict):
+                continue
+            text = quote.get("x") or quote.get("quote") or quote.get("exact_text") or ""
+            needle = normalized(text)
+            if needle and needle in haystack:
+                verified.append(quote)
+        cleaned = dict(observation)
+        cleaned[key] = verified
+        cleaned["discarded_unverified_quotes"] = len(observation[key]) - len(verified)
+        return cleaned
 
     def normalize_result(self, doc_path: str, template_id: str, run_id: str, template: dict, contract: dict, chunks_raw: Any, master_raw: Any, synthesis: str = "") -> dict:
         chunks = chunks_raw if isinstance(chunks_raw, list) else self._parse_jsonish(chunks_raw)
@@ -630,7 +663,7 @@ class AnalysisRuntime:
         limits = contract.get("limits") or {}
         chunk_max = max(1, int(limits.get("max_entities_per_chunk") or 6))
         max_claims = min(7, max(4, chunk_max // 2))
-        max_quotes_each = min(3, max(1, int(limits.get("max_quotes_per_chunk") or 2)))
+        max_quotes_each = min(5, max(2, int(limits.get("max_quotes_per_chunk") or 4)))
         for claim_idx, group in enumerate(groups[:max_claims]):
             claim_text = group["theme"]
             reason_text = group.get("reason", "")

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Type, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from core.plugins.plugin_step_protocol import CustomExecutionStep
 
 
 @dataclass
@@ -19,6 +22,9 @@ class WorkflowNodeType:
     plugin_id: Optional[str] = None
     input_schema: Dict[str, Any] = field(default_factory=dict)   # {key: {type, label, required}}
     output_schema: Dict[str, Any] = field(default_factory=dict)  # {key: {type, label}}
+    # Registry-dispatch: when set, _dispatch_step instantiates step_cls instead of
+    # calling a legacy handler function.  None = flow-control native or legacy handler.
+    step_cls: Optional["Type[CustomExecutionStep]"] = None
 
 
 @dataclass

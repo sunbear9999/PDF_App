@@ -6,9 +6,15 @@ from typing import Iterable, List
 
 
 def active_pdf_paths(project_manager) -> List[str]:
-    """Return project PDF paths that are still active and not soft-removed."""
+    """Return active source paths. Name kept for compatibility with older callers."""
     if not project_manager:
         return []
+
+    if hasattr(project_manager, "list_sources"):
+        try:
+            return [s.get("path") for s in project_manager.list_sources() if s.get("path")]
+        except Exception:
+            pass
 
     pdfs = list(getattr(project_manager, "pdfs", []) or [])
     if not pdfs:

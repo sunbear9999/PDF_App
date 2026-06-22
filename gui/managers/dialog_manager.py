@@ -110,7 +110,16 @@ def exec_as_modal(dialog: QDialog) -> int:
         | Qt.WindowType.WindowSystemMenuHint
         | Qt.WindowType.WindowCloseButtonHint
     )
-    dialog.setWindowFlags(flags)
+    parent = dialog.parent()
+    if not isinstance(parent, QMainWindow):
+        parent = resolve_main_window(dialog)
+    if parent is not None:
+        # Combined setParent+flags call: Qt establishes the native XDG /
+        # WM_TRANSIENT_FOR parent in a single step, preventing Wayland from
+        # losing the parent link when the window handle is recreated.
+        dialog.setParent(parent, flags)  # type: ignore[arg-type]
+    else:
+        dialog.setWindowFlags(flags)
     dialog.setWindowModality(Qt.WindowModality.WindowModal)
     return dialog.exec()
 
@@ -281,7 +290,10 @@ class DialogManager(QObject):
         )
         dialog.show()
         dialog.raise_()
-        dialog.activateWindow()
+        # Do NOT call activateWindow() here — on Linux (GNOME Shell / Ubuntu Dock)
+        # activating a new window while in fullscreen causes the desktop panel to
+        # surface.  For modeless dialogs the user decides when to interact; just
+        # raising the window is enough.
         return dialog
 
     # ------------------------------------------------------------------ #
@@ -311,20 +323,15 @@ class DialogManager(QObject):
                        window or one of its children.
         :returns: QDialog.DialogCode (Accepted=1, Rejected=0).
         """
-        # Ensure a proper parent so the OS applies the transient-for hint
-        if dialog.parent() is None:
-            dialog.setParent(self._main_window)  # type: ignore[arg-type]
-
-        # Apply Tool flags to avoid a taskbar entry even for modal dialogs,
-        # and use WindowModal rather than the default ApplicationModal so that
-        # other top-level windows (e.g. a plugin dialog) remain interactive.
         flags = (
             Qt.WindowType.Tool
             | Qt.WindowType.WindowTitleHint
             | Qt.WindowType.WindowSystemMenuHint
             | Qt.WindowType.WindowCloseButtonHint
         )
-        dialog.setWindowFlags(flags)
+        # Combined setParent+flags: establishes the Wayland XDG transient
+        # parent atomically, preventing the desktop panel from surfacing.
+        dialog.setParent(self._main_window, flags)  # type: ignore[arg-type]
         dialog.setWindowModality(Qt.WindowModality.WindowModal)
 
         log.debug(
@@ -364,19 +371,17 @@ class DialogManager(QObject):
     # Internal helpers
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _apply_modeless_config(dialog: QDialog) -> None:
+    def _apply_modeless_config(self, dialog: QDialog) -> None:
         """Apply standard modeless presentation to *dialog* before showing."""
-        # Determine whether to include a resize/maximize hint by checking the
-        # current flags before we replace them.
         old_flags = dialog.windowFlags()
         resizable = bool(old_flags & Qt.WindowType.WindowMaximizeButtonHint)
         flags = _MODELESS_FLAGS_RESIZABLE if resizable else _MODELESS_FLAGS
-        dialog.setWindowFlags(flags)
+        # Use the combined setParent(parent, flags) overload so Qt establishes
+        # the native Wayland XDG / X11 WM_TRANSIENT_FOR parent link atomically.
+        # Calling setParent() and setWindowFlags() as two separate steps can
+        # lose the parent link on Wayland when Qt recreates the native handle.
+        dialog.setParent(self._main_window, flags)  # type: ignore[arg-type]
         dialog.setWindowModality(Qt.WindowModality.NonModal)
-        # Delete the C++ object when the dialog window is closed so we don't
-        # accumulate hidden widgets.  The destroyed signal handler removes
-        # our Python reference before the object is freed.
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
 
     def _install_keyed(self, key: str, dialog: QDialog) -> None:

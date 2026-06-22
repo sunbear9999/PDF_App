@@ -23,10 +23,9 @@ class SafeWebEnginePage(QWebEnginePage):
         # Automatically returns a safe string so the old cached JS doesn't crash
         return True, "Custom Layout"
 class PapyrusOpenDeckBridge(QObject):
-    def __init__(self, project_manager, main_window):
+    def __init__(self, project_manager):
         super().__init__()
         self.project_manager = project_manager
-        self.main_window = main_window
 
     @Slot(str)
     def logToPython(self, message):
@@ -63,10 +62,9 @@ class PapyrusOpenDeckBridge(QObject):
     def requestLLMSlideGeneration(self, prompt):
         print(f"LLM requested to build slide based on: {prompt}")
 class SlideshowTab(QWidget):
-    def __init__(self, project_manager, main_window):
-        super().__init__()
+    def __init__(self, project_manager, parent=None):
+        super().__init__(parent)
         self.project_manager = project_manager
-        self.main_window = main_window
         
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
@@ -94,7 +92,7 @@ class SlideshowTab(QWidget):
         settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
         settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
         settings.setAttribute(QWebEngineSettings.WebAttribute.LocalStorageEnabled, True)
-        self.bridge = PapyrusOpenDeckBridge(self.project_manager, self.main_window)
+        self.bridge = PapyrusOpenDeckBridge(self.project_manager)
         self.channel = QWebChannel()
         self.channel.registerObject("papyrusBridge", self.bridge)
         self.web_view.page().setWebChannel(self.channel)

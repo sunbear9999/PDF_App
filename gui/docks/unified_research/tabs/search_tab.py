@@ -30,8 +30,8 @@ class AsyncCitationWorker(QThread):
         self.finished_extraction.emit()
 
 class SearchTab(BaseTab):
-    def __init__(self, main_window, parent=None):
-        super().__init__(main_window, target_id="search_tab", parent=parent)
+    def __init__(self, app_context, parent=None):
+        super().__init__(app_context, target_id="search_tab", parent=parent)
         self._build_ui()
 
     def _build_ui(self):
@@ -106,7 +106,7 @@ class SearchTab(BaseTab):
         if not text: return
         if engine == "rag":
             from core.events.domains.document_events import DocumentIntent, DocumentPayload
-            EventBus.get_instance().document_action_requested.emit(
+            self.app_context.bus.document_action_requested.emit(
                 DocumentIntent.FIND_SIMILAR, DocumentPayload(text=text)
             )
         else:
@@ -207,7 +207,7 @@ class SearchTab(BaseTab):
         target_path = next((p for p in active_pdf_paths(pm) if doc_name in os.path.basename(p)), None)
         if target_path:
             from core.events.domains.document_events import DocumentIntent, DocumentPayload
-            bus = EventBus.get_instance()
+            bus = self.app_context.bus
             bus.document_action_requested.emit(DocumentIntent.OPEN, DocumentPayload(path=target_path))
             bus.document_action_requested.emit(DocumentIntent.FIND_TEXT, DocumentPayload(text=text))
 

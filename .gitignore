@@ -43,3 +43,8 @@ voices/
 *.pdfproj
 OllamaSetup.exe
 main.patched.spec
+
+# Papyrus Local Web Companion source and prebuilt offline assets.
+!web/**
+web/**/__pycache__/
+web/frontend/node_modules/

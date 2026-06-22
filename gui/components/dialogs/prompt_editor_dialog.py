@@ -6,24 +6,31 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer
 from core.events.domains.metadata_events import PromptIntent, PromptPayload
 class PromptEditorDialog(QDialog):
-    def __init__(self, prompt_manager, parent=None, trace_id=None, trace_record=None):
+    def __init__(self, prompt_manager, parent=None, app_context=None, trace_id=None, trace_record=None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.prompt_manager = prompt_manager
-        self.blueprint_manager = getattr(parent, 'blueprint_manager', None)
-        self.blueprint_registry = getattr(parent, 'blueprint_registry', None)
-        self.step_manager = getattr(parent, 'step_manager', None)
-        self.prompt_service = getattr(parent, 'prompt_app_service', None)
+        self._ctx = app_context
+
+        # Resolve prompt_app_service from app_context first, then fall back to creating one
+        self.prompt_service = (
+            getattr(app_context, 'prompt_app_service', None)
+            or getattr(parent, 'prompt_app_service', None)
+        )
         if not self.prompt_service:
-            from core.services.prompt_app_service import PromptAppService
+            from core.services.ai.prompt_app_service import PromptAppService
             self.prompt_service = PromptAppService(
                 prompt_manager,
-                blueprint_manager=self.blueprint_manager,
-                blueprint_registry=self.blueprint_registry,
-                step_manager=self.step_manager,
+                blueprint_manager=getattr(app_context, 'blueprint_manager', None),
+                blueprint_registry=getattr(app_context, 'blueprint_registry', None),
+                step_manager=getattr(app_context, 'step_manager', None),
             )
 
-        self.theme = parent.theme_manager.get_theme() if hasattr(parent, 'theme_manager') else {
+        theme_manager = (
+            getattr(app_context, 'theme_manager', None)
+            or getattr(parent, 'theme_manager', None)
+        )
+        self.theme = theme_manager.get_theme() if theme_manager else {
             'bg_main': '#1e1e1e', 'text_main': '#ffffff', 'bg_panel': '#333333',
             'bg_input': '#2b2b2b', 'border': '#444444', 'accent': '#b366ff',
             'danger': '#ff4444', 'success': '#00cc66', 'text_muted': '#aaaaaa'
@@ -335,7 +342,10 @@ class PromptEditorDialog(QDialog):
             details_item.setForeground(0, Qt.GlobalColor.cyan)
     
     def _populate_analysis_mode_tree(self):
-        project_manager = getattr(self.parent(), "project_manager", None)
+        project_manager = (
+            getattr(self._ctx, 'project_manager', None)
+            or getattr(self.parent(), 'project_manager', None)
+        )
         templates = project_manager.get_analysis_templates() if project_manager and hasattr(project_manager, "get_analysis_templates") else []
         usage_rows = self.prompt_service.get_analysis_template_prompt_usage(templates)
         if not usage_rows:
@@ -400,7 +410,10 @@ class PromptEditorDialog(QDialog):
     def open_trace(self):
         trace = self._trace_as_dict()
         if not trace and self.trace_id:
-            pm = getattr(self.parent(), "project_manager", None)
+            pm = (
+                getattr(self._ctx, 'project_manager', None)
+                or getattr(self.parent(), 'project_manager', None)
+            )
             if pm and hasattr(pm, "get_prompt_trace"):
                 trace = pm.get_prompt_trace(self.trace_id)
         if not trace:

@@ -19,6 +19,7 @@ from gui.docks.unified_research.tabs.base_tab import BaseTab
 from gui.docks.unified_research.components.template_editor import TemplateEditorDialog
 from gui.docks.unified_research.components.note_bubble import NoteBubbleWidget
 from gui.utils.document_helpers import active_pdf_paths
+from core.utils.analysis_helpers import MASTER_CHUNK_SENTINEL, PAGES_PER_CHUNK
 
 
 class AnalysisResultCard(QFrame):
@@ -207,11 +208,11 @@ class AnalysisTab(BaseTab):
     ui_signal = Signal(object, object)
     workflow_signal = Signal(object, object)
 
-    def __init__(self, main_window, parent=None):
-        super().__init__(main_window, target_id="analysis_tab", parent=parent)
+    def __init__(self, app_context, parent=None):
+        super().__init__(app_context, target_id="analysis_tab", parent=parent)
         self.pm = self.project_manager
         self._save_counter = 0  # Strict counter for DB saves
-        self.bus = EventBus.get_instance()
+        self.bus = app_context.bus
         
         # 2. Connect the signals to safely hop back to the Main UI Thread
         self.ui_signal.connect(self._safe_analysis_event, Qt.ConnectionType.QueuedConnection)
@@ -268,22 +269,8 @@ class AnalysisTab(BaseTab):
 
     # --- BULLETPROOF DB EXTRACTORS ---
     def _parse_db_row(self, row):
-        """Guarantees extraction of chunk_index and json_data regardless of SQLite row format."""
-        c_idx, j_data = 0, "{}"
-        if hasattr(row, 'keys'): 
-            c_idx = row['chunk_index']
-            j_data = row['json_data']
-        elif isinstance(row, dict):
-            c_idx = row.get('chunk_index', 0)
-            j_data = row.get('json_data', '{}')
-        else: # Ultimate Tuple Fallback
-            for val in row:
-                if isinstance(val, int) and val < 1000: c_idx = val
-            for val in reversed(row):
-                if isinstance(val, str) and (val.strip().startswith('{') or val.strip().startswith('[')):
-                    j_data = val
-                    break
-        return c_idx, j_data
+        from core.utils.analysis_helpers import parse_db_row
+        return parse_db_row(row)
 
     def _get_safe_template_id(self, template):
         """Prevents crash if the template dropdown returns a raw string/tuple instead of a dict."""
@@ -294,42 +281,8 @@ class AnalysisTab(BaseTab):
         return str(template)
 
     def _mathematical_merge(self, analyses):
-        """Deterministically merges JSON chunks, mathematically stripping identical data."""
-        if not analyses: return "{}"
-        master_dict = {}
-        
-        for row in analyses:
-            c_idx, j_data = self._parse_db_row(row)
-            try:
-                from core.utils.json_utils import extract_and_heal_json
-                success, parsed = extract_and_heal_json(j_data)
-                if not success: continue
-                
-                items_to_process = parsed if isinstance(parsed, list) else [parsed]
-                
-                for obj in items_to_process:
-                    if not isinstance(obj, dict): continue
-                    
-                    for key, val in obj.items():
-                        if key not in master_dict:
-                            master_dict[key] = []
-                            
-                        # Flatten logic: if val is a list, extend. If scalar, append.
-                        vals_to_add = val if isinstance(val, list) else [val]
-                        
-                        for v in vals_to_add:
-                            # Deduplication Check
-                            if isinstance(v, dict):
-                                v_str = json.dumps(v, sort_keys=True)
-                                if not any(isinstance(existing, dict) and json.dumps(existing, sort_keys=True) == v_str for existing in master_dict[key]):
-                                    master_dict[key].append(v)
-                            else:
-                                if v not in master_dict[key]:
-                                    master_dict[key].append(v)
-            except Exception as e:
-                print(f"[Merge Error] {e}")
-                
-        return json.dumps(master_dict)
+        from core.utils.analysis_helpers import mathematical_merge
+        return mathematical_merge(analyses)
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -482,7 +435,17 @@ class AnalysisTab(BaseTab):
             if item.widget(): item.widget().deleteLater()
 
     def _refresh_selectors(self):
-        if not self.pm: return
+        import shiboken6
+        if not self.pm or not shiboken6.isValid(self):
+            return
+        selectors = [
+            getattr(self, name, None) for name in (
+                "doc_selector", "cmp_doc", "comp_doc1", "comp_doc2",
+                "combo_templates", "cmp_template",
+            )
+        ]
+        if any(widget is None or not shiboken6.isValid(widget) for widget in selectors):
+            return
         previous_docs = {
             self.doc_selector: self.doc_selector.currentData(),
             self.cmp_doc: self.cmp_doc.currentData(),
@@ -566,7 +529,7 @@ class AnalysisTab(BaseTab):
             WorkflowPayload(
                 blueprint=blueprint,
                 initial_state={
-                    "selected_model": self.main_window._get_active_ai_model() if hasattr(self.main_window, "_get_active_ai_model") else "",
+                    "selected_model": self.app_context.get_active_ai_model(),
                     "analysis_doc_path": doc_path,
                     "target_doc": doc_path,
                     "analysis_template_id": template_id,
@@ -640,7 +603,7 @@ class AnalysisTab(BaseTab):
             chunk,
             self.theme,
             doc_name,
-            getattr(self.main_window, "viewer", None),
+            self.app_context.viewer,
             self,
         )
         self.results_layout.insertWidget(self.results_layout.count() - 1, card)
@@ -668,7 +631,7 @@ class AnalysisTab(BaseTab):
                 initial_state={
                     "analysis_result": result,
                     "analysis_workspace_id": workspace_id,
-                    "selected_model": self.main_window._get_active_ai_model() if hasattr(self.main_window, "_get_active_ai_model") else "",
+                    "selected_model": self.app_context.get_active_ai_model(),
                 },
                 job_name=blueprint.name,
                 target_id="analysis_tab",
@@ -694,7 +657,7 @@ class AnalysisTab(BaseTab):
         for row in analyses:
             try:
                 c_idx, j_data = self._parse_db_row(row)
-                if c_idx == 999999:
+                if c_idx == MASTER_CHUNK_SENTINEL:
                     try:
                         parsed_master = self._parse_saved_master_json(j_data)
                         self._clear_layout(self.master_layout)
@@ -710,7 +673,7 @@ class AnalysisTab(BaseTab):
                 items = parsed if (success and isinstance(parsed, list)) else [j_data]
                 
                 for i, item in enumerate(items):
-                    start_page = ((c_idx + i) * 4) + 1 if isinstance(parsed, list) else (c_idx * 4) + 1
+                    start_page = ((c_idx + i) * PAGES_PER_CHUNK) + 1 if isinstance(parsed, list) else (c_idx * PAGES_PER_CHUNK) + 1
                     title = f"Section {c_idx + i + 1 if isinstance(parsed, list) else c_idx + 1}: Pages {start_page}-{start_page + 3}"
                     container = QFrame()
                     container.setStyleSheet(f"background-color: {self.theme.get('bg_input', '#2b2b2b')}; border: 1px solid {self.theme.get('border', '#444')}; border-radius: 6px;")
@@ -735,7 +698,7 @@ class AnalysisTab(BaseTab):
                         section_chunk,
                         self.theme,
                         os.path.basename(doc_path),
-                        getattr(self.main_window, "viewer", None),
+                        self.app_context.viewer,
                         self,
                     )
                     vbox.addWidget(section_card)
@@ -751,7 +714,7 @@ class AnalysisTab(BaseTab):
             return {}
         for row in analyses or []:
             c_idx, j_data = self._parse_db_row(row)
-            if c_idx == 999999:
+            if c_idx == MASTER_CHUNK_SENTINEL:
                 return self._parse_saved_master_json(j_data)
         return {}
 
