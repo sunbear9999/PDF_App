@@ -145,6 +145,25 @@ class DatabaseSchema(BaseDB):
                 doc_path TEXT, template_id TEXT, chunk_index INTEGER, json_data TEXT
             )''')
 
+            cursor.execute('''CREATE TABLE IF NOT EXISTS analysis_evidence_quotes (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                doc_path TEXT NOT NULL,
+                chunk_id INTEGER NOT NULL,
+                exact_text TEXT NOT NULL,
+                snippet TEXT NOT NULL,
+                page_num INTEGER,
+                note_text TEXT NOT NULL DEFAULT '',
+                importance_score REAL NOT NULL DEFAULT 0.5,
+                confidence_score REAL NOT NULL DEFAULT 0.5,
+                suggested_node_type TEXT NOT NULL DEFAULT '',
+                quote_role TEXT NOT NULL DEFAULT 'supports',
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )''')
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_evidence_quotes_run ON analysis_evidence_quotes(run_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_evidence_quotes_chunk ON analysis_evidence_quotes(run_id, chunk_id)")
+
             cursor.execute('''CREATE TABLE IF NOT EXISTS data_dock_datasets (
                 id TEXT PRIMARY KEY,
                 name TEXT,
@@ -165,6 +184,15 @@ class DatabaseSchema(BaseDB):
             )''')
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_data_dock_datasets_updated ON data_dock_datasets(updated_at)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_data_dock_charts_dataset ON data_dock_charts(dataset_id)")
+            cursor.execute('''CREATE TABLE IF NOT EXISTS media_assets (
+                id TEXT PRIMARY KEY,
+                mime_type TEXT NOT NULL,
+                sha256 TEXT NOT NULL UNIQUE,
+                data BLOB NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )''')
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_media_assets_sha256 ON media_assets(sha256)")
 
             self._ensure_graph_tables(cursor)
             self._migrate_legacy_workspace_to_graph(cursor)

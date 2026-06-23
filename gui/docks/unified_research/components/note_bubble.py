@@ -9,6 +9,7 @@ class NoteBubbleWidget(BaseCard):
     save_requested = Signal(str, str, str) # quote, note, doc_name
     jump_requested = Signal(str, str)      # doc_name, quote
     source_jump_requested = Signal(dict)
+    citation_jump_requested = Signal(dict)
     search_requested = Signal(str)         # quote (for finding similar context)
 
     def __init__(self, doc_name, quote, note="", theme=None, parent=None, source_meta=None):
@@ -60,9 +61,13 @@ class NoteBubbleWidget(BaseCard):
         self.update_theme(self.theme)
 
     def _emit_jump(self):
+        citation = dict(self.source_meta)
+        citation.setdefault("doc_name", self.doc_name)
+        citation.setdefault("quote", self.quote)
+        self.citation_jump_requested.emit(citation)
         if self.source_meta.get("source_type") == "video":
             self.source_jump_requested.emit(dict(self.source_meta))
-        else:
+        elif not self.property("citation_handler_connected"):
             self.jump_requested.emit(self.doc_name, self.quote)
 
     def update_theme(self, theme):

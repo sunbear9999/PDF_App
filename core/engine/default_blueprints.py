@@ -5,116 +5,21 @@ from core.engine.action_model import AIActionBlueprint, ActionStep
 class DefaultBlueprints:
     @staticmethod
     def get_citation_coverage_steps(answer_key="final_answer", context_key="rag_context", ui_target="chat_dock") -> list[ActionStep]:
-        """Cite each factual answer claim independently, then render one deduplicated card set."""
-        per_claim = AIActionBlueprint(
-            name="Cite Answer Claim",
-            description="Find all source passages supporting one answer claim.",
-            steps=[ActionStep(
-                step_id="cite_answer_claim",
-                step_type="LLM_QUERY",
-                inputs={"query": (
-                    "Find every distinct passage in SOURCE TEXT that directly supports, qualifies, "
-                    "or materially challenges TARGET CLAIM. Return exact verbatim quotes only. "
-                    "Do not stop after the first match. Exclude merely topical passages.\n\n"
-                    "TARGET CLAIM:\n{item.claim}\n\n"
-                    f"FULL ANSWER:\n{{{answer_key}}}\n\nSOURCE TEXT:\n{{{context_key}}}"
-                )},
-                prompt_key="Evidence Extractor",
-                output_schema={"citations": [{
-                    "doc_name": "filename.pdf",
-                    "quote": "exact verbatim passage",
-                    "note": "precise relationship to the target claim",
-                }]},
-                llm_options={"temperature": 0.1, "num_predict": 2400, "num_ctx": 65536},
-                output_key="claim_citations",
-                ui_format="status",
-                ui_target=ui_target,
-                status_text="Matching answer claims to source evidence...",
-            )],
-        )
-        combine_script = (
-            "import json\n"
-            "raw = state.get('citation_groups', '[]')\n"
-            "try:\n"
-            "    groups = json.loads(raw) if isinstance(raw, str) else raw\n"
-            "except Exception:\n"
-            "    groups = []\n"
-            "if not isinstance(groups, list): groups = [groups]\n"
-            "items = []\n"
-            "for group in groups:\n"
-            "    if isinstance(group, str):\n"
-            "        try: group = json.loads(group)\n"
-            "        except Exception: continue\n"
-            "    candidates = group.get('citations', []) if isinstance(group, dict) else group\n"
-            "    if isinstance(candidates, dict): candidates = [candidates]\n"
-            "    if isinstance(candidates, list): items.extend(x for x in candidates if isinstance(x, dict))\n"
-            "seen = set()\n"
-            "deduped = []\n"
-            "for item in items:\n"
-            "    key = (' '.join(str(item.get('quote', '')).lower().split()), str(item.get('doc_name', '')).lower())\n"
-            "    if key[0] and key not in seen:\n"
-            "        seen.add(key)\n"
-            "        deduped.append(item)\n"
-            "result = json.dumps(deduped)"
-        )
-        return [
-            ActionStep(
-                step_id="plan_citation_coverage",
-                step_type="LLM_QUERY",
-                inputs={"query": (
-                    "List every independently sourced factual claim in the completed answer. "
-                    "Do not collapse distinct claims into one broad topic.\n\n"
-                    f"COMPLETED ANSWER:\n{{{answer_key}}}"
-                )},
-                prompt_key="General Assistant",
-                output_schema={"claims": [{
-                    "claim": "one independently verifiable factual claim",
-                    "evidence_need": "what evidence must establish",
-                }]},
-                llm_options={"temperature": 0.1, "num_predict": 2000, "num_ctx": 32768},
-                output_key="citation_claim_plan",
-                ui_format="status",
-                ui_target=ui_target,
-                status_text="Mapping answer claims for citation coverage...",
-            ),
-            ActionStep(
-                step_id="gather_claim_citations",
-                step_type="FOREACH",
-                inputs={"list": "{citation_claim_plan}", "sub_blueprint": per_claim},
-                output_key="citation_groups",
-                ui_format="status",
-                ui_target=ui_target,
-                status_text="Gathering all relevant source notes...",
-            ),
-            ActionStep(
-                step_id="render_citation_coverage",
-                step_type="PYTHON_SCRIPT",
-                inputs={"script": combine_script},
-                output_key="citations",
-                ui_format="chat_widgets",
-                ui_target=ui_target,
-                status_text="Rendering source notes...",
-            ),
-        ]
+        """Generate complete answer citations in one structured model pass."""
+        return [DefaultBlueprints.get_universal_citation_step(answer_key, context_key, ui_target)]
 
     @staticmethod
     def get_universal_citation_step(answer_key="final_answer", context_key="rag_context", ui_target="floating") -> ActionStep:
+        # Instruction lives in PromptManager ("Citation Coverage Query") so it is editable.
+        # The state-variable blocks (SOURCE TEXT / AI ANSWER) are appended here so the
+        # step works regardless of which keys the calling blueprint uses.
         query_text = (
-            "Review the completed answer against every passage in SOURCE TEXT. "
-            "Return one note bubble for every distinct source passage that directly "
-            "supports, qualifies, or materially challenges a claim in the answer. "
-            "Do not impose an arbitrary citation limit. Do not merge evidence from "
-            "different documents. Quotes must be exact and notes must identify the "
-            "specific answer claim they relate to. Exclude duplicates and passages "
-            "that are merely topically similar.\n\n"
-            "--- SOURCE TEXT ---\n"
-            f"{{{context_key}}}\n\n"
-            "--- AI ANSWER ---\n"
-            f"{{{answer_key}}}"
+            "{prompt:Citation Coverage Query}\n\n"
+            f"--- SOURCE TEXT ---\n{{{context_key}}}\n\n"
+            f"--- AI ANSWER ---\n{{{answer_key}}}"
         )
-        
         return ActionStep(
-            step_id="extract_citations", 
+            step_id="generate_citation_coverage",
             step_type="LLM_QUERY",
             inputs={"query": query_text},
             prompt_key="Evidence Extractor",
@@ -122,13 +27,18 @@ class DefaultBlueprints:
                 "citations": [{
                     "doc_name": "filename.pdf", 
                     "quote": "exact verbatim sentence from text", 
-                    "note": "brief reason why it supports the answer"
+                    "note": "specific answer claim supported by this quote",
+                    "source_type": "exact value from CITATION_SOURCE_TYPE",
+                    "source_id": "exact value from CITATION_SOURCE_ID",
+                    "source_locator": {"key": "values from CITATION_LOCATOR_key lines"},
                 }]
             },
-            llm_options={"temperature": 0.1, "num_predict": 4096, "num_ctx": 32768},
+            llm_options={"temperature": 0.1, "num_predict": 4096, "num_ctx": 65536},
+            output_key="citations",
+            citation_source_key=context_key,
             ui_format="chat_widgets",
             ui_target=ui_target,
-            output_key="citations",
+            status_text="Citing all answer claims in one pass...",
             required_context=[] 
         )
 
@@ -139,10 +49,7 @@ class DefaultBlueprints:
             step_type="LLM_QUERY",
             inputs={
                 "query": (
-                    "Review the user request and completed answer. Update the project "
-                    "manifest only when they establish or materially change the research "
-                    "thesis, major topics, or open questions. If no update is warranted, "
-                    "return a brief acknowledgement without an UPDATE_MANIFEST block.\n\n"
+                    "{prompt:Manifest Update Query}\n\n"
                     f"USER REQUEST:\n{{{user_key}}}\n\nCOMPLETED ANSWER:\n{{{answer_key}}}"
                 )
             },
@@ -216,13 +123,7 @@ class DefaultBlueprints:
                 step_id="build_typed_workspace_graph",
                 step_type="LLM_QUERY",
                 inputs={"query": (
-                    "Turn the completed response into a useful research-planning graph. "
-                    "Choose node categories and edge categories only from ONTOLOGY CATALOG. "
-                    "Use the most semantically specific types available—for example Question "
-                    "for open research questions, Concept for topical groupings, Finding for "
-                    "synthesized knowledge, Claim for assertions, and Reasoning for planning "
-                    "steps. Every relation must obey its registered valid source/target types. "
-                    "Create a connected, practically useful graph rather than a flat list.\n\n"
+                    "{prompt:Build Typed Workspace Graph Query}\n\n"
                     "ONTOLOGY CATALOG:\n{ontology_catalog}\n\n"
                     f"COMPLETED RESPONSE:\n{{{source_key}}}\n\n"
                     "CURRENT WORKSPACE:\n{workspace_data}"
@@ -425,12 +326,7 @@ class DefaultBlueprints:
                 step_type="LLM_QUERY",
                 inputs={
                     "query": (
-                        "Decide what additional evidence is needed to fully answer the user. "
-                        "Use the initial search results and source statistics, including document "
-                        "page counts and indexed coverage, to choose the smallest sufficient number "
-                        "of distinct targeted searches (zero through eight). Each search must close "
-                        "a specific unresolved topic, ambiguity, comparison, counterpoint, or evidence "
-                        "gap. Do not repeat the initial query.\n\n"
+                        "{prompt:Plan Adaptive Research Query}\n\n"
                         "USER REQUEST:\n{user_query}\n\n"
                         "SOURCE STATISTICS:\n{source_statistics}\n\n"
                         "INITIAL SEARCH CONTEXT:\n{initial_rag_context}"
@@ -513,14 +409,12 @@ class DefaultBlueprints:
                     if_false=standard_steps
                 ),
                 ActionStep(
-                    step_id="chat_response", 
+                    step_id="chat_response",
                     step_type="LLM_QUERY",
-                    # Tell the LLM to read the history variable
-                    inputs={"query": "--- PREVIOUS CHAT HISTORY ---\n{chat_history}\n\n--- DOCUMENT CONTEXT ---\n{rag_context}\n\nUser: {user_query}"},
-                    model=model, 
-                    
-                    # Tell the LLM to read the dynamic persona
-                    prompt_key="{chat_persona}", 
+                    # {chat_history} expands to "" or "CONVERSATION HISTORY:\n...\n\n" via the tab's context contributor
+                    inputs={"query": "{chat_history}--- DOCUMENT CONTEXT ---\n{rag_context}\n\nUser: {user_query}"},
+                    model=model,
+                    prompt_key="{chat_persona}",
                     
                     required_context=["manifest"], 
                     ui_format="live_stream", 
@@ -562,8 +456,9 @@ class DefaultBlueprints:
                 ui_format="silent", ui_target="brainstorm_dock"
             ))
             
-        query_text = "{prompt:Brainstorm Query}"
-        if "RAG" in prompt_key: 
+        # {chat_history} expands to "" or "CONVERSATION HISTORY:\n...\n\n" via context contributor
+        query_text = "{chat_history}{prompt:Brainstorm Query}"
+        if "RAG" in prompt_key:
             query_text += "\n\nDOCUMENT CONTEXT:\n{context}"
 
         required_context = ["manifest"]
@@ -685,7 +580,8 @@ class DefaultBlueprints:
         )
 
     @staticmethod
-    def get_analysis_blueprint(pm, doc_path: str = "{analysis_doc_path}") -> AIActionBlueprint:
+    def get_legacy_analysis_blueprint(pm, doc_path: str = "{analysis_doc_path}") -> AIActionBlueprint:
+        """Original single-pass synthesis blueprint — kept for backward compat and short documents."""
         sub_blueprint = AIActionBlueprint(name="Analyze Chunk", description="", steps=[
             ActionStep(
                 step_id="analyze_chunk_graph",
@@ -698,8 +594,8 @@ class DefaultBlueprints:
                 ui_target="analysis_tab",
             )
         ])
-        return AIActionBlueprint(name="Document Analysis", description="Registry-driven document graph analysis.", mount_points=["analysis_tab"], steps=[
-            ActionStep("analysis_contract", "ANALYSIS_CONTRACT", inputs={"template": "{analysis_template}"}, output_key="analysis_contract", ui_format="silent"),
+        return AIActionBlueprint(name="Document Analysis (Legacy)", description="Single-pass document graph analysis.", mount_points=["analysis_tab"], steps=[
+            ActionStep("analysis_contract", "ANALYSIS_CONTRACT", inputs={"template": "{analysis_template}", "user_prompt": "{analysis_user_prompt}"}, output_key="analysis_contract", ui_format="silent"),
             ActionStep("chunk_document", "DOCUMENT_CHUNK", inputs={"doc_path": doc_path, "template_id": "{analysis_template_id}", "template": "{analysis_template}", "contract": "{analysis_contract}"}, output_key="doc_chunks", ui_format="silent"),
             ActionStep("process_all_chunks", "FOREACH", inputs={"list": "{doc_chunks}", "sub_blueprint": sub_blueprint}, output_key="final_analysis", ui_format="silent"),
             ActionStep("compact_master_input", "ANALYSIS_COMPACT", inputs={"chunks": "{final_analysis}"}, output_key="master_input", ui_format="silent"),
@@ -725,6 +621,220 @@ class DefaultBlueprints:
             ),
             ActionStep("finalize_analysis", "ANALYSIS_FINALIZE", inputs={"doc_path": doc_path, "template_id": "{analysis_template_id}", "template": "{analysis_template}", "contract": "{analysis_contract}", "chunks": "{final_analysis}", "synthesis": "{argument_synthesis}", "master": "{master_diagram}", "run_id": "{analysis_run_id}"}, output_key="analysis_result", ui_format="silent"),
         ])
+
+    @staticmethod
+    def get_analysis_blueprint(pm, doc_path: str = "{analysis_doc_path}") -> AIActionBlueprint:
+        """Hierarchical evidence-to-graph pipeline.
+
+        Stages:
+          1. FOREACH: per-chunk evidence extraction (LLM) + EVIDENCE_STORE (DB + streaming events)
+          2. SECTION_GROUP: group chunks into 5-chunk sections
+          3. FOREACH: per-section synthesis LLM call
+          4. PYTHON_SCRIPT: merge section syntheses into compact state keys
+          5. LLM: graph planning (compact refs only — no full quote text)
+          6. LLM: graph assembly (quote_ids → source_quote_id fields)
+          7. QUOTE_HYDRATION: attach exact text from DB
+          8. ANALYSIS_FINALIZE: normalize, save, emit RESULT_READY
+
+        Full quote text never re-enters an LLM after step 1.
+        """
+        # ── Sub-blueprint 1: per-chunk evidence extraction ──────────────────
+        evidence_sub = AIActionBlueprint(name="Extract Chunk Evidence", description="", steps=[
+            ActionStep(
+                step_id="extract_chunk_evidence",
+                step_type="LLM_QUERY",
+                inputs={"query": "{analysis_evidence_query_prompt}"},
+                system_prompt="{analysis_evidence_system_prompt}",
+                llm_options={
+                    "json_mode": True,
+                    "num_predict": "{analysis_limits.evidence_num_predict}",
+                    "temperature": 0.12,
+                    "num_ctx": "{analysis_limits.num_ctx}",
+                },
+                output_key="chunk_evidence_json",
+                ui_format="silent",
+                ui_target="analysis_tab",
+            ),
+            ActionStep(
+                step_id="store_chunk_evidence",
+                step_type="EVIDENCE_STORE",
+                inputs={
+                    "chunk_evidence": "{chunk_evidence_json}",
+                    "chunk_id": "{item.chunk_index}",
+                },
+                output_key="chunk_compact_refs",
+                ui_format="silent",
+                ui_target="analysis_tab",
+            ),
+        ])
+
+        # ── Sub-blueprint 2: per-section synthesis ───────────────────────────
+        section_synthesis_sub = AIActionBlueprint(name="Synthesize Section", description="", steps=[
+            ActionStep(
+                step_id="synthesis_llm",
+                step_type="LLM_QUERY",
+                inputs={"query": "{analysis_section_synthesis_query_prompt}\n\nSECTION EVIDENCE:\n{item.compact_refs_text}"},
+                system_prompt="{analysis_section_synthesis_system_prompt}",
+                llm_options={
+                    "json_mode": True,
+                    "num_predict": 2000,
+                    "temperature": 0.12,
+                    "num_ctx": 16384,
+                },
+                output_key="section_synthesis_result",
+                ui_format="status",
+                ui_target="analysis_tab",
+                status_text="Synthesizing section {item.section_number} of {item.total_sections}...",
+            ),
+        ])
+
+        # ── Merge script: build section_syntheses_compact from synthesis results
+        merge_syntheses_script = """
+import json
+
+raw = state.get('all_section_syntheses', '[]')
+try:
+    syntheses = json.loads(raw) if isinstance(raw, str) else raw
+except Exception:
+    syntheses = []
+if not isinstance(syntheses, list):
+    syntheses = [syntheses] if syntheses else []
+
+lines = []
+for i, s in enumerate(syntheses):
+    if not isinstance(s, dict):
+        try:
+            s = json.loads(str(s))
+        except Exception:
+            s = {}
+    sid = s.get('section_id', f'section_{i}')
+    summary = str(s.get('summary') or '')[:300]
+    themes = ', '.join(str(t) for t in (s.get('key_themes') or [])[:4])
+    qids = ', '.join(str(q) for q in (s.get('key_quote_ids') or [])[:6])
+    lines.append(f'[{sid}] {summary}\\n  themes: {themes}\\n  key_quotes: {qids}')
+
+result = '\\n\\n'.join(lines) if lines else '(no section syntheses)'
+state['section_syntheses_compact'] = result
+"""
+
+        return AIActionBlueprint(
+            name="Document Analysis",
+            description="Hierarchical evidence-to-graph analysis — works for any document length.",
+            mount_points=["analysis_tab"],
+            steps=[
+                # 1. Build analysis contract (populates all prompt state keys)
+                ActionStep(
+                    "analysis_contract", "ANALYSIS_CONTRACT",
+                    inputs={"template": "{analysis_template}", "user_prompt": "{analysis_user_prompt}"},
+                    output_key="analysis_contract",
+                    ui_format="silent",
+                    status_text="Building analysis contract...",
+                ),
+                # 2. Chunk the document
+                ActionStep(
+                    "chunk_document", "DOCUMENT_CHUNK",
+                    inputs={
+                        "doc_path": doc_path,
+                        "template_id": "{analysis_template_id}",
+                        "template": "{analysis_template}",
+                        "contract": "{analysis_contract}",
+                    },
+                    output_key="doc_chunks",
+                    ui_format="silent",
+                    status_text="Chunking document...",
+                ),
+                # 3. Per-chunk: extract evidence (LLM) → store quotes in DB + stream events
+                #    Keeps step_id "process_all_chunks" for master_runner.py compatibility.
+                ActionStep(
+                    "process_all_chunks", "FOREACH",
+                    inputs={"list": "{doc_chunks}", "sub_blueprint": evidence_sub},
+                    output_key="all_chunk_evidence",
+                    ui_format="silent",
+                    status_text="Extracting evidence from chunks...",
+                ),
+                # 4. Group chunks into 5-chunk sections
+                ActionStep(
+                    "group_sections", "SECTION_GROUP",
+                    inputs={"all_chunk_evidence": "{all_chunk_evidence}", "chunks_per_section": 5},
+                    output_key="section_groups",
+                    ui_format="silent",
+                    status_text="Grouping chunks into sections...",
+                ),
+                # 5. Per-section synthesis (one LLM call per section, compact refs only)
+                ActionStep(
+                    "synthesize_sections", "FOREACH",
+                    inputs={"list": "{section_groups}", "sub_blueprint": section_synthesis_sub},
+                    output_key="all_section_syntheses",
+                    ui_format="silent",
+                    status_text="Synthesizing sections...",
+                ),
+                # 6. Merge synthesis results → section_syntheses_compact state key
+                ActionStep(
+                    "merge_syntheses", "PYTHON_SCRIPT",
+                    inputs={"script": merge_syntheses_script},
+                    output_key="section_syntheses_compact",
+                    ui_format="status",
+                    ui_target="analysis_tab",
+                    status_text="Merging section syntheses...",
+                ),
+                # 7. Graph planning pass (section summaries + compact top quote_ids, no full text)
+                ActionStep(
+                    "graph_plan_pass", "LLM_QUERY",
+                    inputs={"query": "{analysis_graph_plan_query_prompt}"},
+                    system_prompt="{analysis_graph_plan_system_prompt}",
+                    llm_options={
+                        "json_mode": False,
+                        "num_predict": "{analysis_limits.synthesis_num_predict}",
+                        "temperature": 0.12,
+                        "num_ctx": "{analysis_limits.num_ctx}",
+                    },
+                    output_key="graph_plan_text",
+                    ui_format="status",
+                    ui_target="analysis_tab",
+                    status_text="Planning graph structure...",
+                ),
+                # 8. Graph assembly (references quote_ids, not full text)
+                ActionStep(
+                    "graph_assembly_pass", "LLM_QUERY",
+                    inputs={"query": "{analysis_graph_assembly_query_prompt}"},
+                    system_prompt="{analysis_graph_assembly_system_prompt}",
+                    llm_options={
+                        "json_mode": True,
+                        "num_predict": "{analysis_limits.master_num_predict}",
+                        "temperature": 0.08,
+                        "num_ctx": "{analysis_limits.num_ctx}",
+                    },
+                    output_key="assembled_graph",
+                    ui_format="status",
+                    ui_target="analysis_tab",
+                    status_text="Assembling final graph...",
+                ),
+                # 9. Hydrate quote_ids → exact text from DB
+                ActionStep(
+                    "hydrate_quotes", "QUOTE_HYDRATION",
+                    inputs={"assembled_graph": "{assembled_graph}"},
+                    output_key="hydrated_graph",
+                    ui_format="silent",
+                    status_text="Hydrating quote references...",
+                ),
+                # 10. Normalize, save, emit RESULT_READY
+                ActionStep(
+                    "finalize_analysis", "ANALYSIS_FINALIZE",
+                    inputs={
+                        "doc_path": doc_path,
+                        "template_id": "{analysis_template_id}",
+                        "template": "{analysis_template}",
+                        "contract": "{analysis_contract}",
+                        "chunks": "{all_chunk_evidence}",
+                        "synthesis": "{all_section_syntheses}",
+                        "master": "{hydrated_graph}",
+                        "run_id": "{analysis_run_id}",
+                    },
+                    output_key="analysis_result",
+                    ui_format="silent",
+                ),
+            ],
+        )
 
     @staticmethod
     def get_analysis_send_to_workspace_blueprint() -> AIActionBlueprint:

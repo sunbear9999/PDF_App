@@ -55,6 +55,14 @@ class AIOutputRendererSpec:
 
 
 @dataclass
+class CitationSourceHandlerSpec:
+    """Navigation handler for citations produced by a plugin-owned RAG source."""
+    source_type: str
+    callback: Callable[[dict, Any], None]  # callback(citation, app_context)
+    plugin_id: str = ""
+
+
+@dataclass
 class DockSpec:
     """A standalone dock window contributed by a plugin."""
     id: str
@@ -193,6 +201,44 @@ class DockActionSpec:
             self.mounts = []
 
 
+@dataclass
+class RagSourceFilterSpec:
+    """A plugin-contributed entry shown in the Global AI Settings filter dialog."""
+    source_id: str          # qualified id, e.g. "locallaws:laws"
+    label: str              # display label, e.g. "⚖️ Laws & Precedent"
+    description: str = ""   # tooltip / subtitle
+    plugin_id: str = ""
+
+
+@dataclass
+class TabContextContributorSpec:
+    """
+    A context contributor injected into one or more research tabs by a plugin.
+
+    The ``factory`` receives the tab instance (a BaseTab subclass) and returns a
+    ``TabContextContributor``.  A non-None ``get_widget()`` is automatically added
+    to the tab's options bar.
+
+    Example::
+
+        from gui.docks.unified_research.components.tab_context import TabContextContributor
+
+        class MyContributor(TabContextContributor):
+            def __init__(self, tab): ...
+            def get_state(self): return {"my_key": "my_value"}
+
+        api.gui_extensions.add_tab_context_contributor(TabContextContributorSpec(
+            target_ids=["chat_dock", "brainstorm_dock"],
+            factory=lambda tab: MyContributor(tab),
+            plugin_id="myplugin",
+        ))
+    """
+    target_ids: List[str]          # which tab target_ids get this contributor; empty = all tabs
+    factory: Callable              # factory(tab: BaseTab) -> TabContextContributor
+    position: int = 50
+    plugin_id: str = ""
+
+
 class PluginExtensionRegistry:
     """
     Central collector for all GUI extension specs contributed by plugins.
@@ -205,6 +251,7 @@ class PluginExtensionRegistry:
         self._toolbar_buttons: List[ToolbarButtonSpec] = []
         self._research_tabs: List[ResearchTabSpec] = []
         self._ai_renderers: List[AIOutputRendererSpec] = []
+        self._citation_source_handlers: List[CitationSourceHandlerSpec] = []
         self._extra_docks: List[DockSpec] = []
         self._menu_items: List[MenuItemSpec] = []
         self._main_toolbar_buttons: List[MainToolbarButtonSpec] = []
@@ -214,6 +261,8 @@ class PluginExtensionRegistry:
         self._actions: List[Any] = []  # ActionSpec instances from gui.registry.action_spec
         self._themes: List[ThemeSpec] = []
         self._dock_actions: List[DockActionSpec] = []
+        self._tab_context_contributors: List[TabContextContributorSpec] = []
+        self._rag_source_filters: List[RagSourceFilterSpec] = []
 
     # ----------------------------------------------------------------
     # Registration
@@ -227,6 +276,13 @@ class PluginExtensionRegistry:
 
     def add_ai_renderer(self, spec: AIOutputRendererSpec) -> None:
         self._ai_renderers.append(spec)
+
+    def add_citation_source_handler(self, spec: CitationSourceHandlerSpec) -> None:
+        self._citation_source_handlers = [
+            current for current in self._citation_source_handlers
+            if current.source_type != spec.source_type
+        ]
+        self._citation_source_handlers.append(spec)
 
     def add_dock(self, spec: DockSpec) -> None:
         self._extra_docks.append(spec)
@@ -253,6 +309,21 @@ class PluginExtensionRegistry:
     def add_dock_action(self, spec: DockActionSpec) -> None:
         """Register a DockActionSpec to be injected into dock context menus / toolbars."""
         self._dock_actions.append(spec)
+
+    def add_tab_context_contributor(self, spec: "TabContextContributorSpec") -> None:
+        """Register a TabContextContributorSpec to be instantiated by matching research tabs."""
+        self._tab_context_contributors.append(spec)
+
+    def add_rag_source_filter(self, spec: "RagSourceFilterSpec") -> None:
+        """Register a plugin RAG source for the Global AI Settings filter dialog."""
+        self._rag_source_filters[:] = [
+            s for s in self._rag_source_filters
+            if not (s.source_id == spec.source_id and s.plugin_id == spec.plugin_id)
+        ]
+        self._rag_source_filters.append(spec)
+
+    def get_rag_source_filters(self) -> List["RagSourceFilterSpec"]:
+        return list(self._rag_source_filters)
 
     def add_action(self, spec: Any) -> None:
         """Register an ActionSpec (from gui.registry.action_spec) for cross-context mounting.
@@ -286,6 +357,12 @@ class PluginExtensionRegistry:
 
     def get_ai_renderers(self) -> Dict[str, AIOutputRendererSpec]:
         return {s.payload_type: s for s in self._ai_renderers}
+
+    def get_citation_source_handler(self, source_type: str) -> Optional[CitationSourceHandlerSpec]:
+        return next(
+            (spec for spec in self._citation_source_handlers if spec.source_type == source_type),
+            None,
+        )
 
     def get_extra_docks(self) -> List[DockSpec]:
         return list(self._extra_docks)
@@ -361,12 +438,20 @@ class PluginExtensionRegistry:
             key=lambda s: s.position,
         )
 
+    def get_tab_context_contributor_specs(self, target_id: str) -> List["TabContextContributorSpec"]:
+        """Return contributor specs that apply to the given tab target_id."""
+        return sorted(
+            [s for s in self._tab_context_contributors
+             if not s.target_ids or target_id in s.target_ids],
+            key=lambda s: s.position,
+        )
+
     def _spec_list_attrs(self) -> List[str]:
         """Canonical list of all spec-list attribute names. Used by hot-reload cleanup and tagging."""
         return [
-            "_toolbar_buttons", "_research_tabs", "_ai_renderers", "_extra_docks",
+            "_toolbar_buttons", "_research_tabs", "_ai_renderers", "_citation_source_handlers", "_extra_docks",
             "_menu_items", "_main_toolbar_buttons", "_shortcuts", "_commands",
-            "_workspace_context_menu_items", "_actions", "_themes", "_dock_actions",
+            "_workspace_context_menu_items", "_actions", "_themes", "_dock_actions", "_rag_source_filters",
         ]
 
     def remove_plugin_specs(self, plugin_id: str) -> None:

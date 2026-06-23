@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Protocol
 
 from core.models.data_dock_models import DataGridState, DataProvenance
+from core.utils.numeric_utils import is_number
 
 
 class TableParserProvider(Protocol):
@@ -19,6 +20,22 @@ class VisionEstimatorProvider(Protocol):
     provider_id: str
 
     def estimate_chart_data(self, payload: Any, provenance: DataProvenance) -> Optional[DataGridState]:
+        ...
+
+
+class SelectionClassifierProvider(Protocol):
+    provider_id: str
+    plugin_id: str
+
+    def classify_selection(self, payload: Any, provenance: DataProvenance) -> Optional[str]:
+        ...
+
+
+class ChartAnalysisProvider(Protocol):
+    provider_id: str
+    plugin_id: str
+
+    def build_blueprint(self, payload: Any) -> Any:
         ...
 
 
@@ -51,6 +68,24 @@ class GridActionSpec:
 
 
 @dataclass
+class GridExtractorSpec:
+    extractor_id: str
+    label: str
+    callback: Optional[Callable[[Dict[str, Any]], Any]] = None
+    position: int = 50
+    plugin_id: str = ""
+
+
+@dataclass
+class GridMappingStrategySpec:
+    strategy_id: str
+    label: str
+    callback: Optional[Callable[..., Any]] = None
+    position: int = 50
+    plugin_id: str = ""
+
+
+@dataclass
 class ChartTypeSpec:
     chart_type: str
     label: str
@@ -59,6 +94,10 @@ class ChartTypeSpec:
     supports_series: bool = True
     default_options: Dict[str, Any] = field(default_factory=dict)
     plugin_id: str = ""
+    data_adapter: Optional[Callable[..., Any]] = None
+    supported_encodings: List[str] = field(default_factory=list)
+    option_schema: Dict[str, Any] = field(default_factory=dict)
+    capabilities: Dict[str, Any] = field(default_factory=dict)
 
 
 class DefaultTableParserProvider:
@@ -119,13 +158,26 @@ class StubVisionEstimatorProvider:
         return None
 
 
+class DefaultChartAnalysisProvider:
+    provider_id = "core.prompt_managed_chart_analysis"
+    plugin_id = ""
+
+    def build_blueprint(self, payload: Any) -> Any:
+        from core.engine.blueprints.chart_vision import build_chart_analysis_blueprint
+        return build_chart_analysis_blueprint()
+
+
 class DataProviderRegistry:
     def __init__(self) -> None:
         self._table_parsers: List[TableParserProvider] = [DefaultTableParserProvider()]
         self._vision_estimators: List[VisionEstimatorProvider] = [StubVisionEstimatorProvider()]
+        self._selection_classifiers: List[SelectionClassifierProvider] = []
+        self._chart_analysis_providers: List[ChartAnalysisProvider] = [DefaultChartAnalysisProvider()]
         self._grid_hooks: List[GridHookProvider] = []
         self._cleaners: Dict[str, DataCleanerSpec] = {}
         self._grid_actions: Dict[str, GridActionSpec] = {}
+        self._grid_extractors: Dict[str, GridExtractorSpec] = {}
+        self._grid_mapping_strategies: Dict[str, GridMappingStrategySpec] = {}
         self._chart_types: Dict[str, ChartTypeSpec] = {}
         self._palettes: Dict[str, List[str]] = {
             "default": ["#2f80ed", "#27ae60", "#f2994a", "#eb5757", "#9b51e0"],
@@ -134,18 +186,41 @@ class DataProviderRegistry:
             "cool": ["#0f766e", "#2563eb", "#0891b2", "#4f46e5", "#16a34a"],
         }
         for chart_type, label in (
-            ("bar", "Bar"),
-            ("line", "Line"),
-            ("pie", "Pie"),
-            ("scatter", "Scatter"),
+            ("bar", "Bar"), ("horizontal_bar", "Horizontal Bar"),
+            ("stacked_bar", "Stacked Bar"), ("stacked_100_bar", "100% Stacked Bar"),
+            ("line", "Line"), ("area", "Area"), ("stacked_area", "Stacked Area"),
+            ("pie", "Pie"), ("donut", "Donut"), ("scatter", "XY Scatter"),
+            ("histogram", "Histogram"), ("box", "Box Plot"), ("heatmap", "Heatmap"),
         ):
-            self.register_chart_type(ChartTypeSpec(chart_type=chart_type, label=label))
+            encodings = ["x", "y", "series"]
+            if chart_type in {"pie", "donut"}: encodings = ["category", "value"]
+            elif chart_type == "histogram": encodings = ["value"]
+            elif chart_type == "box": encodings = ["category", "value", "series"]
+            elif chart_type == "heatmap": encodings = ["row", "column", "value", "series"]
+            self.register_chart_type(ChartTypeSpec(
+                chart_type=chart_type, label=label, supported_encodings=encodings,
+                supports_series=chart_type not in {"pie", "donut", "histogram"},
+                default_options={"bins": None} if chart_type == "histogram" else {},
+                capabilities={"negative_values": chart_type not in {"pie", "donut", "histogram"}},
+            ))
 
     def register_table_parser(self, provider: TableParserProvider) -> None:
         self._table_parsers.insert(0, provider)
 
     def register_vision_estimator(self, provider: VisionEstimatorProvider) -> None:
         self._vision_estimators.insert(0, provider)
+
+    def register_selection_classifier(self, provider: SelectionClassifierProvider) -> None:
+        self._selection_classifiers.insert(0, provider)
+
+    def register_chart_analysis_provider(self, provider: ChartAnalysisProvider) -> None:
+        self._chart_analysis_providers.insert(0, provider)
+
+    def selection_classifiers(self) -> List[SelectionClassifierProvider]:
+        return list(self._selection_classifiers)
+
+    def chart_analysis_providers(self) -> List[ChartAnalysisProvider]:
+        return list(self._chart_analysis_providers)
 
     def register_grid_hook(self, provider: GridHookProvider) -> None:
         self._grid_hooks.append(provider)
@@ -155,6 +230,12 @@ class DataProviderRegistry:
 
     def register_grid_action(self, spec: GridActionSpec) -> None:
         self._grid_actions[spec.action_id] = spec
+
+    def register_grid_extractor(self, spec: GridExtractorSpec) -> None:
+        self._grid_extractors[spec.extractor_id] = spec
+
+    def register_grid_mapping_strategy(self, spec: GridMappingStrategySpec) -> None:
+        self._grid_mapping_strategies[spec.strategy_id] = spec
 
     def register_chart_type(self, spec: ChartTypeSpec) -> None:
         self._chart_types[spec.chart_type] = spec
@@ -185,6 +266,12 @@ class DataProviderRegistry:
     def grid_actions(self) -> Dict[str, GridActionSpec]:
         return dict(self._grid_actions)
 
+    def grid_extractors(self) -> Dict[str, GridExtractorSpec]:
+        return dict(sorted(self._grid_extractors.items(), key=lambda item: item[1].position))
+
+    def grid_mapping_strategies(self) -> Dict[str, GridMappingStrategySpec]:
+        return dict(sorted(self._grid_mapping_strategies.items(), key=lambda item: item[1].position))
+
     def chart_types(self) -> Dict[str, ChartTypeSpec]:
         return dict(self._chart_types)
 
@@ -198,12 +285,24 @@ class DataProviderRegistry:
         return list(self._palettes.get(palette_id) or self._palettes["default"])
 
     def remove_plugin(self, plugin_id: str) -> None:
+        self._table_parsers = [item for item in self._table_parsers if getattr(item, "plugin_id", "") != plugin_id]
+        self._vision_estimators = [item for item in self._vision_estimators if getattr(item, "plugin_id", "") != plugin_id]
+        self._selection_classifiers = [item for item in self._selection_classifiers if getattr(item, "plugin_id", "") != plugin_id]
+        self._chart_analysis_providers = [item for item in self._chart_analysis_providers if getattr(item, "plugin_id", "") != plugin_id]
         self._cleaners = {
             key: spec for key, spec in self._cleaners.items()
             if getattr(spec, "plugin_id", "") != plugin_id
         }
         self._grid_actions = {
             key: spec for key, spec in self._grid_actions.items()
+            if getattr(spec, "plugin_id", "") != plugin_id
+        }
+        self._grid_extractors = {
+            key: spec for key, spec in self._grid_extractors.items()
+            if getattr(spec, "plugin_id", "") != plugin_id
+        }
+        self._grid_mapping_strategies = {
+            key: spec for key, spec in self._grid_mapping_strategies.items()
             if getattr(spec, "plugin_id", "") != plugin_id
         }
         self._chart_types = {
@@ -213,8 +312,4 @@ class DataProviderRegistry:
 
 
 def _is_number(value: Any) -> bool:
-    try:
-        float(str(value).replace(",", "").replace("%", "").replace("$", ""))
-        return True
-    except Exception:
-        return False
+    return is_number(value)

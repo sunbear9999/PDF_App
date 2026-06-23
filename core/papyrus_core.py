@@ -47,6 +47,8 @@ from core.services.video_transcription_service import VideoTranscriptionService
 from core.services.content.deterministic_extractor_service import DeterministicExtractorService
 from core.services.document.source_evaluation_service import SourceEvaluationService
 from core.services.ai.ai_setup_service import AISetupService
+from core.services.media_asset_service import MediaAssetService
+from core.services.pdf_data_selection_service import PdfDataSelectionService
 
 def get_resource_path(relative_path):
     if hasattr(sys, '_MEIPASS'):
@@ -87,6 +89,12 @@ class PapyrusCore:
         self.ontology_registry = OntologyRegistry()
         self.data_provider_registry = DataProviderRegistry()
 
+        # Plugin-contributed analysis templates (in-memory, not written to project file).
+        # Plugins call api.contribute_analysis_template(template_dict) in on_load().
+        # ProjectManager.get_analysis_templates() merges this list into its output.
+        self._plugin_analysis_templates: list = []
+        self.project_manager._plugin_analysis_templates = self._plugin_analysis_templates
+
         # LLM backend registry — plugins can extend this via api.llm_backends.register()
         self.llm_backend_registry = LLMBackendRegistry()
         self.llm_backend_registry.register(make_ollama_backend_spec())
@@ -113,6 +121,12 @@ class PapyrusCore:
         self.workspace_layout_service = WorkspaceLayoutService(self.project_manager, self.llm_manager, self.bus)
         self.ontology_service = OntologyService(self.project_manager, self.bus, self.ontology_registry)
         self.data_dock_service = DataDockService(self.project_manager, self.data_provider_registry, self.bus)
+        from core.services.pdf_grid_extraction_service import PdfGridExtractionService
+        self.pdf_grid_extraction_service = PdfGridExtractionService(self.data_provider_registry)
+        self.media_asset_service = MediaAssetService(self.project_manager)
+        self.pdf_data_selection_service = PdfDataSelectionService(
+            self.data_dock_service, self.data_provider_registry, self.pdf_grid_extraction_service,
+        )
 
         self.essay_app_service = EssayAppService(self.project_manager)
         self.index_app_service = IndexAppService(self.llm_manager, self.project_manager)
@@ -134,6 +148,7 @@ class PapyrusCore:
             ontology_registry=self.ontology_registry,
             blueprint_manager=self.blueprint_manager,
             node_type_registry=self.workflow_node_type_registry,
+            data_provider_registry=self.data_provider_registry,
             event_bus=self.bus,
         )
         self.research_agent_service = ResearchAgentService(

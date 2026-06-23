@@ -462,7 +462,7 @@ def build_builtin_key_specs() -> List[KeySpec]:
         KeySpec("data_dock.save_dataset",   "Save Dataset",       "data_dock",
                 "Save the active dataset to the project",        "Ctrl+Shift+S"),
         KeySpec("data_dock.extract_pdf",     "Extract PDF Data",   "data_dock",
-                "Extract tables and data from the open PDF",      ""),
+                "Extract tables only from the open PDF",          ""),
         KeySpec("data_dock.jump_to_source",  "Jump To Source",     "data_dock",
                 "Open the source document and jump to this dataset's origin", ""),
         KeySpec("data_dock.copy",            "Copy Cells",         "data_dock",

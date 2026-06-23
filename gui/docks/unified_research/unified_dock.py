@@ -526,6 +526,21 @@ class UnifiedResearchDock(QDockWidget):
         if not self.active_docs and active_pdf_paths(self.project_manager):
             self.active_docs = active_pdf_names(self.project_manager)
 
+        # Collect plugin RAG sources from the extension registry
+        plugin_rag_sources = []
+        ext_registry = getattr(self.app_context, "plugin_extension_registry", None)
+        if ext_registry and hasattr(ext_registry, "get_rag_source_filters"):
+            for spec in ext_registry.get_rag_source_filters():
+                raw = self.project_manager.get_metadata(
+                    f"rag_source_enabled:{spec.source_id}", "true"
+                )
+                plugin_rag_sources.append({
+                    "id": spec.source_id,
+                    "label": spec.label,
+                    "description": spec.description,
+                    "enabled": raw != "false",
+                })
+
         dialog = ContextFilterDialog(
             self.project_manager,
             self.active_docs,
@@ -533,6 +548,7 @@ class UnifiedResearchDock(QDockWidget):
             self.tag_logic,
             self.theme,
             self,
+            plugin_rag_sources=plugin_rag_sources,
         )
 
         def _on_accepted():

@@ -122,8 +122,6 @@ class AIDB(BaseDB):
                 record = PromptTraceRecord.from_dict(trace_record)
             else:
                 record = trace_record
-            if not record.calls:
-                return None
             if not record.trace_id:
                 record.trace_id = str(uuid.uuid4())
             data = record.as_dict()

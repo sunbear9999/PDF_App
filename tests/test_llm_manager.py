@@ -6,6 +6,25 @@ import json
 import fitz  # PyMuPDF
 from core.llm_manager import LocalLLMManager
 
+
+class _VisionProvider:
+    ai_enabled = True
+
+    def __init__(self, supports=True):
+        self.supports = supports
+        self.last = None
+
+    def available_models(self): return ["vision-model"]
+    def supports_model_capability(self, model, capability): return self.supports and capability == "vision"
+    def generate(self, prompt, system, model, **kwargs):
+        self.last = {"prompt": prompt, "system": system, "model": model, **kwargs}
+        return "ok"
+    def embed(self, text): return []
+    def embed_batch(self, texts): return [[] for _ in texts]
+    def preload_model(self, model_name): pass
+    def unload_all_models(self): pass
+    def check_and_pull_embedding_model(self, progress_callback=None): pass
+
 class TestLocalLLMManager(unittest.TestCase):
     @patch('core.llm_manager.subprocess.Popen')
     @patch('core.llm_manager.requests.get')
@@ -119,6 +138,26 @@ class TestLocalLLMManager(unittest.TestCase):
         
         self.assertEqual("".join(chunks), "Hello World!")
         self.assertEqual(result, "Hello World!")
+
+    def test_query_forwards_normalized_images_to_vision_provider(self):
+        provider = _VisionProvider()
+        manager = LocalLLMManager(provider=provider)
+
+        result = manager.query(
+            "read chart", "vision-model", images=[{"data": b"png", "mime_type": "image/png"}],
+            required_capabilities=["vision"],
+        )
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(provider.last["images"][0]["data"], "cG5n")
+        self.assertEqual(provider.last["images"][0]["mime_type"], "image/png")
+
+    def test_query_rejects_non_vision_provider(self):
+        manager = LocalLLMManager(provider=_VisionProvider(supports=False))
+
+        result = manager.query("read chart", "text-model", images=[{"data": b"png"}], required_capabilities=["vision"])
+
+        self.assertIn("does not support required capability 'vision'", result)
 
 if __name__ == '__main__':
     unittest.main()

@@ -7,7 +7,6 @@ from gui.docks.unified_research.components.chat_streamer import ChatMessageWidge
 from gui.docks.unified_research.components.dynamic_inputs import DynamicInputWidget
 import json
 import os 
-from core.utils.json_utils import strip_tagged_block
 from gui.docks.unified_research.tabs.base_tab import BaseTab
 from gui.utils.document_helpers import active_pdf_names, prune_doc_names
 
@@ -17,7 +16,8 @@ class ChatTab(BaseTab):
         self.active_blueprint = None
         self._build_ui()
         self._load_blueprint()
-        QTimer.singleShot(100, self.safe_load_history) # Inherited from BaseTab
+        self._load_plugin_context_contributors()
+        QTimer.singleShot(100, self.safe_load_history)  # Inherited from BaseTab
 
     def _load_blueprint(self):
         from core.engine.default_blueprints import DefaultBlueprints
@@ -44,7 +44,7 @@ class ChatTab(BaseTab):
         self.chat_layout = QVBoxLayout(self.chat_container)
         self.chat_layout.setContentsMargins(0, 0, 0, 0)
         self.chat_layout.setSpacing(0)
-        self.chat_layout.addStretch() 
+        self.chat_layout.addStretch()
         self.scroll_area.setWidget(self.chat_container)
         layout.addWidget(self.scroll_area, 1)
 
@@ -53,28 +53,36 @@ class ChatTab(BaseTab):
         self.input_wrapper.setMinimumHeight(118)
         input_layout = QVBoxLayout(self.input_wrapper)
         input_layout.setContentsMargins(8, 8, 8, 8)
-        
+
         self.input_field = QTextEdit()
         self.input_field.setPlaceholderText("Ask a question about your documents...")
-        self.input_field.setMaximumHeight(70) 
+        self.input_field.setMaximumHeight(70)
         input_layout.addWidget(self.input_field)
 
         action_layout = QHBoxLayout()
         self.dynamic_options_layout = QHBoxLayout()
         action_layout.addLayout(self.dynamic_options_layout)
-        
+
+        # Built-in history context contributor — widget is embedded here
+        from gui.docks.unified_research.components.tab_context import ChatHistoryContextWidget
+        self._history_widget = ChatHistoryContextWidget(
+            self.project_manager, self.target_id, self.theme, parent=self
+        )
+        self.register_context_contributor(self._history_widget)
+        action_layout.addWidget(self._history_widget)
+
         self.btn_settings = QPushButton("⚙️")
         self.btn_settings.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_settings.clicked.connect(self._show_settings_menu)
-        
+
         action_layout.addWidget(self.btn_settings)
         action_layout.addStretch()
-        
+
         self.btn_send = QPushButton("Send")
         self.btn_send.setFixedSize(70, 30)
         self.btn_send.clicked.connect(self._send_message)
         action_layout.addWidget(self.btn_send)
-        
+
         input_layout.addLayout(action_layout)
         layout.addWidget(self.input_wrapper)
 
@@ -131,32 +139,26 @@ class ChatTab(BaseTab):
 
     def _send_message(self):
         text = self.input_field.toPlainText().strip()
-        if not text or not self.active_blueprint: return
+        if not text or not self.active_blueprint:
+            return
         self.input_field.clear()
 
         pm = self.project_manager
-        if pm: pm.save_chat_message(self.target_id, "user", text, "text")
+        if pm:
+            pm.save_chat_message(self.target_id, "user", text, "text")
 
         user_msg = ChatMessageWidget("You", theme=self.theme, is_user=True)
         user_msg.append_chunk(text)
         self.receive_ai_widget(user_msg)
 
         dynamic_state = self.dynamic_inputs.get_values()
-        history_str = ""
-        
-        if pm:
-            history_data = pm.get_chat_history(self.target_id)
-            for msg in history_data[-6:]:
-                role = "User" if msg["role"] == "user" else "AI"
-                if msg["ui_format"] in ["live_stream", "text"]:
-                    clean_content = strip_tagged_block(msg["content"] or "", "UPDATE_MANIFEST")
-                    history_str += f"{role}: {clean_content}\n\n"
+        context_state = self._gather_context_state()  # history widget + plugin contributors
 
         initial_state = {
             "user_query": text,
-            "chat_history": history_str.strip(),
             "chat_persona": "RAG Agent Mode" if dynamic_state.get("use_advanced_rag") else "General Assistant",
-            **dynamic_state 
+            **context_state,
+            **dynamic_state,
         }
 
         self._active_stream_widget = None
@@ -168,3 +170,5 @@ class ChatTab(BaseTab):
         self.input_field.setStyleSheet(f"background-color: transparent; color: {theme.get('text_main', '#fff')}; border: none;")
         self.btn_send.setStyleSheet(f"background-color: {theme.get('accent', '#b366ff')}; font-weight: bold; color: white; border: none; border-radius: 6px;")
         self.btn_settings.setStyleSheet("background: transparent; border: none;")
+        if hasattr(self, '_history_widget'):
+            self._history_widget.apply_theme(theme)

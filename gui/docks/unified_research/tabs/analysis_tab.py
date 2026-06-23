@@ -255,6 +255,22 @@ class AnalysisTab(BaseTab):
             self.status_lbl.setText(payload.result.get("message", "Analysis is running..."))
         elif event == AnalysisEvent.CHUNK_RESULT:
             self._render_chunk_result(payload.result)
+        elif event == AnalysisEvent.CHUNK_EVIDENCE_READY:
+            self._render_chunk_evidence(payload.result)
+        elif event == AnalysisEvent.SECTION_SYNTHESIS_READY:
+            n = payload.result.get("section_number", "?")
+            total = payload.result.get("total_sections", "?")
+            summary = str(payload.result.get("summary", ""))[:120]
+            self.status_lbl.setText(f"Section {n}/{total} synthesised. {summary}{'...' if len(summary) == 120 else ''}")
+        elif event == AnalysisEvent.GRAPH_PLAN_READY:
+            self.status_lbl.setText("Graph plan ready. Assembling final graph...")
+        elif event == AnalysisEvent.GRAPH_HYDRATED:
+            n_nodes = payload.result.get("hydrated_entity_count", 0)
+            missing = len(payload.result.get("missing_quote_ids") or [])
+            msg = f"Graph hydrated: {n_nodes} nodes."
+            if missing:
+                msg += f" ({missing} quote reference(s) unresolved.)"
+            self.status_lbl.setText(msg)
         elif event == AnalysisEvent.RUN_FAILED:
             self.status_lbl.setText(f"Analysis failed: {'; '.join(payload.errors or ['Unknown error'])}")
             self.btn_run.setEnabled(True)
@@ -316,6 +332,18 @@ class AnalysisTab(BaseTab):
         self.btn_run.clicked.connect(self._trigger_analysis)
         opts_layout.addWidget(self.btn_run)
         run_layout.addLayout(opts_layout)
+
+        from PySide6.QtWidgets import QTextEdit
+        focus_layout = QHBoxLayout()
+        focus_layout.addWidget(QLabel("Research Focus:"))
+        self._user_prompt_edit = QTextEdit()
+        self._user_prompt_edit.setPlaceholderText(
+            "Optional — describe a specific research question, concept to track, or focus area for the analysis…"
+        )
+        self._user_prompt_edit.setFixedHeight(54)
+        self._user_prompt_edit.setAcceptRichText(False)
+        focus_layout.addWidget(self._user_prompt_edit, 1)
+        run_layout.addLayout(focus_layout)
 
         self.status_lbl = QLabel("")
         run_layout.addWidget(self.status_lbl)
@@ -524,6 +552,8 @@ class AnalysisTab(BaseTab):
             AnalysisEvent.RUN_STARTED,
             AnalysisPayload(doc_path=doc_path, template_id=template_id, template=template, run_id=run_id),
         )
+        user_prompt = getattr(self, "_user_prompt_edit", None)
+        user_prompt = user_prompt.toPlainText().strip() if user_prompt else ""
         self.bus.workflow_action_requested.emit(
             WorkflowIntent.RUN_BLUEPRINT,
             WorkflowPayload(
@@ -535,6 +565,7 @@ class AnalysisTab(BaseTab):
                     "analysis_template_id": template_id,
                     "analysis_template": template,
                     "analysis_run_id": run_id,
+                    "analysis_user_prompt": user_prompt,
                 },
                 job_name=blueprint.name,
                 target_id="analysis_tab",
@@ -601,6 +632,33 @@ class AnalysisTab(BaseTab):
             result.get("chunk_number", 0),
             result.get("total_chunks", 0),
             chunk,
+            self.theme,
+            doc_name,
+            self.app_context.viewer,
+            self,
+        )
+        self.results_layout.insertWidget(self.results_layout.count() - 1, card)
+
+    def _render_chunk_evidence(self, result: dict):
+        chunk_id = result.get("chunk_id", 0)
+        refs = result.get("compact_refs") or result.get("refs") or []
+        doc_name = os.path.basename(result.get("doc_path") or self.doc_selector.currentData() or "")
+        # Map compact_refs into the {x, n} quote format AnalysisChunkCard expects
+        quotes = [
+            {"x": r.get("snippet", ""), "n": r.get("note", ""), "id": r.get("quote_id", "")}
+            for r in refs
+            if r.get("snippet")
+        ]
+        synthetic_chunk = {
+            "quotes": quotes,
+            "chunk_index": chunk_id,
+        }
+        position = result.get("chunk_number") or (chunk_id + 1)
+        total = result.get("total_chunks", 0)
+        card = AnalysisChunkCard(
+            position,
+            total,
+            synthetic_chunk,
             self.theme,
             doc_name,
             self.app_context.viewer,
@@ -737,4 +795,5 @@ class AnalysisTab(BaseTab):
         toggle_style = f"QPushButton {{ background-color: {theme.get('bg_panel', '#333')}; color: {theme.get('text_main', '#fff')}; border: 1px solid {theme.get('border', '#444')}; padding: 6px; font-weight: bold; border-radius: 4px; }} QPushButton:checked {{ background-color: {theme.get('accent', '#b366ff')}; color: white; border: none; }}"
         for btn in [self.btn_view_sections, self.btn_view_master, self.btn_compare]: btn.setStyleSheet(toggle_style)
         if hasattr(self, 'status_lbl'): self.status_lbl.setStyleSheet(f"color: {theme.get('accent', '#b366ff')}; font-weight: bold;")
+        if hasattr(self, '_user_prompt_edit'): self._user_prompt_edit.setStyleSheet(f"background-color: {theme.get('bg_input', '#2b2b2b')}; color: {theme.get('text_main', '#fff')}; border: 1px solid {theme.get('border', '#444')}; border-radius: 4px; padding: 4px;")
         for scroll in [self.run_scroll, self.saved_scroll, self.master_scroll, self.comp_scroll]: scroll.setStyleSheet("background: transparent; border: none;")

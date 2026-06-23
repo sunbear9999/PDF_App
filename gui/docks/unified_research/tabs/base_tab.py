@@ -28,6 +28,43 @@ class BaseTab(QWidget):
             app_context.ui_router.register_target(self.target_id, self)
         self._active_stream_widget = None
 
+        # Context contributors inject additional state into every pipeline call.
+        # Subclasses register built-ins; plugins register via extension_registry.
+        self._context_contributors: list = []
+
+    # ------------------------------------------------------------------
+    # Context contributor API
+    # ------------------------------------------------------------------
+
+    def register_context_contributor(self, contributor) -> None:
+        """Register a TabContextContributor for this tab."""
+        self._context_contributors.append(contributor)
+
+    def _load_plugin_context_contributors(self) -> None:
+        """
+        Instantiate any TabContextContributorSpecs from the extension registry
+        that match this tab's target_id.  Call this after _build_ui().
+        """
+        reg = getattr(self.app_context, "plugin_extension_registry", None)
+        if not reg or not self.target_id:
+            return
+        for spec in reg.get_tab_context_contributor_specs(self.target_id):
+            try:
+                contributor = spec.factory(self)
+                self.register_context_contributor(contributor)
+            except Exception as exc:
+                print(f"[BaseTab] Failed to instantiate tab context contributor from plugin: {exc}")
+
+    def _gather_context_state(self) -> dict:
+        """Collect state dicts from all registered contributors."""
+        state: dict = {}
+        for contributor in self._context_contributors:
+            try:
+                state.update(contributor.get_state())
+            except Exception as exc:
+                print(f"[BaseTab] Context contributor error: {exc}")
+        return state
+
     def receive_ai_widget(self, widget):
         """Universal UI Router receiver."""
         if hasattr(self, 'chat_layout'):
@@ -234,6 +271,9 @@ class BaseTab(QWidget):
         meta = {
             "source_type": item.get("source_type", "pdf"),
             "source_id": item.get("source_id", ""),
+            "source_locator": item.get("source_locator", {}),
+            "doc_name": item.get("doc_name", ""),
+            "quote": quote,
             "start": item.get("start", 0),
             "end": item.get("end", 0),
         }

@@ -59,6 +59,9 @@ def build_default_blueprint_node_type_registry() -> BlueprintNodeTypeRegistry:
     from core.engine.steps.analysis_compact_step import AnalysisCompactStep
     from core.engine.steps.analysis_finalize_step import AnalysisFinalizeStep
     from core.engine.steps.analysis_send_to_workspace_step import AnalysisSendToWorkspaceStep
+    from core.engine.steps.evidence_store_step import EvidenceStoreStep
+    from core.engine.steps.section_synthesis_step import SectionGroupStep
+    from core.engine.steps.quote_hydration_step import QuoteHydrationStep
     from core.engine.steps.ontology_upsert_step import OntologyUpsertStep
     from core.engine.steps.await_event_step import AwaitEventStep
     from core.engine.steps.dispatch_event_step import DispatchEventStep
@@ -71,9 +74,21 @@ def build_default_blueprint_node_type_registry() -> BlueprintNodeTypeRegistry:
     from core.engine.steps.notes_read_step import NotesReadStep
     from core.engine.steps.source_statistics_step import SourceStatisticsStep
     from core.engine.steps.ontology_catalog_step import OntologyCatalogStep
+    from core.engine.steps.extract_pdf_grid_step import ExtractPdfGridStep
+    from core.engine.steps.select_pdf_region_step import SelectPdfRegionStep
 
     registry = BlueprintNodeTypeRegistry()
     defaults = [
+        WorkflowNodeType(
+            "workflow.select_pdf_region", "Select PDF Region", "Interaction", "SELECT_PDF_REGION",
+            SelectPdfRegionStep.description, step_cls=SelectPdfRegionStep,
+            input_schema=SelectPdfRegionStep.input_schema, output_schema=SelectPdfRegionStep.output_schema,
+        ),
+        WorkflowNodeType(
+            "workflow.extract_pdf_grid", "Extract PDF Grid", "Data", "EXTRACT_PDF_GRID",
+            ExtractPdfGridStep.description, step_cls=ExtractPdfGridStep,
+            input_schema=ExtractPdfGridStep.input_schema, output_schema=ExtractPdfGridStep.output_schema,
+        ),
         WorkflowNodeType(
             "workflow.llm_query", "LLM Query", "AI", "LLM_QUERY",
             "Send a query to the AI model and stream a text response. Combine with Prompt Key "
@@ -86,6 +101,12 @@ def build_default_blueprint_node_type_registry() -> BlueprintNodeTypeRegistry:
                     "description": "The main input passed to the model. Use {state_key} to inject "
                                    "values from previous steps. Example: Summarize the following:\n\n{rag_context}",
                     "required": True,
+                },
+                "images": {
+                    "type": "json",
+                    "label": "Image Inputs",
+                    "description": "Optional image objects containing base64 data and mime_type. Requires a vision-capable local model.",
+                    "placeholder": "{selection_images}",
                 },
             },
         ),
@@ -282,6 +303,24 @@ def build_default_blueprint_node_type_registry() -> BlueprintNodeTypeRegistry:
             "Run the synthesis and master passes, emit the completed analysis to the workspace. "
             "Final step in the analysis chain.",
             step_cls=AnalysisFinalizeStep,
+        ),
+        WorkflowNodeType(
+            "workflow.evidence_store", "Evidence Store", "Analysis", "EVIDENCE_STORE",
+            EvidenceStoreStep.description,
+            step_cls=EvidenceStoreStep,
+            input_schema=EvidenceStoreStep.input_schema,
+        ),
+        WorkflowNodeType(
+            "workflow.section_group", "Section Group", "Analysis", "SECTION_GROUP",
+            SectionGroupStep.description,
+            step_cls=SectionGroupStep,
+            input_schema=SectionGroupStep.input_schema,
+        ),
+        WorkflowNodeType(
+            "workflow.quote_hydration", "Quote Hydration", "Analysis", "QUOTE_HYDRATION",
+            QuoteHydrationStep.description,
+            step_cls=QuoteHydrationStep,
+            input_schema=QuoteHydrationStep.input_schema,
         ),
         WorkflowNodeType(
             "workflow.analysis_send_to_workspace", "Send Analysis to Workspace", "Analysis",

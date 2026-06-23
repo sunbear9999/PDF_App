@@ -424,12 +424,23 @@ class LlamaCppProvider:
         num_predict: int = 2048,
         num_ctx: int = 8192,
         stop=None,
+        images=None,
         **kwargs,
     ) -> str:
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
+        if images:
+            content = [{"type": "text", "text": prompt}]
+            for image in images:
+                mime = image.get("mime_type") or "image/png"
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{image['data']}"},
+                })
+            messages.append({"role": "user", "content": content})
+        else:
+            messages.append({"role": "user", "content": prompt})
 
         if json_mode:
             # Instruct the model via the system prompt rather than grammar-constrained generation.
@@ -483,6 +494,11 @@ class LlamaCppProvider:
                 stream_callback(err)
             full_response += err
         return full_response
+
+    def supports_model_capability(self, model: str, capability: str) -> bool:
+        # This backend does not currently configure llama-server's required
+        # multimodal projector, so advertising vision would be unsafe.
+        return capability != "vision"
 
     def embed(self, text: str) -> List[float]:
         try:

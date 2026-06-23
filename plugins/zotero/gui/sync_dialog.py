@@ -454,12 +454,37 @@ class ZoteroSyncDialog(QDialog):
             for i in range(self._pdf_list.count())
         ]
         citations = {path: self._pm.get_citation(path) for path in pdf_paths}
-        result = self._outbound_adapter.sync_pdfs(
-            pdf_paths,
-            citations,
-            collection_name=self._outbound_collection_name,
-        )
-        self._summary_lbl.setText(result.message)
+
+        # Capture for closure — avoid holding refs to self inside the thread
+        adapter = self._outbound_adapter
+        collection_name = self._outbound_collection_name
+        summary_lbl = self._summary_lbl
+
+        self._summary_lbl.setText("Syncing to Zotero…")
+
+        class _SyncWorker(QThread):
+            finished = Signal(str)
+            errored = Signal(str)
+
+            def run(self):
+                try:
+                    result = adapter.sync_pdfs(
+                        pdf_paths,
+                        citations,
+                        collection_name=collection_name,
+                    )
+                    self.finished.emit(result.message if hasattr(result, "message") else str(result))
+                except Exception as exc:
+                    self.errored.emit(str(exc))
+
+        worker = _SyncWorker(self)
+        # Keep a reference so the thread isn't GC'd mid-run
+        self._zotero_sync_worker = worker
+        worker.finished.connect(lambda msg: summary_lbl.setText(f"✅  {msg}"))
+        worker.errored.connect(lambda err: summary_lbl.setText(f"⚠  Sync error: {err}"))
+        worker.finished.connect(lambda _: setattr(self, "_zotero_sync_worker", None))
+        worker.errored.connect(lambda _: setattr(self, "_zotero_sync_worker", None))
+        worker.start()
 
     def update_theme(self, theme: dict):
         bg = theme.get("bg_panel", theme.get("bg_main", "#1e1e1e"))

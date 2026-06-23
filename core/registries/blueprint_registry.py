@@ -13,6 +13,11 @@ def _get_extract_claims():
     return get_extract_claims_blueprint()
 
 
+def _get_chart_analysis():
+    from core.engine.blueprints.chart_vision import build_chart_analysis_blueprint
+    return build_chart_analysis_blueprint()
+
+
 BlueprintFactory = Callable[..., AIActionBlueprint]
 
 
@@ -108,6 +113,16 @@ def build_default_blueprint_registry() -> BlueprintRegistry:
         BlueprintDefinition("Research Agent Planner", "Research Agent Planner", "Plan the next human-in-the-loop research agent action.", lambda pm=None, **_: DefaultBlueprints.get_research_agent_planner_blueprint(pm), ["research_agent"], capabilities=["plan_research_agent_next_action"], produced_outputs=["agent_plan"], agent_visible=False),
         BlueprintDefinition("Keyword Density Analyzer (Python)", "Keyword Density Analyzer (Python)", "Example workflow using RAG plus Python transform.", DefaultBlueprints.get_python_example_blueprint, ["custom_tools_tab", "data_dock"], capabilities=["analyze_keyword_density"], required_inputs=[{"key": "keyword", "type": "text", "label": "Target keyword"}], produced_outputs=["keyword_density"]),
         BlueprintDefinition("Blank Workflow", "Blank Workflow", "Starter workflow for custom tools.", lambda name="Blank Workflow", **_: DefaultBlueprints.get_blank_custom_tool(name), ["custom_tools_tab"], agent_visible=False),
+        BlueprintDefinition(
+            "Analyze Selected Chart", "Analyze Selected Chart",
+            "Prompt-managed conversion of a chart image into structured data (titles, series, values, evidence status).",
+            lambda **_: _get_chart_analysis(),
+            ["data_dock"],
+            capabilities=["chart_to_data", "vision_extraction"],
+            required_inputs=[{"key": "selection_images", "type": "image_list", "label": "Chart image(s)"}],
+            produced_outputs=["chart_analysis_result"],
+            agent_visible=False,
+        ),
         BlueprintDefinition(
             "Extract Claims", "Extract Claims",
             "Highlight text in the PDF viewer, extract structured claims with AI, review them, and save selected claims as workspace nodes.",

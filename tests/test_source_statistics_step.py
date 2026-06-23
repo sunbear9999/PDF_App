@@ -98,14 +98,9 @@ def test_deep_research_executes_each_planned_search_and_reuses_all_context():
                     {"topic": "limitations", "query": "limitations query", "reason": "gap two"},
                     {"topic": "outcomes", "query": "outcomes query", "reason": "gap three"},
                 ]})
-            if "List every independently sourced factual claim" in question:
-                return json.dumps({"claims": [
-                    {"claim": "claim one", "evidence_need": "support one"},
-                    {"claim": "claim two", "evidence_need": "support two"},
-                ]})
-            if "Find every distinct passage" in question:
+            if "In one pass, identify every independently verifiable factual claim" in question:
                 return json.dumps({"citations": [{
-                    "doc_name": "paper.pdf", "quote": question.split("TARGET CLAIM:\n", 1)[1].split("\n", 1)[0],
+                    "doc_name": "paper.pdf", "quote": "evidence from search 1",
                     "note": "supports claim",
                 }]})
             answer = "complete synthesized answer"
@@ -156,12 +151,12 @@ def test_deep_research_executes_each_planned_search_and_reuses_all_context():
     assert lm.collection.search_count == 4  # initial search + three planned searches
     assert "ontology_catalog" not in runner.state
     assert all(f"evidence from search {n}" in runner.state["rag_context"] for n in range(1, 5))
-    citation_questions = [q for q in lm.questions if "Find every distinct passage" in q]
-    assert len(citation_questions) == 2
+    citation_questions = [q for q in lm.questions if "In one pass, identify every independently verifiable factual claim" in q]
+    assert len(citation_questions) == 1
     assert all("complete synthesized answer" in q for q in citation_questions)
     assert all(all(f"evidence from search {n}" in q for n in range(1, 5)) for q in citation_questions)
     rendered = json.loads(runner.state["citations"])
-    assert len(rendered) == 2
+    assert len(rendered["citations"]) == 1
 
 
 def test_typed_workspace_graph_uses_registry_catalog_and_import_contract():

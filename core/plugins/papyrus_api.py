@@ -87,6 +87,7 @@ class _PluginTaskNamespace:
         job_name: str = "",
         on_done: Optional[Callable] = None,
         on_error: Optional[Callable] = None,
+        pass_cancel_check: bool = False,
     ) -> Any:
         """Run *func* in a background QThread tracked by ProcessRegistry.
 
@@ -100,7 +101,9 @@ class _PluginTaskNamespace:
         from core.plugins.plugin_worker import PluginWorker
 
         name = job_name or f"{self._plugin_id}.task"
-        worker = PluginWorker(func, args, job_name=name)
+        worker = PluginWorker(
+            func, args, job_name=name, pass_cancel_check=pass_cancel_check
+        )
 
         if on_done:
             worker.finished.connect(on_done)
@@ -127,7 +130,7 @@ class _PluginTaskNamespace:
             if job and hasattr(job, "kill"):
                 job.kill()
             elif worker.isRunning():
-                worker.terminate()
+                worker.requestInterruption()
         self._active_workers.clear()
 
 
@@ -145,6 +148,64 @@ class _PluginSourceNamespace:
             SourceIntent.OPEN,
             SourcePayload(source_id=source_id or None, path=path or None, timestamp=timestamp),
         )
+
+
+class _PluginTagNamespace:
+    """Project tag helpers exposed as ``api.tags``.
+
+    All methods proxy to the project's TagDB via ProjectManager.
+    They are safe to call from the main thread at any point when a project is open.
+    """
+
+    def __init__(self, core: "PapyrusCore") -> None:
+        self._core = core
+
+    @property
+    def _pm(self):
+        return self._core.project_manager
+
+    def ensure_tag(self, name: str, color: str = "#607d8b") -> Optional[int]:
+        """Return the tag_id for *name*, creating it (with *color*) if absent."""
+        for t in (self._pm.get_all_tags() or []):
+            if t["name"].lower() == name.lower():
+                return t["id"]
+        return self._pm.create_tag(name, color)
+
+    def create(self, name: str, color: str = "#607d8b") -> Optional[int]:
+        return self._pm.create_tag(name, color)
+
+    def delete(self, tag_id: int) -> None:
+        self._pm.delete_tag(tag_id)
+
+    def rename(self, tag_id: int, new_name: str) -> None:
+        self._pm.rename_tag(tag_id, new_name)
+
+    def update_color(self, tag_id: int, color: str) -> None:
+        self._pm.update_tag_color(tag_id, color)
+
+    def list_all(self) -> List[Dict[str, Any]]:
+        return self._pm.get_all_tags() or []
+
+    def assign_to_doc(self, doc_path: str, tag_id: int) -> None:
+        self._pm.assign_tag_to_doc(doc_path, tag_id)
+
+    def remove_from_doc(self, doc_path: str, tag_id: int) -> None:
+        self._pm.remove_tag_from_doc(doc_path, tag_id)
+
+    def get_for_doc(self, doc_path: str) -> List[Dict[str, Any]]:
+        return self._pm.get_tags_for_doc(doc_path) or []
+
+    def get_docs_for_tag(self, tag_id: int) -> List[Dict[str, Any]]:
+        return self._pm.get_docs_for_tag(tag_id) or []
+
+    def sync_tags(self, tag_dicts: List[Dict[str, Any]]) -> Dict[str, int]:
+        """Ensure all tags in *tag_dicts* exist in the project; return name→tag_id map."""
+        mapping: Dict[str, int] = {}
+        for t in tag_dicts:
+            tid = self.ensure_tag(t["name"], t.get("color", "#607d8b"))
+            if tid is not None:
+                mapping[t["name"]] = tid
+        return mapping
 
 
 class _PluginVideoNamespace:
@@ -188,11 +249,13 @@ class PapyrusAPI:
         self._registered_service_ids: List[str] = []
         # Tracks workflow step types registered by this plugin for cleanup
         self._registered_step_types: List[str] = []
+        self._registered_rag_source_ids: List[str] = []
         # Lazy-initialised namespaces
         self._db_ns: Optional["_PluginDBNamespace"] = None
         self._tasks_ns: Optional["_PluginTaskNamespace"] = None
         self._sources_ns: Optional["_PluginSourceNamespace"] = None
         self._video_ns: Optional["_PluginVideoNamespace"] = None
+        self._tags_ns: Optional["_PluginTagNamespace"] = None
         # Per-plugin persistent config (lazy import to avoid circular at module level)
         from core.plugins.plugin_config import PluginConfig
         self._config = PluginConfig(plugin_id or "_unknown", core.user_data_dir)
@@ -218,8 +281,13 @@ class PapyrusAPI:
 
     @property
     def workflow_runner(self) -> "WorkflowRunnerService":
-        """Run AI blueprints programmatically."""
+        """Run AI blueprints programmatically, including prompt-managed vision steps."""
         return self._core.workflow_runner_service
+
+    @property
+    def media_assets(self):
+        """Persist and load project-contained binary assets by stable asset ID."""
+        return self._core.media_asset_service
 
     @property
     def research_agent(self) -> "ResearchAgentService":
@@ -339,6 +407,13 @@ class PapyrusAPI:
             self._video_ns = _PluginVideoNamespace(self._core)
         return self._video_ns
 
+    @property
+    def tags(self) -> "_PluginTagNamespace":
+        """Project tag helpers: ensure_tag, create, delete, rename, assign_to_doc, sync_tags, etc."""
+        if self._tags_ns is None:
+            self._tags_ns = _PluginTagNamespace(self._core)
+        return self._tags_ns
+
     # ----------------------------------------------------------------
     # Section C: Event subscription helpers
     # ----------------------------------------------------------------
@@ -398,6 +473,23 @@ class PapyrusAPI:
             )
         self._core._custom_services[service_id] = instance
         self._registered_service_ids.append(service_id)
+
+    def register_rag_source(self, source_id: str, query: Callable) -> str:
+        """Contribute a plugin-owned database to every standard RAG search.
+
+        The callback receives ``embedding_vector``, ``n_results``,
+        ``allowed_docs``, ``tag_filters``, and ``tag_logic`` as keyword
+        arguments. It may query any storage backend and must return a standard
+        vector result payload containing nested ``ids``, ``documents``,
+        ``metadatas``, and ``distances`` lists.
+        """
+        if not source_id or not callable(query):
+            raise ValueError("A RAG source requires a non-empty id and callable query.")
+        qualified_id = f"{self._plugin_id}:{source_id}"
+        self._core.llm_manager.register_rag_source(qualified_id, query)
+        if qualified_id not in self._registered_rag_source_ids:
+            self._registered_rag_source_ids.append(qualified_id)
+        return qualified_id
 
     def get_service(self, service_id: str) -> Optional[Any]:
         """
@@ -671,6 +763,21 @@ class PapyrusAPI:
         spec.plugin_id = self._plugin_id
         self.gui_extensions.add_dock_action(spec)
 
+    def register_data_grid_extractor(self, spec: Any) -> None:
+        """Register a deterministic PDF/grid extractor owned by this plugin."""
+        spec.plugin_id = self._plugin_id
+        self._core.data_provider_registry.register_grid_extractor(spec)
+
+    def register_data_mapping_strategy(self, spec: Any) -> None:
+        """Register an optional grid mapping strategy owned by this plugin."""
+        spec.plugin_id = self._plugin_id
+        self._core.data_provider_registry.register_grid_mapping_strategy(spec)
+
+    def register_data_chart_type(self, spec: Any) -> None:
+        """Register a Data Dock chart adapter/renderer owned by this plugin."""
+        spec.plugin_id = self._plugin_id
+        self._core.data_provider_registry.register_chart_type(spec)
+
     def register_pack_contributor(self, contributor) -> None:
         """
         Register a :class:`PackContributor` so the Import/Export system can include
@@ -713,6 +820,48 @@ class PapyrusAPI:
     # Section F: Cleanup (called by plugin loader on unload)
     # ----------------------------------------------------------------
 
+    def contribute_analysis_template(self, template: dict) -> None:
+        """Register a plugin-contributed analysis template.
+
+        The template appears in the Analysis Tab alongside built-in templates.
+        It is held in-memory and disappears cleanly on plugin unload/hot-reload —
+        nothing is written to the project file.
+
+        Use the same dict format as ``DocumentDB._default_analysis_templates()``:
+        ``id``, ``title``, ``instructions``, ``node_types``, ``relation_types``,
+        ``chunk_prompt_key``, ``synthesis_prompt_key``, ``master_prompt_key``,
+        ``limits``, etc.
+        """
+        import copy
+        t = copy.deepcopy(template)
+        t.setdefault("plugin_id", self._plugin_id)
+        registry = getattr(self._core, "_plugin_analysis_templates", None)
+        if registry is None:
+            return
+        # Idempotent: replace any prior registration of the same id by this plugin
+        registry[:] = [
+            x for x in registry
+            if not (x.get("id") == t.get("id") and x.get("plugin_id") == self._plugin_id)
+        ]
+        registry.append(t)
+
+    def contribute_rag_source_filter(self, source_id: str, label: str, description: str = "") -> None:
+        """Register a plugin RAG source entry in the Global AI Settings filter dialog.
+
+        The entry appears as a checkbox that lets users enable/disable this plugin's RAG
+        contribution per-project. State is stored in project metadata.
+        Disappears cleanly on plugin unload/hot-reload via extension_registry cleanup.
+        """
+        from core.plugins.extension_registry import RagSourceFilterSpec
+        qualified_id = f"{self._plugin_id}:{source_id}"
+        spec = RagSourceFilterSpec(
+            source_id=qualified_id,
+            label=label,
+            description=description,
+            plugin_id=self._plugin_id,
+        )
+        self.gui_extensions.add_rag_source_filter(spec)
+
     def _cleanup(self) -> None:
         """Disconnect all tracked subscriptions and remove registered services. Called on plugin unload."""
         for signal, slot in self._subscriptions:
@@ -724,6 +873,9 @@ class PapyrusAPI:
         for service_id in self._registered_service_ids:
             self._core._custom_services.pop(service_id, None)
         self._registered_service_ids.clear()
+        for source_id in self._registered_rag_source_ids:
+            self._core.llm_manager.unregister_rag_source(source_id)
+        self._registered_rag_source_ids.clear()
         # Remove plugin table registrations (does NOT drop the actual SQLite table)
         from core.plugins.plugin_db_registry import PluginTableRegistry
         PluginTableRegistry.get_instance().remove_by_plugin(self._plugin_id)
@@ -747,3 +899,7 @@ class PapyrusAPI:
         data_registry = getattr(self._core, "data_provider_registry", None)
         if data_registry is not None and hasattr(data_registry, "remove_plugin"):
             data_registry.remove_plugin(self._plugin_id)
+        # Remove plugin-contributed analysis templates
+        plugin_templates = getattr(self._core, "_plugin_analysis_templates", None)
+        if plugin_templates is not None:
+            plugin_templates[:] = [t for t in plugin_templates if t.get("plugin_id") != self._plugin_id]

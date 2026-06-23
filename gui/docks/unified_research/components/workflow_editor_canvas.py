@@ -472,6 +472,14 @@ class VisualWorkflowEditor(QWidget):
         self.input_llm_options.setPlaceholderText('{"temperature": 0.7, "num_predict": 2048}')
         self.input_llm_options.setToolTip("JSON object with generation parameters.\n  temperature (0.0–1.0): creativity\n  num_predict: max output tokens\n  num_ctx: context window\n  json_mode: true/false")
 
+        self.input_model_capabilities = QLineEdit()
+        self.input_model_capabilities.setPlaceholderText("e.g. vision")
+        self.input_model_capabilities.setToolTip("Comma-separated model capabilities required by this step. Image workflows should require vision.")
+
+        self.input_required_prompts = QLineEdit()
+        self.input_required_prompts.setPlaceholderText("Prompt Key A, Prompt Key B")
+        self.input_required_prompts.setToolTip("Comma-separated Prompt Manager keys that must exist before this step can run.")
+
         self.input_schema = QTextEdit()
         self.input_schema.setMaximumHeight(70)
         self.input_schema.setPlaceholderText('{"claims": [{"claim": "", "type": ""}]}')
@@ -488,6 +496,8 @@ class VisualWorkflowEditor(QWidget):
             ("Prompt Key", self._prompt_key_row_widget),
             ("System", self._system_wrap_widget),
             ("LLM Options", self.input_llm_options),
+            ("Capabilities", self.input_model_capabilities),
+            ("Required Prompts", self.input_required_prompts),
             ("Output Schema", self.input_schema),
             ("", self.check_inline_citations),
             ("Cite Src Key", self.input_citation_source_key),
@@ -942,6 +952,8 @@ class VisualWorkflowEditor(QWidget):
                 self.input_prompt_key.setText(step.prompt_key or "")
                 self.input_system.setPlainText(step.system_prompt or "")
                 self.input_llm_options.setPlainText(json.dumps(step.llm_options, indent=2) if step.llm_options else "")
+                self.input_model_capabilities.setText(", ".join(step.required_model_capabilities or []))
+                self.input_required_prompts.setText(", ".join(step.required_prompt_keys or []))
                 self.input_schema.setPlainText(json.dumps(step.output_schema, indent=2) if step.output_schema else "")
                 self.check_inline_citations.setChecked(bool(step.inline_citations))
                 self.input_citation_source_key.setText(step.citation_source_key or "")
@@ -988,6 +1000,8 @@ class VisualWorkflowEditor(QWidget):
                 step.prompt_key = self.input_prompt_key.text().strip() or None
                 step.system_prompt = self.input_system.toPlainText().strip() or None
                 step.llm_options = self._parse_json_or_none(self.input_llm_options.toPlainText()) or {}
+                step.required_model_capabilities = [item.strip() for item in self.input_model_capabilities.text().split(",") if item.strip()]
+                step.required_prompt_keys = [item.strip() for item in self.input_required_prompts.text().split(",") if item.strip()]
                 step.output_schema = self._parse_json_or_none(self.input_schema.toPlainText())
                 step.inline_citations = self.check_inline_citations.isChecked()
                 step.citation_source_key = self.input_citation_source_key.text().strip() or None

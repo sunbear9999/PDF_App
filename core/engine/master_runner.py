@@ -57,6 +57,7 @@ class MasterActionRunner(QThread):
         ontology_registry=None,
         blueprint_manager=None,
         node_type_registry=None,
+        data_provider_registry=None,
     ):
         super().__init__()
         self.llm_manager = llm_manager
@@ -67,6 +68,7 @@ class MasterActionRunner(QThread):
         self.ontology_registry = ontology_registry
         self.blueprint_manager = blueprint_manager
         self.node_type_registry = node_type_registry
+        self.data_provider_registry = data_provider_registry
 
         import copy
         self.blueprint = copy.deepcopy(blueprint)
@@ -114,6 +116,7 @@ class MasterActionRunner(QThread):
                         llm_manager=runner.llm_manager,
                         state=runner.state,
                         abort_check=abort_fn,
+                        data_provider_registry=runner.data_provider_registry,
                     )
                     return instance.execute(ctx, inputs)
                 return _handler
@@ -163,6 +166,7 @@ class MasterActionRunner(QThread):
             ontology_registry=self.ontology_registry,
             trace_id=self.trace_id,
             node_type_registry=self.node_type_registry,
+            data_provider_registry=self.data_provider_registry,
             _pause_mutex=self._pause_mutex,
             _wait_condition=self._wait_condition,
             _user_response_holder=self._user_response_holder,
@@ -452,11 +456,15 @@ class MasterActionRunner(QThread):
 
             final_result = sub_state.get(sub_blueprint.steps[-1].output_key)
 
-            try:
-                parsed_res = json.loads(final_result)
-            except Exception:
-                success, healed = extract_and_heal_json(str(final_result))
-                parsed_res = healed if success else final_result
+            if isinstance(final_result, (dict, list)):
+                # Already a Python object — no JSON round-trip needed.
+                parsed_res = final_result
+            else:
+                try:
+                    parsed_res = json.loads(final_result)
+                except Exception:
+                    success, healed = extract_and_heal_json(str(final_result))
+                    parsed_res = healed if success else final_result
 
             if step.step_id == "process_all_chunks" and isinstance(item, dict):
                 parsed_res = self._analysis_runtime().validate_chunk_observation_quotes(
@@ -509,6 +517,20 @@ class MasterActionRunner(QThread):
             from core.events.event_bus import EventBus
             from core.events.domains.analysis_events import AnalysisEvent, AnalysisPayload
             bus = EventBus.get_instance()
+
+            # Hierarchical pipeline: EvidenceStoreStep already emitted CHUNK_EVIDENCE_READY.
+            # The compact-refs dict {chunk_id, refs} is not a chunk observation — skip CHUNK_RESULT.
+            if isinstance(parsed_res, dict) and "refs" in parsed_res and "chunk_id" in parsed_res:
+                bus.analysis_result_changed.emit(
+                    AnalysisEvent.PROGRESS,
+                    AnalysisPayload(
+                        doc_path=self.state.get("analysis_doc_path"),
+                        template_id=self.state.get("analysis_template_id"),
+                        run_id=self.state.get("analysis_run_id"),
+                        result={"message": f"Extracted evidence from chunk {idx + 1}/{total}"},
+                    ),
+                )
+                return
 
             runtime = self._analysis_runtime()
             contract = self.state.get("analysis_contract") or {}

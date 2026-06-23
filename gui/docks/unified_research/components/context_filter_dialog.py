@@ -10,12 +10,16 @@ from core.events.event_bus import EventBus
 from gui.utils.document_helpers import active_pdf_paths, prune_doc_names
 
 class ContextFilterDialog(QDialog):
-    def __init__(self, project_manager, current_docs, current_tags, current_logic, theme, parent=None):
+    def __init__(self, project_manager, current_docs, current_tags, current_logic, theme, parent=None,
+                 plugin_rag_sources=None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setWindowTitle("⚙️ Global AI Engine Settings")
         self.setMinimumSize(450, 700)
         self.pm = project_manager
+        # plugin_rag_sources: list of dicts {id, label, description, enabled}
+        self._plugin_rag_sources = plugin_rag_sources or []
+        self._plugin_source_checkboxes: dict = {}  # source_id -> QCheckBox
         
         # Load Universal Settings from Project Metadata
         raw_settings = self.pm.get_metadata("global_ai_settings", "{}")
@@ -135,7 +139,20 @@ class ContextFilterDialog(QDialog):
         btn_clear_tags = QPushButton("Clear Tags")
         btn_clear_tags.clicked.connect(lambda: self._set_all(self.list_tags, Qt.CheckState.Unchecked))
         layout.addWidget(btn_clear_tags)
-        
+
+        # --- Plugin RAG Sources ---
+        if self._plugin_rag_sources:
+            sep_plugin = QFrame()
+            sep_plugin.setFrameShape(QFrame.Shape.HLine)
+            layout.addWidget(sep_plugin)
+            layout.addWidget(QLabel("<b>🔌 Plugin RAG Sources:</b>"))
+            for src in self._plugin_rag_sources:
+                chk = QCheckBox(src["label"])
+                chk.setChecked(src.get("enabled", True))
+                chk.setToolTip(src.get("description", ""))
+                self._plugin_source_checkboxes[src["id"]] = chk
+                layout.addWidget(chk)
+
         # --- Save/Cancel ---
         btn_layout = QHBoxLayout()
         btn_save = QPushButton("Save Settings")
@@ -205,6 +222,12 @@ class ContextFilterDialog(QDialog):
             "include_selected_nodes": self.chk_include_selected_nodes.isChecked()
         }
         self.pm.set_metadata("global_ai_settings", json.dumps(new_settings))
+        # Save per-plugin-source enabled states
+        for source_id, chk in self._plugin_source_checkboxes.items():
+            self.pm.set_metadata(
+                f"rag_source_enabled:{source_id}",
+                "true" if chk.isChecked() else "false",
+            )
         self.accept()
 
     def get_results(self):

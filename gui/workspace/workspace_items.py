@@ -1,9 +1,9 @@
 # gui/components/workspace_items.py
 import uuid
 from PySide6.QtWidgets import (QGraphicsRectItem, QGraphicsTextItem, QGraphicsLineItem, QGraphicsItem,
-                             QGraphicsProxyWidget, QHBoxLayout, QMenu, QToolButton, QWidget)
+                             QGraphicsProxyWidget, QHBoxLayout, QMenu, QToolButton, QWidget, QLabel)
 from PySide6.QtCore import Qt, QLineF, QRectF
-from PySide6.QtGui import QColor, QPen, QBrush, QFont, QTextDocument, QPainter, QTextCursor
+from PySide6.QtGui import QColor, QPen, QBrush, QFont, QTextDocument, QPainter, QTextCursor, QPixmap
 
 from gui.theme.theme import ThemeManager
 from core.events.event_bus import EventBus
@@ -234,6 +234,8 @@ class Node(QGraphicsRectItem):
         source_id=None,
         entity_properties=None,
         entity_state=None,
+        media_asset_service=None,
+        data_provider_registry=None,
     ):
         super().__init__(0, 0, width, height)
         self.node_id = node_id
@@ -242,6 +244,7 @@ class Node(QGraphicsRectItem):
         self.quote = quote if quote else ""
         self.note = note if note else ""
         self.node_origin = node_origin
+        self.data_provider_registry = data_provider_registry
         self.is_verified = bool(is_verified)
         self.original_text = original_text if original_text is not None else note
         self.pdf_path = pdf_path
@@ -255,6 +258,7 @@ class Node(QGraphicsRectItem):
         self.source_id = source_id
         self.entity_properties = dict(entity_properties or {})
         self.entity_state = dict(entity_state or {})
+        self.media_asset_service = media_asset_service
         self.entity_properties.setdefault("quote", self.quote)
         self.entity_properties.setdefault("exact_text", self.quote)
         self.entity_properties.setdefault("note_text", self.note)
@@ -346,12 +350,29 @@ class Node(QGraphicsRectItem):
                 from core.models.data_dock_models import ChartConfig, DataGridState
                 from gui.docks.data_dock_chart import DataChartWidget
                 dock_payload = self.entity_properties.get("data_dock") or {}
+                raw_chart = dock_payload.get("raw_chart") or {}
                 snapshot = dock_payload.get("snapshot") or {}
                 config_data = dock_payload.get("chart_config") or {}
-                if snapshot and config_data:
+                if raw_chart.get("asset_id") and self.media_asset_service:
+                    asset = self.media_asset_service.load(raw_chart["asset_id"])
+                    if asset:
+                        label = QLabel()
+                        pixmap = QPixmap()
+                        pixmap.loadFromData(asset["data"])
+                        label.setPixmap(pixmap)
+                        label.setScaledContents(True)
+                        label.setMinimumSize(300, 180)
+                        self.proxy_custom_ui = QGraphicsProxyWidget(self)
+                        self.proxy_custom_ui.setWidget(label)
+                        self.proxy_custom_ui.setZValue(20)
+                        self._custom_ui_height = 190
+                elif snapshot and config_data:
                     custom_widget = DataChartWidget()
                     custom_widget.setMinimumSize(300, 180)
-                    custom_widget.set_chart(DataGridState.from_dict(snapshot), ChartConfig.from_dict(config_data))
+                    config = ChartConfig.from_dict(config_data)
+                    spec = self.data_provider_registry.chart_type(config.chart_type) if self.data_provider_registry else None
+                    palette = self.data_provider_registry.palette(config.palette_id) if self.data_provider_registry else None
+                    custom_widget.set_chart(DataGridState.from_dict(snapshot), config, palette, spec)
                     self.proxy_custom_ui = QGraphicsProxyWidget(self)
                     self.proxy_custom_ui.setWidget(custom_widget)
                     self.proxy_custom_ui.setZValue(20)
@@ -991,7 +1012,17 @@ class Node(QGraphicsRectItem):
         self.bus.workspace_action_requested.emit(WorkspaceIntent.NODE_CONNECT_START, WorkspacePayload(node_id=self.node_id))
 
     def trigger_edit(self):
+        try:
+            if self.scene() is None:
+                return
+        except RuntimeError:
+            return
         self.bus.workspace_action_requested.emit(WorkspaceIntent.UNDO_CHECKPOINT_REQUESTED, WorkspacePayload())
+        try:
+            if self.scene() is None:
+                return
+        except RuntimeError:
+            return
         self._normalize_source_backed_note()
         self.is_hovered = True
         if not self.isSelected():

@@ -31,8 +31,8 @@ class AnalysisRuntime:
     def analysis_limits(self, template: dict) -> dict:
         raw = template.get("limits") if isinstance(template.get("limits"), dict) else {}
         return {
-            "chunk_pages": int(raw.get("chunk_pages", template.get("chunk_pages", 4)) or 4),
-            "max_chunk_chars": int(raw.get("max_chunk_chars", template.get("max_chunk_chars", 14000)) or 14000),
+            "chunk_pages": int(raw.get("chunk_pages", template.get("chunk_pages", 2)) or 2),
+            "max_chunk_chars": int(raw.get("max_chunk_chars", template.get("max_chunk_chars", 6000)) or 6000),
             "max_master_chars": int(raw.get("max_master_chars", template.get("max_master_chars", 36000)) or 36000),
             "num_ctx": int(raw.get("num_ctx", template.get("num_ctx", 24576)) or 24576),
             # INCREASED: Give the LLM enough room to output complete JSON graphs
@@ -41,7 +41,8 @@ class AnalysisRuntime:
             "master_num_predict": int(raw.get("master_num_predict", template.get("master_num_predict", 7000)) or 7000),
             "max_entities_per_chunk": int(raw.get("max_entities_per_chunk", template.get("max_entities_per_chunk", 6)) or 6),
             "max_relations_per_chunk": int(raw.get("max_relations_per_chunk", template.get("max_relations_per_chunk", 10)) or 10),
-            "max_quotes_per_chunk": int(raw.get("max_quotes_per_chunk", template.get("max_quotes_per_chunk", 4)) or 4),
+            "evidence_num_predict": int(raw.get("evidence_num_predict", template.get("evidence_num_predict", 800)) or 800),
+            "max_quotes_per_chunk": int(raw.get("max_quotes_per_chunk", template.get("max_quotes_per_chunk", 6)) or 6),
             "quote_words": int(raw.get("quote_words", template.get("quote_words", 10)) or 10),
             "max_quote_words": int(raw.get("max_quote_words", template.get("max_quote_words", 18)) or 18),
             "explanation_words": int(raw.get("explanation_words", template.get("explanation_words", 10)) or 10),
@@ -207,6 +208,54 @@ class AnalysisRuntime:
 
     def synthesis_query_prompt(self, template: dict) -> str:
         return self.prompt_manager.get_prompt(template.get("synthesis_query_prompt_key") or "Graph Analysis Synthesis Query")
+
+    # ── Hierarchical pipeline prompts ──────────────────────────────────────
+
+    def evidence_system_prompt(self, template: dict, contract: dict) -> str:
+        prompt = self.prompt_manager.get_prompt(
+            template.get("evidence_prompt_key") or "Graph Analysis Evidence Chunk System"
+        )
+        # Use the lean synthesis renderer — evidence extraction only needs the research goal,
+        # not the old OUTPUT RULES / graph node format injected by _render_chunk_observation_prompt.
+        return self._render_synthesis_prompt(prompt, template)
+
+    def evidence_query_prompt(self, template: dict) -> str:
+        return self.prompt_manager.get_prompt(
+            template.get("evidence_query_prompt_key") or "Graph Analysis Evidence Chunk Query"
+        )
+
+    def section_synthesis_system_prompt(self, template: dict, contract: dict) -> str:
+        prompt = self.prompt_manager.get_prompt(
+            template.get("section_synthesis_prompt_key") or "Graph Analysis Section Synthesis System"
+        )
+        return self._render_synthesis_prompt(prompt, template)
+
+    def section_synthesis_query_prompt(self, template: dict) -> str:
+        return self.prompt_manager.get_prompt(
+            template.get("section_synthesis_query_prompt_key") or "Graph Analysis Section Synthesis Query"
+        )
+
+    def graph_plan_system_prompt(self, template: dict, contract: dict) -> str:
+        prompt = self.prompt_manager.get_prompt(
+            template.get("graph_plan_prompt_key") or "Graph Analysis Graph Plan System"
+        )
+        return self._render_synthesis_prompt(prompt, template)
+
+    def graph_plan_query_prompt(self, template: dict) -> str:
+        return self.prompt_manager.get_prompt(
+            template.get("graph_plan_query_prompt_key") or "Graph Analysis Graph Plan Query"
+        )
+
+    def graph_assembly_system_prompt(self, template: dict, contract: dict) -> str:
+        prompt = self.prompt_manager.get_prompt(
+            template.get("graph_assembly_prompt_key") or "Graph Analysis Graph Assembly System"
+        )
+        return self._render_prompt(prompt, template, contract, master=True)
+
+    def graph_assembly_query_prompt(self, template: dict) -> str:
+        return self.prompt_manager.get_prompt(
+            template.get("graph_assembly_query_prompt_key") or "Graph Analysis Graph Assembly Query"
+        )
 
     def compact_master_input(self, chunks: Any, max_chars: int, contract: Optional[dict] = None) -> str:
         if isinstance(chunks, str):

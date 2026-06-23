@@ -46,6 +46,7 @@ def collect_step_prompt_usage(step: Any) -> BlueprintPromptUsage:
             explicit.update(["General Assistant", "RAG Agent Mode"])
         elif "{" not in str(prompt_key):
             explicit.add(str(prompt_key))
+    explicit.update(str(key) for key in (getattr(step, "required_prompt_keys", []) or []) if key)
 
     texts_to_scan = [getattr(step, "system_prompt", "")]
     if isinstance(getattr(step, "inputs", None), dict):
@@ -58,7 +59,7 @@ def collect_step_prompt_usage(step: Any) -> BlueprintPromptUsage:
                 if state_token in text:
                     explicit.update(prompt_keys)
 
-    if getattr(step, "step_type", "") == "LLM_QUERY":
+    if getattr(step, "step_type", "") in {"LLM_QUERY", "LLM_SCHEMA_QUERY"}:
         opts = getattr(step, "llm_options", {}) or {}
         if getattr(step, "output_schema", None) or opts.get("json_mode"):
             implicit.add("JSON Schema Enforcer")
@@ -70,6 +71,8 @@ def collect_step_prompt_usage(step: Any) -> BlueprintPromptUsage:
             implicit.add("Format Enforcer - Data Table")
         elif ui_fmt == "card_grid":
             implicit.add("Format Enforcer - Card Grid")
+        elif ui_fmt == "live_stream":
+            implicit.add("Format Enforcer - Live Stream")
 
         if getattr(step, "inline_citations", False):
             implicit.add("Inline Citation Directive")

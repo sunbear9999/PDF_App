@@ -424,16 +424,26 @@ class DataDockServiceTests(unittest.TestCase):
         self.assertEqual(state.headers, ["Date", "AAPL", "MSFT"])
         self.assertEqual(state.rows, [["Jan", "10", "20"], ["Feb", "11", "22"]])
 
-    def test_extract_document_detects_tables_and_chart_regions(self):
+    def test_extract_document_returns_tables_without_chart_inventory(self):
         service = DataDockService(provider_registry=DataProviderRegistry())
 
         states = service.extract_document(_FakeDoc(), "/tmp/stocks.pdf")
 
-        self.assertEqual(len(states), 2)
+        self.assertEqual(len(states), 1)
         self.assertEqual(states[0].name, "P1: Date | AAPL")
         self.assertEqual(states[0].headers, ["Date", "AAPL"])
         self.assertEqual(states[0].rows, [["Jan", "10"], ["Feb", "11"]])
-        self.assertEqual(states[1].headers, ["Page", "Detected Item", "x0", "y0", "x1", "y1"])
+
+    def test_numeric_parser_handles_embedded_negative_and_trailing_period(self):
+        service = DataDockService(provider_registry=DataProviderRegistry())
+
+        self.assertEqual(service.coerce_number("Revenue: -12.5%."), -12.5)
+        self.assertEqual(service.coerce_number("Loss (1,234.50)."), -1234.5)
+        self.assertEqual(service.coerce_number("2024 result 7."), 7.0)
+
+        summary = service.selection_summary(["down −4.5 points", "$2,000.", "none"])
+        self.assertEqual(summary["numeric_count"], 2)
+        self.assertEqual(summary["sum"], 1995.5)
 
     def test_extract_document_ignores_non_table_page_text(self):
         service = DataDockService(provider_registry=DataProviderRegistry())

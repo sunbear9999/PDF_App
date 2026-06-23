@@ -36,7 +36,13 @@ class RagSearchStep(BaseStep):
         if context.state.get("autopilot_disable_rag", False):
             fallback = "[]" if ui_format == "chat_widgets" else "Context skipped by Auto-Pilot."
             return self.build_result(fallback)
-        if not lm or not getattr(lm, "ai_enabled", False) or not getattr(lm, "collection", None):
+        has_sources = bool(
+            lm and (
+                lm.has_rag_sources() if hasattr(lm, "has_rag_sources")
+                else getattr(lm, "collection", None)
+            )
+        )
+        if not lm or not getattr(lm, "ai_enabled", False) or not has_sources:
             fallback = "[]" if ui_format == "chat_widgets" else "RAG is offline or collection is empty."
             return self.build_result(fallback)
 
@@ -67,13 +73,23 @@ class RagSearchStep(BaseStep):
                 continue
             try:
                 emb = lm.get_embedding(q)
-                where_clause = self._build_where_clause(allowed_docs, tag_filters, tag_logic)
-                results = lm.collection.query(
-                    query_embeddings=[emb],
-                    n_results=n_res,
-                    where=where_clause,
-                    include=["documents", "metadatas", "distances"],
-                )
+                if hasattr(lm, "query_by_raw_embedding"):
+                    results = lm.query_by_raw_embedding(
+                        emb,
+                        n_results=n_res,
+                        allowed_docs=allowed_docs,
+                        tag_filters=tag_filters,
+                        tag_logic=tag_logic,
+                    )
+                else:
+                    # Compatibility for lightweight third-party manager adapters.
+                    where_clause = self._build_where_clause(allowed_docs, tag_filters, tag_logic)
+                    results = lm.collection.query(
+                        query_embeddings=[emb],
+                        n_results=n_res,
+                        where=where_clause,
+                        include=["documents", "metadatas", "distances"],
+                    )
                 if results.get("documents") and results["documents"][0]:
                     for idx, doc_text in enumerate(results["documents"][0]):
                         doc_id_val = results["ids"][0][idx]
@@ -89,6 +105,7 @@ class RagSearchStep(BaseStep):
                                 "end": meta.get("end", 0),
                                 "distance": results["distances"][0][idx],
                                 "query_used": q,
+                                "source_locator": meta.get("source_locator", {}),
                             }
             except Exception:
                 continue
@@ -112,6 +129,7 @@ class RagSearchStep(BaseStep):
                     "source_id": d.get("source_id", ""),
                     "start": d.get("start", 0),
                     "end": d.get("end", 0),
+                    "source_locator": d.get("source_locator", {}),
                     "text": d["text"][:450] + "..." if len(d["text"]) > 450 else d["text"],
                 }
                 for d in reading_order
@@ -134,6 +152,7 @@ class RagSearchStep(BaseStep):
                     "source_id": d.get("source_id", ""),
                     "start": d.get("start", 0),
                     "end": d.get("end", 0),
+                    "source_locator": d.get("source_locator", {}),
                     "quote": d["text"][:400] + "..." if len(d["text"]) > 400 else d["text"],
                     "note": f"Confidence: {95 - int(45 * (d['distance'] - min_d) / (max_d - min_d))}% | "
                             f"Found via: '{d['query_used'][:30]}...'",
@@ -144,11 +163,25 @@ class RagSearchStep(BaseStep):
             payloads = build_ui_payloads(ui_format, raw_value, step=None, trace_id=context.trace_id)
             return self.build_result(raw_value, ui_payloads=payloads)
 
-        context_pieces = [
-            f"--- DOCUMENT: {d['doc_name']} | "
-            f"{'TIME ' + str(round(float(d.get('start', 0)), 1)) + 's' if d.get('source_type') == 'video' else 'PAGE ' + str(d['page'] + 1)} ---\n{d['text']}"
-            for d in reading_order
-        ]
+        context_pieces = []
+        for d in reading_order:
+            locator = d.get("source_locator", {})
+            locator_lines = "\n".join(
+                f"CITATION_LOCATOR_{key}: {str(value).replace(chr(10), ' ')}"
+                for key, value in locator.items()
+            ) if isinstance(locator, dict) else f"CITATION_LOCATOR_value: {locator}"
+            context_pieces.append(
+                f"--- DOCUMENT: {d['doc_name']} | "
+                f"{'TIME ' + str(round(float(d.get('start', 0)), 1)) + 's' if d.get('source_type') == 'video' else 'PAGE ' + str(d['page'] + 1)} ---\n"
+                f"CITATION_DOC_NAME: {d['doc_name']}\n"
+                f"CITATION_SOURCE_TYPE: {d.get('source_type', 'pdf')}\n"
+                f"CITATION_SOURCE_ID: {d.get('source_id', '')}\n"
+                f"CITATION_PAGE: {d.get('page', 0)}\n"
+                f"CITATION_START: {d.get('start', 0)}\n"
+                f"CITATION_END: {d.get('end', 0)}\n"
+                f"{locator_lines}\n"
+                f"{d['text']}"
+            )
         return self.build_result("\n\n".join(context_pieces))
 
     # ------------------------------------------------------------------

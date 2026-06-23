@@ -25,6 +25,7 @@ class LLMQueryStep(BaseStep):
         "query": {"type": "string", "label": "Query / User Message", "required": True},
         "system_prompt": {"type": "string", "label": "System Prompt Override"},
         "model": {"type": "string", "label": "Model"},
+        "images": {"type": "array", "label": "Image Inputs"},
     }
 
     def execute(self, context: StepContext, inputs: dict):
@@ -40,11 +41,19 @@ class LLMQueryStep(BaseStep):
         system_prompt = (getattr(step, "system_prompt", None) or inputs.get("system_prompt", "")).strip()
         pm = context.prompt_manager
 
+        required_prompt_keys = list(getattr(step, "required_prompt_keys", []) or [])
+        if required_prompt_keys and not pm:
+            raise RuntimeError("Prompt Manager is required for this workflow step.")
+        for required_key in required_prompt_keys:
+            if not pm.get_prompt(required_key):
+                raise KeyError(f"Required Prompt Manager key is unavailable: {required_key}")
+
         if pm and getattr(step, "prompt_key", None):
             resolved_key = StateResolver.resolve_val(step.prompt_key, context.state, pm)
             raw_prompt = pm.get_prompt(resolved_key)
-            if raw_prompt:
-                system_prompt = raw_prompt + "\n\n" + system_prompt
+            if not raw_prompt:
+                raise KeyError(f"Required Prompt Manager key is unavailable: {resolved_key}")
+            system_prompt = raw_prompt + "\n\n" + system_prompt
 
         if pm:
             req_context = getattr(step, "required_context", [])
@@ -68,11 +77,8 @@ class LLMQueryStep(BaseStep):
             elif ui_format == "card_grid":
                 system_prompt += "\n\n" + (pm.get_prompt("Format Enforcer - Card Grid") or "")
 
-            if ui_format == "live_stream":
-                system_prompt += (
-                    "\n\nFormat the visible answer as readable Markdown. Use short "
-                    "paragraphs, headings, and lists where they improve clarity."
-                )
+            elif ui_format == "live_stream":
+                system_prompt += "\n\n" + (pm.get_prompt("Format Enforcer - Live Stream") or "")
 
             if getattr(step, "inline_citations", False) and self._has_citation_source(step, context.state):
                 system_prompt += "\n\n" + (pm.get_prompt("Inline Citation Directive") or "")
@@ -98,7 +104,9 @@ class LLMQueryStep(BaseStep):
             options["json_mode"] = True
             schema_str = json.dumps(output_schema, indent=2)
             if pm:
-                enforcer = pm.get_prompt("JSON Schema Enforcer") or ""
+                enforcer = pm.get_prompt("JSON Schema Enforcer")
+                if not enforcer:
+                    raise KeyError("Required Prompt Manager key is unavailable: JSON Schema Enforcer")
                 system_prompt += "\n\n" + enforcer.replace("{schema_str}", schema_str)
         elif options.get("json_mode") and "JSON" not in system_prompt:
             system_prompt += "\n\nCRITICAL: Output ONLY valid JSON. No markdown blocks, no explanations."
@@ -141,6 +149,8 @@ class LLMQueryStep(BaseStep):
             num_predict=options.get("num_predict"),
             num_ctx=options.get("num_ctx") or 16384,
             stop=options.get("stop_sequences"),
+            images=inputs.get("images") or [],
+            required_capabilities=getattr(step, "required_model_capabilities", []) or inputs.get("required_model_capabilities") or [],
         )
         trailing_visible = manifest_filter.flush()
         if context.api and trailing_visible:
@@ -156,6 +166,11 @@ class LLMQueryStep(BaseStep):
                     raw_result = json.dumps(parsed["final_output"])
                 else:
                     raw_result = json.dumps(parsed)
+                source_key = getattr(step, "citation_source_key", None)
+                if source_key and context.state.get(source_key):
+                    raw_result = self._restore_citation_metadata(
+                        raw_result, str(context.state[source_key])
+                    )
 
         # ------- Build UI payloads -------
         ui_format = getattr(step, "ui_format", inputs.get("_ui_format", "silent"))
@@ -199,9 +214,68 @@ class LLMQueryStep(BaseStep):
         text = str(value).strip()
         return bool(text and text not in {"[]", "{}", "No relevant documents found.", "RAG is offline or collection is empty."})
 
+    @staticmethod
+    def _restore_citation_metadata(raw_result: str, source_context: str) -> str:
+        """Match exact citation quotes back to RAG blocks and restore routing data."""
+        try:
+            payload = json.loads(raw_result)
+        except Exception:
+            return raw_result
+        citations = payload.get("citations") if isinstance(payload, dict) else payload
+        if not isinstance(citations, list):
+            return raw_result
+
+        blocks = []
+        for raw_block in source_context.split("--- DOCUMENT:")[1:]:
+            block = "--- DOCUMENT:" + raw_block
+            metadata = {}
+            locator = {}
+            for line in block.splitlines():
+                if line.startswith("CITATION_LOCATOR_") and ":" in line:
+                    key, value = line.split(":", 1)
+                    locator[key.removeprefix("CITATION_LOCATOR_")] = value.strip()
+                elif line.startswith("CITATION_") and ":" in line:
+                    key, value = line.split(":", 1)
+                    metadata[key.removeprefix("CITATION_").lower()] = value.strip()
+            metadata["source_locator"] = locator
+            metadata["_normalized_block"] = " ".join(block.lower().split())
+            blocks.append(metadata)
+
+        for citation in citations:
+            if not isinstance(citation, dict):
+                continue
+            quote = " ".join(str(citation.get("quote", "")).lower().split())
+            doc_name = str(citation.get("doc_name", "")).strip().lower()
+
+            def score(block):
+                value = 0
+                if quote and quote in block["_normalized_block"]:
+                    value += 100
+                if doc_name and doc_name == block.get("doc_name", "").lower():
+                    value += 20
+                return value
+
+            match = max(blocks, key=score, default=None)
+            if not match or score(match) == 0:
+                continue
+            for key in ("doc_name", "source_type", "source_id", "page", "start", "end"):
+                if key in match:
+                    value = match[key]
+                    if key in {"page", "start", "end"}:
+                        try:
+                            value = float(value) if "." in value else int(value)
+                        except (TypeError, ValueError):
+                            pass
+                    citation[key] = value
+            citation["source_locator"] = match.get("source_locator", {})
+        return json.dumps(payload)
+
     def _build_trace_event(self, step, inputs: dict, model: str, system_prompt: str, options: dict, context: StepContext):
         try:
             usage = collect_step_prompt_usage(step) if step else None
+            trace_options = dict(options or {})
+            trace_options["image_count"] = len(inputs.get("images") or [])
+            trace_options["required_model_capabilities"] = list(getattr(step, "required_model_capabilities", []) or [])
             call_dict = {
                 "step_id": getattr(step, "step_id", ""),
                 "step_type": self.step_type,
@@ -211,8 +285,11 @@ class LLMQueryStep(BaseStep):
                 "prompt_key": getattr(step, "prompt_key", None),
                 "explicit_prompt_keys": getattr(usage, "explicit", []) if usage else [],
                 "implicit_prompt_keys": getattr(usage, "implicit", []) if usage else [],
-                "llm_options": dict(options or {}),
+                "llm_options": trace_options,
             }
             return SystemEvent(event_type="prompt_trace", payload=call_dict)
-        except Exception:
+        except Exception as exc:
+            import traceback as _tb
+            print(f"[LLMQueryStep] Trace event build failed for step "
+                  f"'{getattr(step, 'step_id', '?')}': {exc}\n{_tb.format_exc()}")
             return None

@@ -9,6 +9,8 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -31,7 +33,9 @@ from PySide6.QtWidgets import (
 
 from core.events.domains.data_dock_events import DataDockEvent, DataDockEventPayload, DataDockIntent
 from core.events.domains.document_events import DocumentIntent, DocumentPayload
-from core.models.data_dock_models import ChartConfig, DataGridState
+from core.models.data_dock_models import (
+    ChartConfig, DataGridState, GridCoordinate, GridSelection, PdfRegion,
+)
 from core.models.ontology_model import EntityType
 from core.models.workspace_models import NodeModel, WorkspaceModel
 from gui.base import BaseDialog
@@ -47,6 +51,7 @@ class SpreadsheetModel(QAbstractTableModel):
         super().__init__(parent)
         self.service = service
         self.state: DataGridState | None = None
+        self.estimate_background = QColor("#6b4f12")
 
     def set_state(self, state: DataGridState | None) -> None:
         self.beginResetModel()
@@ -59,7 +64,10 @@ class SpreadsheetModel(QAbstractTableModel):
         top = self.index(0, 0)
         bottom = self.index(max(0, self.rowCount() - 1), max(0, self.columnCount() - 1))
         if top.isValid() and bottom.isValid():
-            self.dataChanged.emit(top, bottom, [Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole])
+            self.dataChanged.emit(top, bottom, [
+                Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole,
+                Qt.ItemDataRole.BackgroundRole, Qt.ItemDataRole.ToolTipRole,
+            ])
         self.headerDataChanged.emit(Qt.Orientation.Horizontal, 0, max(0, self.columnCount() - 1))
         self.headerDataChanged.emit(Qt.Orientation.Vertical, 0, max(0, self.rowCount() - 1))
 
@@ -74,6 +82,17 @@ class SpreadsheetModel(QAbstractTableModel):
             return None
         if role == Qt.ItemDataRole.BackgroundRole and (index.row() == 0 or index.column() == 0):
             return QColor("#263241")
+        if index.row() > 0 and index.column() > 0:
+            provenance = (
+                self.state.cell_provenance.get(f"data:{index.row() - 1}:{index.column() - 1}")
+                or self.state.cell_provenance.get(f"{index.row() - 1}:{index.column() - 1}") or {}
+            )
+            if role == Qt.ItemDataRole.BackgroundRole and provenance.get("evidence_status") == "estimated":
+                return self.estimate_background
+            if role == Qt.ItemDataRole.ToolTipRole and provenance.get("evidence_status"):
+                status = str(provenance.get("evidence_status")).title()
+                source = provenance.get("source_text") or "No printed data label"
+                return f"{status} chart value\nEvidence: {source}"
         if role == Qt.ItemDataRole.ForegroundRole and (index.row() == 0 or index.column() == 0):
             return QColor("#f3f6fb")
         if role == Qt.ItemDataRole.TextAlignmentRole and (index.row() == 0 or index.column() == 0):
@@ -109,7 +128,10 @@ class SpreadsheetModel(QAbstractTableModel):
             self.service.update_header(self.state.dataset_id, "row", row - 1, value)
         else:
             self.service.update_cell(self.state.dataset_id, row - 1, col - 1, value)
-        self.dataChanged.emit(index, index, [Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole])
+        self.dataChanged.emit(index, index, [
+            Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole,
+            Qt.ItemDataRole.BackgroundRole, Qt.ItemDataRole.ToolTipRole,
+        ])
         self.changed.emit()
         return True
 
@@ -209,6 +231,60 @@ class DataExtractThread(QThread):
             self.error.emit(str(exc))
 
 
+class PdfGridExtractThread(QThread):
+    result_ready = Signal(str, object)
+    failed = Signal(str, str)
+
+    def __init__(self, request_id, service, region, expected_rows, expected_columns, parent=None):
+        super().__init__(parent)
+        self.request_id = request_id
+        self.service = service
+        self.region = region
+        self.expected_rows = expected_rows
+        self.expected_columns = expected_columns
+
+    def run(self):
+        try:
+            result = self.service.extract(
+                self.region, expected_rows=self.expected_rows, expected_columns=self.expected_columns,
+            )
+            self.result_ready.emit(self.request_id, result)
+        except Exception as exc:
+            self.failed.emit(self.request_id, str(exc))
+
+
+class ChartSelectionDialog(BaseDialog):
+    def __init__(self, parent=None, analysis_available=True, theme=None):
+        super().__init__("Chart Detected", theme=theme, parent=parent, modal=True, delete_on_close=False)
+        self.update_theme(theme or {})
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("This selection appears to be a chart. Choose one or both actions:"))
+        self.save_raw = QCheckBox("Save the raw chart as a workspace chart node")
+        self.analyze = QCheckBox("Analyze the chart into a Data Dock table")
+        self.save_raw.setChecked(True)
+        self.analyze.setChecked(True)
+        self.analyze.setEnabled(analysis_available)
+        if not analysis_available:
+            self.analyze.setChecked(False)
+            self.analyze.setToolTip("Install or select a local vision-capable model to analyze charts.")
+        layout.addWidget(self.save_raw)
+        layout.addWidget(self.analyze)
+        text_color = self.theme.get("text_main", "#f3f6fb")
+        muted = self.theme.get("text_muted", "#aab4c3")
+        self.setStyleSheet(self.styleSheet() + (
+            f"QCheckBox {{ color: {text_color}; spacing: 8px; padding: 5px 2px; }}"
+            f"QCheckBox:disabled {{ color: {muted}; }}"
+        ))
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self._accept_valid)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _accept_valid(self):
+        if self.save_raw.isChecked() or self.analyze.isChecked():
+            self.accept()
+
+
 class DataDockView(BaseDock, UnifiedThemedMixin):
     _dock_id = "data_dock"
 
@@ -223,6 +299,9 @@ class DataDockView(BaseDock, UnifiedThemedMixin):
         self._redo_stack: List[dict] = []
         self._restoring_history = False
         self._history_dataset_id: str | None = None
+        self._vision_runners = set()
+        self._pending_pdf_fill = None
+        self._pdf_fill_thread = None
         self._build_ui()
         self._bind_events()
         self.refresh_library()
@@ -292,9 +371,13 @@ class DataDockView(BaseDock, UnifiedThemedMixin):
         self.metrics_btn.setMaximumWidth(82)
         self.metrics_btn.clicked.connect(self._show_metrics_menu)
         row2.addWidget(self.metrics_btn)
+        self.btn_fill_pdf = QPushButton("Fill from PDF")
+        self.btn_fill_pdf.setToolTip("Fill the selected cells or titles from a rectangle drawn on the open PDF.")
+        self.btn_fill_pdf.clicked.connect(self.fill_selection_from_pdf)
+        row2.addWidget(self.btn_fill_pdf)
         row2.addStretch()
         self.btn_extract_pdf = QPushButton("Extract PDF")
-        self.btn_extract_pdf.setToolTip("Scan the open PDF for tables and import detected data into Data Dock.")
+        self.btn_extract_pdf.setToolTip("Scan the open PDF for tables only and import them into Data Dock.")
         self.btn_extract_pdf.setMaximumWidth(120)
         self.btn_extract_pdf.clicked.connect(self.extract_open_pdf)
         row2.addWidget(self.btn_extract_pdf)
@@ -335,6 +418,10 @@ class DataDockView(BaseDock, UnifiedThemedMixin):
         self.summary_label = QLabel("-")
         self.summary_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         root.addWidget(self.summary_label)
+        self.estimate_legend = QLabel("Estimated chart values are highlighted in amber.")
+        self.estimate_legend.setStyleSheet("color: #f2b84b;")
+        self.estimate_legend.hide()
+        root.addWidget(self.estimate_legend)
 
         chart_panel = QFrame()
         chart_panel.setObjectName("DataDockChartPanel")
@@ -343,11 +430,13 @@ class DataDockView(BaseDock, UnifiedThemedMixin):
         chart_grid.setHorizontalSpacing(4)
         chart_grid.setVerticalSpacing(3)
         self.chart_type = QComboBox()
-        self.chart_type.addItems(sorted(self.registry.chart_types().keys()))
+        for chart_type, spec in self.registry.chart_types().items():
+            self.chart_type.addItem(spec.label or chart_type, chart_type)
         self.x_field = QComboBox()
         self.y_field = QComboBox()
         self.palette_combo = QComboBox()
         self.palette_combo.addItems(sorted(self.registry.palettes().keys()))
+        self.palette_combo.setCurrentText("default")
         for combo in (self.chart_type, self.x_field, self.y_field, self.palette_combo):
             combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.chart_title = QLineEdit()
@@ -362,6 +451,10 @@ class DataDockView(BaseDock, UnifiedThemedMixin):
         self.show_labels.setToolTip("Show values next to bars or points.")
         self.multi_series = QCheckBox("Series")
         self.multi_series.setToolTip("Use selected numeric columns as separate chart series, useful for grouped bar charts.")
+        self.multi_series.setChecked(True)
+        self.series_fields = QLineEdit()
+        self.series_fields.setPlaceholderText("Series fields (comma-separated; blank = selected numeric columns)")
+        self.series_fields.setToolTip("Choose chart series explicitly by column name, or leave blank to infer them from the selection.")
         self.show_grid = QCheckBox("Grid")
         self.show_grid.setToolTip("Show chart grid lines.")
         self.show_grid.setChecked(True)
@@ -371,6 +464,7 @@ class DataDockView(BaseDock, UnifiedThemedMixin):
             field.textChanged.connect(self.update_chart_preview)
         self.show_labels.stateChanged.connect(self.update_chart_preview)
         self.multi_series.stateChanged.connect(self.update_chart_preview)
+        self.series_fields.textChanged.connect(self.update_chart_preview)
         self.show_grid.stateChanged.connect(self.update_chart_preview)
         self.btn_chart_node = QPushButton("Chart Node")
         self.btn_chart_node.setToolTip("Create a workspace node that renders this chart.")
@@ -399,8 +493,10 @@ class DataDockView(BaseDock, UnifiedThemedMixin):
         chart_grid.addWidget(self.multi_series, 2, 3)
         chart_grid.addWidget(self.show_grid, 2, 4)
         chart_grid.addWidget(self.btn_export_chart, 2, 5)
-        chart_grid.addWidget(self.btn_data_node, 3, 0, 1, 3)
-        chart_grid.addWidget(self.btn_chart_node, 3, 3, 1, 3)
+        chart_grid.addWidget(QLabel("Series"), 3, 0)
+        chart_grid.addWidget(self.series_fields, 3, 1, 1, 5)
+        chart_grid.addWidget(self.btn_data_node, 4, 0, 1, 3)
+        chart_grid.addWidget(self.btn_chart_node, 4, 3, 1, 3)
         for col in range(6):
             chart_grid.setColumnStretch(col, 1 if col in (1, 3, 5) else 0)
         root.addWidget(chart_panel, 0)
@@ -446,6 +542,20 @@ class DataDockView(BaseDock, UnifiedThemedMixin):
         self._add_menu_action(menu, "Split selected column...", "Split one selected column by a delimiter.", self.split_selected_column)
         self._add_menu_action(menu, "Merge selected columns", "Merge selected columns into one text column.", self.merge_selected_columns)
         self._add_menu_action(menu, "Replace text...", "Find and replace text in selected columns or the whole table.", self.replace_text)
+        menu.addSeparator()
+        self._add_menu_action(menu, "Sort ascending", "Sort rows by the first selected column.", lambda: self.sort_selected(False))
+        self._add_menu_action(menu, "Sort descending", "Sort rows by the first selected column.", lambda: self.sort_selected(True))
+        self._add_menu_action(menu, "Remove duplicate rows", "Keep the first row for each selected-column value combination.", self.remove_duplicate_rows)
+        self._add_menu_action(menu, "Find data issues", "Report missing values, duplicate rows, and declared-type errors.", self.show_data_issues)
+        self._add_menu_action(menu, "Export selection as TSV...", "Export selected titles/cells with logical coordinates.", lambda: self.export_selected_data("tsv"))
+        self._add_menu_action(menu, "Export selection as JSON...", "Export selected values with per-cell PDF provenance.", lambda: self.export_selected_data("json"))
+        menu.addSeparator()
+        self._add_menu_action(menu, "Append another dataset...", "Append rows while aligning columns by header name.", self.append_another_dataset)
+        self._add_menu_action(menu, "Join another dataset...", "Left-join another dataset using selected key fields.", self.join_another_dataset)
+        self._add_menu_action(menu, "Pivot table...", "Turn row/category/value fields into a wide table.", self.pivot_table)
+        self._add_menu_action(menu, "Unpivot selected columns", "Turn selected value columns into Variable and Value rows.", self.unpivot_selected)
+        self._add_menu_action(menu, "Fill missing from previous", "Fill blank selected-column values from the row above.", lambda: self.fill_missing_selected("previous"))
+        self._add_menu_action(menu, "Fill missing with mean", "Fill blank selected numeric values with their column mean.", lambda: self.fill_missing_selected("mean"))
         plugin_cleaners = self.registry.cleaners()
         if plugin_cleaners:
             menu.addSeparator()
@@ -523,6 +633,7 @@ class DataDockView(BaseDock, UnifiedThemedMixin):
 
     def _bind_events(self):
         self.bus.data_dock_action_requested.connect(self._handle_intent)
+        self.bus.pdf_data_selection_ready.connect(self._on_pdf_region_ready)
 
     def _register_keybindings(self):
         kr = getattr(self.app_context, "keybinding_registry", None)
@@ -548,7 +659,11 @@ class DataDockView(BaseDock, UnifiedThemedMixin):
         if intent == DataDockIntent.LOAD_SELECTION:
             self.show()
             self.raise_()
-            state = self.service.dataset_from_selection(getattr(payload, "selection", payload))
+            selection = getattr(payload, "selection", payload)
+            if hasattr(selection, "selection_type") and hasattr(selection, "image_data"):
+                self._handle_pdf_selection(selection)
+                return
+            state = self.service.dataset_from_selection(selection)
             self.refresh_library(select_id=state.dataset_id)
             self._emit_dataset_changed(state.dataset_id, DataDockEvent.DATASET_LOADED)
         elif intent == DataDockIntent.LOAD_DATASET:
@@ -560,6 +675,143 @@ class DataDockView(BaseDock, UnifiedThemedMixin):
                 self.load_dataset(payload.dataset_id)
         elif intent == DataDockIntent.NEW_DATASET:
             self.new_dataset()
+
+    def _handle_pdf_selection(self, selection):
+        kind = selection.selection_type
+        if kind == "table" and selection.table_state is not None:
+            state = selection.table_state
+            self.service._track(state)
+            self.refresh_library(select_id=state.dataset_id)
+            self._emit_dataset_changed(state.dataset_id, DataDockEvent.DATASET_LOADED)
+            self.bus.status_message_requested.emit("Selected table imported into Data Dock.", 3000)
+            return
+        if kind == "table":
+            self._show_info(
+                "Table Detected",
+                "This appears to be a raster table, but it has no recoverable PDF cell text. Run OCR on the PDF, then select it again.",
+            )
+            return
+        if kind == "chart":
+            self._offer_chart_actions(selection)
+            return
+        self._show_info("Unsupported Selection", "The selected region is not a structured table or quantitative chart.")
+
+    def _vision_model(self) -> str:
+        preferred = self.app_context.get_active_ai_model() if hasattr(self.app_context, "get_active_ai_model") else ""
+        return self.app_context.llm_manager.find_model_with_capability("vision", preferred)
+
+    def _offer_chart_actions(self, selection):
+        model = self._vision_model()
+        dialog = ChartSelectionDialog(self, analysis_available=bool(model), theme=getattr(self, "_theme", {}))
+        manager = getattr(self.app_context, "dialog_manager", None)
+        result = manager.exec_modal(dialog) if manager else dialog.exec()
+        if result != QDialog.DialogCode.Accepted:
+            return
+        asset_id = ""
+        if dialog.save_raw.isChecked():
+            try:
+                asset_id = self.app_context.media_asset_service.save(
+                    selection.image_data,
+                    selection.image_mime_type,
+                    {"kind": "pdf_chart_crop", "provenance": selection.provenance.to_dict()},
+                )
+                self._create_raw_chart_node(selection, asset_id)
+            except Exception as exc:
+                self._show_info("Chart Save Failed", str(exc))
+        if dialog.analyze.isChecked() and model:
+            self._analyze_chart(selection, model, asset_id)
+
+    def _analyze_chart(self, selection, model: str, asset_id: str = ""):
+        self.bus.status_message_requested.emit("Analyzing chart with the local vision model…", 5000)
+        self.bus.data_dock_state_changed.emit(
+            DataDockEvent.CHART_ANALYSIS_STARTED,
+            DataDockEventPayload(changes={"model": model, "provenance": selection.provenance.to_dict()}),
+        )
+
+        def completed(final_state, runner):
+            try:
+                state = self.app_context.pdf_data_selection_service.grid_from_chart_analysis(
+                    final_state.get("chart_analysis_result"),
+                    selection.provenance,
+                    trace_id=getattr(runner, "trace_id", "") or "",
+                    model=model,
+                    source_asset_id=asset_id,
+                )
+            except Exception as exc:
+                self.bus.data_dock_state_changed.emit(
+                    DataDockEvent.CHART_ANALYSIS_FAILED,
+                    DataDockEventPayload(changes={"error": str(exc)}),
+                )
+                self._show_info("Chart Analysis Failed", str(exc))
+                return
+            self.service._track(state)
+            self.refresh_library(select_id=state.dataset_id)
+            self._emit_dataset_changed(state.dataset_id, DataDockEvent.DATASET_LOADED)
+            self.bus.data_dock_state_changed.emit(
+                DataDockEvent.CHART_ANALYSIS_COMPLETED,
+                DataDockEventPayload(dataset_id=state.dataset_id, dataset_state=state),
+            )
+            self.bus.status_message_requested.emit("Chart data imported into Data Dock.", 3000)
+
+        providers = self.registry.chart_analysis_providers()
+        if not providers:
+            self._show_info("Chart Analysis Unavailable", "No chart-analysis provider is registered.")
+            return
+        blueprint = providers[0].build_blueprint({"selection": selection, "model": model})
+        self._run_vision_blueprint(blueprint, selection, model, completed)
+
+    def _run_vision_blueprint(self, blueprint, selection, model: str, completed):
+        workflow = self.app_context.workflow_runner_service
+        try:
+            self.app_context.pdf_data_selection_service.validate_prompt_managed_blueprint(blueprint)
+        except Exception as exc:
+            self._show_info("Invalid Vision Workflow", str(exc))
+            return
+        runner = workflow.prepare_runner(blueprint, {
+            "selected_model": model,
+            "selection_images": selection.workflow_images(),
+        })
+        self._vision_runners.add(runner)
+        runner.action_complete.connect(lambda state, r=runner: completed(state, r))
+        def failed(error):
+            if blueprint.name == "Analyze Selected Chart":
+                self.bus.data_dock_state_changed.emit(
+                    DataDockEvent.CHART_ANALYSIS_FAILED,
+                    DataDockEventPayload(changes={"error": str(error)}),
+                )
+            self._show_info("Vision Workflow Failed", str(error))
+        runner.error.connect(failed)
+        runner.finished.connect(lambda r=runner: self._vision_runners.discard(r))
+        workflow.start_runner(runner, is_express=True, job_name=blueprint.name, job_type="Vision")
+
+    def _create_raw_chart_node(self, selection, asset_id: str):
+        page = (selection.provenance.page_number or 0) + 1
+        title = f"Source Chart — Page {page}"
+        props = {
+            "title": title,
+            "text": title,
+            "note_text": title,
+            "preview_text": "Raw chart captured from PDF",
+            "data_dock": {
+                "raw_chart": {"asset_id": asset_id, "mime_type": selection.image_mime_type},
+                "provenance": selection.provenance.to_dict(),
+            },
+        }
+        node = NodeModel(
+            id=f"chart_{uuid.uuid4()}", quote="", note=title, color="#6d28d9", is_custom=True,
+            x=80, y=80, width=460, height=300, workspace_id=1,
+            pdf_path=selection.provenance.pdf_path,
+            page_num=selection.provenance.page_number,
+            node_type_id="workspace.node.chart", entity_type=EntityType.CHART.value,
+            entity_properties=props,
+            entity_state={"is_verified": True, "ai_generated": False, "origin": "human"},
+        )
+        self.app_context.workspace_service.sync_delta(WorkspaceModel(workspace_id=1, nodes=[node]))
+        self.bus.data_dock_state_changed.emit(
+            DataDockEvent.RAW_CHART_NODE_CREATED,
+            DataDockEventPayload(node_id=node.id, changes={"asset_id": asset_id}),
+        )
+        self.bus.status_message_requested.emit("Raw chart added to the workspace.", 3000)
 
     def refresh_library(self, select_id: str | None = None):
         current = select_id or self.current_dataset_id()
@@ -589,7 +841,26 @@ class DataDockView(BaseDock, UnifiedThemedMixin):
 
     def _on_dataset_selected(self, *args):
         state = self.current_state()
+        pending = self._pending_pdf_fill
+        if pending and state and pending["selection"].dataset_id != state.dataset_id:
+            self._cancel_pending_pdf_fill()
         self.render_state(state)
+
+    def _cancel_pending_pdf_fill(self):
+        pending = self._pending_pdf_fill
+        self._pending_pdf_fill = None
+        if pending:
+            from core.events.domains.data_dock_events import DataDockPayload
+            self.bus.data_dock_action_requested.emit(
+                DataDockIntent.CANCEL_PDF_REGION_SELECTION,
+                DataDockPayload(request_id=pending.get("request_id")),
+            )
+        if not self._pdf_fill_thread:
+            self.btn_fill_pdf.setEnabled(True)
+
+    def closeEvent(self, event):
+        self._cancel_pending_pdf_fill()
+        super().closeEvent(event)
 
     def render_state(self, state: DataGridState | None):
         self.model.set_state(state)
@@ -602,6 +873,10 @@ class DataDockView(BaseDock, UnifiedThemedMixin):
         self.dataset_name.setText(state.name if state else "")
         self.dataset_name.blockSignals(False)
         self._refresh_chart_fields(state)
+        self.estimate_legend.setVisible(bool(state and any(
+            (item or {}).get("evidence_status") == "estimated"
+            for item in state.cell_provenance.values()
+        )))
         self._refresh_provenance(state)
         self._update_summary()
         self.update_chart_preview()
@@ -680,12 +955,180 @@ class DataDockView(BaseDock, UnifiedThemedMixin):
     def _selected_data_cells(self) -> List[Tuple[int, int]]:
         return sorted((row - 1, col - 1) for row, col in self._selected_cells() if row > 0 and col > 0)
 
+    def _logical_selection(self) -> GridSelection | None:
+        state = self.current_state()
+        if not state:
+            return None
+        coordinates = []
+        for row, column in self._selected_cells():
+            if row == 0 and column == 0:
+                continue
+            if row == 0:
+                coordinates.append(GridCoordinate("column_header", column=column - 1))
+            elif column == 0:
+                coordinates.append(GridCoordinate("row_header", row=row - 1))
+            else:
+                coordinates.append(GridCoordinate("data", row - 1, column - 1))
+        return GridSelection(state.dataset_id, state.version, coordinates) if coordinates else None
+
+    def fill_selection_from_pdf(self, *args):
+        if self._pending_pdf_fill:
+            self.bus.status_message_requested.emit("Finish or cancel the current PDF selection first.", 3000)
+            return
+        selection = self._logical_selection()
+        if not selection:
+            self._show_info("Select Destinations", "Select one or more cells, row titles, or column titles first.")
+            return
+        if not getattr(self.app_context, "viewer", None) or not getattr(self.app_context.viewer, "pdf_path", ""):
+            self._show_info("Open a PDF", "Open the source PDF before using Fill from PDF.")
+            return
+        request_id = f"pdf_fill_{uuid.uuid4()}"
+        self._pending_pdf_fill = {"request_id": request_id, "selection": selection}
+        self.btn_fill_pdf.setEnabled(False)
+        from core.events.domains.data_dock_events import DataDockPayload
+        self.bus.data_dock_action_requested.emit(
+            DataDockIntent.SELECT_PDF_REGION, DataDockPayload(request_id=request_id),
+        )
+        self.bus.status_message_requested.emit("Draw a box around the source values in the PDF.", 5000)
+
+    def _on_pdf_region_ready(self, request_id, region):
+        pending = self._pending_pdf_fill
+        if not pending or request_id != pending.get("request_id"):
+            return
+        if region is None:
+            self._pending_pdf_fill = None
+            self.btn_fill_pdf.setEnabled(True)
+            return
+        selection = pending["selection"]
+        rows, columns = selection.shape()
+        service = getattr(self.app_context, "pdf_grid_extraction_service", None)
+        if not service:
+            self._pending_pdf_fill = None
+            self.btn_fill_pdf.setEnabled(True)
+            self._show_info("PDF Fill Unavailable", "The deterministic PDF grid extraction service is unavailable.")
+            return
+        self.btn_fill_pdf.setEnabled(False)
+        self._pdf_fill_thread = PdfGridExtractThread(request_id, service, region, rows, columns, self)
+        self._pdf_fill_thread.result_ready.connect(self._on_pdf_grid_extracted)
+        self._pdf_fill_thread.failed.connect(self._on_pdf_grid_error)
+        self._pdf_fill_thread.finished.connect(self._finish_pdf_fill_thread)
+        self._pdf_fill_thread.start()
+
+    def _finish_pdf_fill_thread(self):
+        self.btn_fill_pdf.setEnabled(True)
+        thread = self._pdf_fill_thread
+        self._pdf_fill_thread = None
+        if thread:
+            thread.deleteLater()
+
+    def _on_pdf_grid_error(self, request_id, message):
+        if self._pending_pdf_fill and request_id == self._pending_pdf_fill.get("request_id"):
+            self._pending_pdf_fill = None
+            self._show_info("PDF Fill Failed", message)
+
+    def _on_pdf_grid_extracted(self, request_id, extracted):
+        pending = self._pending_pdf_fill
+        self._pending_pdf_fill = None
+        if not pending or request_id != pending.get("request_id"):
+            return
+        if not extracted.cells:
+            self._show_info("No Recoverable Grid", "\n".join(extracted.warnings) or "No text-backed values were found.")
+            return
+        selection = pending["selection"]
+        try:
+            plan = self.service.plan_pdf_fill(
+                selection.dataset_id, selection.dataset_version, selection, extracted,
+            )
+        except Exception as exc:
+            self._show_info("PDF Values Do Not Fit", str(exc))
+            return
+        policy = "overwrite"
+        if plan.requires_preview:
+            review = self._review_pdf_patch(plan)
+            if not review:
+                return
+            policy, orientation = review
+            if orientation != plan.orientation:
+                plan = self.service.plan_pdf_fill(
+                    selection.dataset_id, selection.dataset_version, selection, extracted,
+                    preferred_orientation=orientation,
+                )
+        self._push_undo()
+        try:
+            result = self.service.apply_grid_patch(plan, policy)
+        except Exception as exc:
+            self._show_info("PDF Fill Failed", str(exc))
+            return
+        self.model.refresh()
+        self._on_model_changed()
+        self.bus.status_message_requested.emit(
+            f"Filled {len(result.applied)} destination(s) from the PDF.", 3500,
+        )
+
+    def _review_pdf_patch(self, plan):
+        source = "\n".join("\t".join(row) for row in plan.extracted_grid.cells)
+        mapping = "\n".join(
+            f"{item.target.key}: {item.existing_value!r} → {item.value!r}" for item in plan.assignments
+        )
+        details = f"Extracted grid:\n{source}\n\nDestination mapping:\n{mapping}"
+        notes = "\n".join(plan.diagnostics)
+        orientation = plan.orientation
+        if any("orientation" in note.lower() for note in plan.diagnostics):
+            orientation_box = QMessageBox(self)
+            orientation_box.setWindowTitle("Choose PDF Mapping")
+            orientation_box.setText("The source fits both direct and transposed orientations.")
+            orientation_box.setDetailedText(details)
+            direct = orientation_box.addButton("Use direct", QMessageBox.ButtonRole.AcceptRole)
+            transposed = orientation_box.addButton("Use transposed", QMessageBox.ButtonRole.ActionRole)
+            cancel_orientation = orientation_box.addButton(QMessageBox.StandardButton.Cancel)
+            orientation_box.exec()
+            if orientation_box.clickedButton() is cancel_orientation:
+                return None
+            orientation = "transposed" if orientation_box.clickedButton() is transposed else "direct"
+            if orientation != plan.orientation:
+                plan = self.service.plan_pdf_fill(
+                    plan.dataset_id, plan.expected_version, plan.selection, plan.extracted_grid,
+                    preferred_orientation=orientation,
+                )
+                mapping = "\n".join(
+                    f"{item.target.key}: {item.existing_value!r} → {item.value!r}" for item in plan.assignments
+                )
+                details = f"Extracted grid:\n{source}\n\nDestination mapping:\n{mapping}"
+        if not plan.conflicts:
+            box = QMessageBox(self)
+            box.setWindowTitle("Review PDF Fill")
+            box.setText(f"{len(plan.assignments)} value(s) will be mapped {orientation.replace('_', ' ')}.")
+            box.setInformativeText(notes or "Review the extracted values before applying them.")
+            box.setDetailedText(details)
+            box.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
+            return ("overwrite", orientation) if box.exec() == QMessageBox.StandardButton.Ok else None
+        box = QMessageBox(self)
+        box.setWindowTitle("Review PDF Fill")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(f"{len(plan.assignments)} value(s) will be mapped {plan.orientation.replace('_', ' ')}.")
+        box.setInformativeText(
+            (notes + "\n" if notes else "") +
+            (f"{len(plan.conflicts)} existing value(s) differ." if plan.conflicts else "No existing values conflict.")
+        )
+        box.setDetailedText(details)
+        overwrite = box.addButton("Overwrite conflicts", QMessageBox.ButtonRole.AcceptRole)
+        skip = box.addButton("Keep existing", QMessageBox.ButtonRole.DestructiveRole)
+        cancel = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is cancel:
+            return None
+        return ("skip" if clicked is skip else "overwrite", orientation)
+
     def _show_table_context_menu(self, pos):
         menu = QMenu(self.table)
         menu.setToolTipsVisible(True)
         self._add_menu_action(menu, "Copy", "Copy selected labels and data cells.", self.copy_selection)
         self._add_menu_action(menu, "Cut", "Cut selected labels and data cells; dashed cells clear after a successful paste.", self.cut_selection)
         self._add_menu_action(menu, "Paste", "Paste clipboard values into the selected starting cell or title cell.", self.paste_selection)
+        self._add_menu_action(menu, "Fill from PDF", "Draw a PDF rectangle and map its values into this selection.", self.fill_selection_from_pdf)
+        self._add_menu_action(menu, "Inspect source evidence", "Show extraction details for the first selected destination.", self.inspect_selected_provenance)
+        self._add_menu_action(menu, "Jump to source cell", "Open the PDF at the first selected destination's source box.", self.jump_selected_to_source)
         menu.addSeparator()
         for metric in ("average", "sum", "min", "max", "count"):
             title = metric.title()
@@ -706,6 +1149,43 @@ class DataDockView(BaseDock, UnifiedThemedMixin):
         self._add_menu_action(menu, "Promote Column to Row Titles", "Use the first selected column as editable row titles.", self.promote_selected_column)
         self._inject_dock_actions_cell(menu, pos)
         menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _selected_provenance(self):
+        state = self.current_state()
+        selection = self._logical_selection()
+        if not state or not selection or not selection.ordered():
+            return None
+        coordinate = selection.ordered()[0]
+        return state.cell_provenance.get(coordinate.key) or (
+            state.cell_provenance.get(f"{coordinate.row}:{coordinate.column}") if coordinate.kind == "data" else None
+        )
+
+    def inspect_selected_provenance(self):
+        provenance = self._selected_provenance()
+        if not provenance:
+            self._show_info("No Source Evidence", "The selected destination has no recorded PDF source.")
+            return
+        source = provenance.get("source_text") or provenance.get("selection_text") or ""
+        strategy = provenance.get("extraction_strategy") or "unknown"
+        page = provenance.get("page_number")
+        self._show_info("Source Evidence", f"Page: {(page + 1) if isinstance(page, int) else '-'}\nStrategy: {strategy}\nText: {source}")
+
+    def jump_selected_to_source(self):
+        provenance = self._selected_provenance()
+        if not provenance:
+            self.inspect_selected_provenance()
+            return
+        path = provenance.get("source_path") or provenance.get("pdf_path")
+        page = provenance.get("page_number")
+        bbox = provenance.get("source_cell_bbox") or ((provenance.get("bounding_box_coordinates") or [None])[0])
+        if path and getattr(self.app_context.viewer, "pdf_path", None) != path:
+            self.bus.document_action_requested.emit(DocumentIntent.OPEN, DocumentPayload(path=path))
+            QTimer.singleShot(300, lambda: self.bus.document_action_requested.emit(
+                DocumentIntent.JUMP_TO_LOCATION, DocumentPayload(page_num=page, rects=[bbox] if bbox else None)))
+        else:
+            self.bus.document_action_requested.emit(
+                DocumentIntent.JUMP_TO_LOCATION, DocumentPayload(page_num=page, rects=[bbox] if bbox else None),
+            )
 
     def _selection_matrix(self) -> List[List[str]]:
         cells = self._selected_cells()
@@ -1025,6 +1505,98 @@ class DataDockView(BaseDock, UnifiedThemedMixin):
             self.refresh_library(select_id=updated.dataset_id)
             self._emit_dataset_changed(updated.dataset_id, DataDockEvent.CLEANER_APPLIED)
 
+    def sort_selected(self, reverse=False):
+        columns = self._selected_columns()
+        if not columns:
+            self._show_info("Select a Column", "Select a data column to sort the rows.")
+            return
+        self._apply_transform(lambda state: self.service.sort_rows(state.dataset_id, columns[0], reverse))
+
+    def remove_duplicate_rows(self):
+        columns = self._selected_columns()
+        self._apply_transform(lambda state: self.service.remove_duplicate_rows(state.dataset_id, columns or None))
+
+    def show_data_issues(self):
+        state = self.current_state()
+        if not state:
+            return
+        issues = self.service.find_data_issues(state.dataset_id, self._selected_columns() or None)
+        self._show_info(
+            "Data Validation",
+            f"Missing values: {len(issues['missing'])}\nDuplicate row pairs: {len(issues['duplicates'])}\n"
+            f"Declared-type errors: {len(issues['type_errors'])}",
+        )
+
+    def export_selected_data(self, file_format="tsv"):
+        state = self.current_state(); selection = self._logical_selection()
+        if not state or not selection:
+            self._show_info("Select Data", "Select cells or titles to export.")
+            return
+        suffix = "json" if file_format == "json" else "tsv"
+        label = "JSON (*.json)" if suffix == "json" else "TSV (*.tsv)"
+        path, _ = QFileDialog.getSaveFileName(self, "Export Data Selection", f"{state.name}.{suffix}", label)
+        if not path:
+            return
+        content = self.service.export_selection(state.dataset_id, selection, file_format)
+        with open(path, "w", encoding="utf-8", newline="") as handle:
+            handle.write(content)
+
+    def _choose_other_dataset(self, title):
+        state = self.current_state()
+        choices = [(item.get("name") or item.get("dataset_id"), item.get("dataset_id"))
+                   for item in self.service.list_datasets() if not state or item.get("dataset_id") != state.dataset_id]
+        if not choices:
+            self._show_info(title, "No other Data Dock dataset is available.")
+            return None
+        labels = [f"{name} — {dataset_id}" for name, dataset_id in choices]
+        label, ok = QInputDialog.getItem(self, title, "Dataset", labels, 0, False)
+        return choices[labels.index(label)][1] if ok and label in labels else None
+
+    def append_another_dataset(self):
+        other = self._choose_other_dataset("Append Dataset")
+        if other:
+            self._apply_transform(lambda state: self.service.append_dataset(state.dataset_id, other))
+
+    def join_another_dataset(self):
+        state = self.current_state(); other_id = self._choose_other_dataset("Join Dataset")
+        if not state or not other_id:
+            return
+        other = self.service.set_active_dataset(other_id)
+        self.service.set_active_dataset(state.dataset_id)
+        if not other:
+            return
+        left, ok = QInputDialog.getItem(self, "Join Dataset", "Current dataset key", state.headers, 0, False)
+        if not ok: return
+        right, ok = QInputDialog.getItem(self, "Join Dataset", "Other dataset key", other.headers, 0, False)
+        if ok:
+            self._apply_transform(lambda current: self.service.join_dataset(current.dataset_id, other_id, left, right))
+
+    def pivot_table(self):
+        state = self.current_state()
+        if not state or len(state.headers) < 3:
+            self._show_info("Pivot Table", "A pivot requires row, column, and value fields.")
+            return
+        fields = []
+        for label in ("Row field", "Column field", "Value field"):
+            value, ok = QInputDialog.getItem(self, "Pivot Table", label, state.headers, 0, False)
+            if not ok: return
+            fields.append(value)
+        self._apply_transform(lambda current: self.service.pivot(current.dataset_id, *fields))
+
+    def unpivot_selected(self):
+        columns = self._selected_columns()
+        if not columns:
+            self._show_info("Unpivot", "Select one or more value columns first.")
+            return
+        self._apply_transform(lambda state: self.service.unpivot(state.dataset_id, columns))
+
+    def fill_missing_selected(self, method):
+        columns = self._selected_columns()
+        if not columns:
+            self._show_info("Fill Missing Values", "Select one or more columns first.")
+            return
+        self._apply_transform(lambda state: self.service.fill_missing_values(state.dataset_id, columns, method))
+
     def _show_clean_menu(self):
         menu = QMenu(self)
         menu.setToolTipsVisible(True)
@@ -1097,7 +1669,7 @@ class DataDockView(BaseDock, UnifiedThemedMixin):
             self._show_info("No Tables Found", "No selectable tables were detected in the open PDF.")
             return
         self.refresh_library(select_id=states[0].dataset_id)
-        self._show_info("Data Extracted", f"Extracted {len(states)} dataset(s) from the open PDF.")
+        self._show_info("Tables Extracted", f"Extracted {len(states)} table dataset(s) from the open PDF.")
 
     def _on_extraction_error(self, msg):
         self.btn_extract_pdf.setEnabled(True)
@@ -1144,6 +1716,11 @@ class DataDockView(BaseDock, UnifiedThemedMixin):
             idx = combo.findData(current)
             if idx < 0:
                 idx = combo.findText(str(current))
+            if idx < 0 and combo is self.y_field and state:
+                for header_index, header in enumerate(state.headers):
+                    if any(self.service.coerce_number(row[header_index] if header_index < len(row) else "") is not None for row in state.rows):
+                        idx = combo.findData(header)
+                        break
             if idx >= 0:
                 combo.setCurrentIndex(idx)
             combo.blockSignals(False)
@@ -1154,12 +1731,14 @@ class DataDockView(BaseDock, UnifiedThemedMixin):
             self.chart_preview.set_chart(None, None, [])
             return
         cells = self._selected_data_cells()
-        config = self.service.chart_config_for_selection(state.dataset_id, cells, self.chart_type.currentText())
+        chart_type = self.chart_type.currentData() or self.chart_type.currentText()
+        config = self.service.chart_config_for_selection(state.dataset_id, cells, chart_type)
         if config is None:
             return
         config.x_field = self.x_field.currentData() or self.x_field.currentText()
         config.y_field = self.y_field.currentData() or self.y_field.currentText()
         config.palette_id = self.palette_combo.currentText()
+        config.export_options["palette_colors"] = self.registry.palette(config.palette_id)
         config.title = self.chart_title.text().strip() or config.title
         config.name = config.title
         config.x_title = self.x_title.text().strip() or self.x_field.currentText()
@@ -1167,16 +1746,30 @@ class DataDockView(BaseDock, UnifiedThemedMixin):
         config.show_data_labels = self.show_labels.isChecked()
         config.show_grid_lines = self.show_grid.isChecked()
         config.series = self._chart_series_from_selection(state, config) if self.multi_series.isChecked() else []
+        config.encodings = {
+            "x": config.x_field,
+            "y": config.y_field,
+            "series": [item.get("y_field") for item in config.series],
+        }
         self._chart_config = config
-        self.chart_preview.set_chart(state, config, self.registry.palette(config.palette_id))
+        self.chart_preview.set_chart(
+            state, config, self.registry.palette(config.palette_id), self.registry.chart_type(config.chart_type),
+        )
 
     def _chart_series_from_selection(self, state: DataGridState, config: ChartConfig) -> List[dict]:
+        explicit = [value.strip() for value in self.series_fields.text().split(",") if value.strip()]
+        if explicit:
+            return [{"name": field, "y_field": field} for field in explicit if field in state.headers]
         selected_cols = self._selected_columns()
         try:
             x_idx = state.headers.index(config.x_field) if config.x_field in state.headers else -1
         except Exception:
             x_idx = -1
-        y_cols = [col for col in selected_cols if col != x_idx and 0 <= col < len(state.headers)]
+        y_cols = [
+            col for col in selected_cols
+            if col != x_idx and 0 <= col < len(state.headers)
+            and any(self.service.coerce_number(row[col] if col < len(row) else "") is not None for row in state.rows)
+        ]
         if not y_cols and config.y_field in state.headers:
             y_cols = [state.headers.index(config.y_field)]
         return [{"name": state.headers[col], "y_field": state.headers[col]} for col in y_cols]
@@ -1329,6 +1922,11 @@ class DataDockView(BaseDock, UnifiedThemedMixin):
 
     def apply_theme(self, theme: dict) -> None:
         self._theme = theme
+        input_color = QColor(self._t('bg_input'))
+        light_theme = input_color.lightness() > 128
+        self.model.estimate_background = QColor("#fff3cd" if light_theme else "#6b4f12")
+        self.estimate_legend.setStyleSheet(f"color: {'#8a5a00' if light_theme else '#f2b84b'};")
+        self.model.refresh()
         self.setStyleSheet(
             f"DataDockView {{ background: {self._t('bg_main')}; color: {self._t('text_main')}; }}"
             f"QTableView {{ background: {self._t('bg_input')}; color: {self._t('text_main')}; gridline-color: {self._t('border')}; }}"

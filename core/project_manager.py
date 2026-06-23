@@ -19,6 +19,8 @@ from core.db.ai_db import AIDB
 from core.db.document_db import DocumentDB
 from core.db.graph_db import GraphDB
 from core.db.data_dock_db import DataDockDB
+from core.db.media_asset_db import MediaAssetDB
+from core.db.evidence_db import EvidenceDB
 from core.events.event_bus import EventBus
 from core.events.domains.document_events import DocumentEvent, DocumentEventPayload
 
@@ -53,6 +55,8 @@ class ProjectManager:
         self.db_docs = DocumentDB(self)
         self.db_graph = GraphDB(self)
         self.db_data_dock = DataDockDB(self)
+        self.db_media_assets = MediaAssetDB(self)
+        self.db_evidence = EvidenceDB(self)
 
         self.db_docs.ensure_default_templates()
 
@@ -675,6 +679,10 @@ class ProjectManager:
     def get_data_dock_chart(self, chart_id): return self.db_data_dock.get_chart(chart_id)
     def save_data_dock_chart(self, config): return self.db_data_dock.upsert_chart(config)
 
+    # --- Project media assets ---
+    def save_media_asset(self, data, mime_type="application/octet-stream", metadata=None): return self.db_media_assets.put(data, mime_type, metadata)
+    def get_media_asset(self, asset_id): return self.db_media_assets.get(asset_id)
+
     # --- Annotations ---
     def upsert_highlight(self, highlight_data): return self.db_annotations.upsert_highlight(highlight_data)
     def get_highlights(self): return self.db_annotations.get_highlights()
@@ -688,6 +696,8 @@ class ProjectManager:
     # --- Tags ---
     def create_tag(self, name, color): return self.db_tags.create_tag(name, color)
     def delete_tag(self, tag_id): return self.db_tags.delete_tag(tag_id)
+    def rename_tag(self, tag_id, new_name): return self.db_tags.rename_tag(tag_id, new_name)
+    def update_tag_color(self, tag_id, color): return self.db_tags.update_tag_color(tag_id, color)
     def get_all_tags(self): return self.db_tags.get_all_tags()
     def assign_tag_to_doc(self, doc_id, tag_id): return self.db_tags.assign_tag_to_doc(doc_id, tag_id)
     def remove_tag_from_doc(self, doc_id, tag_id): return self.db_tags.remove_tag_from_doc(doc_id, tag_id)
@@ -717,8 +727,24 @@ class ProjectManager:
     def upsert_citation(self, citation_data): return self.db_docs.upsert_citation(citation_data)
     def get_citation(self, doc_id): return self.db_docs.get_citation(doc_id)
     def delete_citation(self, doc_id): return self.db_docs.delete_citation(doc_id)
-    def get_analysis_templates(self): return self.db_docs.get_analysis_templates()
+    def get_analysis_templates(self):
+        base = self.db_docs.get_analysis_templates()
+        plugin_templates = getattr(self, "_plugin_analysis_templates", [])
+        if not plugin_templates:
+            return base
+        base_ids = {t.get("id") for t in base}
+        merged = list(base)
+        for t in plugin_templates:
+            if t.get("id") not in base_ids:
+                merged.append(t)
+        return merged
     def save_analysis_templates(self, templates_list): return self.db_docs.save_analysis_templates(templates_list)
     def save_document_analysis(self, doc_path, template_id, chunk_index, json_data): return self.db_docs.save_document_analysis(doc_path, template_id, chunk_index, json_data)
     def get_document_analyses(self, doc_path, template_id): return self.db_docs.get_document_analyses(doc_path, template_id)
     def clear_document_analyses(self, doc_path, template_id): return self.db_docs.clear_document_analyses(doc_path, template_id)
+
+    # Evidence quote storage (hierarchical analysis pipeline)
+    def save_evidence_quote(self, quote): return self.db_evidence.save_quote(quote)
+    def get_evidence_quote(self, quote_id): return self.db_evidence.get_quote(quote_id)
+    def get_evidence_quotes_for_run(self, run_id): return self.db_evidence.get_quotes_for_run(run_id)
+    def get_evidence_quotes_for_chunk(self, run_id, chunk_id): return self.db_evidence.get_quotes_for_chunk(run_id, chunk_id)

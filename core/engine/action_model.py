@@ -15,6 +15,8 @@ class ActionStep:
     output_key: str = "result"
     
     model: str = "{selected_model}"
+    required_model_capabilities: List[str] = field(default_factory=list)
+    required_prompt_keys: List[str] = field(default_factory=list)
     prompt_key: Optional[str] = None          
     system_prompt: Optional[str] = None       
     llm_options: Dict[str, Any] = field(default_factory=dict)

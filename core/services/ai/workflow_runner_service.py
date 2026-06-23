@@ -23,6 +23,7 @@ class WorkflowRunnerService(QObject):
         ontology_registry=None,
         blueprint_manager=None,
         node_type_registry=None,
+        data_provider_registry=None,
         event_bus: Optional[EventBus] = None,
         ui_router=None,
         model_provider: Optional[Callable[[], str]] = None,
@@ -37,6 +38,7 @@ class WorkflowRunnerService(QObject):
         self.ontology_registry = ontology_registry
         self.blueprint_manager = blueprint_manager
         self.node_type_registry = node_type_registry
+        self.data_provider_registry = data_provider_registry
         self.bus = event_bus or EventBus.get_instance()
         self.ui_router = ui_router
         self.model_provider = model_provider
@@ -97,6 +99,7 @@ class WorkflowRunnerService(QObject):
             ontology_registry=self.ontology_registry,
             blueprint_manager=self.blueprint_manager,
             node_type_registry=self.node_type_registry,
+            data_provider_registry=self.data_provider_registry,
         )
         self._attach_runner(runner)
         return runner
@@ -122,8 +125,10 @@ class WorkflowRunnerService(QObject):
 
     def _persist_prompt_trace(self, runner):
         trace = getattr(runner, "prompt_trace", None)
-        if not trace or not getattr(trace, "calls", None):
+        if not trace:
             return None
+        # Always save — even with 0 calls — so the Trace button appears and the
+        # user can see "run attempted but no LLM step completed" rather than silence.
         trace.trace_id = getattr(runner, "trace_id", None) or trace.trace_id
         trace.job_id = getattr(runner, "workflow_request_id", None) or trace.job_id
         trace.blueprint_id = getattr(runner, "blueprint_id", None) or trace.blueprint_id

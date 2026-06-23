@@ -145,18 +145,33 @@ class ChatMessageWidget(QWidget):
     def add_bubble(self, doc_name, quote, note, source_meta=None):
         bubble = NoteBubbleWidget(doc_name, quote, note, self.theme, parent=self, source_meta=source_meta)
         viewer = getattr(self.window(), "viewer", None)
+        app_context = getattr(self.window(), "app_context", None)
+        source_meta = dict(source_meta or {})
+        source_meta.setdefault("doc_name", doc_name)
+        source_meta.setdefault("quote", quote)
+        registry = getattr(app_context, "plugin_extension_registry", None)
+        handler = registry.get_citation_source_handler(source_meta.get("source_type", "")) if registry else None
+        if handler:
+            bubble.setProperty("citation_handler_connected", True)
+            bubble.citation_jump_requested.connect(
+                lambda citation, spec=handler, ctx=app_context: spec.callback(citation, ctx)
+            )
         if viewer:
-            bubble.jump_requested.connect(viewer.jump_to_source)
-            bubble.source_jump_requested.connect(
-                lambda meta: viewer.jump_to_video(
-                    source_id=meta.get("source_id"),
-                    timestamp=meta.get("start", 0),
+            if not handler and hasattr(viewer, "jump_to_source"):
+                bubble.jump_requested.connect(viewer.jump_to_source)
+            if hasattr(viewer, "jump_to_video"):
+                bubble.source_jump_requested.connect(
+                    lambda meta: viewer.jump_to_video(
+                        source_id=meta.get("source_id"),
+                        timestamp=meta.get("start", 0),
+                    )
                 )
-            )
             bubble.save_requested.connect(lambda q, n, d, meta=source_meta: self._save_bubble_note(q, n, d, meta))
-            bubble.search_requested.connect(
-                lambda selected_quote: viewer.annot_manager.trigger_similar_context(selected_quote)
-            )
+            annot_manager = getattr(viewer, "annot_manager", None)
+            if annot_manager and hasattr(annot_manager, "trigger_similar_context"):
+                bubble.search_requested.connect(
+                    lambda selected_quote: annot_manager.trigger_similar_context(selected_quote)
+                )
         if hasattr(self, "main_browser") and not self.raw_buffer.strip():
             self.main_browser.hide()
         self.bubbles_layout.addWidget(bubble)

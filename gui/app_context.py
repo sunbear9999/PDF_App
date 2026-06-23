@@ -74,6 +74,9 @@ class AppContext:
     workspace_ai_service: Any = None
     data_dock_service: Any = None
     data_provider_registry: Any = None
+    media_asset_service: Any = None
+    pdf_data_selection_service: Any = None
+    pdf_grid_extraction_service: Any = None
     video_transcription_service: Any = None
 
     # Plugin extension specs collected at startup
@@ -210,6 +213,9 @@ class AppContext:
             research_agent_service=core.research_agent_service,
             data_dock_service=getattr(core, "data_dock_service", None),
             data_provider_registry=getattr(core, "data_provider_registry", None),
+            media_asset_service=getattr(core, "media_asset_service", None),
+            pdf_data_selection_service=getattr(core, "pdf_data_selection_service", None),
+            pdf_grid_extraction_service=getattr(core, "pdf_grid_extraction_service", None),
             video_transcription_service=getattr(core, "video_transcription_service", None),
             plugin_extension_registry=getattr(core, "plugin_extension_registry", None),
             pack_service=getattr(core, "pack_service", None),

@@ -28,6 +28,7 @@ import shutil
 import subprocess
 import time
 import platform
+import base64
 from typing import Callable, List, Optional, Protocol, runtime_checkable
 
 import chromadb
@@ -60,6 +61,7 @@ class LLMProvider(Protocol):
         num_predict: int = 2048,
         num_ctx: int = 16384,
         stop: Optional[List[str]] = None,
+        images: Optional[List[dict]] = None,
         **kwargs,
     ) -> str: ...
 
@@ -68,6 +70,8 @@ class LLMProvider(Protocol):
     def embed_batch(self, texts: List[str]) -> List[List[float]]: ...
 
     def available_models(self) -> List[str]: ...
+
+    def supports_model_capability(self, model: str, capability: str) -> bool: ...
 
     def preload_model(self, model_name: str) -> None: ...
 
@@ -91,6 +95,7 @@ class OllamaProvider:
         self.api_base = api_base
         self._ollama_proc: Optional[subprocess.Popen] = None
         self._ai_enabled = False
+        self._capability_cache: dict[tuple[str, str], bool] = {}
         self._start_server()
 
     # -- LLMProvider protocol ------------------------------------------------
@@ -112,6 +117,7 @@ class OllamaProvider:
         num_predict: int = 2048,
         num_ctx: int = 16384,
         stop: Optional[List[str]] = None,
+        images: Optional[List[dict]] = None,
         **kwargs,
     ) -> str:
         payload: dict = {
@@ -128,6 +134,8 @@ class OllamaProvider:
         }
         if stop:
             payload["options"]["stop"] = stop
+        if images:
+            payload["images"] = [item["data"] for item in images]
         if json_mode:
             payload["format"] = "json"
 
@@ -171,6 +179,25 @@ class OllamaProvider:
             full_response += err
 
         return full_response
+
+    def supports_model_capability(self, model: str, capability: str) -> bool:
+        if capability != "vision":
+            return True
+        cache_key = (model, capability)
+        if cache_key in self._capability_cache:
+            return self._capability_cache[cache_key]
+        try:
+            response = requests.post(
+                f"{self.api_base}/show", json={"model": model}, timeout=5
+            )
+            if response.status_code == 200:
+                capabilities = response.json().get("capabilities") or []
+                supported = "vision" in {str(item).lower() for item in capabilities}
+                self._capability_cache[cache_key] = supported
+                return supported
+        except Exception:
+            pass
+        return False
 
     def embed(self, text: str) -> List[float]:
         payload = {
@@ -354,6 +381,7 @@ class LocalLLMManager:
         self.collection = None
         self.audit_logger = None
         self._query_interceptors: List[Callable] = []
+        self._rag_sources: dict[str, Callable] = {}
 
     # -- Lifecycle -----------------------------------------------------------
 
@@ -375,6 +403,20 @@ class LocalLLMManager:
 
     def get_available_models(self) -> List[str]:
         return self._provider.available_models()
+
+    def find_model_with_capability(self, capability: str, preferred: str = "") -> str:
+        checker = getattr(self._provider, "supports_model_capability", None)
+        if not checker:
+            return ""
+        candidates = self.get_available_models() or []
+        ordered = ([preferred] if preferred else []) + [item for item in candidates if item != preferred]
+        for model in ordered:
+            try:
+                if model and checker(model, capability):
+                    return model
+            except Exception:
+                continue
+        return ""
 
     def preload_model(self, model_name: str = "") -> None:
         self._provider.preload_model(model_name)
@@ -435,6 +477,8 @@ class LocalLLMManager:
         num_predict: int = 2048,
         num_ctx: int = 16384,
         stop=None,
+        images=None,
+        required_capabilities=None,
         **kwargs,
     ) -> str:
         """Stream a generation from the provider.
@@ -456,6 +500,24 @@ class LocalLLMManager:
         if hasattr(self._provider, "_resolve_model"):
             selected_model = self._provider._resolve_model(selected_model)  # type: ignore[attr-defined]
 
+        required = [str(item).strip().lower() for item in (required_capabilities or []) if str(item).strip()]
+        for capability in required:
+            checker = getattr(self._provider, "supports_model_capability", None)
+            if not checker or not checker(selected_model, capability):
+                err = f"\n[Generation Error: Model '{selected_model}' does not support required capability '{capability}'.]"
+                if callback:
+                    callback(err)
+                return err
+
+        normalized_images = self._normalize_images(images or [])
+        if normalized_images and "vision" not in required:
+            checker = getattr(self._provider, "supports_model_capability", None)
+            if not checker or not checker(selected_model, "vision"):
+                err = f"\n[Generation Error: Model '{selected_model}' does not support image input.]"
+                if callback:
+                    callback(err)
+                return err
+
         system = custom_system_prompt or ""
 
         result = self._provider.generate(
@@ -469,12 +531,29 @@ class LocalLLMManager:
             num_predict=num_predict,
             num_ctx=num_ctx,
             stop=stop,
+            images=normalized_images,
         )
 
         if self.audit_logger and result and "[System Error" not in result:
             self.audit_logger(question, result, selected_model)
 
         return result
+
+    @staticmethod
+    def _normalize_images(images) -> List[dict]:
+        normalized = []
+        for image in images:
+            item = dict(image) if isinstance(image, dict) else {"data": image}
+            data = item.get("data")
+            if isinstance(data, bytes):
+                data = base64.b64encode(data).decode("ascii")
+            if not isinstance(data, str) or not data.strip():
+                raise ValueError("Image inputs require non-empty bytes or base64 data.")
+            if data.startswith("data:"):
+                header, _, data = data.partition(",")
+                item.setdefault("mime_type", header[5:].split(";", 1)[0] or "image/png")
+            normalized.append({"data": data, "mime_type": item.get("mime_type") or "image/png"})
+        return normalized
 
     # -- Embeddings ----------------------------------------------------------
 
@@ -515,31 +594,61 @@ class LocalLLMManager:
         n_results: int = 5,
         allowed_docs=None,
         tag_filters=None,
+        tag_logic: str = "AND",
     ):
         results = None
 
         # 1. Query the main project workspace (if active)
-        if self.collection and self.collection.count() > 0:
-            where_clause: dict = {}
+        if self.collection:
+            conditions = []
             tag_filters_list = [str(t).strip() for t in (tag_filters or []) if str(t).strip()]
 
             if allowed_docs:
                 base_names = [os.path.basename(d) for d in allowed_docs]
-                where_clause["doc_name"] = base_names[0] if len(base_names) == 1 else {"$in": base_names}
+                conditions.append({"doc_name": base_names[0] if len(base_names) == 1 else {"$in": base_names}})
 
-            for t in tag_filters_list:
-                where_clause[f"tag_{t}"] = True
+            if tag_filters_list:
+                tag_conditions = [{f"tag_{t}": True} for t in tag_filters_list]
+                if str(tag_logic).upper() == "OR" and len(tag_conditions) > 1:
+                    conditions.append({"$or": tag_conditions})
+                else:
+                    conditions.extend(tag_conditions)
+
+            if not conditions:
+                where_clause = None
+            elif len(conditions) == 1:
+                where_clause = conditions[0]
+            else:
+                where_clause = {"$and": conditions}
 
             try:
-                results = self.collection.query(
-                    query_embeddings=[embedding_vector],
-                    n_results=n_results,
-                    where=where_clause or None,
-                )
+                if self.collection.count() > 0:
+                    results = self.collection.query(
+                        query_embeddings=[embedding_vector],
+                        n_results=n_results,
+                        where=where_clause,
+                        include=["documents", "metadatas", "distances"],
+                    )
             except Exception as exc:
                 print(f"[LocalLLMManager] Centroid query failed: {exc}")
 
-        # 2. Pass through plugin interceptors to allow external DB injection
+        # 2. Query registered plugin-owned RAG sources. Sources may use any
+        # storage engine; they only need to return the standard Chroma-shaped
+        # result payload consumed by the workflow layer.
+        for source_id, source in list(self._rag_sources.items()):
+            try:
+                source_results = source(
+                    embedding_vector=embedding_vector,
+                    n_results=n_results,
+                    allowed_docs=allowed_docs,
+                    tag_filters=tag_filters,
+                    tag_logic=tag_logic,
+                )
+                results = self._merge_rag_results(results, source_results, n_results)
+            except Exception as exc:
+                print(f"[LocalLLMManager] RAG source '{source_id}' failed: {exc}")
+
+        # 3. Backward-compatible interceptor chain for older plugins.
         for interceptor in self._query_interceptors:
             try:
                 # Interceptors must accept these kwargs and return a merged results dictionary
@@ -554,6 +663,58 @@ class LocalLLMManager:
                 print(f"[LocalLLMManager] Plugin interceptor failed: {exc}")
 
         return results
+
+    def has_rag_sources(self) -> bool:
+        """Return whether core or a plugin can service a RAG retrieval."""
+        if self._rag_sources or self._query_interceptors:
+            return True
+        if not self.collection:
+            return False
+        try:
+            return self.collection.count() > 0
+        except Exception:
+            return True
+
+    def register_rag_source(self, source_id: str, query: Callable) -> None:
+        """Register a backend-only external retrieval source.
+
+        ``query`` receives the embedding and search filters as keyword
+        arguments and returns a Chroma-shaped result dictionary. Registering a
+        stable id replaces the previous source, which keeps hot reload safe.
+        """
+        if not source_id or not callable(query):
+            raise ValueError("A RAG source requires a non-empty id and callable query.")
+        self._rag_sources[source_id] = query
+
+    def unregister_rag_source(self, source_id: str) -> None:
+        self._rag_sources.pop(source_id, None)
+
+    @staticmethod
+    def _merge_rag_results(first, second, max_results: int):
+        """Merge two standard vector-search payloads by ascending distance."""
+        if not first:
+            return second
+        if not second:
+            return first
+
+        combined = []
+        for payload in (first, second):
+            ids = (payload.get("ids") or [[]])[0]
+            documents = (payload.get("documents") or [[]])[0]
+            metadatas = (payload.get("metadatas") or [[]])[0]
+            distances = (payload.get("distances") or [[]])[0]
+            length = min(len(ids), len(documents), len(metadatas), len(distances))
+            for index in range(length):
+                combined.append((distances[index], ids[index], documents[index], metadatas[index]))
+
+        combined.sort(key=lambda item: item[0])
+        top = combined[:max(1, int(max_results))]
+        return {
+            "ids": [[item[1] for item in top]],
+            "documents": [[item[2] for item in top]],
+            "metadatas": [[item[3] for item in top]],
+            "distances": [[item[0] for item in top]],
+        }
     # -- Document indexing ---------------------------------------------------
 
     def index_documents(

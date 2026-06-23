@@ -13,6 +13,8 @@ from gui.components.search_bar_widget import SearchBarWidget
 from core.events.event_bus import EventBus
 from core.events.domains.document_events import AnnotationIntent, AnnotationPayload, DocumentEvent, DocumentEventPayload, DocumentIntent, DocumentPayload
 from core.events.domains.project_events import ProjectEvent, ProjectEventPayload
+from core.events.domains.data_dock_events import DataDockIntent
+from core.models.data_dock_models import PdfRegion
 from gui.theme.theme import ThemeManager
 class PageHUD(QFrame):
     def __init__(self, parent=None):
@@ -99,6 +101,8 @@ class PDFViewer(QGraphicsView):
         self._data_select_rect_item = None
         self._data_select_page = None
         self._data_select_page_item = None
+        self._data_select_request_id = None
+        self.bus.data_dock_action_requested.connect(self._handle_data_dock_intent)
 
         self.pending_jump = None
 
@@ -170,7 +174,7 @@ class PDFViewer(QGraphicsView):
         self.bus.theme_changed.connect(self._on_global_theme_changed)
         self.data_select_btn = QPushButton("Data Select", self.viewer_toolbar)
         self.data_select_btn.setCheckable(True)
-        self.data_select_btn.setToolTip("Drag over a table to send it to Data Dock")
+        self.data_select_btn.setToolTip("Drag over a table or chart to send structured data to Data Dock")
         self.data_select_btn.setStyleSheet("""
             background: #285e61;
             color: white;
@@ -795,6 +799,18 @@ class PDFViewer(QGraphicsView):
             self.viewport().setCursor(Qt.CursorShape.ArrowCursor)
             self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
 
+    def _handle_data_dock_intent(self, intent, payload):
+        if intent == DataDockIntent.SELECT_PDF_REGION:
+            self._data_select_request_id = getattr(payload, "request_id", None)
+            self.data_select_btn.setChecked(True)
+            self.raise_()
+            self.setFocus()
+        elif intent == DataDockIntent.CANCEL_PDF_REGION_SELECTION:
+            request_id = getattr(payload, "request_id", None)
+            if not request_id or request_id == self._data_select_request_id:
+                self._data_select_request_id = None
+                self.data_select_btn.setChecked(False)
+
     def _status_tip(self, message):
         try:
             self.bus.status_message_requested.emit(message, 3000)
@@ -837,28 +853,54 @@ class PDFViewer(QGraphicsView):
             local_rect.right() / self.base_zoom,
             local_rect.bottom() / self.base_zoom,
         )
-        matrix = self._table_matrix_in_pdf_rect(page_idx, pdf_rect)
-        words = self._words_in_pdf_rect(page_idx, pdf_rect)
         self._clear_data_select_rect()
-        if not matrix and not words:
-            self._status_tip("No selectable table text found in that region.")
+        request_id = self._data_select_request_id
+        pdf_path = getattr(self, "pdf_path", "") or ""
+        if not pdf_path:
+            self._status_tip("PDF data selection service is unavailable.")
             return
-        # Use the PyMuPDF matrix only when it has good cell occupancy (bordered tables).
-        # For text/whitespace tables the spatial word clustering in the service is more reliable.
-        if matrix and (self._matrix_looks_sound(matrix) or not words):
-            self._send_matrix_to_data_dock(page_idx, pdf_rect, matrix)
-        else:
-            self._send_words_to_data_dock(page_idx, pdf_rect, words)
+        bbox = [float(pdf_rect.x0), float(pdf_rect.y0), float(pdf_rect.x1), float(pdf_rect.y1)]
+        if request_id:
+            region = PdfRegion(pdf_path, page_idx, bbox, request_id=request_id)
+            self.bus.pdf_data_selection_ready.emit(request_id, region)
+            self._status_tip("PDF region captured for Data Dock.")
+            self._data_select_request_id = None
+            return
+        service = getattr(self._app_ctx, "pdf_data_selection_service", None)
+        if not service:
+            self._status_tip("PDF data selection service is unavailable.")
+            return
+        try:
+            result = service.inspect(pdf_path, page_idx, bbox)
+        except Exception as exc:
+            self._status_tip(f"Data selection failed: {exc}")
+            return
+        from core.events.domains.data_dock_events import DataDockIntent, DataDockPayload
+        self.bus.pdf_data_selection_ready.emit(None, result)
+        self.bus.data_dock_action_requested.emit(DataDockIntent.LOAD_SELECTION, DataDockPayload(selection=result))
+        self._status_tip("Data selection captured; opening Data Dock.")
 
-    def _matrix_looks_sound(self, matrix):
-        if not matrix or len(matrix) < 2:
-            return False
-        width = max(len(row) for row in matrix)
-        if width < 2:
-            return False
-        total = len(matrix) * width
-        filled = sum(1 for row in matrix for cell in (row + [""] * (width - len(row))) if str(cell).strip())
-        return filled >= total * 0.35
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape and self._data_select_active:
+            request_id = self._data_select_request_id
+            self._data_select_request_id = None
+            self.data_select_btn.setChecked(False)
+            if request_id:
+                self.bus.pdf_data_selection_ready.emit(request_id, None)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def closeEvent(self, event):
+        request_id = self._data_select_request_id
+        self._data_select_request_id = None
+        if request_id:
+            self.bus.pdf_data_selection_ready.emit(request_id, None)
+        try:
+            self.bus.data_dock_action_requested.disconnect(self._handle_data_dock_intent)
+        except (RuntimeError, TypeError):
+            pass
+        super().closeEvent(event)
 
     def _clear_data_select_rect(self):
         if self._data_select_rect_item is not None:
@@ -867,118 +909,6 @@ class PDFViewer(QGraphicsView):
             except Exception:
                 pass
         self._data_select_rect_item = None
-
-    def _words_in_pdf_rect(self, page_idx, pdf_rect):
-        if not self._doc_valid() or page_idx is None:
-            return []
-        try:
-            page = self.doc.load_page(page_idx)
-            selected = []
-            for word in page.get_text("words"):
-                w_rect = fitz.Rect(word[:4])
-                if w_rect.intersects(pdf_rect) or pdf_rect.contains(w_rect.tl) or pdf_rect.contains(w_rect.br):
-                    selected.append(list(word[:5]))
-            selected.sort(key=lambda w: (w[1], w[0]))
-            return selected
-        except Exception as exc:
-            print(f"Data selection failed: {exc}")
-            return []
-
-    def _table_matrix_in_pdf_rect(self, page_idx, pdf_rect):
-        if not self._doc_valid() or page_idx is None:
-            return []
-        try:
-            page = self.doc.load_page(page_idx)
-            try:
-                finder = page.find_tables(clip=pdf_rect)
-            except TypeError:
-                finder = page.find_tables()
-            tables = list(getattr(finder, "tables", []) or [])
-            best = None
-            best_area = 0
-            for table in tables:
-                bbox = getattr(table, "bbox", None)
-                if bbox:
-                    table_rect = fitz.Rect(bbox)
-                    if not table_rect.intersects(pdf_rect):
-                        continue
-                    x0 = max(float(table_rect.x0), float(pdf_rect.x0))
-                    y0 = max(float(table_rect.y0), float(pdf_rect.y0))
-                    x1 = min(float(table_rect.x1), float(pdf_rect.x1))
-                    y1 = min(float(table_rect.y1), float(pdf_rect.y1))
-                    area = max(0, x1 - x0) * max(0, y1 - y0)
-                    if area > best_area:
-                        best = table
-                        best_area = area
-                elif best is None:
-                    best = table
-            if best is None:
-                return []
-            matrix = best.extract()
-            return [
-                [str(cell or "").replace("\n", " ").strip() for cell in (row or [])]
-                for row in matrix or []
-                if any(str(cell or "").strip() for cell in (row or []))
-            ]
-        except Exception:
-            return []
-
-    def _send_words_to_data_dock(self, page_idx, pdf_rect, words):
-        from core.events.domains.data_dock_events import DataDockIntent, DataDockPayload
-        text = "\n".join(" ".join(str(w[4]) for w in row) for row in self._group_words_for_text(words))
-        pdf_path = getattr(self, "pdf_path", "") or ""
-        payload = DocumentPayload(
-            path=pdf_path,
-            text=text,
-            context={
-                "page_num": page_idx,
-                "doc_path": pdf_path,
-                "pdf_path": pdf_path,
-                "rects": [[float(pdf_rect.x0), float(pdf_rect.y0), float(pdf_rect.x1), float(pdf_rect.y1)]],
-                "words": words,
-            },
-        )
-        self.bus.pdf_data_selection_ready.emit(None, payload)
-        self.bus.data_dock_action_requested.emit(DataDockIntent.LOAD_SELECTION, DataDockPayload(selection=payload))
-        self._status_tip(f"Sent {len(words)} selected words to Data Dock.")
-
-    def _send_matrix_to_data_dock(self, page_idx, pdf_rect, matrix):
-        from core.events.domains.data_dock_events import DataDockIntent, DataDockPayload
-        text = "\n".join("\t".join(str(cell) for cell in row) for row in matrix)
-        pdf_path = getattr(self, "pdf_path", "") or ""
-        payload = DocumentPayload(
-            path=pdf_path,
-            text=text,
-            context={
-                "page_num": page_idx,
-                "doc_path": pdf_path,
-                "pdf_path": pdf_path,
-                "rects": [[float(pdf_rect.x0), float(pdf_rect.y0), float(pdf_rect.x1), float(pdf_rect.y1)]],
-                "matrix": matrix,
-            },
-        )
-        self.bus.pdf_data_selection_ready.emit(None, payload)
-        self.bus.data_dock_action_requested.emit(DataDockIntent.LOAD_SELECTION, DataDockPayload(selection=payload))
-        self._status_tip(f"Sent detected table with {len(matrix)} row(s) to Data Dock.")
-
-    def _group_words_for_text(self, words):
-        rows = []
-        current = []
-        current_y = None
-        for word in words:
-            y = float(word[1])
-            if current_y is None or abs(y - current_y) <= 4:
-                current.append(word)
-                current_y = y if current_y is None else (current_y + y) / 2
-            else:
-                rows.append(current)
-                current = [word]
-                current_y = y
-        if current:
-            rows.append(current)
-        for row in rows:
-            row.sort(key=lambda w: w[0])
-        return rows
 
     def mousePressEvent(self, event):
         is_shift = event.modifiers() == Qt.KeyboardModifier.ShiftModifier

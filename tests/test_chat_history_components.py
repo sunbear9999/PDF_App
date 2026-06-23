@@ -12,6 +12,7 @@ from core.engine.default_blueprints import DefaultBlueprints
 from core.engine.action_model import AIActionBlueprint
 from core.events.event_bus import EventBus
 from core.engine.ui_payloads import serialize_payloads
+from core.plugins.extension_registry import CitationSourceHandlerSpec, PluginExtensionRegistry
 from gui.docks.unified_research.components.chat_streamer import ChatMessageWidget
 from gui.docks.unified_research.components.history_renderer import ChatHistoryRenderer
 from gui.docks.unified_research.components.note_bubble import NoteBubbleWidget
@@ -171,25 +172,47 @@ def test_legacy_history_hides_manifest_tags_and_adds_actionable_update():
     assert isinstance(message.bubbles_layout.itemAt(0).widget(), ManifestUpdateWidget)
 
 
-def test_chat_blueprint_uses_separate_citation_and_manifest_steps():
+def test_chat_blueprint_uses_one_complete_citation_pass_and_separate_manifest_step():
     blueprint = DefaultBlueprints.get_universal_chat_blueprint(None)
     answer = next(step for step in blueprint.steps if step.step_id == "chat_response")
-    citation_plan = next(step for step in blueprint.steps if step.step_id == "plan_citation_coverage")
-    citation_loop = next(step for step in blueprint.steps if step.step_id == "gather_claim_citations")
-    citation_render = next(step for step in blueprint.steps if step.step_id == "render_citation_coverage")
-    citation_worker = citation_loop.inputs["sub_blueprint"].steps[0]
+    citation = next(step for step in blueprint.steps if step.step_id == "generate_citation_coverage")
     manifest_router = next(step for step in blueprint.steps if step.step_id == "manifest_update_router")
     manifest = manifest_router.if_true[0]
 
     assert answer.inline_citations is False
     assert answer.allow_manifest_updates is False
-    assert citation_plan.output_key == "citation_claim_plan"
-    assert citation_loop.step_type == "FOREACH"
-    assert "{final_answer}" in citation_worker.inputs["query"]
-    assert "{rag_context}" in citation_worker.inputs["query"]
-    assert citation_render.ui_format == "chat_widgets"
+    assert citation.step_type == "LLM_QUERY"
+    assert "{final_answer}" in citation.inputs["query"]
+    assert "{rag_context}" in citation.inputs["query"]
+    assert "CITATION_* metadata" in citation.inputs["query"]
+    assert citation.ui_format == "chat_widgets"
+    assert not any(step.step_id in {"plan_citation_coverage", "gather_claim_citations"} for step in blueprint.steps)
     assert manifest.ui_format == "silent"
     assert manifest.allow_manifest_updates is True
+
+
+def test_plugin_citation_handler_owns_jump_navigation():
+    calls = []
+    registry = PluginExtensionRegistry()
+    registry.add_citation_source_handler(CitationSourceHandlerSpec(
+        source_type="plugin.test",
+        callback=lambda citation, context: calls.append((citation, context)),
+    ))
+    host = QWidget()
+    context = SimpleNamespace(plugin_extension_registry=registry)
+    host.app_context = context
+    host.viewer = SimpleNamespace()
+    message = ChatMessageWidget("AI Agent", theme=_ThemeManager().get_theme(), parent=host)
+    bubble = message.add_bubble(
+        "External source", "Exact quote", "Supports claim",
+        {"source_type": "plugin.test", "source_id": "record-1"},
+    )
+
+    bubble.btn_jump.click()
+
+    assert calls[0][0]["source_id"] == "record-1"
+    assert calls[0][0]["quote"] == "Exact quote"
+    assert calls[0][1] is context
 
 
 def test_deep_chat_blueprint_plans_and_foreaches_targeted_searches():

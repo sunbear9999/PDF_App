@@ -130,6 +130,22 @@ class TagDB(BaseDB):
             print(f"Error reading documents for tag {tag_id}: {e}")
             return []
 
+    def rename_tag(self, tag_id, new_name):
+        if not self._conn: return
+        try:
+            self._conn.execute("UPDATE tags SET name = ? WHERE id = ?", (new_name, tag_id))
+            self._conn.commit()
+        except sqlite3.Error as e:
+            print(f"Error renaming tag {tag_id}: {e}")
+
+    def update_tag_color(self, tag_id, color):
+        if not self._conn: return
+        try:
+            self._conn.execute("UPDATE tags SET color = ? WHERE id = ?", (color, tag_id))
+            self._conn.commit()
+        except sqlite3.Error as e:
+            print(f"Error updating tag color {tag_id}: {e}")
+
     def _is_thread_error(self, error):
         return "created in a thread" in str(error)
 

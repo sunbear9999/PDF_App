@@ -14,6 +14,11 @@ class AnalysisEvent(Enum):
     RESULT_READY = auto()
     SENT_TO_WORKSPACE = auto()
     TEMPLATES_CHANGED = auto()
+    # Hierarchical pipeline streaming events
+    CHUNK_EVIDENCE_READY = auto()      # per-chunk evidence extracted and stored
+    SECTION_SYNTHESIS_READY = auto()   # every-5-chunk section synthesis complete
+    GRAPH_PLAN_READY = auto()          # graph planning pass complete
+    GRAPH_HYDRATED = auto()            # quote IDs resolved to exact text
 
 
 @dataclass

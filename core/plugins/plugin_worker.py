@@ -22,16 +22,27 @@ class PluginWorker(QThread):
         func: Callable,
         args: Sequence[Any] = (),
         job_name: str = "",
+        pass_cancel_check: bool = False,
     ) -> None:
         super().__init__()
         self._func = func
         self._args = tuple(args)
         self.job_name = job_name
+        self._pass_cancel_check = pass_cancel_check
         self.job = None  # set by ProcessRegistry.enqueue_runner()
+
+    def is_cancelled(self) -> bool:
+        return bool(
+            self.isInterruptionRequested()
+            or (self.job and self.job.abort_event.is_set())
+        )
 
     def run(self) -> None:
         try:
-            result = self._func(*self._args)
+            if self._pass_cancel_check:
+                result = self._func(*self._args, cancel_check=self.is_cancelled)
+            else:
+                result = self._func(*self._args)
             self.finished.emit(result)
         except Exception as exc:
             self.error.emit(str(exc))

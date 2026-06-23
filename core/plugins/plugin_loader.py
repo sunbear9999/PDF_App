@@ -123,6 +123,13 @@ def _topological_sort(plugins_by_id: Dict[str, PapyrusPlugin]) -> List[PapyrusPl
     return result
 
 
+def _remove_plugin_analysis_templates(core, plugin_id: str) -> None:
+    """Remove in-memory analysis templates contributed by *plugin_id*."""
+    templates = getattr(core, "_plugin_analysis_templates", None)
+    if templates is not None:
+        templates[:] = [t for t in templates if t.get("plugin_id") != plugin_id]
+
+
 def _tag_plugin_specs(registry, plugin_id: str, before_count: dict) -> None:
     """
     Tag newly-added extension specs with plugin_id so hot-reload can remove them.
@@ -287,6 +294,7 @@ def reload_plugin(core: "PapyrusCore", plugin_id: str) -> bool:
     core.workspace_node_type_registry.remove_by_plugin(plugin_id)
     core.workflow_node_type_registry.remove_by_plugin(plugin_id)
     core.ontology_registry.remove_by_plugin(plugin_id)
+    _remove_plugin_analysis_templates(core, plugin_id)
 
     # 3. Remove from loaded list
     core._loaded_plugins = [(p, a) for p, a in core._loaded_plugins if p.plugin_id != plugin_id]
@@ -357,6 +365,7 @@ def _unload_plugin_internal(core: "PapyrusCore", plugin_id: str) -> bool:
     core.workspace_node_type_registry.remove_by_plugin(plugin_id)
     core.workflow_node_type_registry.remove_by_plugin(plugin_id)
     core.ontology_registry.remove_by_plugin(plugin_id)
+    _remove_plugin_analysis_templates(core, plugin_id)
 
     core._loaded_plugins = [(p, a) for p, a in core._loaded_plugins if p.plugin_id != plugin_id]
     return True

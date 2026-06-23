@@ -10,6 +10,10 @@ class PromptManager:
             "Graph Analysis Master System",
             "Graph Analysis Chunk Observations System",
             "Graph Analysis Synthesis System",
+            "Graph Analysis Evidence Chunk System",
+            "Graph Analysis Section Synthesis System",
+            "Graph Analysis Graph Plan System",
+            "Graph Analysis Graph Assembly System",
             "Master Outline Generator", "Brainstorming Agent", "Compare Outlines System",
             "Blueprint Architect System", "Auto Build Graph System", 
             "Analysis Search System", "Autopilot Planner System",
@@ -21,8 +25,14 @@ class PromptManager:
         "Tool & Feature Queries": [
             "Brainstorm Query", "Search Terms Query", "Advanced RAG Optimize Query",
             "Universal Citation Query", "Analyze Chunk Query",
+            "Citation Coverage Query", "Manifest Update Query",
+            "Plan Adaptive Research Query", "Build Typed Workspace Graph Query",
             "Graph Analysis Chunk Observations Query",
             "Graph Analysis Synthesis Query", "Graph Analysis Master Query",
+            "Graph Analysis Evidence Chunk Query",
+            "Graph Analysis Section Synthesis Query",
+            "Graph Analysis Graph Plan Query",
+            "Graph Analysis Graph Assembly Query",
             "Master Outline Query",
             "Compare Outlines Query", "Blueprint Architect Query", "Auto Build Graph Query",
             "Modular Workspace Query", "Consolidate Workspace Plan Query",
@@ -38,7 +48,8 @@ class PromptManager:
         "System & Engine Enforcers": [
             "Manifest Update Directive", "JSON Schema Enforcer", "JSON Mode Enforcer",
             "Format Enforcer - Chat Widgets", "Format Enforcer - Data Table",
-            "Format Enforcer - Card Grid", "Inline Citation Directive",
+            "Format Enforcer - Card Grid", "Format Enforcer - Live Stream",
+            "Inline Citation Directive",
             "Graph Analysis Compact Output Contract",
             "Graph Analysis Argument Chain Directive"
         ],
@@ -49,6 +60,10 @@ class PromptManager:
         "Discovery & Extraction": [
             "Discovery Analysis System",
             "Discovery Analysis Query",
+            "Chart Analysis System v1",
+            "Chart Evidence Policy v1",
+            "Chart Structured Output v1",
+            "Vision JSON Repair v1",
         ]
     }
 
@@ -60,6 +75,22 @@ class PromptManager:
         "Evidence Extractor": "You are an expert AI research assistant. Your task is to find concrete textual evidence to support the AI's final answer. Read the provided CONTEXT documents thoroughly. Extract highly relevant, VERBATIM quotes that strongly prove the claims made.",
         "Search Term Generator": "You are an expert academic librarian. Generate 3 to 5 highly specific advanced academic search queries using boolean operators (AND/OR).",
         "Document Analyzer": "You are an expert document analysis engine. Analyze ONLY the current section of text and extract insights strictly from the text provided.",
+        "Chart Analysis System v1": (
+            "Read the attached chart and reconstruct its quantitative data. Preserve titles, category labels, axis titles, and series names exactly when legible. "
+            "Omit unreadable points instead of inventing values."
+        ),
+        "Chart Evidence Policy v1": (
+            "Mark a value exact only when an unqualified numeric data label is visibly printed beside that data point. "
+            "Values inferred from axes, geometry, tick alignment, rounding, or approximate labels are estimated."
+        ),
+        "Chart Structured Output v1": (
+            "Return the required structured chart result. Each point must have a numeric value and evidence_status exact or estimated. "
+            "source_text is the visible printed label for exact values and a short basis for estimated values. "
+            "Preserve the displayed numeric magnitude: for example, a printed 12.5% has numeric value 12.5."
+        ),
+        "Vision JSON Repair v1": (
+            "Before responding, verify the result is valid JSON matching the supplied schema. Remove prose, markdown, unreadable points, and unsupported fields."
+        ),
         "Graph Analysis Chunk Observations System": "Select only the strongest short verbatim evidence quotes from the current text chunk for the requested analysis mode. The analysis goal decides what counts as relevant evidence. Prefer quotes that directly reveal the document's substantive position, relationship, pattern, result, data point, cause, contrast, or support. Avoid background, section framing, literature review, and methodology quotes unless the analysis goal specifically asks for those. Do not infer graph nodes, relation types, aliases, schema fields, or confidence scores. Your only job is evidence selection. USER INSTRUCTIONS / ANALYSIS MODE:\n{template_instructions}",
         "Graph Analysis Synthesis System": "You synthesize selected evidence quotes into a clear analysis plan before graph generation. Do not output graph JSON, node aliases, or edge aliases. Use only the selected quotes and the requested analysis mode. Build a small connected structure: one central organizing conclusion or relationship, a few broad support themes, and quote IDs as evidence under those themes. Treat narrow facts, examples, data points, and short source assertions as evidence unless they must be promoted to organize the whole analysis. USER INSTRUCTIONS / ANALYSIS MODE:\n{template_instructions}",
         "Graph Analysis Chunk System": "Extract a precise, concise relationship graph from the current text chunk. Use ONLY the node aliases, relation aliases, fields, source/target directions, and GRAPH_PLAN in the injected contract. The contract describes allowed labels; it is not source content. Fill node text fields from the document text only. USER INSTRUCTIONS: {template_instructions}\n\nCONTRACT:\n{template_schema}\n\nDYNAMIC EXAMPLE:\n{schema_few_shot}",
@@ -86,7 +117,9 @@ ActionStep fields:
 - output_key (string, snake_case — this is the state key downstream steps reference)
 - model (string, use "{selected_model}" for default)
 - prompt_key (string, optional — name of a saved prompt template)
-- system_prompt (string, optional — inline system prompt, use {state_key} for injection)
+- system_prompt (string, optional — compose saved prompts with {prompt:Prompt Name}; use {state_key} for data injection)
+- required_prompt_keys (list, required for vision workflows — fail if any Prompt Manager key is unavailable)
+- required_model_capabilities (list, e.g. ["vision"] — prevents incompatible model fallback)
 - required_context (list of string state keys this step needs)
 - ui_format (string, see OUTPUT FORMATS — only set on the LAST visible step)
 - ui_target (string, see UI TARGETS)
@@ -100,7 +133,7 @@ ActionStep fields:
 - if_false (list of ActionStep — for BRANCH false branch)
 
 === STEP TYPES ===
-LLM_QUERY — Call the language model. Use system_prompt or prompt_key. Inject state via {key_name} in any string field.
+LLM_QUERY — Call the language model. Use system_prompt or prompt_key. Inject state via {key_name} in any string field. Optional images input: [{"data":"base64", "mime_type":"image/png"}]; require ["vision"] for image workflows.
 LLM_SCHEMA_QUERY — LLM_QUERY but forces JSON matching output_schema. Set llm_options.json_mode=true.
 RAG_SEARCH — Search indexed documents. inputs: {"queries": ["{user_input}"], "n_results": 5, "allowed_docs": "{active_rag_docs}", "tag_filters": [], "tag_logic": "AND"}. Always include n_results (5 for standard, 8 for deep).
 BRANCH — Route based on condition. inputs: {"logic": "state.get('key') == 'value'"}. Use if_true/if_false lists.
@@ -204,6 +237,39 @@ the documented field names and types. Plugin steps work identically to core step
         "Analysis Search Query": "USER INTENT: {__analysis_intent__}\n\nRAW DOCUMENT ANALYSES:\n{raw_analyses}\n\nExtract and summarize any information from the analyses that is directly relevant to the user intent. If nothing is relevant or analyses are empty, output 'None'.",
         "Async Teardown Buffer Query": "Acknowledge process completion with the word 'done'.",
         "Generate Counter Argument Query": "Generate a rigorous counter-argument for this claim using only local project/workspace context.\n\nCLAIM:\n{text}\n\nWORKSPACE DATA:\n{workspace_data}",
+        "Citation Coverage Query": (
+            "In one pass, identify every independently verifiable factual claim in the completed answer "
+            "and cite every claim that is supported, qualified, or materially challenged by SOURCE TEXT. "
+            "Return the smallest complete set of distinct source passages that fully covers those claims; "
+            "do not omit claims and do not impose an arbitrary citation limit. Quotes must be exact verbatim "
+            "text. Notes must name the specific answer claim supported. Never merge passages or metadata from "
+            "different source blocks. For each citation, copy doc_name, source_type, source_id, and "
+            "source_locator exactly from that block's CITATION_* metadata lines (locator fields use the "
+            "CITATION_LOCATOR_ prefix). Exclude duplicates and merely topical text."
+        ),
+        "Manifest Update Query": (
+            "Review the user request and completed answer. Update the project "
+            "manifest only when they establish or materially change the research "
+            "thesis, major topics, or open questions. If no update is warranted, "
+            "return a brief acknowledgement without an UPDATE_MANIFEST block."
+        ),
+        "Plan Adaptive Research Query": (
+            "Decide what additional evidence is needed to fully answer the user. "
+            "Use the initial search results and source statistics, including document "
+            "page counts and indexed coverage, to choose the smallest sufficient number "
+            "of distinct targeted searches (zero through eight). Each search must close "
+            "a specific unresolved topic, ambiguity, comparison, counterpoint, or evidence "
+            "gap. Do not repeat the initial query."
+        ),
+        "Build Typed Workspace Graph Query": (
+            "Turn the completed response into a useful research-planning graph. "
+            "Choose node categories and edge categories only from ONTOLOGY CATALOG. "
+            "Use the most semantically specific types available—for example Question "
+            "for open research questions, Concept for topical groupings, Finding for "
+            "synthesized knowledge, Claim for assertions, and Reasoning for planning "
+            "steps. Every relation must obey its registered valid source/target types. "
+            "Create a connected, practically useful graph rather than a flat list."
+        ),
 
         # --- ENGINE ENFORCERS & CONTEXT INJECTORS ---
         "Manifest Update Directive": "--- SECONDARY BACKGROUND TASK & TONE ---\nTONE DIRECTIVE: Be highly direct, factual, and strictly professional. No conversational filler, greetings, or forced follow-up questions.\nMANIFEST UPDATE: You are the active manager of the Project Manifest. If the user proposes a research topic, dynamically organize it into a structured hierarchy.\nCRITICAL RULES FOR MANIFEST:\n1. AVOID REDUNDANCY: Do NOT create overlapping keys (e.g., having both 'main_goal' and 'current_goal'). Merge them.\n2. HIERARCHY: Organize research into clear, actionable keys. Prefer using 'Core Thesis', 'Major Topics' (use nested dictionaries for subtopics), and 'Open Questions'.\n3. CONSOLIDATION: If asked to clean up or consolidate, aggressively DELETE redundant keys by setting their values to `null`, and merge their contents into the remaining keys.\nTo ADD or EDIT a category, provide the key and its new value.\nTo DELETE a category, set its value exactly to `null`.\nTo save, append at the VERY END of your text as a raw JSON object wrapped EXACTLY in these tags (No markdown ticks):\n<UPDATE_MANIFEST>{\"Core Thesis\": \"...\", \"Major Topics\": {\"Topic A\": [\"Sub 1\"]}, \"obsolete_key\": null}</UPDATE_MANIFEST>",
@@ -212,6 +278,7 @@ the documented field names and types. Plugin steps work identically to core step
         "Format Enforcer - Chat Widgets": "CRITICAL: You are extracting exact citations. Your output must strictly represent verbatim quotes from the source text. Provide the exact 'quote', the 'doc_name', and a brief 'note' explaining its relevance.",
         "Format Enforcer - Data Table": "CRITICAL: Your output must be a uniform array of flat JSON objects suitable for a spreadsheet. Do not nest arrays or objects within the rows. Keep keys consistent across all objects.",
         "Format Enforcer - Card Grid": "CRITICAL: Your output must be an array of objects. Make the first key a concise 'title' for the card, followed by relevant summary keys.",
+        "Format Enforcer - Live Stream": "Format the visible answer as readable Markdown. Use short paragraphs, headings, and lists where they improve clarity.",
         "Inline Citation Directive": "When using DOCUMENT CONTEXT, cite directly from the documents in your first answer. Treat citations as source-evidence passages, not famous attributed quotations. In the visible answer, mark important verbatim evidence with <QUOTE>exact quote</QUOTE>. At the very end, append a machine-readable block wrapped exactly in <CITATIONS>...</CITATIONS>. Inside that block output ONLY one valid JSON array, with no markdown and no wrapper object: [{\"doc_name\": \"filename.pdf\", \"quote\": \"exact verbatim quote\", \"note\": \"brief reason this quote supports the answer\"}]. Use only exact quotes copied from DOCUMENT CONTEXT.",
         "Graph Analysis Compact Output Contract": """
 CRITICAL OUTPUT RULES:
@@ -250,6 +317,56 @@ Keep the graph sparse but evidentiary. For master output, synthesize to roughly 
 {analysis_stage_rules}
 """,
         "Graph Analysis Master System": "Build the final graph from the selected quote evidence and the synthesis plan. The chunks contain short numbered quotes and relevance notes, not ontology nodes. You are responsible for creating concise synthesized parent/support/source items, valid edges, and any confidence/strength fields required by the CONTRACT. Deduplicate by meaning and exact quote text. Do not repeat the same wording across different node roles. Do not turn every quote into a parent item; parent/support items should be broader than the evidence beneath them. Build a 3-level hierarchy: one root claim node at the top (use the cla alias or root alias from GRAPH_PLAN); 2–4 bridge reasoning nodes in the middle as distinct named support pillars (use the rea alias or bridge alias); quote leaf nodes at the bottom attached to their specific bridge (use the quo alias or source alias). Never use theme names or full type strings as the 't' value — only the short alias codes from CONTRACT. Output one connected, readable hierarchy. USER INSTRUCTIONS: {template_instructions}\n\nCONTRACT:\n{template_schema}\n\nDYNAMIC EXAMPLE:\n{schema_few_shot}",
+
+        # --- HIERARCHICAL ANALYSIS PIPELINE (evidence extraction → section synthesis → graph plan → assembly) ---
+        "Graph Analysis Evidence Chunk System": (
+            "Extract verbatim evidence quotes for the research goal. "
+            "Copy full sentences or clauses (10–60 words). Skip headings and filler.\n"
+            'OUTPUT JSON: {"quotes":[{"x":"exact verbatim quote","n":"≤10-word note","r":"supports|contradicts|context|data","i":0.8,"p":1}]}\n\n'
+            "RESEARCH GOAL:\n{template_instructions}"
+        ),
+        "Graph Analysis Section Synthesis System": (
+            "Synthesize the compact evidence refs into a structured section summary. "
+            "Use only the provided quote_ids and snippets — do not invent quotes or text. "
+            "Identify 2-3 key themes, assign key_quote_ids from the list, note contradictions.\n"
+            "USER INSTRUCTIONS:\n{template_instructions}"
+        ),
+        "Graph Analysis Graph Plan System": (
+            "Plan the final graph structure from section summaries and key evidence quote_ids. "
+            "Use the CONTRACT to select node/edge aliases. Identify which quote_ids become source leaf nodes. "
+            "Output a brief planning text — not graph JSON.\n"
+            "USER INSTRUCTIONS:\n{template_instructions}"
+        ),
+        "Graph Analysis Graph Assembly System": (
+            "Build the final graph from the graph plan and compact evidence refs. "
+            "CRITICAL: every quote/source leaf node MUST set properties.source_quote_id to the quote_id from the evidence list — do NOT copy full quote text into the graph. "
+            "Follow CONTRACT aliases and GRAPH_PLAN. 3-level hierarchy: one root claim, 2-4 bridge reasoning nodes, quote leaf nodes referencing quote_ids.\n"
+            "USER INSTRUCTIONS: {template_instructions}\n\nCONTRACT:\n{template_schema}"
+        ),
+
+        # --- HIERARCHICAL PIPELINE QUERIES ---
+        "Graph Analysis Evidence Chunk Query": (
+            "Pages {item.page_range}. Up to {analysis_limits.max_quotes_per_chunk} quotes.\n"
+            "TEXT:\n{item.text}"
+        ),
+        "Graph Analysis Section Synthesis Query": (
+            "SECTION EVIDENCE REFS:\n{item.compact_refs_text}\n\n"
+            'Return JSON: {"summary":"...","key_themes":["..."],"key_quote_ids":["qid1"],'
+            '"candidate_node_types":["entity.claim"],"contradictions":[],"unresolved":[]}'
+        ),
+        "Graph Analysis Graph Plan Query": (
+            "CONTRACT:\n{template_schema}\n\n"
+            "SECTION SUMMARIES:\n{section_syntheses_compact}\n\n"
+            "TOP EVIDENCE QUOTES:\n{top_quote_ids_compact}\n\n"
+            "Plan: root theme, 2-4 bridge claims, and which quote_ids to use as source leaf nodes."
+        ),
+        "Graph Analysis Graph Assembly Query": (
+            "GRAPH PLAN:\n{graph_plan_text}\n\n"
+            "EVIDENCE REFS (set source_quote_id for source leaf nodes):\n{top_quote_ids_compact}\n\n"
+            "Build the graph. Each quote/source leaf node: {\"t\":\"quo\",\"x\":\"brief label\","
+            "\"properties\":{\"source_quote_id\":\"qid_here\"}}. Return compact JSON only."
+        ),
+
         "Context Inject - Manifest": "\n\n--- PROJECT MANIFEST ---\n{project_manifest}",
         "Context Inject - Workspace": "\n\n--- WORKSPACE GRAPH DATA ---\n{workspace_data}",
         "Context Inject - Selected": "\n\n--- SELECTED WORKSPACE NODES ---\n{selected_nodes}",

@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import copy
+import csv
+import io
+import json
 import re
 import uuid
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from core.models.data_dock_models import ChartConfig, DataGridState, DataProvenance, utc_now_iso
+from core.models.data_dock_models import (
+    ChartConfig, DataGridState, DataProvenance, ExtractedGrid, GridCoordinate,
+    GridPatchPlan, GridPatchResult, GridSelection, utc_now_iso,
+)
 from core.registries.data_provider_registry import DataProviderRegistry
+from core.services.grid_mapping_service import GridMappingService
 from core.events.domains.project_events import ProjectIntent
+from core.utils.numeric_utils import coerce_number
 
 
 class DataDockService:
@@ -17,6 +25,7 @@ class DataDockService:
         self.bus = event_bus
         self._open: Dict[str, DataGridState] = {}
         self._active_dataset_id: Optional[str] = None
+        self.grid_mapping_service = GridMappingService()
         if self.bus is not None and hasattr(self.bus, "project_action_requested"):
             self.bus.project_action_requested.connect(self._handle_project_intent)
 
@@ -208,6 +217,8 @@ class DataDockService:
             return None
         self._ensure_shape(state, row + 1, column + 1)
         state.rows[row][column] = "" if value is None else str(value)
+        state.cell_provenance.pop(f"{row}:{column}", None)
+        state.cell_provenance.pop(f"data:{row}:{column}", None)
         state.version += 1
         state.dirty = True
         state.updated_at = utc_now_iso()
@@ -221,13 +232,283 @@ class DataDockService:
         if orientation == "column":
             self._ensure_shape(state, len(state.rows), index + 1)
             state.headers[index] = text or f"Column {index + 1}"
+            state.cell_provenance.pop(f"column_header:{index}", None)
         else:
             self._ensure_shape(state, index + 1, len(state.headers))
             state.row_headers[index] = text or str(index + 1)
+            state.cell_provenance.pop(f"row_header:{index}", None)
         state.version += 1
         state.dirty = True
         state.updated_at = utc_now_iso()
         return state
+
+    def plan_pdf_fill(
+        self,
+        dataset_id: str,
+        expected_version: int,
+        selection: GridSelection | Dict[str, Any],
+        extracted_grid: ExtractedGrid | Dict[str, Any],
+        preferred_orientation: Optional[str] = None,
+    ) -> GridPatchPlan:
+        state = self._open.get(dataset_id) or self.load_dataset(dataset_id)
+        if not state:
+            raise ValueError("The destination dataset is no longer available.")
+        selection = selection if isinstance(selection, GridSelection) else GridSelection.from_dict(selection)
+        extracted_grid = extracted_grid if isinstance(extracted_grid, ExtractedGrid) else ExtractedGrid.from_dict(extracted_grid)
+        if expected_version != state.version:
+            raise ValueError("The dataset changed after the PDF fill began; select the cells again.")
+        for spec in self.provider_registry.grid_mapping_strategies().values():
+            if spec.callback:
+                try:
+                    custom = spec.callback(state, selection, extracted_grid)
+                except Exception:
+                    continue
+                if custom is not None:
+                    return custom
+        return self.grid_mapping_service.plan(state, selection, extracted_grid, preferred_orientation)
+
+    def apply_grid_patch(self, plan: GridPatchPlan, conflict_policy: str = "cancel") -> GridPatchResult:
+        state = self._open.get(plan.dataset_id) or self.load_dataset(plan.dataset_id)
+        if not state:
+            raise ValueError("The destination dataset is no longer available.")
+        if state.version != plan.expected_version:
+            raise ValueError("The dataset changed after the fill was previewed; no values were applied.")
+        policy = str(conflict_policy or "cancel").lower()
+        if plan.conflicts and policy in {"cancel", "ask"}:
+            raise ValueError("The patch contains existing values and requires an overwrite or skip policy.")
+        applied, skipped = [], []
+        for assignment in plan.assignments:
+            conflict = assignment.target.key in plan.conflicts
+            if conflict and policy in {"skip", "blanks_only"}:
+                skipped.append(assignment.target.key)
+                continue
+            self._set_coordinate_value(state, assignment.target, assignment.value)
+            provenance = plan.extracted_grid.provenance.to_dict()
+            provenance.update({
+                "source_text": assignment.value,
+                "source_cell_bbox": list(assignment.source_box),
+                "extraction_strategy": plan.extracted_grid.strategy,
+                "mapping_orientation": plan.orientation,
+                "captured_at": utc_now_iso(),
+            })
+            state.cell_provenance[assignment.target.key] = provenance
+            # Retain legacy data-cell lookup compatibility for older consumers.
+            if assignment.target.kind == "data":
+                state.cell_provenance[f"{assignment.target.row}:{assignment.target.column}"] = provenance
+            applied.append(assignment.target.key)
+        if applied:
+            state.version += 1
+            state.dirty = True
+            state.updated_at = utc_now_iso()
+            self._record_history(state, "apply_grid_patch", {
+                "orientation": plan.orientation, "applied": applied, "skipped": skipped,
+            })
+        return GridPatchResult(state.dataset_id, state.version, applied, skipped)
+
+    def _set_coordinate_value(self, state: DataGridState, coordinate: GridCoordinate, value: Any) -> None:
+        text = "" if value is None else str(value)
+        if coordinate.kind == "row_header":
+            row = int(coordinate.row or 0)
+            self._ensure_shape(state, row + 1, len(state.headers))
+            state.row_headers[row] = text
+        elif coordinate.kind == "column_header":
+            column = int(coordinate.column or 0)
+            self._ensure_shape(state, len(state.rows), column + 1)
+            state.headers[column] = text
+        else:
+            row, column = int(coordinate.row or 0), int(coordinate.column or 0)
+            self._ensure_shape(state, row + 1, column + 1)
+            state.rows[row][column] = text
+
+    def sort_rows(self, dataset_id: str, column: int, reverse: bool = False) -> Optional[DataGridState]:
+        state = self._open.get(dataset_id)
+        if not state or not 0 <= column < len(state.headers):
+            return state
+        titles = list(state.row_headers) + [str(index + 1) for index in range(len(state.row_headers), len(state.rows))]
+        pairs = list(enumerate(zip(titles, state.rows)))
+        def key(pair):
+            row = pair[1][1]
+            value = row[column] if column < len(row) else ""
+            number = self.coerce_number(value)
+            return (value == "", 0 if number is not None else 1, number if number is not None else str(value).casefold())
+        pairs.sort(key=key, reverse=reverse)
+        state.row_headers = [pair[1][0] for pair in pairs]
+        state.rows = [pair[1][1] for pair in pairs]
+        self._remap_row_provenance(state, [pair[0] for pair in pairs])
+        self._mark_transform(state, "sort_rows", {"column": column, "reverse": reverse})
+        return state
+
+    def remove_duplicate_rows(self, dataset_id: str, columns: Optional[Iterable[int]] = None) -> Optional[DataGridState]:
+        state = self._open.get(dataset_id)
+        if not state:
+            return None
+        selected = sorted(set(columns or range(len(state.headers))))
+        seen, rows, titles, old_indexes = set(), [], [], []
+        source_titles = list(state.row_headers) + [str(index + 1) for index in range(len(state.row_headers), len(state.rows))]
+        for old_index, (title, row) in enumerate(zip(source_titles, state.rows)):
+            key = tuple(row[column] if column < len(row) else "" for column in selected)
+            if key in seen:
+                continue
+            seen.add(key); rows.append(row); titles.append(title); old_indexes.append(old_index)
+        state.rows, state.row_headers = rows, titles
+        self._remap_row_provenance(state, old_indexes)
+        self._mark_transform(state, "remove_duplicate_rows", {"columns": selected})
+        return state
+
+    def find_data_issues(self, dataset_id: str, columns: Optional[Iterable[int]] = None) -> Dict[str, Any]:
+        state = self._open.get(dataset_id)
+        if not state:
+            return {"missing": [], "duplicates": [], "type_errors": []}
+        selected = sorted(set(columns or range(len(state.headers))))
+        missing = [[row, column] for row, values in enumerate(state.rows) for column in selected
+                   if column >= len(values) or not str(values[column]).strip()]
+        keys, duplicates = {}, []
+        for row, values in enumerate(state.rows):
+            key = tuple(values[column] if column < len(values) else "" for column in selected)
+            if key in keys: duplicates.append([keys[key], row])
+            else: keys[key] = row
+        type_errors = []
+        for column in selected:
+            declared = state.column_types.get(state.headers[column], "") if column < len(state.headers) else ""
+            if str(declared).lower() in {"number", "numeric", "float", "integer"}:
+                type_errors.extend([[row, column] for row, values in enumerate(state.rows)
+                                    if column < len(values) and str(values[column]).strip() and self.coerce_number(values[column]) is None])
+        return {"missing": missing, "duplicates": duplicates, "type_errors": type_errors}
+
+    def fill_missing_values(
+        self, dataset_id: str, columns: Iterable[int], method: str = "previous", constant: str = ""
+    ) -> Optional[DataGridState]:
+        state = self._open.get(dataset_id)
+        if not state:
+            return None
+        selected = sorted(set(columns))
+        for column in selected:
+            numeric = [self.coerce_number(row[column]) for row in state.rows if column < len(row)]
+            numeric = [value for value in numeric if value is not None]
+            statistic = ""
+            if numeric and method in {"mean", "average"}: statistic = self.format_number(sum(numeric) / len(numeric))
+            if numeric and method == "median":
+                ordered = sorted(numeric); statistic = self.format_number(ordered[len(ordered) // 2])
+            for row_index, row in enumerate(state.rows):
+                self._ensure_shape(state, len(state.rows), column + 1)
+                if str(row[column]).strip(): continue
+                if method == "constant": row[column] = str(constant)
+                elif method in {"mean", "average", "median"}: row[column] = statistic
+                elif method == "previous" and row_index: row[column] = state.rows[row_index - 1][column]
+                elif method == "next":
+                    row[column] = next((str(state.rows[index][column]) for index in range(row_index + 1, len(state.rows))
+                                        if column < len(state.rows[index]) and str(state.rows[index][column]).strip()), "")
+        self._mark_transform(state, "fill_missing_values", {"columns": selected, "method": method})
+        return state
+
+    def append_dataset(self, dataset_id: str, other_dataset_id: str) -> Optional[DataGridState]:
+        state = self._open.get(dataset_id) or self.load_dataset(dataset_id)
+        other = self._open.get(other_dataset_id) or self.load_dataset(other_dataset_id)
+        if not state or not other:
+            return None
+        headers = list(dict.fromkeys(state.headers + other.headers))
+        def expanded(source, row): return [row[source.headers.index(header)] if header in source.headers and source.headers.index(header) < len(row) else "" for header in headers]
+        state.rows = [expanded(state, row) for row in state.rows] + [expanded(other, row) for row in other.rows]
+        other_titles = list(other.row_headers) + [str(index + 1) for index in range(len(other.row_headers), len(other.rows))]
+        state.row_headers.extend(other_titles[:len(other.rows)])
+        state.headers = headers
+        self._mark_transform(state, "append_dataset", {"other_dataset_id": other_dataset_id})
+        return state
+
+    def join_dataset(
+        self, dataset_id: str, other_dataset_id: str, left_key: str, right_key: Optional[str] = None
+    ) -> Optional[DataGridState]:
+        state = self._open.get(dataset_id) or self.load_dataset(dataset_id)
+        other = self._open.get(other_dataset_id) or self.load_dataset(other_dataset_id)
+        right_key = right_key or left_key
+        if not state or not other or left_key not in state.headers or right_key not in other.headers:
+            return None
+        left_index, right_index = state.headers.index(left_key), other.headers.index(right_key)
+        added = [header for index, header in enumerate(other.headers) if index != right_index]
+        unique_added = []
+        for header in added:
+            candidate, suffix = header, 2
+            while candidate in state.headers or candidate in unique_added:
+                candidate = f"{header} ({suffix})"; suffix += 1
+            unique_added.append(candidate)
+        lookup = {}
+        for row in other.rows:
+            key = row[right_index] if right_index < len(row) else ""
+            lookup.setdefault(str(key), row)
+        for row in state.rows:
+            match = lookup.get(str(row[left_index] if left_index < len(row) else ""))
+            row.extend([match[index] if match and index < len(match) else "" for index in range(len(other.headers)) if index != right_index])
+        state.headers.extend(unique_added)
+        self._mark_transform(state, "join_dataset", {"other_dataset_id": other_dataset_id, "left_key": left_key, "right_key": right_key})
+        return state
+
+    def pivot(self, dataset_id: str, row_field: str, column_field: str, value_field: str) -> Optional[DataGridState]:
+        state = self._open.get(dataset_id)
+        if not state or any(field not in state.headers for field in (row_field, column_field, value_field)):
+            return None
+        row_index, column_index, value_index = (state.headers.index(field) for field in (row_field, column_field, value_field))
+        row_keys, column_keys, values = [], [], {}
+        for row in state.rows:
+            row_key = row[row_index] if row_index < len(row) else ""
+            column_key = row[column_index] if column_index < len(row) else ""
+            value = row[value_index] if value_index < len(row) else ""
+            if row_key not in row_keys: row_keys.append(row_key)
+            if column_key not in column_keys: column_keys.append(column_key)
+            values.setdefault((row_key, column_key), value)
+        state.headers = [row_field] + [str(key) for key in column_keys]
+        state.rows = [[str(row_key)] + [values.get((row_key, column_key), "") for column_key in column_keys] for row_key in row_keys]
+        state.row_headers = [str(index + 1) for index in range(len(state.rows))]
+        state.cell_provenance = {}
+        self._mark_transform(state, "pivot", {"row_field": row_field, "column_field": column_field, "value_field": value_field})
+        return state
+
+    def unpivot(self, dataset_id: str, value_columns: Iterable[int], variable_name="Variable", value_name="Value") -> Optional[DataGridState]:
+        state = self._open.get(dataset_id)
+        if not state: return None
+        values = sorted(set(value_columns)); ids = [index for index in range(len(state.headers)) if index not in values]
+        rows, row_headers = [], []
+        for row_index, row in enumerate(state.rows):
+            for column in values:
+                rows.append([row[index] if index < len(row) else "" for index in ids] + [state.headers[column], row[column] if column < len(row) else ""])
+                row_headers.append(state.row_headers[row_index] if row_index < len(state.row_headers) else str(row_index + 1))
+        state.headers = [state.headers[index] for index in ids] + [variable_name, value_name]
+        state.rows, state.row_headers = rows, row_headers
+        state.cell_provenance = {}
+        self._mark_transform(state, "unpivot", {"value_columns": values})
+        return state
+
+    def export_selection(self, dataset_id: str, selection: GridSelection, file_format: str = "tsv") -> str:
+        state = self._open.get(dataset_id) or self.load_dataset(dataset_id)
+        if not state: return ""
+        items = [{"coordinate": coordinate.to_dict(), "value": self.grid_mapping_service.value_at(state, coordinate),
+                  "provenance": state.cell_provenance.get(coordinate.key, {})} for coordinate in selection.ordered()]
+        if file_format.lower() == "json": return json.dumps(items, ensure_ascii=False, indent=2)
+        output = io.StringIO(); delimiter = "," if file_format.lower() == "csv" else "\t"
+        writer = csv.writer(output, delimiter=delimiter); writer.writerow(["kind", "row", "column", "value"])
+        for item in items:
+            coordinate = item["coordinate"]; writer.writerow([coordinate["kind"], coordinate.get("row"), coordinate.get("column"), item["value"]])
+        return output.getvalue()
+
+    def _mark_transform(self, state: DataGridState, action: str, details: Dict[str, Any]) -> None:
+        state.version += 1; state.dirty = True; state.updated_at = utc_now_iso()
+        self._record_history(state, action, details)
+
+    @staticmethod
+    def _remap_row_provenance(state: DataGridState, old_indexes: List[int]) -> None:
+        source, remapped = dict(state.cell_provenance), {}
+        for key, value in source.items():
+            if key.startswith("column_header:"):
+                remapped[key] = value
+        for new_row, old_row in enumerate(old_indexes):
+            row_key = f"row_header:{old_row}"
+            if row_key in source: remapped[f"row_header:{new_row}"] = source[row_key]
+            for column in range(len(state.headers)):
+                modern, legacy = f"data:{old_row}:{column}", f"{old_row}:{column}"
+                provenance = source.get(modern) or source.get(legacy)
+                if provenance:
+                    remapped[f"data:{new_row}:{column}"] = provenance
+                    remapped[f"{new_row}:{column}"] = provenance
+        state.cell_provenance = remapped
 
     def transpose(self, dataset_id: str) -> Optional[DataGridState]:
         state = self._open.get(dataset_id)
@@ -285,26 +566,7 @@ class DataDockService:
         }
 
     def coerce_number(self, value: Any) -> Optional[float]:
-        text = str(value if value is not None else "").strip()
-        if not text:
-            return None
-        negative = text.startswith("(") and text.endswith(")")
-        if negative:
-            text = text[1:-1].strip()
-        text = text.replace(",", "").replace("$", "").replace("€", "").replace("£", "")
-        is_percent = text.endswith("%")
-        if is_percent:
-            text = text[:-1].strip()
-        text = re.sub(r"\s+", "", text)
-        if not re.fullmatch(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)", text):
-            return None
-        try:
-            number = float(text)
-        except Exception:
-            return None
-        if negative:
-            number = -abs(number)
-        return number
+        return coerce_number(value)
 
     def trim_whitespace(self, dataset_id: str) -> Optional[DataGridState]:
         state = self._open.get(dataset_id)
@@ -661,54 +923,58 @@ class DataDockService:
             except Exception:
                 continue
             extracted.extend(self._extract_page_tables(page, page_index, pdf_path))
-            chart_inventory = self._extract_page_chart_inventory(page, page_index, pdf_path)
-            if chart_inventory:
-                extracted.append(chart_inventory)
         for state in extracted:
             self._track(state)
         return extracted
 
     def _extract_page_tables(self, page: Any, page_index: int, pdf_path: str) -> List[DataGridState]:
-        states = []
+        states: List[DataGridState] = []
 
-        # Step 1: Use AI layout model to pinpoint table regions precisely.
-        layout_bboxes = self._find_table_bboxes_with_layout(page)
-        if layout_bboxes:
-            for clip_rect in layout_bboxes:
+        def add_candidate(state: Optional[DataGridState]) -> None:
+            if state is None:
+                return
+            bbox = (state.provenance.bounding_box_coordinates or [[]])[0]
+            for existing in states:
+                existing_bbox = (existing.provenance.bounding_box_coordinates or [[]])[0]
+                if self._bbox_iou(bbox, existing_bbox) >= 0.75:
+                    existing_cells = len(existing.headers) * len(existing.rows)
+                    new_cells = len(state.headers) * len(state.rows)
+                    if new_cells > existing_cells:
+                        states[states.index(existing)] = state
+                    return
+            states.append(state)
+
+        # Step 1: Use AI layout model with semantic naming
+        layout_data = self._find_table_bboxes_with_layout(page)
+        if layout_data:
+            for table_idx, (clip_rect, semantic_name) in enumerate(layout_data):
                 state = self._extract_table_from_region(
-                    page, page_index, pdf_path, clip_rect, len(states), lax=True
+                    page, page_index, pdf_path, clip_rect, table_idx, semantic_name, lax=False
                 )
-                if state:
-                    states.append(state)
-            if states:
-                return states
-
+                add_candidate(state)
         # Step 2: Full-page PyMuPDF structural table detection.
         # Try the default (line-based) strategy first, then fall back to text-alignment strategy
         # for borderless tables.
-        tables = []
         for kwargs in ({}, {"vertical_strategy": "text", "horizontal_strategy": "text"}):
             try:
                 finder = page.find_tables(**kwargs)
                 tables = list(getattr(finder, "tables", []) or [])
             except Exception:
                 tables = []
-            if tables:
-                break
-        for table in tables:
-            try:
-                matrix = table.extract()
-            except Exception:
-                matrix = []
-            if not self._matrix_quality_ok(matrix):
-                continue
-            state = self._state_from_matrix(
-                matrix,
-                self._table_name(matrix, page_index, len(states)),
-                page_index, pdf_path, getattr(table, "bbox", None),
-            )
-            if state:
-                states.append(state)
+            for table in tables:
+                try:
+                    matrix = table.extract()
+                except Exception:
+                    matrix = []
+                if not self._matrix_quality_ok(matrix):
+                    continue
+                if kwargs.get("vertical_strategy") == "text" and not self._looks_like_data_table(matrix):
+                    continue
+                add_candidate(self._state_from_matrix(
+                    matrix,
+                    self._table_name(matrix, page_index, len(states)),
+                    page_index, pdf_path, getattr(table, "bbox", None),
+                ))
         if states:
             return states
 
@@ -718,7 +984,7 @@ class DataDockService:
             words = [list(w[:5]) for w in page.get_text("words")]
         except Exception:
             words = []
-        matrix = self._matrix_from_words(words)
+        matrix = self._matrix_from_words(words, require_table_like=True)
         if matrix:
             state = self._state_from_matrix(
                 matrix,
@@ -726,38 +992,58 @@ class DataDockService:
                 page_index, pdf_path, self._page_bbox(page),
             )
             if state:
-                states.append(state)
+                add_candidate(state)
         return states
 
-    def _extract_table_from_region(self, page: Any, page_index: int, pdf_path: str,
-                                    clip_rect: Any, table_idx: int, lax: bool = False) -> Optional[DataGridState]:
-        """Extract a table from a pre-identified region, trying PyMuPDF then word clustering."""
+    @staticmethod
+    def _bbox_iou(first: Any, second: Any) -> float:
+        try:
+            ax0, ay0, ax1, ay1 = [float(value) for value in first]
+            bx0, by0, bx1, by1 = [float(value) for value in second]
+        except Exception:
+            return 0.0
+        intersection = max(0.0, min(ax1, bx1) - max(ax0, bx0)) * max(0.0, min(ay1, by1) - max(ay0, by0))
+        area_a = max(0.0, ax1 - ax0) * max(0.0, ay1 - ay0)
+        area_b = max(0.0, bx1 - bx0) * max(0.0, by1 - by0)
+        union = area_a + area_b - intersection
+        return intersection / union if union else 0.0
+
+    def _extract_table_from_region(
+        self, page: Any, page_index: int, pdf_path: str,
+        clip_rect: Any, table_idx: int, semantic_name: Optional[str] = None, lax: bool = False
+    ) -> Optional[DataGridState]:
         try:
             import fitz
             clip = fitz.Rect(clip_rect) if not hasattr(clip_rect, "x0") else clip_rect
         except Exception:
             return None
 
-        # Try structural detection clipped to the region.
-        try:
-            finder = page.find_tables(clip=clip)
-            tables = list(getattr(finder, "tables", []) or [])
-        except Exception:
-            tables = []
-        for table in tables:
+        # Try multiple structural strategies. "lines" works best for grid tables,
+        # "text" works best for borderless financial/scientific tables.
+        extraction_strategies = [
+            {"vertical_strategy": "lines", "horizontal_strategy": "lines"},
+            {"vertical_strategy": "text", "horizontal_strategy": "text", "intersection_tol": 15}
+        ]
+
+        best_matrix = []
+        for kwargs in extraction_strategies:
             try:
-                matrix = table.extract()
+                finder = page.find_tables(clip=clip, **kwargs)
+                tables = list(getattr(finder, "tables", []) or [])
+                for table in tables:
+                    matrix = table.extract()
+                    # Only keep the matrix if it has better data density than previous attempts
+                    if self._matrix_quality_ok(matrix) and len(matrix) > len(best_matrix):
+                        best_matrix = matrix
             except Exception:
                 continue
-            if not self._matrix_quality_ok(matrix):
-                continue
-            return self._state_from_matrix(
-                matrix,
-                self._table_name(matrix, page_index, table_idx),
-                page_index, pdf_path,
-                list(getattr(table, "bbox", clip)),
-            )
 
+        if best_matrix:
+            # Use semantic name if found, otherwise fallback to row generation
+            final_name = semantic_name or self._table_name(best_matrix, page_index, table_idx)
+            return self._state_from_matrix(
+                best_matrix, final_name, page_index, pdf_path, list(clip)
+            )
         # Fall back to word-based for this region.
         try:
             words = [list(w[:5]) for w in page.get_text("words", clip=clip)]
@@ -800,47 +1086,42 @@ class DataDockService:
                 self._layout_model = None
         return self._layout_model
 
-    def _find_table_bboxes_with_layout(self, page: Any) -> List[Any]:
-        """Run the layout model to identify table regions; returns fitz.Rect list."""
+    def _find_table_bboxes_with_layout(self, page: Any) -> List[Tuple[Any, str]]:
+        """
+        Run the layout model to identify table regions and their contextual titles.
+        Returns a list of tuples: (fitz.Rect, table_name).
+        """
         model = self._get_layout_model()
         if model is None:
             return []
+
         try:
             import fitz
             results = model.predict(page)
-            return [fitz.Rect(r[0], r[1], r[2], r[3]) for r in results if r[4] == "table"]
+
+            tables_with_context = []
+            last_text_block = None
+
+            for r in results:
+                bbox = fitz.Rect(r[0], r[1], r[2], r[3])
+                block_type = r[4]
+
+                if block_type in ("title", "text"):
+                    # Save the text from this block to potentially name the next table
+                    text_content = page.get_text("text", clip=bbox).strip()
+                    # Only keep short text blocks (likely titles/captions)
+                    if text_content and len(text_content) < 100:
+                        last_text_block = text_content.replace("\n", " ")
+
+                elif block_type == "table":
+                    # Assign the preceding title, or fallback to a default
+                    table_name = last_text_block if last_text_block else None
+                    tables_with_context.append((bbox, table_name))
+                    last_text_block = None # Reset for the next table
+
+            return tables_with_context
         except Exception:
             return []
-
-    def _extract_page_chart_inventory(self, page: Any, page_index: int, pdf_path: str) -> Optional[DataGridState]:
-        rows = []
-        try:
-            page_dict = page.get_text("dict")
-            for idx, block in enumerate(page_dict.get("blocks") or []):
-                bbox = block.get("bbox")
-                if block.get("type") == 1 and bbox:
-                    rows.append([page_index + 1, f"Image/Chart Region {idx + 1}", *[round(float(v), 2) for v in bbox]])
-        except Exception:
-            pass
-        try:
-            text = page.get_text("text") or ""
-            for line in text.splitlines():
-                stripped = line.strip()
-                low = stripped.lower()
-                if low.startswith(("figure ", "fig. ", "chart ")) or " chart " in f" {low} ":
-                    rows.append([page_index + 1, stripped[:80], "", "", "", ""])
-        except Exception:
-            pass
-        if not rows:
-            return None
-        return DataGridState(
-            dataset_id=f"data_{uuid.uuid4()}",
-            name=f"Page {page_index + 1} Chart/Image Regions",
-            headers=["Page", "Detected Item", "x0", "y0", "x1", "y1"],
-            row_headers=[str(i + 1) for i in range(len(rows))],
-            rows=[[str(cell) for cell in row] for row in rows],
-            provenance=DataProvenance(pdf_path=pdf_path, page_number=page_index, bounding_box_coordinates=[self._page_bbox(page)]),
-        )
 
     def _matrix_quality_ok(self, matrix: List[List[Any]]) -> bool:
         rows = [row for row in (matrix or []) if any(str(cell or "").strip() for cell in (row or []))]
@@ -1054,14 +1335,7 @@ class DataDockService:
         return expected_width >= 2 and rows_with_multiple_cells >= 2 and rows_with_expected_width >= 2
 
     def _is_numericish(self, value: Any) -> bool:
-        text = str(value).strip().replace(",", "").replace("$", "").replace("%", "")
-        if not text:
-            return False
-        try:
-            float(text)
-            return True
-        except Exception:
-            return False
+        return coerce_number(value) is not None
 
     def _is_dateish(self, value: Any) -> bool:
         text = str(value).strip()

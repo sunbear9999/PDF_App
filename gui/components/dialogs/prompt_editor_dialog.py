@@ -251,11 +251,18 @@ class PromptEditorDialog(QDialog):
                 prompt_item.setData(0, Qt.ItemDataRole.UserRole, key)
 
     def _populate_blueprint_tree(self):
+        # Always show the run trace section first (if a trace is loaded)
+        self._populate_run_trace_tree()
+
+        # Then show prompt usage for the selected blueprint (if one is available)
         bp_name = self.blueprint_combo.currentText()
         blueprint = self._all_blueprints_cache.get(bp_name)
-        if not blueprint: return
-
-        self._populate_run_trace_tree()
+        if not blueprint:
+            if not self._trace_as_dict():
+                empty_item = QTreeWidgetItem(self.tree, ["No blueprints loaded — check app_context wiring"])
+                empty_item.setFlags(empty_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+                empty_item.setForeground(0, Qt.GlobalColor.red)
+            return
 
         prompt_usage = self.prompt_service.get_blueprint_prompt_usage(blueprint)
 
@@ -400,12 +407,25 @@ class PromptEditorDialog(QDialog):
             self.restore_button.setEnabled(False)
         elif prompt_key:
             self.current_prompt_key = prompt_key
-            self.lbl_current_prompt.setText(f"<b>Editing:</b> {prompt_key}")
+            is_core = self.prompt_service.is_core_prompt(prompt_key)
+            is_customized = self.prompt_service.is_customized_prompt(prompt_key)
+            if is_customized:
+                label = f"<b>Editing:</b> {prompt_key} <span style='color:#f0a030;font-size:11px;'>[customised — differs from default]</span>"
+            elif is_core:
+                label = f"<b>Editing:</b> {prompt_key} <span style='color:#aaa;font-size:11px;'>[using default]</span>"
+            else:
+                label = f"<b>Editing:</b> {prompt_key}"
+            self.lbl_current_prompt.setText(label)
             self.prompt_editor.setReadOnly(False)
             self.prompt_editor.setPlainText(self.prompt_manager.get_prompt(prompt_key))
-            self.btn_delete.setEnabled(not self.prompt_service.is_core_prompt(prompt_key))
+            self.btn_delete.setEnabled(not is_core)
             self.save_button.setEnabled(True)
-            self.restore_button.setEnabled(True)
+            # Restore only makes sense when the user has a custom override to roll back.
+            self.restore_button.setEnabled(is_customized)
+            self.restore_button.setToolTip(
+                "Revert to the built-in default for this prompt." if is_customized
+                else "This prompt is already at its default — no custom override to restore."
+            )
 
     def open_trace(self):
         trace = self._trace_as_dict()
@@ -488,6 +508,8 @@ class PromptEditorDialog(QDialog):
         name, ok = QInputDialog.getText(self, "New Custom Prompt", "Enter a unique name for this prompt:")
         if ok and name.strip():
             name = name.strip()
+            # get_prompts_dict() now returns the full merged set so this check
+            # catches conflicts with both default and user-saved prompts.
             if name in self.prompt_service.get_prompts_dict():
                 QMessageBox.warning(self, "Conflict", f"A prompt named '{name}' already exists.")
                 return
@@ -517,11 +539,20 @@ class PromptEditorDialog(QDialog):
 
     def _on_restore_default(self):
         if not self.current_prompt_key: return
+        if not self.prompt_service.is_customized_prompt(self.current_prompt_key):
+            QMessageBox.information(self, "Already at Default",
+                                    f"'{self.current_prompt_key}' has not been customised — it is already at its default.")
+            return
         if QMessageBox.question(self, "Confirm Restore", f"Revert '{self.current_prompt_key}' to default?") == QMessageBox.StandardButton.Yes:
-            # Use the bus to restore
             from core.events.event_bus import EventBus
             EventBus.get_instance().prompt_action_requested.emit(PromptIntent.RESTORE, PromptPayload(key=self.current_prompt_key))
             self.prompt_editor.setPlainText(self.prompt_manager.get_prompt(self.current_prompt_key))
+            # Refresh button state now that the custom override is gone
+            self.restore_button.setEnabled(False)
+            self.restore_button.setToolTip("This prompt is already at its default — no custom override to restore.")
+            is_core = self.prompt_service.is_core_prompt(self.current_prompt_key)
+            label_suffix = " <span style='color:#aaa;font-size:11px;'>[using default]</span>" if is_core else ""
+            self.lbl_current_prompt.setText(f"<b>Editing:</b> {self.current_prompt_key}{label_suffix}")
 
     def _on_save(self):
         if not self.current_prompt_key:

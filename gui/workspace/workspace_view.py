@@ -638,6 +638,8 @@ class WorkspaceView(QGraphicsView):
                 node_type_registry=self.workspace_node_types,
                 action_registry=self.workspace_actions,
                 ontology_registry=getattr(self._ctx, "ontology_registry", None),
+                media_asset_service=getattr(self._ctx, "media_asset_service", None),
+                data_provider_registry=getattr(self._ctx, "data_provider_registry", None),
             )
             self.scene_obj.addItem(node)
             node.setPos(QPointF(x, y))
@@ -1221,6 +1223,8 @@ class WorkspaceView(QGraphicsView):
             source_id=node_model.source_id,
             entity_properties=node_model.entity_properties,
             entity_state=node_model.entity_state,
+            media_asset_service=getattr(self._ctx, "media_asset_service", None),
+            data_provider_registry=getattr(self._ctx, "data_provider_registry", None),
         )
 
         if position is None:
@@ -1837,6 +1841,8 @@ class WorkspaceView(QGraphicsView):
                 source_id=data.get("source_id"),
                 entity_properties=data.get("entity_properties"),
                 entity_state=data.get("entity_state"),
+                media_asset_service=getattr(self._ctx, "media_asset_service", None),
+                data_provider_registry=getattr(self._ctx, "data_provider_registry", None),
             )
             node.setPos(data['x'] + offset, data['y'] + offset)
             self.scene_obj.addItem(node)
@@ -2414,6 +2420,8 @@ class WorkspaceView(QGraphicsView):
             entity_type=blueprint.type_key,
             entity_properties=blueprint.build_default_properties({"text": "", "note_text": ""}),
             entity_state=blueprint.build_default_state({"is_verified": True, "ai_generated": False, "origin": "human"}),
+            media_asset_service=getattr(self._ctx, "media_asset_service", None),
+            data_provider_registry=getattr(self._ctx, "data_provider_registry", None),
         )
         node.setPos(self.mapToScene(self.viewport().rect().center()))
         self.scene_obj.addItem(node)
@@ -2523,6 +2531,8 @@ class WorkspaceView(QGraphicsView):
                     data.source_id,
                     data.entity_properties,
                     data.entity_state,
+                    getattr(self._ctx, "media_asset_service", None),
+                    getattr(self._ctx, "data_provider_registry", None),
                 )
                 self.scene_obj.addItem(node)
                 self.nodes[data.id] = node

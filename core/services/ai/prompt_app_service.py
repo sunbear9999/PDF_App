@@ -28,13 +28,27 @@ class PromptAppService(QObject):
             self.pm.restore_default(payload["key"])
 
     def get_prompts_dict(self) -> dict:
-        if hasattr(self.pm, "prompts"):
-            return self.pm.prompts
+        # Return ALL prompts: defaults merged with user customisations so plugin-
+        # registered prompts (DEFAULT_PROMPTS) and user edits (custom_prompts) both
+        # appear everywhere the editor tree, conflict checks, etc. need the full set.
+        defaults = dict(getattr(self.pm, "DEFAULT_PROMPTS", {}))
         if hasattr(self.pm, "custom_prompts"):
-            return self.pm.custom_prompts
+            return {**defaults, **self.pm.custom_prompts}
+        if hasattr(self.pm, "prompts"):
+            return {**defaults, **self.pm.prompts}
         if hasattr(self.pm, "_prompts"):
-            return self.pm._prompts
-        return {}
+            return {**defaults, **self.pm._prompts}
+        return defaults
+
+    def is_customized_prompt(self, prompt_key: str) -> bool:
+        """True if the user has saved a custom override for this prompt key."""
+        custom = (
+            getattr(self.pm, "custom_prompts", None)
+            or getattr(self.pm, "prompts", None)
+            or getattr(self.pm, "_prompts", None)
+            or {}
+        )
+        return prompt_key in custom
 
     def get_prompt_categories(self) -> dict:
         return getattr(self.pm, "CATEGORIES", {}) or {}

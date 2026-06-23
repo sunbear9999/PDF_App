@@ -67,6 +67,7 @@ class StepContext:
     ontology_registry: Optional[Any] = None         # OntologyRegistry for graph-aware steps
     trace_id: Optional[str] = None                  # propagated to ui_payloads for trace linking
     node_type_registry: Optional[Any] = None        # BlueprintNodeTypeRegistry (meta-steps)
+    data_provider_registry: Optional[Any] = None    # deterministic data/chart extension registry
     # pause primitives forwarded from the runner for USER_INPUT / AWAIT_EVENT steps
     _pause_mutex: Optional[Any] = None              # QMutex
     _wait_condition: Optional[Any] = None           # QWaitCondition

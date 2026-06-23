@@ -11,7 +11,8 @@ class BrainstormTab(BaseTab):
         self.active_blueprint = None
         self._build_ui()
         self._load_blueprint()
-        QTimer.singleShot(100, self.safe_load_history) # Inherited from BaseTab
+        self._load_plugin_context_contributors()
+        QTimer.singleShot(100, self.safe_load_history)  # Inherited from BaseTab
 
     def _load_blueprint(self):
         # Dynamically load blueprint based on user's selected Strictness level
@@ -65,11 +66,19 @@ class BrainstormTab(BaseTab):
         self.input_wrapper.setMinimumHeight(70)
         input_layout = QHBoxLayout(self.input_wrapper)
         input_layout.setContentsMargins(8, 8, 8, 8)
-        
+
         self.input_field = QTextEdit()
         self.input_field.setPlaceholderText("Describe your thesis or ideas you want to explore...")
         self.input_field.setMaximumHeight(50)
         input_layout.addWidget(self.input_field)
+
+        # Built-in history context contributor
+        from gui.docks.unified_research.components.tab_context import ChatHistoryContextWidget
+        self._history_widget = ChatHistoryContextWidget(
+            self.project_manager, self.target_id, self.theme, parent=self
+        )
+        self.register_context_contributor(self._history_widget)
+        input_layout.addWidget(self._history_widget)
 
         self.btn_send = QPushButton("Send")
         self.btn_send.setFixedSize(60, 40)
@@ -80,22 +89,25 @@ class BrainstormTab(BaseTab):
 
     def _send_message(self):
         text = self.input_field.toPlainText().strip()
-        if not text or not self.active_blueprint: return
+        if not text or not self.active_blueprint:
+            return
         self.input_field.clear()
 
         if self.project_manager:
-            self.project_manager.save_chat_message("brainstorm_dock", "user", text, "text")
+            self.project_manager.save_chat_message(self.target_id, "user", text, "text")
 
         user_msg = ChatMessageWidget("You", theme=self.theme, is_user=True)
         user_msg.append_chunk(text)
-        self.receive_ai_widget(user_msg) # Inherited from BaseTab
+        self.receive_ai_widget(user_msg)  # Inherited from BaseTab
 
         dynamic_state = self.dynamic_inputs.get_values()
+        context_state = self._gather_context_state()  # history widget + plugin contributors
 
         initial_state = {
             "query": text,
             "context": "",
-            **dynamic_state
+            **context_state,
+            **dynamic_state,
         }
 
         self._active_stream_widget = None
@@ -108,3 +120,5 @@ class BrainstormTab(BaseTab):
         self.input_wrapper.setStyleSheet(f"background-color: {theme.get('bg_input', '#2b2b2b')}; border: 1px solid {theme.get('border', '#444')}; border-radius: 8px;")
         self.input_field.setStyleSheet("background-color: transparent; color: {0}; border: none;".format(theme.get('text_main', '#fff')))
         self.btn_send.setStyleSheet(f"background-color: {theme.get('accent', '#b366ff')}; font-weight: bold; color: white; border: none; border-radius: 6px;")
+        if hasattr(self, '_history_widget'):
+            self._history_widget.apply_theme(theme)

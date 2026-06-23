@@ -3,8 +3,14 @@ core/engine/steps/analysis_finalize_step.py
 
 Migrated from MasterActionRunner._run_analysis_finalize() and _emit_analysis_event().
 Bus emissions are returned as SystemEvents instead of being fired directly.
+
+Compatible with both the legacy pipeline (chunks=final_analysis, master=master_diagram,
+synthesis=argument_synthesis string) and the hierarchical pipeline
+(chunks=all_chunk_evidence, master=hydrated_graph, synthesis=all_section_syntheses list).
 """
 from __future__ import annotations
+
+import json
 
 from core.engine.steps.base_step import BaseStep
 from core.engine.execution_result import SystemEvent
@@ -60,15 +66,24 @@ class AnalysisFinalizeStep(BaseStep):
             or runtime.build_contract(template)
         )
 
+        chunks_raw = inputs.get("chunks") or context.state.get("all_chunk_evidence") or context.state.get("final_analysis", [])
+        master_raw = inputs.get("master") or context.state.get("hydrated_graph") or context.state.get("master_diagram", {})
+        synthesis_raw = inputs.get("synthesis") or context.state.get("all_section_syntheses") or context.state.get("argument_synthesis", "")
+        # Serialize synthesis list to string for normalize_result compatibility
+        if isinstance(synthesis_raw, (list, dict)):
+            synthesis_str = json.dumps(synthesis_raw, ensure_ascii=False)
+        else:
+            synthesis_str = str(synthesis_raw or "")
+
         result = runtime.normalize_result(
             doc_path,
             template_id,
             run_id,
             template,
             contract,
-            inputs.get("chunks", context.state.get("final_analysis", [])),
-            inputs.get("master", context.state.get("master_diagram", {})),
-            inputs.get("synthesis", context.state.get("argument_synthesis", "")),
+            chunks_raw,
+            master_raw,
+            synthesis_str,
         )
         result["prompt_trace"] = {
             "rendered_templates": context.state.get("analysis_prompt_trace", []),
