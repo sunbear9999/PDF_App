@@ -42,3 +42,16 @@ class AIOutputWidgetFactory:
     @classmethod
     def registered_types(cls) -> list:
         return list(cls._registry.keys())
+
+    @classmethod
+    def register_from_spec(cls, spec: "Any") -> None:
+        """Register a renderer from an AIWidgetSpec contributed by a plugin.
+
+        Reads ``spec.renderer_factory`` and ``spec.definition.widget_id``
+        (the payload_type key) so the GUI can create the right widget when a
+        payload of that type arrives in receive_ai_payload().
+        """
+        defn = getattr(spec, "definition", None)
+        factory = getattr(spec, "renderer_factory", None)
+        if defn is not None and factory is not None:
+            cls.register(defn.widget_id, factory)

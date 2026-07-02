@@ -50,6 +50,7 @@ class WorkspaceIntent(Enum):
     CALCULATE_LAYOUT = auto()
     IMPORT_GRAPH = auto()
     SOURCE_FILTER = auto()
+    SHOW_SOURCE_REFS = auto()
 
 
 @dataclass

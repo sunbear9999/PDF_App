@@ -220,6 +220,16 @@ class BaseTab(QWidget):
                     widget.update_status(f"❌ Error: {msg}")
             if hasattr(self, "btn_generate"):
                 self.btn_generate.setEnabled(True)
+            return
+
+        # --- Plugin-registered renderer fallthrough ----------------------------
+        # Built-in types are all handled above with explicit returns.  Any
+        # remaining payload type may have a renderer registered by a plugin via
+        # api.widgets.register() → AIOutputWidgetFactory.
+        from gui.base.ai_output_factory import AIOutputWidgetFactory
+        plugin_widget = AIOutputWidgetFactory.create(payload_type, payload, parent=self)
+        if plugin_widget is not None:
+            self.receive_ai_widget(plugin_widget)
 
     def _ensure_stream_widget(self):
         if self._active_stream_widget is None:

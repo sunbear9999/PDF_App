@@ -199,7 +199,14 @@ class BlueprintUIRouter(QObject):
             # Notify any bus-subscribed tabs that haven't registered directly
             self.bus.ui_render_requested.emit("*", {"type": "hide_status"})
                 
-        if target_id and ui_format in RESTORABLE_UI_FORMATS:
+        should_save_conversation = (
+            target_id
+            and (
+                ui_format in RESTORABLE_UI_FORMATS
+                or getattr(step, "conversation_role", None) == "assistant"
+            )
+        )
+        if should_save_conversation:
             pm = self._project_manager
             if pm:
                 saved_result = strip_tagged_block(result_str, "UPDATE_MANIFEST")

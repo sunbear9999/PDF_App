@@ -3,7 +3,7 @@ from __future__ import annotations
 from core.engine.steps.base_step import BaseStep
 from core.models.data_dock_models import PdfRegion
 from core.plugins.plugin_step_protocol import StepContext
-from core.services.pdf_grid_extraction_service import PdfGridExtractionService
+from core.services.data.pdf_grid_extraction_service import PdfGridExtractionService
 
 
 class ExtractPdfGridStep(BaseStep):

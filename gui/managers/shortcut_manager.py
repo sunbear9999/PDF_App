@@ -54,11 +54,13 @@ class ShortcutManager:
                 kr.bind("pdf.zoom_out",   viewer.zoom_out,   w)
                 kr.bind("pdf.zoom_reset", viewer.zoom_reset, w)
                 kr.bind("pdf.toggle_viewer", w.toggle_source_viewer, w)
+                kr.bind("pdf.reading_mode", viewer.toggle_reading_mode, w)
             else:
                 self._raw_bind("Ctrl+=",  viewer.zoom_in)
                 self._raw_bind("Ctrl++",  viewer.zoom_in)
                 self._raw_bind("Ctrl+-",  viewer.zoom_out)
                 self._raw_bind("Ctrl+0",  viewer.zoom_reset)
+                self._raw_bind("Ctrl+Shift+R", viewer.toggle_reading_mode)
 
             if hasattr(viewer, "annot_manager") and kr:
                 kr.bind("pdf.search", viewer.annot_manager.toggle_search, w)

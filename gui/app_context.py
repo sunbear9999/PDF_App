@@ -28,9 +28,10 @@ if TYPE_CHECKING:
         WorkspaceNodeTypeRegistry,
         OntologyRegistry,
     )
-    from core.services.workspace_services import WorkspaceService, WorkspaceGraphService
-    from core.services.workflow_runner_service import WorkflowRunnerService
-    from core.services.research_agent_service import ResearchAgentService
+    from core.services.workspace.workspace_service import WorkspaceService
+    from core.services.workspace.workspace_graph_service import WorkspaceGraphService
+    from core.services.ai.workflow_runner_service import WorkflowRunnerService
+    from core.services.ai.research_agent_service import ResearchAgentService
     from core.plugins.extension_registry import PluginExtensionRegistry
     from gui.registry.action_spec import ActionRegistry
     from gui.registry.context_menu_registry import ContextMenuRegistry
@@ -106,6 +107,10 @@ class AppContext:
 
     # Prompt management service — fully wired with blueprint_registry and step_manager
     prompt_app_service: Optional["PromptAppService"] = field(default=None)
+    llm_settings_service: Optional[Any] = field(default=None)
+
+    # AI widget registry — maps ui_format → AIWidgetDefinition (prompt, parser, metadata)
+    widget_registry: Optional[Any] = field(default=None)
 
     # Raw core reference — used by AI setup tab to access user_data_dir and registry
     core: Optional[Any] = field(default=None)
@@ -225,5 +230,7 @@ class AppContext:
             llm_backend_registry=getattr(core, "llm_backend_registry", None),
             ai_setup_service=getattr(core, "ai_setup_service", None),
             prompt_app_service=getattr(core, "prompt_app_service", None),
+            llm_settings_service=getattr(core, "llm_settings_service", None),
+            widget_registry=getattr(core, "widget_registry", None),
             core=core,
         )

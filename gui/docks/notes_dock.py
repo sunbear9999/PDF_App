@@ -15,7 +15,7 @@ from core.events.domains.document_events import AnnotationIntent, AnnotationPayl
 from core.events.domains.metadata_events import NotesEvent, NotesEventPayload, NotesIntent, NotesPayload
 from core.events.domains.discovery_events import DiscoveryEvent, DiscoveryEventPayload, DiscoveryIntent, DiscoveryPayload
 from core.events.domains.workspace_events import WorkspaceIntent, WorkspacePayload
-from core.services.content.deterministic_extractor import ExtractedMention
+from core.extraction.deterministic import ExtractedMention
 from core.models.ontology_model import EntityIntent, EntityPayload
 from core.ontology.registry import OntologyRegistry
 from gui.components.dialogs.entity_editor_dialog import EntityEditorDialog
@@ -373,6 +373,84 @@ class MentionRow(QFrame):
         )
 
 
+def _build_refs_rows(content_widget, refs, bus):
+    """Populate *content_widget*'s layout with per-occurrence rows for each document in *refs*.
+
+    Each doc gets a header label followed by up to 5 occurrence rows showing a context
+    snippet and a Jump button that opens the document at the matching page.
+    """
+    layout = content_widget.layout()
+    while layout.count():
+        child = layout.takeAt(0)
+        if child.widget():
+            child.widget().deleteLater()
+
+    if not refs:
+        lbl = QLabel("No mentions found in project.")
+        lbl.setStyleSheet("color: #888; font-size: 11px;")
+        layout.addWidget(lbl)
+        return
+
+    for ref in refs:
+        doc_name = ref.get("doc_name", "Unknown")
+        count = ref.get("mention_count", 0)
+        doc_path = ref.get("doc_path", "")
+
+        hdr = QLabel(
+            f"<b>📄 {html.escape(doc_name)}</b>"
+            f"<span style='color:#888; font-size:11px;'>"
+            f"  — {count} mention{'s' if count != 1 else ''}</span>"
+        )
+        hdr.setTextFormat(Qt.TextFormat.RichText)
+        hdr.setWordWrap(True)
+        layout.addWidget(hdr)
+
+        occurrences = ref.get("occurrences", [])
+        if not occurrences:
+            occurrences = [{"page_num": 0, "context": c} for c in ref.get("contexts", [])[:5]]
+
+        for occ in occurrences[:5]:
+            pg = occ.get("page_num", 0)
+            ctx = occ.get("context", "").strip()
+
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(8, 0, 0, 0)
+            row_layout.setSpacing(4)
+
+            display = f"p.{pg + 1}  {ctx[:120]}" if ctx else f"p.{pg + 1}"
+            ctx_lbl = QLabel(display)
+            ctx_lbl.setWordWrap(True)
+            ctx_lbl.setStyleSheet("color: #aaa; font-size: 10px; font-style: italic;")
+            ctx_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            row_layout.addWidget(ctx_lbl)
+
+            jump_btn = QPushButton("Jump")
+            jump_btn.setFixedSize(42, 20)
+            jump_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            jump_btn.setStyleSheet(
+                "QPushButton { background: transparent; color: #6ac; border: 1px solid #6ac; "
+                "border-radius: 3px; font-size: 10px; padding: 0; }"
+                "QPushButton:hover { background: #6ac; color: #111; }"
+            )
+            def _jump(checked=False, path=doc_path, p=pg):
+                bus.document_action_requested.emit(
+                    DocumentIntent.OPEN,
+                    DocumentPayload(path=path, source_type="pdf"),
+                )
+                if p is not None:
+                    QTimer.singleShot(120, lambda _p=p, _path=path: bus.document_action_requested.emit(
+                        DocumentIntent.JUMP_TO_LOCATION,
+                        DocumentPayload(path=_path, page_num=_p),
+                    ))
+            jump_btn.clicked.connect(_jump)
+            row_layout.addWidget(jump_btn)
+
+            layout.addWidget(row)
+
+    layout.addStretch()
+
+
 class EntityGroupCard(QFrame):
     """Collapsible card for one deduplicated entity (people, dates, generic)."""
     def __init__(self, tab, group, source_path: str, theme=None):
@@ -411,6 +489,13 @@ class EntityGroupCard(QFrame):
         self._btn_expand.clicked.connect(self._toggle)
         header.addWidget(self._btn_expand)
 
+        self._btn_refs = QPushButton("🔗")
+        self._btn_refs.setFixedSize(24, 24)
+        self._btn_refs.setToolTip("Find mentions in other documents")
+        self._btn_refs.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_refs.clicked.connect(self._find_references)
+        header.addWidget(self._btn_refs)
+
         self._btn_save = QPushButton("💾 Save")
         self._btn_save.setFixedHeight(24)
         self._btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -439,7 +524,7 @@ class EntityGroupCard(QFrame):
         self._desc_edit.textChanged.connect(self._on_desc_changed)
         self._outer.addWidget(self._desc_edit)
 
-        # Collapsible body
+        # Collapsible body (mention rows)
         self._body = QWidget()
         body_layout = QVBoxLayout(self._body)
         body_layout.setContentsMargins(0, 4, 0, 0)
@@ -449,6 +534,30 @@ class EntityGroupCard(QFrame):
             body_layout.addWidget(row)
         self._body.setVisible(False)
         self._outer.addWidget(self._body)
+
+        # Inline references panel (hidden until 🔗 clicked)
+        self._refs_panel = QWidget()
+        self._refs_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        refs_layout = QVBoxLayout(self._refs_panel)
+        refs_layout.setContentsMargins(0, 0, 0, 0)
+        refs_layout.setSpacing(2)
+        self._refs_label = QLabel("Searching…")
+        self._refs_label.setStyleSheet("color: #888; font-size: 10px; padding: 0px;")
+        self._refs_label.setMaximumHeight(14)
+        self._refs_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        refs_layout.addWidget(self._refs_label)
+        self._refs_content = QWidget()
+        self._refs_content_layout = QVBoxLayout(self._refs_content)
+        self._refs_content_layout.setContentsMargins(0, 0, 0, 0)
+        self._refs_content_layout.setSpacing(3)
+        self._refs_scroll = QScrollArea()
+        self._refs_scroll.setWidgetResizable(True)
+        self._refs_scroll.setWidget(self._refs_content)
+        self._refs_scroll.setFixedHeight(150)
+        self._refs_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        refs_layout.addWidget(self._refs_scroll)
+        self._refs_panel.setVisible(False)
+        self._outer.addWidget(self._refs_panel)
 
     def _toggle(self):
         self._expanded = not self._expanded
@@ -473,6 +582,28 @@ class EntityGroupCard(QFrame):
     def _dismiss(self):
         self.setVisible(False)
 
+    def _find_references(self):
+        """Request cross-document references for this entity from the backend."""
+        self._refs_label.setText("Searching…")
+        self._refs_panel.setVisible(True)
+        # Notify the parent DiscoveryTabWidget so it can route the response back here
+        if hasattr(self._tab, "_set_pending_refs_card"):
+            self._tab._set_pending_refs_card(self)
+        self._tab.bus.discovery_action_requested.emit(
+            DiscoveryIntent.FIND_REFERENCES,
+            DiscoveryPayload(
+                entity_name=self._group.canonical_text,
+                entity_type=self._group.entity_type,
+            ),
+        )
+
+    def show_references(self, references):
+        """Display per-occurrence reference results with context snippets and Jump buttons."""
+        self._refs_label.setText(
+            f"Found in {len(references)} document(s):" if references else "No other documents found."
+        )
+        _build_refs_rows(self._refs_content, references, self._tab.bus)
+
     def apply_theme(self, theme):
         self._theme = theme
         self.setStyleSheet(
@@ -485,6 +616,7 @@ class EntityGroupCard(QFrame):
         )
         self._btn_expand.setStyleSheet(btn_style)
         self._btn_dismiss.setStyleSheet(btn_style)
+        self._btn_refs.setStyleSheet(btn_style)
         self._btn_save.setStyleSheet(
             f"QPushButton {{ background-color: {theme['accent']}; color: #1e1e1e; "
             f"border: none; padding: 2px 8px; border-radius: 4px; font-weight: bold; }}"
@@ -570,6 +702,13 @@ class CitationGroupCard(QFrame):
         self._btn_workspace.clicked.connect(self._add_to_workspace)
         header.addWidget(self._btn_workspace)
 
+        self._btn_refs = QPushButton("🔗")
+        self._btn_refs.setFixedSize(24, 24)
+        self._btn_refs.setToolTip("Find mentions in other documents")
+        self._btn_refs.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_refs.clicked.connect(self._find_references)
+        header.addWidget(self._btn_refs)
+
         self._btn_dismiss = QPushButton("✖")
         self._btn_dismiss.setFixedSize(24, 24)
         self._btn_dismiss.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -618,10 +757,54 @@ class CitationGroupCard(QFrame):
         self._body.setVisible(self._expanded)
         self._outer.addWidget(self._body)
 
+        # Inline references panel
+        self._refs_panel = QWidget()
+        self._refs_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        refs_layout = QVBoxLayout(self._refs_panel)
+        refs_layout.setContentsMargins(0, 0, 0, 0)
+        refs_layout.setSpacing(2)
+        self._refs_label = QLabel("Searching…")
+        self._refs_label.setStyleSheet("color: #888; font-size: 10px; padding: 0px;")
+        self._refs_label.setMaximumHeight(14)
+        self._refs_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        refs_layout.addWidget(self._refs_label)
+        self._refs_content = QWidget()
+        self._refs_content_layout = QVBoxLayout(self._refs_content)
+        self._refs_content_layout.setContentsMargins(0, 0, 0, 0)
+        self._refs_content_layout.setSpacing(3)
+        self._refs_scroll = QScrollArea()
+        self._refs_scroll.setWidgetResizable(True)
+        self._refs_scroll.setWidget(self._refs_content)
+        self._refs_scroll.setFixedHeight(150)
+        self._refs_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        refs_layout.addWidget(self._refs_scroll)
+        self._refs_panel.setVisible(False)
+        self._outer.addWidget(self._refs_panel)
+
     def _toggle(self):
         self._expanded = not self._expanded
         self._body.setVisible(self._expanded)
         self._btn_expand.setText("▼" if self._expanded else "▶")
+
+    def _find_references(self):
+        self._refs_label.setText("Searching…")
+        self._refs_panel.setVisible(True)
+        if hasattr(self._tab, "_set_pending_refs_card"):
+            self._tab._set_pending_refs_card(self)
+        self._tab.bus.discovery_action_requested.emit(
+            DiscoveryIntent.FIND_REFERENCES,
+            DiscoveryPayload(
+                entity_name=self._group.canonical_text,
+                entity_type=self._group.entity_type,
+            ),
+        )
+
+    def show_references(self, references):
+        """Display per-occurrence reference results with context snippets and Jump buttons."""
+        self._refs_label.setText(
+            f"Found in {len(references)} document(s):" if references else "No other documents found."
+        )
+        _build_refs_rows(self._refs_content, references, self._tab.bus)
 
     def _save(self):
         self._tab.bus.discovery_action_requested.emit(
@@ -681,6 +864,8 @@ class CitationGroupCard(QFrame):
         self._btn_dismiss.setStyleSheet(btn_style)
         if hasattr(self, "_btn_workspace"):
             self._btn_workspace.setStyleSheet(btn_style)
+        if hasattr(self, "_btn_refs"):
+            self._btn_refs.setStyleSheet(btn_style)
         self._btn_save.setStyleSheet(
             f"QPushButton {{ background-color: {theme['accent']}; color: #1e1e1e; "
             f"border: none; padding: 2px 8px; border-radius: 4px; font-weight: bold; }}"
@@ -704,11 +889,15 @@ class DiscoveryTabWidget(QWidget):
         self._is_destroyed = False
         self._current_source_path: str = ""
         self._runner = None
+        self._pending_refs_card = None  # card waiting for REFERENCES_FOUND response
         self._build_ui()
         self._try_register_shortcuts()
 
         self.bus.discovery_state_changed.connect(self._on_discovery_state)
         self.destroyed.connect(self._on_destroyed)
+
+    def _set_pending_refs_card(self, card):
+        self._pending_refs_card = card
 
     def _try_register_shortcuts(self):
         ctx = self._ctx
@@ -803,7 +992,7 @@ class DiscoveryTabWidget(QWidget):
     def _populate_type_combo(self):
         self._type_combo.clear()
         try:
-            from core.services.content.deterministic_extractor import DeterministicExtractorRegistry
+            from core.extraction.deterministic import DeterministicExtractorRegistry
             for spec in DeterministicExtractorRegistry.all_specs():
                 self._type_combo.addItem(spec.display_name, spec.entity_type)
         except Exception:
@@ -909,6 +1098,14 @@ class DiscoveryTabWidget(QWidget):
             self._populate_cards(payload.entity_groups or [], payload.source_path or self._current_source_path)
         elif event == DiscoveryEvent.SAVE_COMPLETE:
             self._lbl_status.setText(f"Saved {len(payload.saved_ids)} entities.")
+        elif event == DiscoveryEvent.REFERENCES_FOUND:
+            card = self._pending_refs_card
+            self._pending_refs_card = None
+            if card is not None and hasattr(card, "show_references"):
+                try:
+                    card.show_references(payload.references or [])
+                except RuntimeError:
+                    pass
 
     def _populate_cards(self, groups, source_path: str):
         if not self._can_use():
@@ -1080,17 +1277,6 @@ class NotesTab(QWidget):
         self.tab_widget.currentChanged.connect(self._on_tab_changed)
         main_layout.addWidget(self.tab_widget)
 
-        if self._ctx and hasattr(self._ctx, "blueprint_registry"):
-            from gui.components.workflow_panel import WorkflowPanel
-            self._workflow_panel = WorkflowPanel(
-                app_context=self._ctx,
-                mount_point="notes_dock",
-                output_target_id="notes_dock_workflow",
-                label="Workflow",
-                parent=self,
-            )
-            main_layout.addWidget(self._workflow_panel)
-
     def _on_tab_changed(self, index):
         if index == 1 and hasattr(self, "extracted_widget"):
             try:
@@ -1197,4 +1383,3 @@ class NotesTab(QWidget):
             )
         except RuntimeError:
             return False
-

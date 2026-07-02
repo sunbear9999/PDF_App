@@ -43,7 +43,7 @@ from core.events.domains.evaluation_events import (
     SourceEvalPayload,
 )
 from core.events.domains.citation_events import CitationIntent
-from core.services.document.source_evaluator_service import OfflineSourceEvaluator
+from core.evaluation.offline_source_evaluator import OfflineSourceEvaluator
 from core.registries.source_scoring_registry import build_default_source_scoring_registry
 
 

@@ -554,7 +554,10 @@ class Node(QGraphicsRectItem):
         return EntityType.TEXT.value
 
     def should_show_verify_action(self):
-        ai_generated = bool(self.entity_state.get("ai_generated")) or self.node_origin == "ai" or str(self.highlight_id or self.node_id).startswith("AINote")
+        ai_generated = (
+            bool(self.entity_state.get("ai_generated", False))
+            or self.node_origin == "ai"
+        )
         return ai_generated and not bool(self.entity_state.get("is_verified", self.is_verified))
 
     def refresh_verify_button(self):
@@ -679,6 +682,13 @@ class Node(QGraphicsRectItem):
                 self.bus.workspace_action_requested.emit(WorkspaceIntent.TAG_FILTER_APPLY, WorkspacePayload(tag_name=clicked_tag))
                 event.accept()
                 return
+            for badge in self.metric_badges:
+                if badge.get("key") == "source_count" and badge["rect"].contains(event.pos()):
+                    self.bus.workspace_action_requested.emit(
+                        WorkspaceIntent.SHOW_SOURCE_REFS, WorkspacePayload(node_id=self.node_id)
+                    )
+                    event.accept()
+                    return
 
         self.bus.workspace_action_requested.emit(WorkspaceIntent.NODE_PRESSED, WorkspacePayload(node_id=self.node_id))
         super().mousePressEvent(event)
@@ -707,7 +717,19 @@ class Node(QGraphicsRectItem):
         super().mouseDoubleClickEvent(event)
 
     def trigger_jump(self):
-        self.bus.workspace_action_requested.emit(WorkspaceIntent.NODE_JUMP_REQUEST, WorkspacePayload(node_id=self.node_id))
+        # Quote/highlight/evidence nodes jump directly to their single known location.
+        # All other entity nodes (person, date, court case, etc.) do a live project-wide
+        # scan so unsaved documents are still surfaced.
+        is_quote_like = self.entity_type in {EntityType.QUOTE.value, EntityType.EVIDENCE.value}
+        has_quote = bool(self.quote_text())
+        if is_quote_like or (has_quote and not self.entity_properties.get("source_refs")):
+            self.bus.workspace_action_requested.emit(
+                WorkspaceIntent.NODE_JUMP_REQUEST, WorkspacePayload(node_id=self.node_id)
+            )
+        else:
+            self.bus.workspace_action_requested.emit(
+                WorkspaceIntent.SHOW_SOURCE_REFS, WorkspacePayload(node_id=self.node_id)
+            )
 
     def trigger_copy_citation(self):
         self.bus.workspace_action_requested.emit(WorkspaceIntent.NODE_CITATION_COPY, WorkspacePayload(node_id=self.node_id))
@@ -1162,6 +1184,28 @@ class Node(QGraphicsRectItem):
                 "key": metric_key,
                 "label": block.label or labels.get(metric_key) or metric_key,
                 "value": self._format_metric_value(metric_key, value),
+            })
+        entity_text = (
+            self.entity_properties.get("name")
+            or self.entity_properties.get("text")
+            or self.entity_properties.get("exact_text")
+            or ""
+        ).strip()
+        if entity_text:
+            source_refs = self.entity_properties.get("source_refs", [])
+            # After a live scan, _live_source_count is set; prefer it over stored refs
+            live = self.entity_properties.get("_live_source_count")
+            if live is not None:
+                badge_value = str(live)
+            elif source_refs:
+                badge_value = str(len(source_refs))
+            else:
+                badge_value = "?"
+            badges.append({
+                "key": "source_count",
+                "label": "Sources",
+                "value": badge_value,
+                "clickable": True,
             })
         return badges
 

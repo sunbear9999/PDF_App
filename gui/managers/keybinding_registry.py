@@ -409,6 +409,8 @@ def build_builtin_key_specs() -> List[KeySpec]:
                 "Reset zoom to fit-width",                        "Ctrl+0"),
         KeySpec("pdf.search",       "Toggle Search Bar", "pdf_viewer",
                 "Show or hide the in-document text search bar",   "Ctrl+F"),
+        KeySpec("pdf.reading_mode", "Toggle Reading Mode", "pdf_viewer",
+                "Show or hide the word-by-word reading overlay",  "Ctrl+Shift+R"),
         KeySpec("pdf.copy",         "Copy Selection",    "pdf_viewer",
                 "Copy the selected text to the clipboard",        "Ctrl+C"),
         KeySpec("pdf.toggle_viewer", "Toggle Source Viewer", "pdf_viewer",

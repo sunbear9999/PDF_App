@@ -70,25 +70,33 @@ class LLMQueryStep(BaseStep):
                 system_prompt += "\n\n" + (pm.get_prompt("Context Inject - Analyses") or "")
 
             ui_format = getattr(step, "ui_format", inputs.get("_ui_format", ""))
-            if ui_format == "chat_widgets":
-                system_prompt += "\n\n" + (pm.get_prompt("Format Enforcer - Chat Widgets") or "")
-            elif ui_format == "data_table":
-                system_prompt += "\n\n" + (pm.get_prompt("Format Enforcer - Data Table") or "")
-            elif ui_format == "card_grid":
-                system_prompt += "\n\n" + (pm.get_prompt("Format Enforcer - Card Grid") or "")
+            from core.registries.ai_widget_registry import AIWidgetRegistry
+            _widget_defn = AIWidgetRegistry.get_instance().get(ui_format)
+            if _widget_defn and _widget_defn.prompt_key:
+                system_prompt += "\n\n" + (pm.get_prompt(_widget_defn.prompt_key) or "")
 
-            elif ui_format == "live_stream":
-                system_prompt += "\n\n" + (pm.get_prompt("Format Enforcer - Live Stream") or "")
-
-            if getattr(step, "inline_citations", False) and self._has_citation_source(step, context.state):
+            has_rag = self._has_citation_source(step, context.state)
+            manual_citations = getattr(step, "inline_citations", False)
+            auto_citations = _widget_defn.auto_citations if _widget_defn else False
+            if (manual_citations or auto_citations) and has_rag:
                 system_prompt += "\n\n" + (pm.get_prompt("Inline Citation Directive") or "")
 
         # Resolve any {variable} references in the composed system prompt
         system_prompt = StateResolver.resolve_val(system_prompt, context.state, pm)
 
         # ------- LLM options -------
-        options = {"temperature": 0.7, "num_predict": 2048, "json_mode": False}
-        options.update(getattr(step, "llm_options", {}))
+        base_options = dict(getattr(step, "llm_options", {}) or {})
+        service = getattr(context, "llm_settings_service", None)
+        if service:
+            options = service.resolve_options(
+                blueprint_id=getattr(context, "blueprint_id", None),
+                step_path=getattr(context, "step_path", None),
+                step=step,
+                base_options=base_options,
+            )
+        else:
+            options = {"temperature": 0.7, "num_predict": 2048, "num_ctx": 16384, "json_mode": False}
+            options.update(base_options)
         options = StateResolver.resolve_val(options, context.state, pm)
         for key in ("temperature", "num_predict", "num_ctx"):
             if key in options and options[key] not in (None, ""):
@@ -96,6 +104,8 @@ class LLMQueryStep(BaseStep):
                     options[key] = float(options[key]) if key == "temperature" else int(options[key])
                 except Exception:
                     pass
+        if "json_mode" in options and not isinstance(options["json_mode"], bool):
+            options["json_mode"] = str(options["json_mode"]).strip().lower() in {"1", "true", "yes", "on"}
         if options.get("num_predict", 1) <= 0:
             options["num_predict"] = 2048
 
@@ -110,6 +120,17 @@ class LLMQueryStep(BaseStep):
                 system_prompt += "\n\n" + enforcer.replace("{schema_str}", schema_str)
         elif options.get("json_mode") and "JSON" not in system_prompt:
             system_prompt += "\n\nCRITICAL: Output ONLY valid JSON. No markdown blocks, no explanations."
+
+        if getattr(step, "show_reasoning", False) and not options.get("json_mode"):
+            directive = ""
+            if pm:
+                directive = pm.get_prompt("Reasoning Disclosure Directive") or ""
+            if not directive:
+                directive = (
+                    "Before the final answer, include a concise reasoning section inside "
+                    "<think>...</think>. Then provide the final answer after the closing tag."
+                )
+            system_prompt += "\n\n" + directive
 
         # ------- Prompt trace -------
         trace_event = self._build_trace_event(step, inputs, resolved_model, system_prompt, options, context)

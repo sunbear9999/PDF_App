@@ -55,6 +55,42 @@ class AIOutputRendererSpec:
 
 
 @dataclass
+class AIWidgetSpec:
+    """
+    Full widget registration: backend definition + optional GUI renderer.
+
+    Plugins use api.widgets.register(AIWidgetSpec(...)) in on_load().
+    This bundles the AIWidgetDefinition (prompt, parser, metadata) with an
+    optional renderer_factory so a single call wires everything end-to-end.
+
+    Example::
+
+        from core.registries.ai_widget_registry import AIWidgetDefinition
+        from core.plugins.extension_registry import AIWidgetSpec
+
+        api.widgets.register(AIWidgetSpec(
+            definition=AIWidgetDefinition(
+                widget_id="my_timeline",
+                label="Timeline",
+                prompt_key="My Timeline Format",
+                default_prompt="Output a JSON array of {date, event, description} objects...",
+                payload_parser=_parse_timeline,
+                plugin_id=plugin_id,
+            ),
+            renderer_factory=lambda payload, parent: TimelineWidget(payload, parent),
+        ))
+    """
+    definition: Any  # AIWidgetDefinition — typed as Any to avoid circular import
+    renderer_factory: Optional[Callable] = None
+    # convenience: forward the plugin_id from definition.plugin_id if not overridden
+    plugin_id: str = ""
+
+    def __post_init__(self):
+        if not self.plugin_id and self.definition is not None:
+            self.plugin_id = getattr(self.definition, "plugin_id", "") or ""
+
+
+@dataclass
 class CitationSourceHandlerSpec:
     """Navigation handler for citations produced by a plugin-owned RAG source."""
     source_type: str
@@ -211,6 +247,26 @@ class RagSourceFilterSpec:
 
 
 @dataclass
+class ReadingTextFilterSpec:
+    """Plugin callback that can refine reading-mode page text before tokenization."""
+    filter_id: str
+    label: str
+    callback: Optional[Callable[[List[Any]], Optional[List[Any]]]] = None
+    position: int = 50
+    plugin_id: str = ""
+
+
+@dataclass
+class ReadingTokenTransformSpec:
+    """Plugin callback that can refine reading-mode tokens before display."""
+    transform_id: str
+    label: str
+    callback: Optional[Callable[[List[Any]], Optional[List[Any]]]] = None
+    position: int = 50
+    plugin_id: str = ""
+
+
+@dataclass
 class TabContextContributorSpec:
     """
     A context contributor injected into one or more research tabs by a plugin.
@@ -263,6 +319,8 @@ class PluginExtensionRegistry:
         self._dock_actions: List[DockActionSpec] = []
         self._tab_context_contributors: List[TabContextContributorSpec] = []
         self._rag_source_filters: List[RagSourceFilterSpec] = []
+        self._reading_text_filters: List[ReadingTextFilterSpec] = []
+        self._reading_token_transforms: List[ReadingTokenTransformSpec] = []
 
     # ----------------------------------------------------------------
     # Registration
@@ -321,6 +379,20 @@ class PluginExtensionRegistry:
             if not (s.source_id == spec.source_id and s.plugin_id == spec.plugin_id)
         ]
         self._rag_source_filters.append(spec)
+
+    def add_reading_text_filter(self, spec: ReadingTextFilterSpec) -> None:
+        self._reading_text_filters[:] = [
+            s for s in self._reading_text_filters
+            if not (s.filter_id == spec.filter_id and s.plugin_id == spec.plugin_id)
+        ]
+        self._reading_text_filters.append(spec)
+
+    def add_reading_token_transform(self, spec: ReadingTokenTransformSpec) -> None:
+        self._reading_token_transforms[:] = [
+            s for s in self._reading_token_transforms
+            if not (s.transform_id == spec.transform_id and s.plugin_id == spec.plugin_id)
+        ]
+        self._reading_token_transforms.append(spec)
 
     def get_rag_source_filters(self) -> List["RagSourceFilterSpec"]:
         return list(self._rag_source_filters)
@@ -383,6 +455,12 @@ class PluginExtensionRegistry:
     def get_commands(self) -> List[CommandSpec]:
         return list(self._commands)
 
+    def get_reading_text_filters(self) -> List[ReadingTextFilterSpec]:
+        return sorted(self._reading_text_filters, key=lambda s: s.position)
+
+    def get_reading_token_transforms(self) -> List[ReadingTokenTransformSpec]:
+        return sorted(self._reading_token_transforms, key=lambda s: s.position)
+
     def get_workspace_context_menu_items(self, context: str = "") -> List[WorkspaceContextMenuSpec]:
         if context:
             return [s for s in self._workspace_context_menu_items
@@ -421,6 +499,12 @@ class PluginExtensionRegistry:
     def register_workspace_context_menu_item(self, spec: WorkspaceContextMenuSpec) -> None:
         self.add_workspace_context_menu_item(spec)
 
+    def register_reading_text_filter(self, spec: ReadingTextFilterSpec) -> None:
+        self.add_reading_text_filter(spec)
+
+    def register_reading_token_transform(self, spec: ReadingTokenTransformSpec) -> None:
+        self.add_reading_token_transform(spec)
+
     def get_themes(self) -> List["ThemeSpec"]:
         return list(self._themes)
 
@@ -452,6 +536,7 @@ class PluginExtensionRegistry:
             "_toolbar_buttons", "_research_tabs", "_ai_renderers", "_citation_source_handlers", "_extra_docks",
             "_menu_items", "_main_toolbar_buttons", "_shortcuts", "_commands",
             "_workspace_context_menu_items", "_actions", "_themes", "_dock_actions", "_rag_source_filters",
+            "_reading_text_filters", "_reading_token_transforms",
         ]
 
     def remove_plugin_specs(self, plugin_id: str) -> None:

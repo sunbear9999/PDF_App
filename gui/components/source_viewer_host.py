@@ -69,6 +69,9 @@ class SourceViewerHost(QStackedWidget):
     def zoom_in(self):
         return self.pdf_viewer.zoom_in()
 
+    def toggle_reading_mode(self):
+        return self.pdf_viewer.toggle_reading_mode()
+
     def sharpen_focus(self):
         return self.pdf_viewer.sharpen_focus()
 

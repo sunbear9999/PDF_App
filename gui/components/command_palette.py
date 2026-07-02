@@ -114,6 +114,13 @@ class CommandPalette(QDialog):
             ]
         cmds += [
             _cmd("toggle_fullscreen", "Toggle Full Screen", mw.toggle_full_screen, "F11", "View"),
+            _cmd(
+                "toggle_reading_mode",
+                "Toggle Reading Mode",
+                lambda: getattr(getattr(mw, "viewer", None), "toggle_reading_mode", lambda: None)(),
+                "Ctrl+Shift+R",
+                "View",
+            ),
             _cmd("open_prompt_editor", "Open Prompt Editor", mw._open_prompt_editor, category="Tools"),
             _cmd("open_tag_manager", "Open Tag Manager", mw._open_tag_manager, category="Tools"),
         ]

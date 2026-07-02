@@ -12,7 +12,7 @@ from core.engine.step_manager import StepManager
 from core.engine.blueprint_manager import BlueprintManager
 
 from core.engine.registries import build_default_blueprint_registry, build_default_workflow_node_type_registry
-from core.services.workspace_registries import build_default_workspace_ai_tool_registry, build_default_workspace_node_type_registry
+from core.services.workspace.registries import build_default_workspace_ai_tool_registry, build_default_workspace_node_type_registry
 from core.ontology.registry import OntologyRegistry
 
 from core.services.project.embedding_service import EmbeddingService
@@ -33,22 +33,25 @@ from core.services.workspace.workspace_layout_service import WorkspaceLayoutServ
 from core.services.ai.workflow_runner_service import WorkflowRunnerService
 from core.services.ai.research_agent_service import ResearchAgentService
 from core.services.ai.prompt_app_service import PromptAppService
+from core.services.ai.llm_settings_service import LLMSettingsService
 from core.services.ai.tts_app_service import TTSAppService
 from core.plugins.plugin_loader import load_plugins
 from core.plugins.extension_registry import PluginExtensionRegistry
 from core.plugins.pack_contributor import PackContributorRegistry
-from core.services.pack_service import PackService
+from core.services.packs.pack_service import PackService
 from core.registries.data_provider_registry import DataProviderRegistry
 from core.registries.llm_backend_registry import LLMBackendRegistry
 from core.backends.ollama_backend import make_ollama_backend_spec
 from core.backends.llamacpp_backend import make_llamacpp_backend_spec
-from core.services.data_dock_service import DataDockService
-from core.services.video_transcription_service import VideoTranscriptionService
+from core.services.data.data_dock_service import DataDockService
+from core.services.document.video_transcription_service import VideoTranscriptionService
 from core.services.content.deterministic_extractor_service import DeterministicExtractorService
 from core.services.document.source_evaluation_service import SourceEvaluationService
 from core.services.ai.ai_setup_service import AISetupService
-from core.services.media_asset_service import MediaAssetService
-from core.services.pdf_data_selection_service import PdfDataSelectionService
+from core.services.project.media_asset_service import MediaAssetService
+from core.services.data.pdf_data_selection_service import PdfDataSelectionService
+from core.registries.ai_widget_registry import AIWidgetRegistry
+from core.registries.ai_widget_definitions import register_builtin_widgets
 
 def get_resource_path(relative_path):
     if hasattr(sys, '_MEIPASS'):
@@ -75,7 +78,12 @@ class PapyrusCore:
         _assets_prompts = get_resource_path(os.path.join("assets", "prompts"))
         if os.path.isdir(_assets_prompts):
             self.prompt_manager.load_assets_dir(_assets_prompts, category="Asset Prompts")
-        
+
+        # Widget registry — must be initialised after PromptManager so that
+        # register_builtin_widgets() can seed new default prompt entries.
+        self.widget_registry = AIWidgetRegistry.get_instance()
+        register_builtin_widgets(self.widget_registry, self.prompt_manager)
+
         self.dictionary_manager = DictionaryManager(user_data_dir)
         self._ensure_default_dictionary()
         self.citation_manager = CitationManager(self.project_manager)
@@ -116,12 +124,19 @@ class PapyrusCore:
             blueprint_registry=self.blueprint_registry,
             step_manager=self.step_manager,
         )
+        self.llm_settings_service = LLMSettingsService(
+            project_manager=self.project_manager,
+            blueprint_registry=self.blueprint_registry,
+            blueprint_manager=self.blueprint_manager,
+            prompt_manager=self.prompt_manager,
+            node_type_registry=self.workflow_node_type_registry,
+        )
         self.workspace_service = WorkspaceService(self.project_manager, self.bus)
         self.workspace_graph_service = WorkspaceGraphService(self.bus)
         self.workspace_layout_service = WorkspaceLayoutService(self.project_manager, self.llm_manager, self.bus)
         self.ontology_service = OntologyService(self.project_manager, self.bus, self.ontology_registry)
         self.data_dock_service = DataDockService(self.project_manager, self.data_provider_registry, self.bus)
-        from core.services.pdf_grid_extraction_service import PdfGridExtractionService
+        from core.services.data.pdf_grid_extraction_service import PdfGridExtractionService
         self.pdf_grid_extraction_service = PdfGridExtractionService(self.data_provider_registry)
         self.media_asset_service = MediaAssetService(self.project_manager)
         self.pdf_data_selection_service = PdfDataSelectionService(
@@ -149,6 +164,7 @@ class PapyrusCore:
             blueprint_manager=self.blueprint_manager,
             node_type_registry=self.workflow_node_type_registry,
             data_provider_registry=self.data_provider_registry,
+            llm_settings_service=self.llm_settings_service,
             event_bus=self.bus,
         )
         self.research_agent_service = ResearchAgentService(

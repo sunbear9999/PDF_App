@@ -9,6 +9,7 @@ modeless).  Reads from and writes to AppContext.keybinding_registry.
 """
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Dict, Optional
 
 from PySide6.QtCore import Qt, Signal
@@ -17,6 +18,8 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
     QDialogButtonBox,
+    QCheckBox,
+    QDoubleSpinBox,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -28,6 +31,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSplitter,
+    QSpinBox,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -526,6 +530,309 @@ class ShortcutsTab(QWidget):
             self._populate_table(self._current_scope)
 
 
+class LLMControlsTab(QWidget):
+    """Per-blueprint LLM option editor backed by LLMSettingsService."""
+
+    def __init__(self, app_context: "AppContext", theme: dict, parent=None) -> None:
+        super().__init__(parent)
+        self._ctx = app_context
+        self._service = getattr(app_context, "llm_settings_service", None)
+        self._theme = theme
+        self._current_blueprint_id: Optional[str] = None
+        self._row_widgets: Dict[str, dict] = {}
+        self._current_steps: list = []
+        self._input_style = (
+            f"background: {theme.get('bg_input', '#3a3a3a')}; "
+            f"color: {theme.get('text_main', '#fff')}; "
+            f"border: 1px solid {theme.get('border', '#555')}; "
+            "border-radius: 4px; padding: 3px;"
+        )
+        self._button_style = (
+            f"background: {theme.get('bg_input', '#3a3a3a')}; color: {theme.get('text_main', '#fff')}; "
+            f"border: 1px solid {theme.get('border', '#555')}; "
+            "border-radius: 4px; padding: 4px 8px;"
+        )
+        self._build_ui()
+        self._populate_blueprints()
+
+    def _build_ui(self) -> None:
+        t = self._theme
+        bg = t.get("bg_main", "#1e1e1e")
+        bg_panel = t.get("bg_panel", "#2b2b2b")
+        bg_input = t.get("bg_input", "#3a3a3a")
+        fg = t.get("text_main", "#fff")
+        muted = t.get("text_muted", "#999")
+        border = t.get("border", "#555")
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setStyleSheet(f"QSplitter::handle {{ background: {border}; width: 1px; }}")
+
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(8, 8, 8, 8)
+        left_title = QLabel("Registered Blueprints")
+        left_title.setStyleSheet(f"color: {fg}; font-weight: 700; padding: 0 2px 4px 2px;")
+        left_layout.addWidget(left_title)
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Filter by blueprint name or id...")
+        self._search.textChanged.connect(self._populate_blueprints)
+        self._search.setStyleSheet(f"background: {bg_input}; color: {fg}; border: 1px solid {border}; border-radius: 4px; padding: 5px;")
+        left_layout.addWidget(self._search)
+        self._blueprint_list = QListWidget()
+        self._blueprint_list.currentRowChanged.connect(self._on_blueprint_selected)
+        self._blueprint_list.setUniformItemSizes(False)
+        self._blueprint_list.setStyleSheet(
+            f"QListWidget {{ background: {bg_panel}; color: {fg}; border: 1px solid {border}; border-radius: 4px; }}"
+            f"QListWidget::item {{ padding: 8px 7px; border-bottom: 1px solid {border}; }}"
+            f"QListWidget::item:selected {{ background: {bg_input}; color: {fg}; }}"
+        )
+        left_layout.addWidget(self._blueprint_list)
+        splitter.addWidget(left)
+
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        self._title = QLabel("Select a blueprint")
+        self._title.setStyleSheet(f"color: {fg}; font-weight: 700; padding: 10px 12px 2px 12px; background: {bg};")
+        right_layout.addWidget(self._title)
+        self._step_hint = QLabel("Choose a blueprint to edit per-step LLM defaults.")
+        self._step_hint.setWordWrap(True)
+        self._step_hint.setStyleSheet(f"color: {muted}; padding: 0 12px 8px 12px; background: {bg};")
+        right_layout.addWidget(self._step_hint)
+        self._table = QTableWidget()
+        self._table.setColumnCount(7)
+        self._table.setHorizontalHeaderLabels(["Step", "Temp", "Predict", "Ctx", "JSON", "Stops", "Reset"])
+        self._table.verticalHeader().hide()
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.setAlternatingRowColors(False)
+        self._table.setStyleSheet(
+            f"QTableWidget {{ background: {bg}; color: {fg}; border: none; gridline-color: {border}; }}"
+            f"QTableWidget::item {{ color: {fg}; padding: 4px; }}"
+            f"QHeaderView::section {{ background: {bg_panel}; color: {muted}; border: none; padding: 6px; }}"
+        )
+        hdr = self._table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for col in range(1, 7):
+            hdr.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+        right_layout.addWidget(self._table)
+        splitter.addWidget(right)
+        splitter.setSizes([260, 700])
+        outer.addWidget(splitter)
+
+    def _populate_blueprints(self) -> None:
+        self._blueprint_list.blockSignals(True)
+        current = self._current_blueprint_id
+        self._blueprint_list.clear()
+        if not self._service:
+            unavailable = QListWidgetItem("LLM settings service unavailable")
+            unavailable.setFlags(Qt.ItemFlag.NoItemFlags)
+            self._blueprint_list.addItem(unavailable)
+            self._blueprint_list.blockSignals(False)
+            return
+        needle = self._search.text().strip().lower() if hasattr(self, "_search") else ""
+        selected_row = -1
+        for item in self._service.list_blueprints(include_empty=True):
+            label_text = str(item.get("label") or item.get("id") or "")
+            bp_id = str(item.get("id") or "")
+            if needle and needle not in label_text.lower() and needle not in bp_id.lower():
+                continue
+            row = self._blueprint_list.count()
+            count = int(item.get("step_count") or 0)
+            step_label = f"{count} LLM step" if count == 1 else f"{count} LLM steps"
+            label = f"{label_text}\n{bp_id} • {step_label}"
+            widget_item = QListWidgetItem(label)
+            widget_item.setToolTip(f"{label_text}\nBlueprint id: {bp_id}\n{step_label}")
+            widget_item.setData(Qt.ItemDataRole.UserRole, item)
+            self._blueprint_list.addItem(widget_item)
+            if bp_id == current:
+                selected_row = row
+        self._blueprint_list.blockSignals(False)
+        if self._blueprint_list.count():
+            if selected_row < 0:
+                selected_row = 0
+            self._blueprint_list.setCurrentRow(selected_row)
+        else:
+            self._current_blueprint_id = None
+            self._title.setText("No matching blueprints")
+            self._step_hint.setText("Clear the filter to browse registered blueprints.")
+            self._populate_steps([])
+
+    def _on_blueprint_selected(self, row: int) -> None:
+        item = self._blueprint_list.item(row)
+        if not item or not self._service:
+            return
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(data, dict):
+            return
+        self._current_blueprint_id = data.get("id")
+        steps = self._service.list_blueprint_steps(self._current_blueprint_id)
+        count = len(steps)
+        self._title.setText(data.get("label") or self._current_blueprint_id or "Blueprint")
+        if count:
+            suffix = "step" if count == 1 else "steps"
+            self._step_hint.setText(f"{count} configurable LLM_QUERY {suffix}. Overrides are saved per project and applied at runtime.")
+        else:
+            self._step_hint.setText("This registered blueprint does not contain any configurable LLM_QUERY steps.")
+        self._populate_steps(steps)
+
+    def _populate_steps(self, steps: list) -> None:
+        self._row_widgets.clear()
+        self._current_steps = list(steps or [])
+        self._table.setRowCount(0)
+        self._table.setVisible(bool(steps))
+        for step in steps:
+            row = self._table.rowCount()
+            self._table.insertRow(row)
+            self._table.setRowHeight(row, 42)
+            default = step.get("defaults", {})
+            effective = step.get("effective", {})
+            step_path = step["step_path"]
+
+            overridden = bool(step.get("overrides"))
+            label = QTableWidgetItem(f"{step['step_id']}{' *' if overridden else ''}\n{step_path}")
+            label.setToolTip(f"Defaults: {json.dumps(default, sort_keys=True)}")
+            label.setForeground(QColor(self._theme.get("text_main", "#fff")))
+            self._table.setItem(row, 0, label)
+
+            temp = QDoubleSpinBox()
+            temp.setRange(0.0, 2.0)
+            temp.setSingleStep(0.05)
+            temp.setDecimals(2)
+            temp.setValue(self._float(effective.get("temperature"), 0.7))
+            temp.setStyleSheet(self._input_style)
+            self._table.setCellWidget(row, 1, temp)
+
+            predict = QSpinBox()
+            predict.setRange(1, 200000)
+            predict.setValue(self._int(effective.get("num_predict"), 2048))
+            predict.setStyleSheet(self._input_style)
+            self._table.setCellWidget(row, 2, predict)
+
+            ctx = QSpinBox()
+            ctx.setRange(512, 262144)
+            ctx.setSingleStep(1024)
+            ctx.setValue(self._int(effective.get("num_ctx"), 16384))
+            ctx.setStyleSheet(self._input_style)
+            self._table.setCellWidget(row, 3, ctx)
+
+            json_mode = QCheckBox()
+            json_mode.setChecked(self._bool(effective.get("json_mode", False)))
+            json_mode.setStyleSheet(f"color: {self._theme.get('text_main', '#fff')};")
+            self._table.setCellWidget(row, 4, json_mode)
+
+            stops = QLineEdit()
+            raw_stops = effective.get("stop_sequences", "")
+            stops.setText("\n".join(raw_stops) if isinstance(raw_stops, list) else str(raw_stops or ""))
+            stops.setPlaceholderText("one stop per line")
+            stops.setStyleSheet(self._input_style)
+            self._table.setCellWidget(row, 5, stops)
+
+            reset = QPushButton("Reset")
+            reset.clicked.connect(lambda checked=False, path=step_path: self._reset_step(path))
+            reset.setStyleSheet(self._button_style)
+            self._table.setCellWidget(row, 6, reset)
+
+            self._row_widgets[step_path] = {
+                "temperature": temp,
+                "num_predict": predict,
+                "num_ctx": ctx,
+                "json_mode": json_mode,
+                "stop_sequences": stops,
+                "_defaults": default,
+            }
+
+    def apply_changes(self) -> None:
+        if not self._service or not self._current_blueprint_id:
+            return
+        for step_path, widgets in self._row_widgets.items():
+            stops_text = widgets["stop_sequences"].text().strip()
+            values = {
+                "temperature": widgets["temperature"].value(),
+                "num_predict": widgets["num_predict"].value(),
+                "num_ctx": widgets["num_ctx"].value(),
+                "json_mode": widgets["json_mode"].isChecked(),
+            }
+            if stops_text:
+                values["stop_sequences"] = [line.strip() for line in stops_text.splitlines() if line.strip()]
+            overrides = {}
+            defaults = widgets.get("_defaults", {})
+            for key, value in values.items():
+                default_value = defaults.get(key)
+                if key in {"num_predict", "num_ctx"}:
+                    same = self._int(default_value, None) == int(value)
+                elif key == "temperature":
+                    same = abs(self._float(default_value, -999.0) - float(value)) < 0.0001
+                elif key == "json_mode":
+                    same = self._bool(default_value) == bool(value)
+                else:
+                    same = default_value == value
+                if not same:
+                    overrides[key] = value
+            self._service.set_step_overrides(self._current_blueprint_id, step_path, overrides)
+        self._on_blueprint_selected(self._blueprint_list.currentRow())
+
+    def _reset_step(self, step_path: str) -> None:
+        if self._service and self._current_blueprint_id:
+            self._service.reset_step_overrides(self._current_blueprint_id, step_path)
+            self._on_blueprint_selected(self._blueprint_list.currentRow())
+
+    @staticmethod
+    def _int(value, default) -> int:
+        try:
+            return int(value)
+        except Exception:
+            return default
+
+    @staticmethod
+    def _float(value, default: float) -> float:
+        try:
+            return float(value)
+        except Exception:
+            return default
+
+    @staticmethod
+    def _bool(value) -> bool:
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+class ComingSoonSettingsTab(QWidget):
+    """Inert placeholder for work-in-progress settings areas."""
+
+    def __init__(self, title: str, message: str, theme: dict, parent=None) -> None:
+        super().__init__(parent)
+        self._theme = theme or {}
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 28, 28, 28)
+        layout.setSpacing(10)
+        layout.addStretch()
+
+        title_lbl = QLabel(title)
+        title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title_lbl.setStyleSheet(
+            f"color: {self._theme.get('text_muted', '#999')}; "
+            "font-size: 20px; font-weight: 700;"
+        )
+        layout.addWidget(title_lbl)
+
+        body = QLabel(message)
+        body.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        body.setWordWrap(True)
+        body.setStyleSheet(
+            f"color: {self._theme.get('text_muted', '#999')}; "
+            "font-size: 13px; padding: 0 48px;"
+        )
+        layout.addWidget(body)
+        layout.addStretch()
+
+    def apply_changes(self) -> None:
+        return
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # GlobalSettingsDialog
 # ──────────────────────────────────────────────────────────────────────────────
@@ -608,10 +915,17 @@ class GlobalSettingsDialog(BaseDialog):
         self._ai_setup_tab = AISetupSettingsTab(self._app_context, t, parent=self)
         self.tabs.addTab(self._ai_setup_tab, "🤖  AI Setup")
 
-        # The local web companion is isolated under web/; this is its only GUI hook.
-        from web.settings_tab import WebAppSettingsTab
-        self._web_app_tab = WebAppSettingsTab(self._app_context, t, parent=self)
+        self._web_app_tab = ComingSoonSettingsTab(
+            "Web App",
+            "Coming soon. The web companion is disabled while this feature is still in progress.",
+            t,
+            parent=self,
+        )
         self.tabs.addTab(self._web_app_tab, "📱  Web App")
+        self.tabs.setTabToolTip(self.tabs.indexOf(self._web_app_tab), "Coming soon")
+
+        self._llm_controls_tab = LLMControlsTab(self._app_context, t, parent=self)
+        self.tabs.addTab(self._llm_controls_tab, "🧠  LLM Controls")
 
         self.tabs.addTab(self._shortcuts_tab, "⌨️  Shortcuts")
 

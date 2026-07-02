@@ -26,8 +26,9 @@ from core.events.domains.discovery_events import (
     DiscoveryIntent,
     DiscoveryPayload,
 )
+from core.events.domains.workspace_events import WorkspaceIntent, WorkspacePayload
 from core.models.ontology_model import EntityModel, EntityType, RelationModel, RelationType
-from core.services.content.deterministic_extractor import (
+from core.extraction.deterministic import (
     DeterministicExtractorRegistry,
     ExtractedEntityGroup,
     ExtractedMention,
@@ -120,6 +121,157 @@ class _ExtractionWorker(QThread):
             self.error.emit(str(exc))
 
 
+def _is_separator_hit(page, rect) -> bool:
+    """Return True if the hit rect sits inside a decorative graphic rule or text separator.
+
+    Two checks only (no "citation fragment" check — the worker must not miss
+    bare years or short values that happen to have no letter-words on their line):
+    1. Hairline height (<2 PDF points) — graphic rule.
+    2. Full-width band dominated by non-alphanumeric chars (dashes, box-drawing, etc.).
+    """
+    import fitz
+    if rect.height < 2.0:
+        return True
+    page_w = page.rect.width
+    band = fitz.Rect(0, rect.y0 - 1, page_w, rect.y1 + 1)
+    line_text = page.get_text("text", clip=band).strip()
+    if not line_text:
+        return False
+    alnum = sum(c.isalnum() for c in line_text)
+    return alnum / len(line_text) < 0.20
+
+
+def _extract_sentence(text: str, term: str) -> str:
+    """Return the sentence within *text* that contains *term* (case-insensitive).
+
+    Falls back to the first 300 chars of *text* if no sentence boundary match is found.
+    """
+    if not text or not term:
+        return text[:300] if text else ""
+    term_lower = term.lower()
+    # Split on common sentence-ending punctuation followed by whitespace or end-of-string.
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    for s in sentences:
+        if term_lower in s.lower():
+            return s.strip()[:300]
+    return text[:300]
+
+
+def _normalize_search_term(raw: str) -> str:
+    """Normalise an entity's canonical text into a search-friendly string.
+
+    Removes trailing parentheticals, normalises dashes and whitespace so the
+    string more closely matches verbatim PDF text.
+    """
+    term = re.sub(r'\s+', ' ', raw).strip()
+    # Drop trailing parentheticals: "Smith, J. (b. 1942)" → "Smith, J."
+    term = re.sub(r'\s*\([^)]{0,60}\)\s*$', '', term).strip()
+    # Normalise en/em dashes to ASCII hyphen (PDFs vary in dash encoding)
+    term = term.replace('–', '-').replace('—', '-')
+    return term
+
+
+class _RefsWorker(QThread):
+    """Scans all project PDFs for mentions of an entity name off the main thread.
+
+    Opens each PDF independently with fitz.open() instead of using the shared
+    pm.get_doc() cache — that cache is not thread-safe and the Document objects
+    it holds are being used by the main thread for rendering.
+    """
+    finished = Signal(str, str, list)   # entity_name, entity_type, references
+
+    def __init__(self, entity_name: str, entity_type: str, pm):
+        super().__init__()
+        self._entity_name = entity_name
+        self._entity_type = entity_type
+        self._pm = pm
+
+    def run(self):
+        import fitz
+        refs_by_doc: Dict[str, Dict] = {}
+
+        # Resolve PDF paths — prefer list_sources() (database-backed, handles removed docs)
+        # over pm.pdfs (flat list that may be stale).
+        pdf_paths: List[str] = []
+        try:
+            sources = self._pm.list_sources(source_type="pdf")
+            pdf_paths = [s["path"] for s in sources if s.get("path")]
+        except Exception:
+            pdf_paths = list(getattr(self._pm, "pdfs", []) or [])
+
+        search_term = _normalize_search_term(self._entity_name)
+        if not search_term:
+            self.finished.emit(self._entity_name, self._entity_type, [])
+            return
+
+        for pdf_path in pdf_paths:
+            if not os.path.isfile(pdf_path):
+                continue
+            doc_name = os.path.basename(pdf_path)
+            mention_count = 0
+            contexts: List[str] = []
+            occurrences: List[Dict] = []
+            try:
+                # Open a private copy — never touch the shared main-thread cache
+                with fitz.open(pdf_path) as doc:
+                    for page_num in range(len(doc)):
+                        try:
+                            page = doc.load_page(page_num)
+                            hits = page.search_for(search_term, quads=False)
+                            for rect in hits:
+                                if _is_separator_hit(page, rect):
+                                    continue
+                                mention_count += 1
+                                # Sentence-level context: full-width band, 60 pts above/below
+                                clip = fitz.Rect(0, rect.y0 - 60, page.rect.width, rect.y1 + 60)
+                                raw = page.get_text("text", clip=clip).strip()
+                                ctx = _extract_sentence(raw, search_term)
+                                occurrences.append({"page_num": page_num, "context": ctx})
+                                if len(contexts) < 3:
+                                    contexts.append(ctx[:200])
+                        except Exception:
+                            continue
+            except Exception:
+                continue
+
+            if mention_count > 0:
+                refs_by_doc[pdf_path] = {
+                    "doc_path": pdf_path,
+                    "doc_name": doc_name,
+                    "mention_count": mention_count,
+                    "contexts": contexts,
+                    "occurrences": occurrences,
+                }
+
+        # Enrich with context snippets from previously saved entities (no DB writes here)
+        db = getattr(self._pm, "db_graph", None)
+        if db and self._entity_type:
+            norm = self._entity_name.lower().strip()
+            try:
+                for entity in db.get_entities_by_type(self._entity_type):
+                    stored = (
+                        entity.properties.get("name")
+                        or entity.properties.get("text")
+                        or entity.properties.get("title")
+                        or ""
+                    ).lower()
+                    if not stored or SequenceMatcher(None, norm, stored).ratio() < 0.75:
+                        continue
+                    for ref in entity.properties.get("source_refs", []):
+                        path = ref.get("pdf_path") or ref.get("doc_path", "")
+                        if not path or path not in refs_by_doc:
+                            continue
+                        entry = refs_by_doc[path]
+                        ctx = ref.get("context", "")
+                        if ctx and ctx not in entry["contexts"] and len(entry["contexts"]) < 5:
+                            entry["contexts"].append(ctx)
+            except Exception:
+                pass
+
+        references = sorted(refs_by_doc.values(), key=lambda r: -r["mention_count"])
+        self.finished.emit(self._entity_name, self._entity_type, references)
+
+
 class DeterministicExtractorService(QObject):
     def __init__(self, project_manager):
         super().__init__()
@@ -128,6 +280,7 @@ class DeterministicExtractorService(QObject):
         self._last_results: List[ExtractedEntityGroup] = []
         self._last_source_path: str = ""
         self._worker: Optional[_ExtractionWorker] = None
+        self._refs_worker: Optional[_RefsWorker] = None
 
         self._bus.discovery_action_requested.connect(self._handle_intent)
         self._bus.document_added.connect(self._on_document_added)
@@ -180,6 +333,8 @@ class DeterministicExtractorService(QObject):
                 self._save_group(payload.entity_groups[0], payload.source_path)
         elif intent == DiscoveryIntent.SAVE_ALL:
             self._save_all(payload.source_path or self._last_source_path)
+        elif intent == DiscoveryIntent.FIND_REFERENCES:
+            self._find_references(payload)
 
     # ------------------------------------------------------------------
     # Extraction
@@ -226,6 +381,29 @@ class DeterministicExtractorService(QObject):
     # Saving
     # ------------------------------------------------------------------
 
+    def _find_references(self, payload: DiscoveryPayload) -> None:
+        """Launch background scan of all project PDFs for mentions of the entity."""
+        entity_name = payload.entity_name
+        entity_type = payload.entity_type or ""
+        if not entity_name:
+            return
+        if self._refs_worker and self._refs_worker.isRunning():
+            self._refs_worker.quit()
+            self._refs_worker.wait(500)
+        self._refs_worker = _RefsWorker(entity_name, entity_type, self._pm)
+        self._refs_worker.finished.connect(self._on_refs_done)
+        self._refs_worker.start()
+
+    def _on_refs_done(self, entity_name: str, entity_type: str, references: List[Dict]) -> None:
+        self._bus.discovery_state_changed.emit(
+            DiscoveryEvent.REFERENCES_FOUND,
+            DiscoveryEventPayload(
+                entity_name=entity_name,
+                entity_type=entity_type,
+                references=references,
+            ),
+        )
+
     def _save_all(self, source_path: str):
         saved_ids: List[str] = []
         for group in self._last_results:
@@ -243,13 +421,35 @@ class DeterministicExtractorService(QObject):
             return None
 
         if group.entity_type == EntityType.SOURCE.value:
-            return self._save_citation(group, source_path, db)
+            entity_id = self._save_citation(group, source_path, db)
         elif group.entity_type == EntityType.PERSON_ORG.value:
-            return self._save_person_org(group, source_path, db)
+            entity_id = self._save_person_org(group, source_path, db)
         elif group.entity_type == EntityType.TIMELINE_EVENT.value:
-            return self._save_timeline_event(group, source_path, db)
+            entity_id = self._save_timeline_event(group, source_path, db)
         else:
-            return self._save_generic(group, source_path, db)
+            entity_id = self._save_generic(group, source_path, db)
+
+        if entity_id:
+            self._dispatch_to_workspace(entity_id, group)
+        return entity_id
+
+    def _dispatch_to_workspace(self, entity_id: str, group: ExtractedEntityGroup) -> None:
+        """After saving an entity to the graph DB, add a corresponding node to the workspace canvas."""
+        text = (
+            group.extra_properties.get("name")
+            or group.extra_properties.get("title")
+            or group.canonical_text
+        )
+        entity_dict = {
+            "id": entity_id,
+            "type": group.entity_type,
+            "text": text,
+            **group.extra_properties,
+        }
+        self._bus.workspace_action_requested.emit(
+            WorkspaceIntent.IMPORT_GRAPH,
+            WorkspacePayload(extra={"graph": {"entities": [entity_dict], "relations": []}}),
+        )
 
     # ---------- Citation saving ----------
 
@@ -357,6 +557,25 @@ class DeterministicExtractorService(QObject):
         db._conn.commit()
         return cited_entity.id
 
+    # ---------- Shared helpers ----------
+
+    def _make_source_ref(self, source_path: str, group: ExtractedEntityGroup) -> Dict:
+        """Build a single source_ref dict from the current extraction context."""
+        first_mention = group.mentions[0] if group.mentions else None
+        return {
+            "pdf_path": source_path,
+            "page_num": first_mention.page_num if first_mention else 0,
+            "doc_name": os.path.basename(source_path) if source_path else "",
+            "context": first_mention.context if first_mention else "",
+        }
+
+    def _merge_source_refs(self, entity: EntityModel, source_path: str, group: ExtractedEntityGroup) -> None:
+        """Add a new source_ref to an existing entity's source_refs list if not already present."""
+        refs = entity.properties.setdefault("source_refs", [])
+        existing_paths = {r.get("pdf_path", "") for r in refs}
+        if source_path and source_path not in existing_paths:
+            refs.append(self._make_source_ref(source_path, group))
+
     # ---------- Person/Org saving ----------
 
     def _find_matching_person(self, canonical: str, db) -> Optional[EntityModel]:
@@ -372,11 +591,11 @@ class DeterministicExtractorService(QObject):
         existing = self._find_matching_person(group.canonical_text, db)
         if existing:
             entity = existing
-            # Merge new context sentences into existing properties
             existing_contexts = existing.properties.get("contexts", [])
             new_contexts = [m.context for m in group.mentions]
             merged = list(dict.fromkeys(existing_contexts + new_contexts))[:20]
             entity.properties["contexts"] = merged
+            self._merge_source_refs(entity, source_path, group)
         else:
             entity = EntityModel(
                 id=str(uuid.uuid4()),
@@ -389,6 +608,7 @@ class DeterministicExtractorService(QObject):
                     "description": group.extra_properties.get("description", ""),
                     "contexts": [m.context for m in group.mentions][:10],
                     "mention_count": len(group.mentions),
+                    "source_refs": [self._make_source_ref(source_path, group)],
                 },
                 state={"is_verified": True, "ai_generated": False, "origin": "deterministic"},
             )
@@ -409,6 +629,7 @@ class DeterministicExtractorService(QObject):
             existing_contexts = entity.properties.get("contexts", [])
             new_contexts = [m.context for m in group.mentions]
             entity.properties["contexts"] = list(dict.fromkeys(existing_contexts + new_contexts))[:20]
+            self._merge_source_refs(entity, source_path, group)
         else:
             entity = EntityModel(
                 id=str(uuid.uuid4()),
@@ -420,6 +641,7 @@ class DeterministicExtractorService(QObject):
                     "certainty": group.extra_properties.get("certainty", "confirmed"),
                     "description": group.extra_properties.get("description", ""),
                     "contexts": [m.context for m in group.mentions][:10],
+                    "source_refs": [self._make_source_ref(source_path, group)],
                 },
                 state={"is_verified": True, "ai_generated": False, "origin": "deterministic"},
             )
@@ -436,6 +658,7 @@ class DeterministicExtractorService(QObject):
             properties={
                 "text": group.canonical_text,
                 "contexts": [m.context for m in group.mentions][:10],
+                "source_refs": [self._make_source_ref(source_path, group)],
                 **group.extra_properties,
             },
             state={"is_verified": True, "ai_generated": False, "origin": "deterministic"},

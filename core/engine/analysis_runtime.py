@@ -39,6 +39,8 @@ class AnalysisRuntime:
             "chunk_num_predict": int(raw.get("chunk_num_predict", template.get("chunk_num_predict", 1600)) or 1600),
             "synthesis_num_predict": int(raw.get("synthesis_num_predict", template.get("synthesis_num_predict", 5000)) or 5000),
             "master_num_predict": int(raw.get("master_num_predict", template.get("master_num_predict", 7000)) or 7000),
+            "section_num_predict": int(raw.get("section_num_predict", template.get("section_num_predict", 2200)) or 2200),
+            "section_num_ctx": int(raw.get("section_num_ctx", template.get("section_num_ctx", 16384)) or 16384),
             "max_entities_per_chunk": int(raw.get("max_entities_per_chunk", template.get("max_entities_per_chunk", 6)) or 6),
             "max_relations_per_chunk": int(raw.get("max_relations_per_chunk", template.get("max_relations_per_chunk", 10)) or 10),
             "evidence_num_predict": int(raw.get("evidence_num_predict", template.get("evidence_num_predict", 800)) or 800),

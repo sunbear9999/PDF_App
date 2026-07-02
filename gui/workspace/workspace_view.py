@@ -9,9 +9,9 @@ from PySide6.QtWidgets import (QGraphicsView, QGraphicsScene, QMessageBox,
                              QWidget,
                              QColorDialog, QFileDialog, QCheckBox, QSlider,
                              QSizePolicy,QApplication, QFormLayout, QLineEdit,
-                             QDoubleSpinBox, QSpinBox, QDialogButtonBox)
+                             QDoubleSpinBox, QSpinBox, QDialogButtonBox, QMenu)
 from PySide6.QtCore import QPointF, Qt, QRectF, QRunnable, QThreadPool, Slot, QTimer
-from PySide6.QtGui import QColor, QPen, QBrush, QFont, QPainter, QImage, QShortcut, QKeySequence
+from PySide6.QtGui import QColor, QCursor, QPen, QBrush, QFont, QPainter, QImage, QShortcut, QKeySequence
 
 from gui.workspace.workspace_items import Node, Edge
 from core.utils.workspace_utils import (
@@ -37,9 +37,9 @@ from gui.components.dialogs.tag_relatives_dialog import AIResultsDialog
 
 # --- NEW IMPORTS ---
 from core.models.workspace_models import WorkspaceModel
-from gui.workspace.workspace_widgets import GhostLineItem, CheckableComboBox, UnusedHighlightsDialog
+from gui.workspace.workspace_widgets import GhostLineItem, CheckableComboBox, UnusedHighlightsDialog, EntityRefsDialog
 from core.events.event_bus import EventBus
-from core.events.domains.document_events import DocumentEvent, DocumentEventPayload
+from core.events.domains.document_events import DocumentEvent, DocumentEventPayload, DocumentIntent, DocumentPayload
 from core.events.domains.project_events import ProjectEvent, ProjectEventPayload
 from core.events.domains.workspace_events import WorkspaceEvent, WorkspaceEventPayload, WorkspaceIntent, WorkspacePayload
 from core.events.domains.ontology_events import OntologyEvent, OntologyEventPayload
@@ -50,13 +50,11 @@ from core.registries import (
     build_default_workspace_ai_tool_registry,
     build_default_workspace_node_type_registry,
 )
-from core.services.workspace_services import (
-    WorkspaceGraphService,
-    WorkspaceLayoutService,
-    WorkspaceService,
-    WorkspaceStateService,
-)
-from core.services.graph_analysis_service import GraphAnalysisService
+from core.services.workspace.workspace_graph_service import WorkspaceGraphService
+from core.services.workspace.workspace_layout_service import WorkspaceLayoutService
+from core.services.workspace.workspace_service import WorkspaceService
+from core.services.workspace.workspace_state_service import WorkspaceStateService
+from core.services.knowledge.graph_analysis_service import GraphAnalysisService
 
 
 
@@ -473,6 +471,11 @@ class WorkspaceView(QGraphicsView):
             if node:
                 self._jump_to_node_source(node)
 
+        elif intent_name == WorkspaceIntent.SHOW_SOURCE_REFS:
+            node = self.nodes.get(payload.get("node_id"))
+            if node:
+                self._show_source_refs_menu(node)
+
         elif intent_name == WorkspaceIntent.NODE_CITATION_COPY:
             node = self.nodes.get(payload.get("node_id"))
             if node:
@@ -880,9 +883,8 @@ class WorkspaceView(QGraphicsView):
         if not node:
             return
         ai_generated = (
-            bool(getattr(node, "entity_state", {}).get("ai_generated"))
+            bool(getattr(node, "entity_state", {}).get("ai_generated", False))
             or getattr(node, "node_origin", "") == "ai"
-            or str(getattr(node, "highlight_id", "") or getattr(node, "node_id", "")).startswith("AINote")
         )
         if not ai_generated:
             return
@@ -968,6 +970,69 @@ class WorkspaceView(QGraphicsView):
             return
         self.save_workspace_state()
         QTimer.singleShot(0, lambda: self.workspace_annotation_service.jump_to_node_source(node))
+
+    def _show_source_refs_menu(self, node):
+        """Find all project-wide mentions of this node's entity text, then show a jump menu.
+
+        Runs a live PyMuPDF scan (same as the Discovery 'Find Other References' button) so
+        documents that were never explicitly saved still appear.
+        """
+        if not node:
+            return
+        entity_name = (
+            node.entity_properties.get("name")
+            or node.entity_properties.get("text")
+            or node.entity_properties.get("exact_text")
+            or node.quote
+            or node.note
+            or ""
+        ).strip()
+        if not entity_name:
+            return
+
+        from core.services.content.deterministic_extractor_service import _RefsWorker
+        pm = getattr(self._ctx, "project_manager", None)
+        if not pm:
+            return
+
+        worker = _RefsWorker(entity_name, node.entity_type or "", pm)
+        self._pending_refs_workers = getattr(self, "_pending_refs_workers", [])
+        self._pending_refs_workers.append(worker)
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+
+        def _on_done(name, etype, references, _w=worker, _node=node, _nid=node.node_id):
+            self._pending_refs_workers = [w for w in getattr(self, "_pending_refs_workers", []) if w is not _w]
+            QApplication.restoreOverrideCursor()
+            # Update the badge with the live occurrence count so "?" becomes a real number
+            total_occs = sum(
+                len(r.get("occurrences") or r.get("contexts", []))
+                for r in references
+            )
+            if hasattr(_node, "entity_properties"):
+                _node.entity_properties["_live_source_count"] = total_occs
+                _node.update()
+            self._show_refs_result_dialog(name, _nid, references)
+
+        worker.finished.connect(_on_done)
+        worker.start()
+
+    def _show_refs_result_dialog(self, entity_name: str, entity_node_id: str, references: list):
+        """Show a non-modal paginated dialog of every project-wide occurrence of the entity.
+
+        Non-modal so the user can click 'Open' to jump to a PDF page while keeping
+        the dialog open for further browsing.
+        """
+        theme = self._theme().get_theme() if self._theme() else None
+        dialog = EntityRefsDialog(entity_name, entity_node_id, references, self.bus, parent=self)
+        if theme:
+            dialog.apply_theme(theme)
+        # Keep a reference so the dialog isn't garbage-collected when this method returns.
+        self._active_refs_dialog = dialog
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def _copy_node_citation(self, node):
         if not node:
@@ -1519,6 +1584,7 @@ class WorkspaceView(QGraphicsView):
         self.update_ghost_connections()
 
     def open_unused_highlights_dialog(self):
+        from core.models.ontology_model import EntityType
         pm = self._pm()
         if not pm: return
         all_highlights = self.workspace_annotation_service.get_annotation_index()
@@ -1531,18 +1597,48 @@ class WorkspaceView(QGraphicsView):
             if highlight_id not in workspace_node_ids
         ]
 
-        if not unused_highlights:
-            QMessageBox.information(self, "Unused Highlights", "No unused highlights found.")
+        # Collect entities that the user explicitly saved from the discovery panel
+        # (origin == "deterministic") that aren't currently on this workspace canvas.
+        saved_entities = []
+        db = getattr(pm, "db_graph", None)
+        if db:
+            _skip_types = {EntityType.QUOTE.value, EntityType.EVIDENCE.value}
+            for et in EntityType:
+                if et.value in _skip_types:
+                    continue
+                for entity in db.get_entities_by_type(et.value):
+                    # Only show entities the user explicitly saved (not AI-workflow byproducts)
+                    if entity.state.get("origin") != "deterministic":
+                        continue
+                    # Skip bare PDF document source entities (no citation_key)
+                    if (et == EntityType.SOURCE
+                            and entity.properties.get("path")
+                            and not entity.properties.get("citation_key")):
+                        continue
+                    label = (
+                        entity.properties.get("name")
+                        or entity.properties.get("title")
+                        or entity.properties.get("text")
+                        or ""
+                    ).strip()
+                    if label and entity.id not in workspace_node_ids:
+                        saved_entities.append(entity)
+
+        if not unused_highlights and not saved_entities:
+            QMessageBox.information(self, "Inbox", "Nothing to add — all highlights and saved entities are already on this workspace.")
             return
 
-        dialog = UnusedHighlightsDialog(unused_highlights, self)
+        dialog = UnusedHighlightsDialog(unused_highlights, saved_entities, self)
         theme = self._theme().get_theme() if self._theme() else None
         if theme:
             style_dialog_with_theme(dialog, theme)
 
         if exec_as_modal(dialog) != QDialog.DialogCode.Accepted: return
+
+        # --- Add selected highlights ---
         highlight_ids = dialog.get_selected_highlight_ids()
-        if not highlight_ids: return
+        entity_dicts = dialog.get_selected_entity_dicts()
+        if not highlight_ids and not entity_dicts: return
 
         self.save_state_for_undo()
         view_center = self.mapToScene(self.viewport().rect().center())
@@ -1566,6 +1662,13 @@ class WorkspaceView(QGraphicsView):
             if node:
                 last_node = node
                 offset += 120
+
+        # --- Add selected saved entities via IMPORT_GRAPH ---
+        for entity_dict in entity_dicts:
+            self.bus.workspace_action_requested.emit(
+                WorkspaceIntent.IMPORT_GRAPH,
+                WorkspacePayload(extra={"graph": {"entities": [entity_dict], "relations": []}}),
+            )
 
         self.scene_obj.clearSelection()
         if last_node: last_node.setSelected(True)

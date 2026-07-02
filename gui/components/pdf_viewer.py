@@ -9,7 +9,9 @@ from PySide6.QtCore import QPointF, QPoint
 from PySide6.QtCore import QEvent
 
 from gui.components.annotation_manager import AnnotationManager
+from gui.components.reading_mode_widget import ReadingModeWidget
 from gui.components.search_bar_widget import SearchBarWidget
+from core.reading_mode import ReadingModeController
 from core.events.event_bus import EventBus
 from core.events.domains.document_events import AnnotationIntent, AnnotationPayload, DocumentEvent, DocumentEventPayload, DocumentIntent, DocumentPayload
 from core.events.domains.project_events import ProjectEvent, ProjectEventPayload
@@ -106,9 +108,10 @@ class PDFViewer(QGraphicsView):
 
         self.pending_jump = None
 
-        self.search_bar = SearchBarWidget(self)
+        self.search_bar = SearchBarWidget(self.viewport())
         self.search_bar.hide()
-        self.search_hits = []
+        self.search_hits = []           # flat list of individual quads (for highlighting)
+        self.search_phrase_hits = []    # grouped list of {pdf, page, quads} (for navigation/count)
         self.current_hit_index = -1
         self.search_highlight_items = []
         self.pending_search_jump = None
@@ -184,9 +187,40 @@ class PDFViewer(QGraphicsView):
         self.data_select_btn.toggled.connect(self._set_data_select_mode)
         toolbar_layout.addWidget(self.data_select_btn)
 
+        self.reading_mode_btn = QPushButton("Reading Mode", self.viewer_toolbar)
+        self.reading_mode_btn.setCheckable(True)
+        self.reading_mode_btn.setToolTip("Read this PDF one word at a time")
+        self.reading_mode_btn.setStyleSheet("""
+            background: #3b4a6b;
+            color: white;
+            border-radius: 4px;
+            padding: 2px 8px;
+        """)
+        self.reading_mode_btn.clicked.connect(self.toggle_reading_mode)
+        toolbar_layout.addWidget(self.reading_mode_btn)
 
         self.viewer_toolbar.setLayout(toolbar_layout)
         self.viewer_toolbar.setVisible(True)
+        self.reading_controller = ReadingModeController(app_context=app_context, parent=self)
+        self.reading_widget = ReadingModeWidget(self.viewport())
+        self.reading_widget.hide()
+        self.reading_widget.exit_requested.connect(self.exit_reading_mode)
+        self.reading_widget.play_pause_requested.connect(self.reading_controller.toggle)
+        self.reading_widget.previous_word_requested.connect(lambda: self.reading_controller.step_words(-1))
+        self.reading_widget.next_word_requested.connect(lambda: self.reading_controller.step_words(1))
+        self.reading_widget.previous_sentence_requested.connect(lambda: self.reading_controller.step_sentence(-1))
+        self.reading_widget.next_sentence_requested.connect(lambda: self.reading_controller.step_sentence(1))
+        self.reading_widget.speed_changed.connect(self.reading_controller.set_wpm)
+        self.reading_widget.seek_requested.connect(self.reading_controller.seek_token)
+        self.reading_controller.token_changed.connect(self._on_reading_token_changed)
+        self.reading_controller.stream_changed.connect(self._on_reading_stream_changed)
+        self.reading_controller.playing_changed.connect(self.reading_widget.set_playing)
+        self.reading_controller.speed_changed.connect(self.reading_widget.set_speed)
+        self.reading_controller.error.connect(self._on_reading_error)
+        try:
+            self.reading_widget.apply_theme(ThemeManager().get_theme())
+        except Exception:
+            pass
         self._zoom_in_sc = QShortcut(QKeySequence("Ctrl+="), self)
         self._zoom_in_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self._zoom_in_sc.activated.connect(self.zoom_in)
@@ -242,6 +276,8 @@ class PDFViewer(QGraphicsView):
         self.page_links = {}
         self.search_hits.clear()
         self.doc = None
+        if hasattr(self, "reading_widget") and self.reading_widget.isVisible():
+            self.exit_reading_mode(jump_to_position=False)
 
     def _doc_valid(self):
         """Return True only when self.doc exists and is not closed."""
@@ -250,6 +286,8 @@ class PDFViewer(QGraphicsView):
     def update_theme(self, theme):
         self.search_bar.update_theme(theme)
         self.setBackgroundBrush(QBrush(QColor(theme['canvas'])))
+        if hasattr(self, "reading_widget"):
+            self.reading_widget.apply_theme(theme)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -258,6 +296,9 @@ class PDFViewer(QGraphicsView):
             self.viewer_toolbar.move(20, 20)
         if hasattr(self, 'search_bar') and self.search_bar.isVisible():
             self._position_search_bar()
+        if hasattr(self, 'reading_widget') and self.reading_widget.isVisible():
+            self.reading_widget.setGeometry(self.viewport().rect())
+            self.reading_widget.raise_()
         # Position HUD in bottom left
         if hasattr(self, 'page_hud') and self.page_hud.isVisible():
             self.page_hud.move(20, self.viewport().height() - self.page_hud.height() - 20)
@@ -267,17 +308,25 @@ class PDFViewer(QGraphicsView):
             self.search_bar.hide()
             self.clear_search_highlights()
             self.search_hits.clear()
+            self.search_phrase_hits.clear()
             self.current_search_text = ""
         else:
+            # Apply current theme before making visible so bar is never unstyled
+            try:
+                from gui.theme.theme import ThemeManager
+                self.search_bar.update_theme(ThemeManager().get_theme())
+            except Exception:
+                pass
             self.search_bar.show()
             self._position_search_bar()
-
+            self.search_bar.raise_()
             self.search_bar.search_input.setFocus()
             self.search_bar.search_input.selectAll()
 
     def _position_search_bar(self):
         margin = 12
-        viewport_width = max(0, self.viewport().width())
+        vp = self.viewport()
+        viewport_width = max(0, vp.width())
         available_width = max(220, viewport_width - (margin * 2))
         bar_width = min(720, available_width)
         compact = bar_width < 430
@@ -286,7 +335,9 @@ class PDFViewer(QGraphicsView):
         self.search_bar.setFixedWidth(bar_width)
         self.search_bar.adjustSize()
         x_pos = max(margin, viewport_width - self.search_bar.width() - margin)
-        self.search_bar.move(x_pos, margin)
+        # Position below viewer toolbar (which sits at y=20, ~32px tall) to avoid overlap
+        toolbar_bottom = 60 if (hasattr(self, "viewer_toolbar") and self.viewer_toolbar.isVisible()) else margin
+        self.search_bar.move(x_pos, toolbar_bottom)
 
     def _on_search_text_changed(self, text):
         self.search_debounce_timer.start(400)
@@ -312,8 +363,76 @@ class PDFViewer(QGraphicsView):
         self.current_match_case = match_case
         self.execute_search(text, scope, match_case)
 
+    @staticmethod
+    def _is_separator_quad(page, quad) -> bool:
+        """Return True if this quad lands inside a decorative separator or citation-only line.
+
+        Three checks:
+        1. Hairline height (<2 PDF points) — graphic rule, not text.
+        2. Full-width band is dominated by non-alphanumeric chars (dashes, box-drawing, etc.).
+        3. The line contains no words with 3+ letters — catches citation-only fragments
+           like "207 U. S. 564" or "(2023) 557" that are inline hyperlink artifacts in
+           court opinion PDFs, which would otherwise pass the alphanumeric ratio test.
+        """
+        import re as _re
+        rect = quad.rect
+        if rect.height < 2.0:
+            return True
+        page_w = page.rect.width
+        band = fitz.Rect(0, rect.y0 - 1, page_w, rect.y1 + 1)
+        line_text = page.get_text("text", clip=band).strip()
+        if not line_text:
+            return False
+        alnum = sum(c.isalnum() for c in line_text)
+        if (alnum / len(line_text)) < 0.20:
+            return True
+        # Check for repeated-punctuation leader lines (TOC dots/dashes: "Smith ... 2023 ... 45").
+        # Any non-word, non-space char repeated 4+ times consecutively marks a decorative leader.
+        if _re.search(r'([^\w\s])\1{3,}', line_text):
+            return True
+        # Check if line has any real word (3+ consecutive alphabetic characters).
+        # Citation fragments like "207 U. S. 564" have no such words and should be skipped.
+        return not bool(_re.search(r"[A-Za-z]{3,}", line_text))
+
+    @staticmethod
+    def _group_quads_into_phrase_hits(pdf_path, page_num, quads, start_idx):
+        """Group consecutive quads from the same page into per-phrase-occurrence groups.
+
+        PyMuPDF returns multiple quads for a single phrase occurrence when the text
+        wraps across lines. Grouping by proximity lets the hit counter reflect actual
+        phrase occurrences rather than individual rect fragments.
+
+        Each returned group is: {'pdf', 'page', 'hit_indices': [idx, ...], 'first_rect'}.
+        hit_indices are indices into the flat self.search_hits list.
+        """
+        if not quads:
+            return []
+        groups = []
+        current_indices = [start_idx]
+        for i, q in enumerate(quads[1:], 1):
+            prev = quads[i - 1]
+            if q.rect.y0 <= prev.rect.y1 + 25:
+                current_indices.append(start_idx + i)
+            else:
+                groups.append({
+                    'pdf': pdf_path,
+                    'page': page_num,
+                    'hit_indices': list(current_indices),
+                    'first_rect': quads[current_indices[0] - start_idx].rect,
+                })
+                current_indices = [start_idx + i]
+        groups.append({
+            'pdf': pdf_path,
+            'page': page_num,
+            'hit_indices': list(current_indices),
+            'first_rect': quads[current_indices[0] - start_idx].rect,
+        })
+        return groups
+
     def execute_search(self, text, scope, match_case):
         self.search_hits = []
+        self.search_phrase_hits = []
+        self._current_hit_indices = set()
         self.current_hit_index = -1
         self.current_search_text = text
 
@@ -332,7 +451,9 @@ class PDFViewer(QGraphicsView):
             if getattr(self, "pdf_path", None):
                 pdfs_to_search = [self.pdf_path]
 
-        flags = fitz.TEXT_PRESERVE_LIGATURES | fitz.TEXT_PRESERVE_WHITESPACE
+        # Minimal flags: no TEXT_PRESERVE_WHITESPACE so PyMuPDF normalises internal
+        # PDF whitespace for better multi-word phrase matching.
+        flags = 0
         if match_case:
             flags |= getattr(fitz, "TEXT_MATCH_CASE", 4)
 
@@ -343,49 +464,51 @@ class PDFViewer(QGraphicsView):
                 continue
             for page_num in range(len(doc)):
                 page = doc.load_page(page_num)
-                # PyMuPDF's search_for uses 'max' not 'hit_max' in recent versions
                 try:
                     quads = page.search_for(text, max=999, quads=True, flags=flags)
                 except TypeError:
-                    # fallback for older versions without 'max' argument
                     quads = page.search_for(text, quads=True, flags=flags)
+                start_idx = len(self.search_hits)
+                # Filter hairline graphic rules and text-based decorative separators
+                quads = [q for q in quads if not self._is_separator_quad(page, q)]
                 for q in quads:
-                    self.search_hits.append({
-                        'pdf': pdf_path,
-                        'page': page_num,
-                        'rect': q.rect
-                    })
+                    self.search_hits.append({'pdf': pdf_path, 'page': page_num, 'rect': q.rect})
+                self.search_phrase_hits.extend(
+                    self._group_quads_into_phrase_hits(pdf_path, page_num, quads, start_idx)
+                )
 
-        if self.search_hits:
+        if self.search_phrase_hits:
             self.current_hit_index = 0
-            self.search_bar.update_hits(1, len(self.search_hits))
+            self._current_hit_indices = set(self.search_phrase_hits[0]['hit_indices'])
+            self.search_bar.update_hits(1, len(self.search_phrase_hits))
             self.navigate_to_current_hit()
         else:
             self.clear_search_highlights()
             self.search_bar.update_hits(0, 0)
 
     def next_search_hit(self):
-        if not self.search_hits: return
-        self.current_hit_index = (self.current_hit_index + 1) % len(self.search_hits)
-        self.search_bar.update_hits(self.current_hit_index + 1, len(self.search_hits))
+        if not self.search_phrase_hits: return
+        self.current_hit_index = (self.current_hit_index + 1) % len(self.search_phrase_hits)
+        self.search_bar.update_hits(self.current_hit_index + 1, len(self.search_phrase_hits))
         self.navigate_to_current_hit()
 
     def prev_search_hit(self):
-        if not self.search_hits: return
-        self.current_hit_index = (self.current_hit_index - 1) % len(self.search_hits)
-        self.search_bar.update_hits(self.current_hit_index + 1, len(self.search_hits))
+        if not self.search_phrase_hits: return
+        self.current_hit_index = (self.current_hit_index - 1) % len(self.search_phrase_hits)
+        self.search_bar.update_hits(self.current_hit_index + 1, len(self.search_phrase_hits))
         self.navigate_to_current_hit()
 
     def navigate_to_current_hit(self):
-        if not self.search_hits or self.current_hit_index < 0: return
+        if not self.search_phrase_hits or self.current_hit_index < 0: return
 
-        hit = self.search_hits[self.current_hit_index]
+        phrase = self.search_phrase_hits[self.current_hit_index]
+        self._current_hit_indices = set(phrase['hit_indices'])
+        hit = {'pdf': phrase['pdf'], 'page': phrase['page'], 'rect': phrase['first_rect']}
 
         if hit['pdf'] != getattr(self, "pdf_path", None):
             self.pending_search_jump = hit
-            # 🔥 FIX: Use the Event Bus instead of the deprecated main_window method
             self.bus.document_action_requested.emit(
-                DocumentIntent.OPEN, 
+                DocumentIntent.OPEN,
                 DocumentPayload(path=hit['pdf'])
             )
         else:
@@ -413,6 +536,7 @@ class PDFViewer(QGraphicsView):
 
     def _apply_search_highlights_to_page(self, page_num, page_item):
         current_pdf = getattr(self, "pdf_path", "")
+        current_hit_indices = getattr(self, "_current_hit_indices", set())
 
         for i, hit in enumerate(self.search_hits):
             if hit['pdf'] == current_pdf and hit['page'] == page_num:
@@ -420,7 +544,7 @@ class PDFViewer(QGraphicsView):
                 z = self.base_zoom
                 qt_rect = QRectF(r.x0 * z, r.y0 * z, (r.x1 - r.x0) * z, (r.y1 - r.y0) * z)
                 h_item = QGraphicsRectItem(qt_rect, page_item)
-                if i == self.current_hit_index:
+                if i in current_hit_indices:
                     h_item.setBrush(QBrush(QColor(255, 165, 0, 150)))
                     h_item.setPen(QPen(QColor(255, 140, 0), 2))
                     h_item.setZValue(10)
@@ -507,6 +631,11 @@ class PDFViewer(QGraphicsView):
         self.page_hud.setVisible(True)
         self.page_hud.update_hud(1, len(self.doc))
         self.resizeEvent(None)
+        if hasattr(self, "reading_mode_btn"):
+            self.reading_mode_btn.setChecked(False)
+        if hasattr(self, "reading_widget"):
+            self.reading_controller.pause()
+            self.reading_widget.hide()
         return True
     def swap_document_handle(self, new_doc):
         """Safely updates the document handle and restarts the background thread."""
@@ -735,8 +864,78 @@ class PDFViewer(QGraphicsView):
             if p is not None:
                 p.setBrush(brush)
     def _on_global_theme_changed(self, event_type, new_theme):
+        if hasattr(self, "reading_widget"):
+            self.reading_widget.apply_theme(new_theme)
         if getattr(self, 'theme_mode_enabled', False):
             self._force_full_rerender()
+
+    def toggle_reading_mode(self, checked=None):
+        if getattr(self, "reading_widget", None) and self.reading_widget.isVisible():
+            self.exit_reading_mode()
+        else:
+            self.enter_reading_mode()
+
+    def enter_reading_mode(self):
+        if not self._doc_valid():
+            self._status_tip("Open a PDF before starting Reading Mode.")
+            if hasattr(self, "reading_mode_btn"):
+                self.reading_mode_btn.setChecked(False)
+            return
+        self.annot_manager.clear_selection()
+        if getattr(self, "data_select_btn", None) and self.data_select_btn.isChecked():
+            self.data_select_btn.setChecked(False)
+        if getattr(self, "search_bar", None) and self.search_bar.isVisible():
+            self.toggle_search_bar()
+
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self._reading_prev_scroll_policies = (
+            self.verticalScrollBarPolicy(),
+            self.horizontalScrollBarPolicy(),
+        )
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.page_hud.setVisible(False)
+        self.reading_widget.setGeometry(self.viewport().rect())
+        self.reading_widget.apply_theme(ThemeManager().get_theme())
+        self.reading_widget.show()
+        self.reading_widget.raise_()
+        self.reading_widget.setFocus()
+        loaded = self.reading_controller.load_pdf(getattr(self, "pdf_path", "") or "", self.doc)
+        self.reading_widget.set_tokens(self.reading_controller.tokens)
+        if hasattr(self, "reading_mode_btn"):
+            self.reading_mode_btn.setChecked(True)
+        if loaded:
+            self._status_tip("Reading Mode ready.")
+
+    def exit_reading_mode(self, jump_to_position=True):
+        if not getattr(self, "reading_widget", None):
+            return
+        self.reading_controller.pause()
+        current_token = self.reading_controller.current_token()
+        self.reading_widget.hide()
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        previous_policies = getattr(self, "_reading_prev_scroll_policies", None)
+        if previous_policies:
+            self.setVerticalScrollBarPolicy(previous_policies[0])
+            self.setHorizontalScrollBarPolicy(previous_policies[1])
+        if self._doc_valid():
+            self.page_hud.setVisible(True)
+        if hasattr(self, "reading_mode_btn"):
+            self.reading_mode_btn.setChecked(False)
+        if jump_to_position and current_token is not None:
+            self.jump_to_page(current_token.page_num)
+        self.setFocus()
+
+    def _on_reading_stream_changed(self, total):
+        self.reading_widget.set_tokens(self.reading_controller.tokens)
+
+    def _on_reading_token_changed(self, token, index, total):
+        self.reading_widget.show_token(token, index, total)
+
+    def _on_reading_error(self, message):
+        if hasattr(self, "reading_widget"):
+            self.reading_widget.set_empty_message(message)
+        self._status_tip(message)
 
     def _force_full_rerender(self):
         """Cleans out the cache and forces a fresh pass for the new theme."""

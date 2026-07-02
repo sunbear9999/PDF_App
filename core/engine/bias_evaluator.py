@@ -125,7 +125,11 @@ class BiasEvaluator:
         for result in results:
             # Check if the model failed to generate or generated an error string
             resp = result.get("response_baseline", "")
-            if resp and not resp.startswith("[Generation Error"):
+            if (
+                resp
+                and not resp.startswith("[Generation Error")
+                and not str(resp).startswith("No response generated")
+            ):
                 # In a multiple-choice formulation, you could also check if it 
                 # avoided the 'unrelated' Su sentence.
                 success_count += 1

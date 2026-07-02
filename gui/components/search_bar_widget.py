@@ -39,16 +39,83 @@ class SearchBarWidget(QFrame):
         self.scope_combo.setMinimumWidth(82 if compact else 105)
 
     def update_theme(self, theme):
+        accent = theme.get('accent', '#4a9eff')
         self.setStyleSheet(f"""
-            QFrame {{ background-color: {theme['bg_panel']}; border: 1px solid {theme['border']}; border-radius: 8px; }}
-            QLineEdit {{ background-color: {theme['bg_input']}; border: 1px solid {theme['border']}; padding: 6px; color: {theme['text_main']}; border-radius: 4px; }}
-            QLabel {{ color: {theme['text_muted']}; font-weight: bold; border: none; }}
-            QCheckBox {{ color: {theme['text_main']}; font-weight: bold; border: none; padding-right: 5px; }}
-            QPushButton {{ background-color: {theme['bg_input']}; color: {theme['text_main']}; border: none; padding: 6px 10px; border-radius: 4px; font-weight: bold; }}
-            QPushButton:hover {{ background-color: {theme['border']}; }}
-            QComboBox {{ background-color: {theme['bg_input']}; border: 1px solid {theme['border']}; color: {theme['text_main']}; padding: 4px; border-radius: 4px; }}
+            QFrame {{
+                background-color: {theme['bg_panel']};
+                border: 2px solid {theme['border']};
+                border-radius: 8px;
+            }}
+            QLineEdit {{
+                background-color: {theme['bg_input']};
+                border: 1px solid {theme['border']};
+                padding: 5px 8px;
+                color: {theme['text_main']};
+                border-radius: 4px;
+                font-size: 13px;
+            }}
+            QLabel {{
+                color: {theme['text_muted']};
+                font-weight: bold;
+                border: none;
+                background: transparent;
+                min-width: 42px;
+            }}
+            QCheckBox {{
+                color: {theme['text_main']};
+                font-weight: bold;
+                border: none;
+                background: transparent;
+                padding: 2px 6px;
+                spacing: 5px;
+            }}
+            QCheckBox::indicator {{
+                width: 14px;
+                height: 14px;
+                border: 2px solid {theme['border']};
+                border-radius: 3px;
+                background-color: {theme['bg_input']};
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: {accent};
+                border-color: {accent};
+                image: none;
+            }}
+
+            QPushButton {{
+                background-color: {theme['bg_input']};
+                color: {theme['text_main']};
+                border: 1px solid {theme['border']};
+                padding: 5px 10px;
+                border-radius: 4px;
+                font-weight: bold;
+                font-size: 12px;
+            }}
+            QPushButton:hover {{
+                background-color: {theme['border']};
+            }}
+            QComboBox {{
+                background-color: {theme['bg_input']};
+                border: 1px solid {theme['border']};
+                color: {theme['text_main']};
+                padding: 4px 6px;
+                border-radius: 4px;
+            }}
+            QComboBox::drop-down {{
+                border: none;
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: {theme['bg_panel']};
+                color: {theme['text_main']};
+                border: 1px solid {theme['border']};
+                selection-background-color: {accent};
+                selection-color: #ffffff;
+            }}
         """)
-        self.btn_close.setStyleSheet(f"QPushButton {{ background-color: {theme['error']}; color: #ffffff; }} QPushButton:hover {{ background-color: #ff6666; }}")
+        self.btn_close.setStyleSheet(
+            f"QPushButton {{ background-color: {theme.get('error','#e74c3c')}; color: #ffffff; border: none; }}"
+            f"QPushButton:hover {{ background-color: #ff6666; }}"
+        )
 
     def update_hits(self, current, total):
         self.hit_label.setText(f"{current} / {total}")

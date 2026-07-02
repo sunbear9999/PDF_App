@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QWidget
 
 from core.models.data_dock_models import ChartConfig, DataGridState
 from core.utils.numeric_utils import coerce_number
-from core.services.chart_data_service import ChartDataAdapter
+from core.data.chart_adapter import ChartDataAdapter
 
 
 class DataChartWidget(QWidget):

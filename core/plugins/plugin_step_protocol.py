@@ -68,6 +68,9 @@ class StepContext:
     trace_id: Optional[str] = None                  # propagated to ui_payloads for trace linking
     node_type_registry: Optional[Any] = None        # BlueprintNodeTypeRegistry (meta-steps)
     data_provider_registry: Optional[Any] = None    # deterministic data/chart extension registry
+    llm_settings_service: Optional[Any] = None      # resolves per-blueprint/per-step LLM options
+    blueprint_id: Optional[str] = None              # registry id for the active blueprint
+    step_path: Optional[str] = None                 # stable nested path for the active step
     # pause primitives forwarded from the runner for USER_INPUT / AWAIT_EVENT steps
     _pause_mutex: Optional[Any] = None              # QMutex
     _wait_condition: Optional[Any] = None           # QWaitCondition

@@ -94,21 +94,13 @@ class ChatMessageWidget(QWidget):
 
         self.hide_status()
 
-        # BUG FIX 2: Rock-solid string splitting instead of fragile Regex
-        if "<think>" in self.raw_buffer:
-            if self.btn_thought.isHidden():
-                self.btn_thought.show()
-
-            parts = self.raw_buffer.split("</think>")
-            thought_part = parts[0].replace("<think>", "").strip()
-            self.thought_browser.setMarkdown(thought_part)
+        thought_part, main_part, has_thought = self._split_thought(self.raw_buffer)
+        if has_thought:
+            self.btn_thought.show()
+            self.thought_browser.setMarkdown(thought_part.strip())
             self._resize_browser(self.thought_browser)
-
-            # If the LLM has finished thinking and closed the tag, print to the main browser
-            if len(parts) > 1:
-                main_part = parts[1].strip()
-                self.main_browser.setMarkdown(main_part)
-                self._resize_browser(self.main_browser)
+            self.main_browser.setMarkdown(main_part.strip())
+            self._resize_browser(self.main_browser)
         else:
             # Standard streaming if no think tags are used
             self.main_browser.setMarkdown(self.raw_buffer.strip())
@@ -228,15 +220,32 @@ class ChatMessageWidget(QWidget):
             self.main_browser.hide()
             return
         self.main_browser.show()
-        if "<think>" in text:
+        thought, answer, has_thought = self._split_thought(text)
+        if has_thought:
             self.btn_thought.show()
-            thought, separator, answer = text.partition("</think>")
-            self.thought_browser.setMarkdown(thought.replace("<think>", "").strip())
+            self.thought_browser.setMarkdown(thought.strip())
             self._resize_browser(self.thought_browser)
-            self.main_browser.setMarkdown(answer.strip() if separator else "")
+            self.main_browser.setMarkdown(answer.strip())
         else:
             self.main_browser.setMarkdown(text)
         self._resize_browser(self.main_browser)
+
+    @staticmethod
+    def _split_thought(text):
+        raw = text or ""
+        lower = raw.lower()
+        start = lower.find("<think>")
+        if start < 0:
+            return "", raw, False
+        content_start = start + len("<think>")
+        end = lower.find("</think>", content_start)
+        if end < 0:
+            thought = raw[content_start:]
+            main = raw[:start].strip()
+            return thought, main, True
+        thought = raw[content_start:end]
+        main = (raw[:start] + raw[end + len("</think>"):]).strip()
+        return thought, main, True
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

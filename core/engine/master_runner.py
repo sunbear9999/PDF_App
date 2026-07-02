@@ -58,6 +58,7 @@ class MasterActionRunner(QThread):
         blueprint_manager=None,
         node_type_registry=None,
         data_provider_registry=None,
+        llm_settings_service=None,
     ):
         super().__init__()
         self.llm_manager = llm_manager
@@ -69,6 +70,7 @@ class MasterActionRunner(QThread):
         self.blueprint_manager = blueprint_manager
         self.node_type_registry = node_type_registry
         self.data_provider_registry = data_provider_registry
+        self.llm_settings_service = llm_settings_service
 
         import copy
         self.blueprint = copy.deepcopy(blueprint)
@@ -84,7 +86,9 @@ class MasterActionRunner(QThread):
             target_id=self.target_id,
         )
         self.current_executing_step = None
+        self.current_step_path = None
         self.resolved_step_specs = {}
+        self.resolved_step_paths = {}
         self._pause_mutex = QMutex()
         self._wait_condition = QWaitCondition()
         self._user_response = None                   # legacy; kept for backward compat
@@ -117,6 +121,9 @@ class MasterActionRunner(QThread):
                         state=runner.state,
                         abort_check=abort_fn,
                         data_provider_registry=runner.data_provider_registry,
+                        llm_settings_service=runner.llm_settings_service,
+                        blueprint_id=runner.blueprint_id,
+                        step_path=runner.current_step_path,
                     )
                     return instance.execute(ctx, inputs)
                 return _handler
@@ -167,6 +174,9 @@ class MasterActionRunner(QThread):
             trace_id=self.trace_id,
             node_type_registry=self.node_type_registry,
             data_provider_registry=self.data_provider_registry,
+            llm_settings_service=self.llm_settings_service,
+            blueprint_id=self.blueprint_id,
+            step_path=self.current_step_path,
             _pause_mutex=self._pause_mutex,
             _wait_condition=self._wait_condition,
             _user_response_holder=self._user_response_holder,
@@ -249,7 +259,7 @@ class MasterActionRunner(QThread):
             if self.registry and self.job:
                 self.registry.complete_job(self.job.id)
 
-    def _execute_step_list(self, steps: list):
+    def _execute_step_list(self, steps: list, path_prefix: str = ""):
         for step in steps:
             if getattr(self, "skip_remaining", False):
                 return
@@ -270,14 +280,19 @@ class MasterActionRunner(QThread):
                     base_dict.update(override_dict)
                     step = ActionStep(**base_dict)
 
-            self._execute_single_step(step)
+            self._execute_single_step(step, self._path_for_step(path_prefix, step.step_id))
 
-    def _execute_single_step(self, step: ActionStep):
+    def _path_for_step(self, prefix: str, step_id: str) -> str:
+        return f"{prefix}.{step_id}" if prefix else str(step_id)
+
+    def _execute_single_step(self, step: ActionStep, step_path: str | None = None):
         if self.registry and self.job:
             self.registry.update_job_status(self.job.id, f"Running: {step.step_id}...")
 
         self.current_executing_step = step
+        self.current_step_path = step_path or step.step_id
         self.resolved_step_specs[step.step_id] = step
+        self.resolved_step_paths[self.current_step_path] = step
         self.step_started.emit(step.step_id)
 
         resolved_inputs = {}
@@ -360,7 +375,8 @@ class MasterActionRunner(QThread):
             passed = eval(logic, {}, {"state": self.state})
             branch_steps = step.if_true if passed else step.if_false
             if branch_steps:
-                self._execute_step_list(branch_steps)
+                branch_name = "if_true" if passed else "if_false"
+                self._execute_step_list(branch_steps, f"{self.current_step_path or step.step_id}.{branch_name}")
             return passed
         except Exception as e:
             self.error.emit(f"Branch Logic Error: {e}")
@@ -406,6 +422,7 @@ class MasterActionRunner(QThread):
                     raise ValueError(f"FOREACH failed: Could not find tool '{sub_bp_name}'")
 
         aggregated_results = []
+        foreach_step_path = self.current_step_path or step.step_id
         for idx, item in enumerate(target_list):
             if self.job and self.job.abort_event.is_set():
                 break
@@ -414,16 +431,19 @@ class MasterActionRunner(QThread):
                     self.job.id, f"Processing {idx + 1}/{len(target_list)}: {str(item)[:20]}..."
                 )
 
-            sub_state = self.state.copy()
+            sub_state = self._build_foreach_sub_state(inputs, item)
             sub_state["item"] = item
             self.state["item"] = item
+            parent_step_path = foreach_step_path
 
             for sub_step in sub_blueprint.steps:
                 if self.job and self.job.abort_event.is_set():
                     break
 
                 self.current_executing_step = sub_step
+                self.current_step_path = f"{parent_step_path}.sub.{sub_step.step_id}"
                 self.resolved_step_specs[sub_step.step_id] = sub_step
+                self.resolved_step_paths[self.current_step_path] = sub_step
                 self.step_started.emit(sub_step.step_id)
 
                 res_inputs = {
@@ -433,11 +453,13 @@ class MasterActionRunner(QThread):
                 res_model = StateResolver.resolve_val(sub_step.model, sub_state, self.prompt_manager)
 
                 parent_state = self.state
+                parent_path = self.current_step_path
                 self.state = sub_state
                 try:
                     raw_out = self._dispatch_step(sub_step, res_inputs, res_model)
                 finally:
                     self.state = parent_state
+                    self.current_step_path = parent_path
 
                 # Coerce ExecutionResult → raw_value so the foreach loop
                 # can JSON-serialize sub-step results without TypeError
@@ -486,6 +508,7 @@ class MasterActionRunner(QThread):
             )
 
         self.current_executing_step = step
+        self.current_step_path = foreach_step_path
 
         if step.step_id == "process_all_chunks":
             try:
@@ -510,6 +533,21 @@ class MasterActionRunner(QThread):
                 deduped.append(res)
 
         return json.dumps(deduped)
+
+    def _build_foreach_sub_state(self, inputs: dict, item):
+        keys = inputs.get("inherit_state_keys")
+        if isinstance(keys, str):
+            try:
+                parsed = json.loads(keys)
+                keys = parsed if isinstance(parsed, list) else []
+            except Exception:
+                keys = [k.strip() for k in keys.split(",") if k.strip()]
+        if not keys:
+            return self.state.copy()
+        sub_state = {key: self.state.get(key) for key in keys if key in self.state}
+        sub_state.setdefault("selected_model", self.state.get("selected_model"))
+        sub_state.setdefault("target_id", self.state.get("target_id"))
+        return sub_state
 
     def _emit_chunk_progress(self, idx: int, total: int, parsed_res) -> None:
         """Emit per-chunk analysis progress events (used by the analysis pipeline FOREACH)."""

@@ -28,6 +28,8 @@ class ActionStep:
     ui_target: str = "floating" 
     ui_title: str = "AI Result"
     status_text: str = "Processing..."
+    conversation_role: Optional[str] = None
+    show_reasoning: bool = False
     inline_citations: bool = False
     citation_source_key: Optional[str] = None
     # Manifest mutations must run in a dedicated silent step so protocol data

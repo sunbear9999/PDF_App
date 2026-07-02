@@ -14,6 +14,7 @@ from core.events.event_bus import EventBus
 from core.engine.ui_payloads import serialize_payloads
 from core.plugins.extension_registry import CitationSourceHandlerSpec, PluginExtensionRegistry
 from gui.docks.unified_research.components.chat_streamer import ChatMessageWidget
+from gui.docks.unified_research.components.tab_context import ChatHistoryContextWidget
 from gui.docks.unified_research.components.history_renderer import ChatHistoryRenderer
 from gui.docks.unified_research.components.note_bubble import NoteBubbleWidget
 from gui.docks.unified_research.components.manifest_bubble import ManifestUpdateWidget
@@ -151,6 +152,37 @@ def test_manifest_history_renders_actionable_change_widget():
     update = message.bubbles_layout.itemAt(0).widget()
     assert isinstance(update, ManifestUpdateWidget)
     assert "open manifest" in update.btn_open.text().lower()
+
+
+def test_chat_history_context_injects_recent_assistant_turns():
+    class _PM:
+        def get_chat_history(self, tab_name):
+            return [
+                {"role": "user", "content": "first", "ui_format": "text"},
+                {"role": "ai", "content": "previous answer", "ui_format": "live_stream"},
+                {"role": "ai", "content": "Project brief updated", "ui_format": "manifest_update"},
+            ]
+
+    widget = ChatHistoryContextWidget(_PM(), "chat_dock", _ThemeManager().get_theme())
+    widget._checkbox.setChecked(True)
+    widget._spin.setValue(2)
+
+    history = widget.get_state()["chat_history"]
+
+    assert "AI: previous answer" in history
+    assert "Project brief updated" not in history
+
+
+def test_thinking_split_handles_closed_and_unclosed_blocks():
+    thought, answer, has_thought = ChatMessageWidget._split_thought("<think>plan</think>\nAnswer")
+    assert has_thought is True
+    assert thought == "plan"
+    assert answer == "Answer"
+
+    thought, answer, has_thought = ChatMessageWidget._split_thought("<think>still planning")
+    assert has_thought is True
+    assert thought == "still planning"
+    assert answer == ""
 
 
 def test_legacy_history_hides_manifest_tags_and_adds_actionable_update():

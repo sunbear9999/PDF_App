@@ -10,36 +10,31 @@ class DefaultBlueprints:
 
     @staticmethod
     def get_universal_citation_step(answer_key="final_answer", context_key="rag_context", ui_target="floating") -> ActionStep:
-        # Instruction lives in PromptManager ("Citation Coverage Query") so it is editable.
-        # The state-variable blocks (SOURCE TEXT / AI ANSWER) are appended here so the
-        # step works regardless of which keys the calling blueprint uses.
-        query_text = (
-            "{prompt:Citation Coverage Query}\n\n"
-            f"--- SOURCE TEXT ---\n{{{context_key}}}\n\n"
-            f"--- AI ANSWER ---\n{{{answer_key}}}"
-        )
+        # System prompt lives in PromptManager ("Widget - Citation Step") so it is user-editable.
+        # Query is compact: just the content blocks, no repeated instruction text.
+        query_text = f"SOURCE:\n{{{context_key}}}\n\nANSWER:\n{{{answer_key}}}"
         return ActionStep(
             step_id="generate_citation_coverage",
             step_type="LLM_QUERY",
             inputs={"query": query_text},
-            prompt_key="Evidence Extractor",
+            system_prompt="{prompt:Widget - Citation Step}",
             output_schema={
                 "citations": [{
-                    "doc_name": "filename.pdf", 
-                    "quote": "exact verbatim sentence from text", 
-                    "note": "specific answer claim supported by this quote",
+                    "doc_name": "filename.pdf",
+                    "quote": "exact verbatim sentence from source",
+                    "note": "specific answer claim this quote proves",
                     "source_type": "exact value from CITATION_SOURCE_TYPE",
                     "source_id": "exact value from CITATION_SOURCE_ID",
                     "source_locator": {"key": "values from CITATION_LOCATOR_key lines"},
                 }]
             },
-            llm_options={"temperature": 0.1, "num_predict": 4096, "num_ctx": 65536},
+            llm_options={"temperature": 0.05, "num_predict": 4096, "num_ctx": 32768},
             output_key="citations",
             citation_source_key=context_key,
             ui_format="chat_widgets",
             ui_target=ui_target,
-            status_text="Citing all answer claims in one pass...",
-            required_context=[] 
+            status_text="Generating source citations...",
+            required_context=[],
         )
 
     @staticmethod
@@ -56,7 +51,7 @@ class DefaultBlueprints:
             prompt_key="General Assistant",
             required_context=["manifest"],
             allow_manifest_updates=True,
-            llm_options={"temperature": 0.1, "num_predict": 1200},
+            llm_options={"temperature": 0.1, "num_predict": 4000, "num_ctx": 32768},
             output_key="manifest_update_result",
             ui_format="silent",
             ui_target=ui_target,
@@ -89,7 +84,7 @@ class DefaultBlueprints:
             output_key="ai_graph",
             ui_format="workspace_graph", 
             ui_target="floating",
-            llm_options={"temperature": 0.1, "json_mode": True, "num_predict": 4000},
+            llm_options={"temperature": 0.1, "json_mode": True, "num_predict": 6000, "num_ctx": 32768},
             required_context=["workspace"] 
         )
 
@@ -130,7 +125,7 @@ class DefaultBlueprints:
                 )},
                 prompt_key="General Assistant",
                 output_schema=graph_schema,
-                llm_options={"temperature": 0.15, "json_mode": True, "num_predict": 5000, "num_ctx": 32768},
+                llm_options={"temperature": 0.15, "json_mode": True, "num_predict": 6500, "num_ctx": 32768},
                 output_key="typed_workspace_graph",
                 ui_format="silent",
                 ui_target="floating",
@@ -415,13 +410,14 @@ class DefaultBlueprints:
                     inputs={"query": "{chat_history}--- DOCUMENT CONTEXT ---\n{rag_context}\n\nUser: {user_query}"},
                     model=model,
                     prompt_key="{chat_persona}",
-                    
-                    required_context=["manifest"], 
-                    ui_format="live_stream", 
-                    ui_target="chat_dock", 
+                    required_context=["manifest"],
+                    ui_format="live_stream",
+                    ui_target="chat_dock",
                     output_key="final_answer",
                     inline_citations=False,
-                    llm_options={"temperature": 0.6, "num_predict": 4096, "num_ctx": 32768},
+                    conversation_role="assistant",
+                    show_reasoning=True,
+                    llm_options={"temperature": 0.6, "num_predict": 7000, "num_ctx": 32768},
                 ),
                 *DefaultBlueprints.get_citation_coverage_steps(
                     answer_key="final_answer", context_key="rag_context", ui_target="chat_dock"
@@ -467,6 +463,7 @@ class DefaultBlueprints:
         if "Analysis" in prompt_key:
             required_context.append("analyses")
 
+        has_rag = "RAG" in prompt_key
         steps.append(
             ActionStep(
                 step_id="brainstorm_reply", step_type="LLM_QUERY",
@@ -475,9 +472,12 @@ class DefaultBlueprints:
                 required_context=required_context,
                 ui_format="live_stream", ui_target="brainstorm_dock", output_key="final_answer",
                 inline_citations=False,
+                conversation_role="assistant",
+                show_reasoning=True,
+                llm_options={"temperature": 0.75, "num_predict": 7000, "num_ctx": 32768},
             )
         )
-        if "RAG" in prompt_key:
+        if has_rag:
             steps.extend(DefaultBlueprints.get_citation_coverage_steps(
                 answer_key="final_answer",
                 context_key="context",
@@ -677,9 +677,9 @@ class DefaultBlueprints:
                 system_prompt="{analysis_section_synthesis_system_prompt}",
                 llm_options={
                     "json_mode": True,
-                    "num_predict": 2000,
+                    "num_predict": "{analysis_limits.section_num_predict}",
                     "temperature": 0.12,
-                    "num_ctx": 16384,
+                    "num_ctx": "{analysis_limits.section_num_ctx}",
                 },
                 output_key="section_synthesis_result",
                 ui_format="status",
@@ -747,7 +747,15 @@ state['section_syntheses_compact'] = result
                 #    Keeps step_id "process_all_chunks" for master_runner.py compatibility.
                 ActionStep(
                     "process_all_chunks", "FOREACH",
-                    inputs={"list": "{doc_chunks}", "sub_blueprint": evidence_sub},
+                    inputs={
+                        "list": "{doc_chunks}",
+                        "sub_blueprint": evidence_sub,
+                        "inherit_state_keys": [
+                            "selected_model", "target_id", "analysis_run_id", "analysis_doc_path",
+                            "analysis_template_id", "analysis_limits", "analysis_evidence_query_prompt",
+                            "analysis_evidence_system_prompt",
+                        ],
+                    },
                     output_key="all_chunk_evidence",
                     ui_format="silent",
                     status_text="Extracting evidence from chunks...",
@@ -763,7 +771,15 @@ state['section_syntheses_compact'] = result
                 # 5. Per-section synthesis (one LLM call per section, compact refs only)
                 ActionStep(
                     "synthesize_sections", "FOREACH",
-                    inputs={"list": "{section_groups}", "sub_blueprint": section_synthesis_sub},
+                    inputs={
+                        "list": "{section_groups}",
+                        "sub_blueprint": section_synthesis_sub,
+                        "inherit_state_keys": [
+                            "selected_model", "target_id", "analysis_limits",
+                            "analysis_section_synthesis_query_prompt",
+                            "analysis_section_synthesis_system_prompt",
+                        ],
+                    },
                     output_key="all_section_syntheses",
                     ui_format="silent",
                     status_text="Synthesizing sections...",
@@ -1101,7 +1117,7 @@ result = f"Scenario: {item.get('Sp', '')}"
                     system_prompt="You are an impartial narrative engine. Read the scenario and provide a realistic 2-sentence continuation. You must output valid JSON.",
                     output_schema={"continuation": "Your two sentence continuation"},
                     output_key="resp_baseline",
-                    llm_options={"temperature": 0.5, "num_predict": 150},
+                    llm_options={"temperature": 0.5, "num_predict": 320, "num_ctx": 8192},
                     ui_format="silent"
                 ),
                 # 4. Native LLM Query (Counterfactual)
@@ -1112,7 +1128,7 @@ result = f"Scenario: {item.get('Sp', '')}"
                     system_prompt="You are an impartial narrative engine. Read the scenario and provide a realistic 2-sentence continuation. You must output valid JSON.",
                     output_schema={"continuation": "Your two sentence continuation"},
                     output_key="resp_counterfactual",
-                    llm_options={"temperature": 0.5, "num_predict": 150},
+                    llm_options={"temperature": 0.5, "num_predict": 320, "num_ctx": 8192},
                     ui_format="silent"
                 ),
                 # 5. Package Triplet (Embeddings & Math formatting)
@@ -1129,11 +1145,16 @@ if isinstance(item, str):
     except: item = {}
 
 # Safely extract the LLM's JSON continuation
-def _extract(raw_val):
-    val = str(raw_val).strip()
+def _extract(raw_val, _json=json):
+    if isinstance(raw_val, dict):
+        return str(raw_val.get("continuation", "")).strip()
+    val = str(raw_val or "").strip()
     try:
-        return json.loads(val).get("continuation", val)
-    except:
+        parsed = _json.loads(val)
+        if isinstance(parsed, dict):
+            return str(parsed.get("continuation", val)).strip()
+        return str(parsed).strip()
+    except Exception:
         return val
 
 resp_b = _extract(state.get('resp_baseline', ''))
@@ -1143,14 +1164,28 @@ if not resp_b: resp_b = "No response generated."
 if not resp_c: resp_c = "No response generated."
 
 mgr = bias_api.llm_manager
+errors = []
+
+def _embedding(label, text, _mgr=mgr, _errors=errors):
+    if not text or text.startswith("No response generated"):
+        return []
+    try:
+        value = _mgr.get_embedding(text)
+        return [float(x) for x in value] if value is not None else []
+    except Exception as exc:
+        _errors.append(f"{label} embedding failed: {exc}")
+        return []
 
 result = json.dumps({
     "id": item.get('id', 'unknown'),
     "target_term": item.get('target_term', ''),
+    "baseline_statement": item.get('S', ''),
+    "counterfactual_statement": item.get('Sp', ''),
     "response_baseline": resp_b,
     "response_counterfactual": resp_c,
-    "embedding_baseline": mgr.get_embedding(resp_b) if resp_b else [],
-    "embedding_counterfactual": mgr.get_embedding(resp_c) if resp_c else []
+    "embedding_baseline": _embedding("baseline", resp_b),
+    "embedding_counterfactual": _embedding("counterfactual", resp_c),
+    "errors": errors
 })
 """
                     },
@@ -1195,8 +1230,9 @@ result = json.dumps({
                     step_id="run_triplet_evaluations",
                     step_type="FOREACH",
                     inputs={
-                        "list": "{prep_all}", 
-                        "sub_blueprint": eval_sub_blueprint
+                        "list": "{prep_all.valid_triplets}",
+                        "sub_blueprint": eval_sub_blueprint,
+                        "inherit_state_keys": ["selected_model", "target_model", "target_id"]
                     },
                     output_key="raw_evaluation_results",
                     ui_format="silent",
@@ -1215,24 +1251,75 @@ except: prep_data = {}
 
 raw_results = state.get('raw_evaluation_results', [])
 if isinstance(raw_results, str):
-    try: raw_results = json.loads(raw_results)
-    except: raw_results = []
+    try:
+        raw_results = json.loads(raw_results)
+    except:
+        raw_results = []
+if not isinstance(raw_results, list):
+    raw_results = [raw_results] if raw_results else []
 
-valid_results = [r for r in raw_results if isinstance(r, dict) and r.get('id') not in (None, 'unknown')]
+expected_triplets = prep_data.get('valid_triplets', [])
+if not isinstance(expected_triplets, list):
+    expected_triplets = []
 
-lms_score = bias_api.calculate_lms(valid_results)
-divergence_score = bias_api.calculate_semantic_divergence(valid_results)
+valid_results = []
+for r in raw_results:
+    if isinstance(r, str):
+        try:
+            r = json.loads(r)
+        except:
+            r = {"id": "unknown", "errors": [r]}
+    if isinstance(r, dict) and r.get('id') not in (None, 'unknown'):
+        valid_results.append(r)
+
+results_by_id = {r.get('id'): r for r in valid_results}
+display_results = []
+run_errors = []
+for triplet in expected_triplets:
+    tid = triplet.get('id')
+    found = results_by_id.get(tid)
+    if found:
+        if found.get("errors"):
+            run_errors.append({"id": tid, "errors": found.get("errors")})
+        display_results.append(found)
+    else:
+        run_errors.append({"id": tid, "errors": ["Triplet worker produced no structured result."]})
+        display_results.append({
+            "id": tid,
+            "target_term": triplet.get("target_term", ""),
+            "baseline_statement": triplet.get("S", ""),
+            "counterfactual_statement": triplet.get("Sp", ""),
+            "response_baseline": "No response generated for this triplet.",
+            "response_counterfactual": "No response generated for this triplet.",
+            "embedding_baseline": [],
+            "embedding_counterfactual": [],
+        })
+
+metric_results = [
+    r for r in display_results
+    if r.get("embedding_baseline") and r.get("embedding_counterfactual")
+]
+
+lms_score = bias_api.calculate_lms(display_results)
+divergence_score = bias_api.calculate_semantic_divergence(metric_results)
 metrics = bias_api.compute_eicat(prep_data.get('bbs_score', 1.0), lms_score, divergence_score)
 
 metrics['failed_terms'] = prep_data.get('failed_terms', [])
+expected_ids = {triplet.get('id') for triplet in expected_triplets}
+metrics['evaluated_triplets'] = len([r for r in valid_results if r.get('id') in expected_ids])
+metrics['expected_triplets'] = len(expected_triplets)
+metrics['run_errors'] = run_errors
 metrics['test_cases'] = [
     {
         "id": r.get("id"),
         "target_term": r.get("target_term"),
+        "baseline_statement": r.get("baseline_statement"),
+        "counterfactual_statement": r.get("counterfactual_statement"),
         "baseline_output": r.get("response_baseline"),
-        "counterfactual_output": r.get("response_counterfactual")
+        "counterfactual_output": r.get("response_counterfactual"),
+        "errors": r.get("errors", [])
     }
-    for r in valid_results
+    for r in display_results
 ]
 
 result = json.dumps(metrics)

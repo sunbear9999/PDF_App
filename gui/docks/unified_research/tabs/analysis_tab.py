@@ -548,6 +548,8 @@ class AnalysisTab(BaseTab):
         run_id = self._analysis_run_id(doc_path, template_id)
         self._save_counter = 0
         blueprint = DefaultBlueprints.get_analysis_blueprint(self.prompt_manager)
+        setattr(blueprint, "_registry_id", "Document Analysis")
+        setattr(blueprint, "_registry_label", "Document Analysis")
         self.bus.analysis_result_changed.emit(
             AnalysisEvent.RUN_STARTED,
             AnalysisPayload(doc_path=doc_path, template_id=template_id, template=template, run_id=run_id),

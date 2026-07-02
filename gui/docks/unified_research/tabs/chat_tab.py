@@ -143,6 +143,9 @@ class ChatTab(BaseTab):
             return
         self.input_field.clear()
 
+        dynamic_state = self.dynamic_inputs.get_values()
+        context_state = self._gather_context_state()  # history widget + plugin contributors
+
         pm = self.project_manager
         if pm:
             pm.save_chat_message(self.target_id, "user", text, "text")
@@ -150,9 +153,6 @@ class ChatTab(BaseTab):
         user_msg = ChatMessageWidget("You", theme=self.theme, is_user=True)
         user_msg.append_chunk(text)
         self.receive_ai_widget(user_msg)
-
-        dynamic_state = self.dynamic_inputs.get_values()
-        context_state = self._gather_context_state()  # history widget + plugin contributors
 
         initial_state = {
             "user_query": text,

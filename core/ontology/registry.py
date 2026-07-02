@@ -237,6 +237,11 @@ class ClaimNodePlugin(BaseOntologyNodePlugin):
         return {
             "supporting_evidence_count": len(supporting),
             "refuting_evidence_count": len(refuting),
+            # ``contradicting_evidence_count`` is the canonical metric used by
+            # the current ontology blueprints.  Keep the older "refuting"
+            # spelling above because saved layouts and plugins may still
+            # reference it.
+            "contradicting_evidence_count": len(refuting),
             "unique_source_count": _claim_unique_source_count(entity, relations, get_entity),
             "evidence_weight": round(support_weight - refute_weight, 2),
             "computed_confidence": _claim_confidence(entity, relations, get_entity),

@@ -24,6 +24,7 @@ class WorkflowRunnerService(QObject):
         blueprint_manager=None,
         node_type_registry=None,
         data_provider_registry=None,
+        llm_settings_service=None,
         event_bus: Optional[EventBus] = None,
         ui_router=None,
         model_provider: Optional[Callable[[], str]] = None,
@@ -39,6 +40,7 @@ class WorkflowRunnerService(QObject):
         self.blueprint_manager = blueprint_manager
         self.node_type_registry = node_type_registry
         self.data_provider_registry = data_provider_registry
+        self.llm_settings_service = llm_settings_service
         self.bus = event_bus or EventBus.get_instance()
         self.ui_router = ui_router
         self.model_provider = model_provider
@@ -100,6 +102,7 @@ class WorkflowRunnerService(QObject):
             blueprint_manager=self.blueprint_manager,
             node_type_registry=self.node_type_registry,
             data_provider_registry=self.data_provider_registry,
+            llm_settings_service=self.llm_settings_service,
         )
         self._attach_runner(runner)
         return runner

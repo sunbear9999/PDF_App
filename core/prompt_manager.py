@@ -49,9 +49,20 @@ class PromptManager:
             "Manifest Update Directive", "JSON Schema Enforcer", "JSON Mode Enforcer",
             "Format Enforcer - Chat Widgets", "Format Enforcer - Data Table",
             "Format Enforcer - Card Grid", "Format Enforcer - Live Stream",
-            "Inline Citation Directive",
+            "Inline Citation Directive", "Reasoning Disclosure Directive",
             "Graph Analysis Compact Output Contract",
             "Graph Analysis Argument Chain Directive"
+        ],
+        "Widget Output Formats": [
+            "Format Enforcer - Live Stream",
+            "Format Enforcer - Chat Widgets",
+            "Format Enforcer - Data Table",
+            "Format Enforcer - Card Grid",
+            "Format Enforcer - Nested Outline",
+            "Format Enforcer - Search Terms",
+            "Format Enforcer - Bias Metrics",
+            "Inline Citation Directive",
+            "Widget - Citation Step",
         ],
         "Context Injectors": [
             "Context Inject - Manifest", "Context Inject - Workspace",
@@ -70,6 +81,7 @@ class PromptManager:
     DEFAULT_PROMPTS = {
         # --- PERSONAS ---
         "General Assistant": "You are an intelligent AI assistant interacting with a user's workspace software. Follow their instructions exactly.",
+        "Reasoning Disclosure Directive": "Before the final answer, include a concise reasoning section inside <think>...</think>. Then provide the final answer after the closing tag.",
         "RAG Agent Mode": "You are an expert AI research agent.\nProvide comprehensive, highly detailed answers using ONLY the DOCUMENT CONTEXT provided in the user message.\nCRITICAL: Follow this exact structure to simulate your thought process. Do NOT deviate:\n\n<think>\n(Analyze the document context, plan your answer, and brainstorm VERBATIM quotes.)\n</think>",
         "RAG Assistant Mode": "You are an expert AI research assistant.\nProvide comprehensive answers using Markdown based ONLY on the DOCUMENT CONTEXT provided in the user message.",
         "Evidence Extractor": "You are an expert AI research assistant. Your task is to find concrete textual evidence to support the AI's final answer. Read the provided CONTEXT documents thoroughly. Extract highly relevant, VERBATIM quotes that strongly prove the claims made.",
@@ -279,7 +291,35 @@ the documented field names and types. Plugin steps work identically to core step
         "Format Enforcer - Data Table": "CRITICAL: Your output must be a uniform array of flat JSON objects suitable for a spreadsheet. Do not nest arrays or objects within the rows. Keep keys consistent across all objects.",
         "Format Enforcer - Card Grid": "CRITICAL: Your output must be an array of objects. Make the first key a concise 'title' for the card, followed by relevant summary keys.",
         "Format Enforcer - Live Stream": "Format the visible answer as readable Markdown. Use short paragraphs, headings, and lists where they improve clarity.",
-        "Inline Citation Directive": "When using DOCUMENT CONTEXT, cite directly from the documents in your first answer. Treat citations as source-evidence passages, not famous attributed quotations. In the visible answer, mark important verbatim evidence with <QUOTE>exact quote</QUOTE>. At the very end, append a machine-readable block wrapped exactly in <CITATIONS>...</CITATIONS>. Inside that block output ONLY one valid JSON array, with no markdown and no wrapper object: [{\"doc_name\": \"filename.pdf\", \"quote\": \"exact verbatim quote\", \"note\": \"brief reason this quote supports the answer\"}]. Use only exact quotes copied from DOCUMENT CONTEXT.",
+        "Format Enforcer - Nested Outline": (
+            "CRITICAL: Your output must be a JSON array of nested outline objects. "
+            "Each top-level item represents a major section with a 'title' string and an 'items' array. "
+            "Items can nest further using the same 'title'/'items' structure. "
+            "Do not include any text outside the JSON array."
+        ),
+        "Format Enforcer - Search Terms": (
+            "CRITICAL: Your output must be a JSON array of search term objects. "
+            "Each object must have a 'term' key (the search query) and a 'description' key "
+            "(one sentence explaining why this search is useful). "
+            "Output ONLY the JSON array. No markdown, no explanation."
+        ),
+        "Format Enforcer - Bias Metrics": (
+            "CRITICAL: Your output must be a JSON object with bias metric keys. "
+            "Each key is a bias dimension (e.g. 'political_lean', 'emotional_tone', 'source_diversity') "
+            "and its value is an object with 'score' (0.0–1.0), 'direction' (string), "
+            "and 'explanation' (one sentence). Output ONLY the JSON object."
+        ),
+        "Inline Citation Directive":"When using DOCUMENT CONTEXT, cite directly from the documents in your first answer. Treat citations as source-evidence passages, not famous attributed quotations. In the visible answer, mark important verbatim evidence with <QUOTE>exact quote</QUOTE>. At the very end, append a machine-readable block wrapped exactly in <CITATIONS>...</CITATIONS>. Inside that block output ONLY one valid JSON array, with no markdown and no wrapper object: [{\"doc_name\": \"filename.pdf\", \"quote\": \"exact verbatim quote\", \"note\": \"brief reason this quote supports the answer\"}]. Use only exact quotes copied from DOCUMENT CONTEXT.",
+        "Widget - Citation Step": (
+            "You extract source citations. For every verifiable claim in ANSWER supported, qualified, or contradicted by SOURCE: "
+            "output one citation object. Rules: "
+            "(1) quote is exact verbatim text copied from SOURCE — never paraphrase. "
+            "(2) note names the specific ANSWER claim this quote proves. "
+            "(3) copy doc_name, source_type, source_id, and source_locator exactly from the CITATION_* and CITATION_LOCATOR_* metadata lines of the matching SOURCE block — never invent them. "
+            "(4) no duplicates. "
+            "(5) no topical quotes that do not back a specific claim. "
+            "Return the minimum complete set that covers all supported claims."
+        ),
         "Graph Analysis Compact Output Contract": """
 CRITICAL OUTPUT RULES:
 Return ONLY valid minified JSON. No markdown. No commentary.

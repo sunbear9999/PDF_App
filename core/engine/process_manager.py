@@ -99,7 +99,7 @@ class ProcessRegistry(QObject):
             runner.finished.connect(self._release_finished_runners)
         for signal_name in (
             "progress_update", "step_started", "step_complete",
-            "action_complete", "error", "state_snapshot", "user_input_requested",
+            "step_result", "action_complete", "error", "state_snapshot", "user_input_requested",
         ):
             sig = getattr(runner, signal_name, None)
             if sig is not None:

@@ -62,8 +62,19 @@ class Plugin:
             agent_visible=False,
         ))
 
+        # Register court case extractor for the Discovery tab
+        from .court_case_extractor import run_court_case_extractor
+        from core.extraction.deterministic import ExtractorSpec
+        api.discovery_extractors.register(ExtractorSpec(
+            entity_type="law.court_case",
+            display_name="Court Cases & Precedent",
+            extractor=run_court_case_extractor,
+            plugin_id=self.plugin_id,
+        ))
+
     def on_unload(self) -> None:
-        pass
+        if self._api:
+            self._api.discovery_extractors.remove_by_plugin(self.plugin_id)
 
     def _query_law_source(
         self, *, embedding_vector, n_results, allowed_docs=None,

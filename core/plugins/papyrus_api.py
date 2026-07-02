@@ -208,6 +208,85 @@ class _PluginTagNamespace:
         return mapping
 
 
+class _PluginWidgetNamespace:
+    """Widget registry helpers exposed as ``api.widgets``.
+
+    Plugins call ``api.widgets.register(AIWidgetSpec(...))`` to contribute a
+    full widget type: LLM prompt, payload parser, and optional GUI renderer.
+
+    Example::
+
+        from core.registries.ai_widget_registry import AIWidgetDefinition
+        from core.plugins.extension_registry import AIWidgetSpec
+
+        def on_load(self, api):
+            api.widgets.register(AIWidgetSpec(
+                definition=AIWidgetDefinition(
+                    widget_id="my_timeline",
+                    label="Timeline",
+                    prompt_key="My Timeline Format",
+                    default_prompt="Output a JSON array of {date, event, description}...",
+                    payload_parser=_parse_timeline,
+                    plugin_id=self.plugin_id,
+                ),
+                renderer_factory=lambda payload, parent: TimelineWidget(payload, parent),
+            ))
+    """
+
+    def __init__(self, core: "PapyrusCore", plugin_id: str) -> None:
+        self._core = core
+        self._plugin_id = plugin_id
+        self._registered_widget_ids: List[str] = []
+
+    def register(self, spec: "Any") -> None:  # spec: AIWidgetSpec
+        """Register a widget type end-to-end (prompt + parser + optional renderer).
+
+        *spec* must be an ``AIWidgetSpec`` from
+        ``core.plugins.extension_registry``.  The backend definition is
+        registered in ``AIWidgetRegistry``; the ``renderer_factory`` (if any)
+        is registered in ``AIOutputWidgetFactory`` so the GUI can create the
+        widget from its payload type.
+
+        Also seeds the widget's ``default_prompt`` into ``PromptManager`` if
+        the key does not yet exist there.
+        """
+        from core.registries.ai_widget_registry import AIWidgetRegistry
+
+        defn = spec.definition
+        # Ensure plugin_id is set on the definition for hot-reload cleanup.
+        if not getattr(defn, "plugin_id", None):
+            defn.plugin_id = self._plugin_id
+
+        # Seed default prompt so restore-to-default works.
+        if defn.prompt_key and defn.default_prompt:
+            pm = getattr(self._core, "prompt_manager", None)
+            if pm is not None and defn.prompt_key not in pm.DEFAULT_PROMPTS:
+                pm.DEFAULT_PROMPTS[defn.prompt_key] = defn.default_prompt
+
+        AIWidgetRegistry.get_instance().register(defn)
+        self._registered_widget_ids.append(defn.widget_id)
+
+        # Also register the old AIOutputRendererSpec pathway so that the
+        # AIOutputWidgetFactory (GUI) can create the widget when a payload
+        # of this type arrives.  The renderer_factory receives the payload
+        # dict and a parent widget.
+        if spec.renderer_factory is not None:
+            from core.plugins.extension_registry import AIOutputRendererSpec
+            self._core.plugin_extension_registry.add_ai_renderer(
+                AIOutputRendererSpec(
+                    payload_type=defn.widget_id,
+                    factory=spec.renderer_factory,
+                    plugin_id=self._plugin_id,
+                )
+            )
+
+    def _cleanup(self) -> None:
+        """Remove all widget types registered by this plugin (called on unload)."""
+        from core.registries.ai_widget_registry import AIWidgetRegistry
+        AIWidgetRegistry.get_instance().remove_by_plugin(self._plugin_id)
+        self._registered_widget_ids.clear()
+
+
 class _PluginVideoNamespace:
     def __init__(self, core: "PapyrusCore") -> None:
         self._core = core
@@ -256,6 +335,7 @@ class PapyrusAPI:
         self._sources_ns: Optional["_PluginSourceNamespace"] = None
         self._video_ns: Optional["_PluginVideoNamespace"] = None
         self._tags_ns: Optional["_PluginTagNamespace"] = None
+        self._widgets_ns: Optional["_PluginWidgetNamespace"] = None
         # Per-plugin persistent config (lazy import to avoid circular at module level)
         from core.plugins.plugin_config import PluginConfig
         self._config = PluginConfig(plugin_id or "_unknown", core.user_data_dir)
@@ -375,6 +455,26 @@ class PapyrusAPI:
         """
         return self._core.llm_backend_registry
 
+    @property
+    def discovery_extractors(self) -> "DeterministicExtractorRegistry":
+        """Register custom entity extractors for the Discovery tab.
+
+        Usage::
+
+            from core.extraction.deterministic import ExtractorSpec
+            api.discovery_extractors.register(ExtractorSpec(
+                entity_type="entity.court_case",
+                display_name="Court Cases & Precedent",
+                extractor=my_extractor_fn,
+                plugin_id="my_plugin",
+            ))
+
+        Call ``api.discovery_extractors.remove_by_plugin("my_plugin")`` in
+        ``on_unload()`` to clean up on hot-reload.
+        """
+        from core.extraction.deterministic import DeterministicExtractorRegistry
+        return DeterministicExtractorRegistry
+
     # ----------------------------------------------------------------
     # Section B2: Database and task namespaces
     # ----------------------------------------------------------------
@@ -413,6 +513,21 @@ class PapyrusAPI:
         if self._tags_ns is None:
             self._tags_ns = _PluginTagNamespace(self._core)
         return self._tags_ns
+
+    @property
+    def widgets(self) -> "_PluginWidgetNamespace":
+        """AI output widget registry helpers.
+
+        Call ``api.widgets.register(AIWidgetSpec(...))`` to contribute a full
+        widget type: LLM prompt instructions, payload parser, and optional GUI
+        renderer — all in one call.  The widget will appear in the blueprint
+        editor's format picker, its prompt will be editable in the prompt
+        editor's 'By Widget' view, and any blueprint step that selects this
+        widget will automatically receive the correct LLM instructions.
+        """
+        if self._widgets_ns is None:
+            self._widgets_ns = _PluginWidgetNamespace(self._core, self._plugin_id)
+        return self._widgets_ns
 
     # ----------------------------------------------------------------
     # Section C: Event subscription helpers
@@ -763,6 +878,24 @@ class PapyrusAPI:
         spec.plugin_id = self._plugin_id
         self.gui_extensions.add_dock_action(spec)
 
+    def register_reading_text_filter(self, spec: Any) -> None:
+        """Register a reading-mode page filter owned by this plugin.
+
+        The callback receives ``List[ReadingPage]`` and may return a replacement
+        list. Exceptions are isolated by the reading mode pipeline.
+        """
+        spec.plugin_id = self._plugin_id
+        self.gui_extensions.add_reading_text_filter(spec)
+
+    def register_reading_token_transform(self, spec: Any) -> None:
+        """Register a reading-mode token transform owned by this plugin.
+
+        The callback receives ``List[ReadingToken]`` and may return a replacement
+        list. Exceptions are isolated by the reading mode pipeline.
+        """
+        spec.plugin_id = self._plugin_id
+        self.gui_extensions.add_reading_token_transform(spec)
+
     def register_data_grid_extractor(self, spec: Any) -> None:
         """Register a deterministic PDF/grid extractor owned by this plugin."""
         spec.plugin_id = self._plugin_id
@@ -890,6 +1023,9 @@ class PapyrusAPI:
         from core.engine.master_runner import MasterActionRunner
         for st in self._registered_step_types:
             MasterActionRunner.unregister_plugin_step_handler(st)
+        # Unregister plugin-contributed widget types
+        if self._widgets_ns is not None:
+            self._widgets_ns._cleanup()
         self._registered_step_types.clear()
         # Remove plugin help content
         hs = getattr(self._core, "help_service", None)

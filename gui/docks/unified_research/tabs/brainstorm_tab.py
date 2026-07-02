@@ -19,10 +19,14 @@ class BrainstormTab(BaseTab):
         mode_key = self.combo_mode.currentData()
         
         from core.engine.default_blueprints import DefaultBlueprints
+        key_name = f"Brainstorm - {mode_key}"
         self.active_blueprint = self.blueprint_manager.get_blueprint(
-            f"Brainstorm - {mode_key}", 
+            key_name,
             lambda: DefaultBlueprints.get_brainstorm_blueprint(self.prompt_manager, prompt_key=mode_key)
         )
+        if key_name not in getattr(self.blueprint_manager, "blueprints", {}):
+            setattr(self.active_blueprint, "_registry_id", "Brainstorming")
+            setattr(self.active_blueprint, "_registry_label", "Brainstorming")
 
         while self.dynamic_options_layout.count():
             item = self.dynamic_options_layout.takeAt(0)
@@ -93,15 +97,15 @@ class BrainstormTab(BaseTab):
             return
         self.input_field.clear()
 
+        dynamic_state = self.dynamic_inputs.get_values()
+        context_state = self._gather_context_state()  # history widget + plugin contributors
+
         if self.project_manager:
             self.project_manager.save_chat_message(self.target_id, "user", text, "text")
 
         user_msg = ChatMessageWidget("You", theme=self.theme, is_user=True)
         user_msg.append_chunk(text)
         self.receive_ai_widget(user_msg)  # Inherited from BaseTab
-
-        dynamic_state = self.dynamic_inputs.get_values()
-        context_state = self._gather_context_state()  # history widget + plugin contributors
 
         initial_state = {
             "query": text,

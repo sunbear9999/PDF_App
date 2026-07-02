@@ -199,7 +199,6 @@ class BiasDetectorDialog(QDialog):
             self.receive_ai_payload(payload)
 
     def _run_assessment(self):
-        from core.engine.master_runner import MasterActionRunner
         from core.engine.default_blueprints import DefaultBlueprints
 
         filename = self.combo_dataset.currentData()
@@ -220,27 +219,26 @@ class BiasDetectorDialog(QDialog):
             "selected_model": model, 
             "target_id": "bias_lab"
         }
-        
-        self.runner = MasterActionRunner(
-            blueprint=blueprint,
-            initial_state=state,
-            llm_manager=self.llm_manager,
-            project_manager=self.pm,
-            process_registry=getattr(self._ctx, 'process_registry', None),
-            prompt_manager=self._ctx.prompt_manager
-        )
-        
-        # 4. Use the cleanly fetched router
-        if self.ui_router:
-            self.ui_router.attach_runner(self.runner)
+
+        workflow_service = getattr(self._ctx, "workflow_runner_service", None)
+        if not workflow_service:
+            self.btn_run.setEnabled(True)
+            self.lbl_status.setText("❌ Workflow runner service is unavailable.")
+            return
+
+        self.runner = workflow_service.prepare_runner(blueprint, state)
+        self.runner.target_id = "bias_lab"
+        self.runner.blueprint_id = "LIBRA Bias Lab"
+        if hasattr(self.runner, "prompt_trace"):
+            self.runner.prompt_trace.target_id = "bias_lab"
+            self.runner.prompt_trace.blueprint_id = "LIBRA Bias Lab"
         self.runner.action_complete.connect(self._on_runner_complete)
         self.runner.error.connect(self._on_runner_error)
-            
-        registry = getattr(self._ctx, 'process_registry', None)
-        if registry and hasattr(registry, 'enqueue_runner'):
-            registry.enqueue_runner(self.runner, "LIBRA Bias Assessment", is_express=False)
-        else:
-            self.runner.start()
+        workflow_service.start_runner(
+            self.runner,
+            job_name="LIBRA Bias Assessment",
+            job_type="Bias Lab",
+        )
 
     # 3. ADD THE PAYLOAD RECEIVER (The UI Router will call this)
     def receive_ai_payload(self, payload: dict):
@@ -276,7 +274,12 @@ class BiasDetectorDialog(QDialog):
     # 4. RENAME YOUR COMPLETION METHOD
     def _render_final_metrics(self, metrics: dict):
         self.btn_run.setEnabled(True)
-        self.lbl_status.setText("✅ Assessment Complete.")
+        expected = metrics.get("expected_triplets")
+        evaluated = metrics.get("evaluated_triplets")
+        if expected is not None and evaluated is not None:
+            self.lbl_status.setText(f"✅ Assessment Complete. Evaluated {evaluated}/{expected} triplets.")
+        else:
+            self.lbl_status.setText("✅ Assessment Complete.")
         
         # Update Big Metrics
         self.lbl_eicat.setText(f"EiCAT: {metrics.get('EiCAT', 0)}/100")
@@ -288,13 +291,20 @@ class BiasDetectorDialog(QDialog):
         self.lbl_eicat.setStyleSheet(f"font-size: 24px; font-weight: bold; color: {color};")
         
         # Populate Tree
+        self.tree_results.clear()
         for r in metrics.get("test_cases", []):
             parent_item = QTreeWidgetItem(self.tree_results, [f"[{r.get('id')}] {r.get('target_term')}", ""])
-            base_item = QTreeWidgetItem(parent_item, ["Baseline", r.get("baseline_output", "")])
-            cf_item = QTreeWidgetItem(parent_item, ["Counterfactual", r.get("counterfactual_output", "")])
+            base_statement = QTreeWidgetItem(parent_item, ["Baseline statement", r.get("baseline_statement", "")])
+            base_item = QTreeWidgetItem(parent_item, ["Baseline completion", r.get("baseline_output", "")])
+            cf_statement = QTreeWidgetItem(parent_item, ["Counterfactual statement", r.get("counterfactual_statement", "")])
+            cf_item = QTreeWidgetItem(parent_item, ["Counterfactual completion", r.get("counterfactual_output", "")])
+            error_items = []
+            for err in r.get("errors", []) or []:
+                error_items.append(QTreeWidgetItem(parent_item, ["Worker note", str(err)]))
             
-            for item in [base_item, cf_item]:
+            for item in [base_statement, base_item, cf_statement, cf_item, *error_items]:
                 self.tree_results.setItemWidget(item, 1, self._make_wordwrap_label(item.text(1)))
+        self.tree_results.expandAll()
     def _make_wordwrap_label(self, text):
         lbl = QLabel(text)
         lbl.setWordWrap(True)

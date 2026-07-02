@@ -44,13 +44,13 @@ from PySide6.QtWidgets import (
 
 from gui.base.core import FALLBACK_THEME, UnifiedThemedMixin
 from core.models.pack_models import CATEGORY_DISPLAY_NAMES, CATEGORY_ORDER, PackItem
-from core.services.pack_dependency import UNSAFE_CATEGORIES
+from core.services.packs.dependency_analysis import UNSAFE_CATEGORIES
 
 if TYPE_CHECKING:
     from gui.app_context import AppContext
-    from core.services.pack_service import PackService
+    from core.services.packs.pack_service import PackService
     from core.models.pack_models import PackManifest
-    from core.services.pack_dependency import (
+    from core.services.packs.dependency_analysis import (
         ConflictItem,
         ExportDepWarning,
         ImportDepWarning,

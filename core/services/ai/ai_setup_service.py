@@ -17,28 +17,11 @@ from __future__ import annotations
 
 import json
 import os
-import traceback
-from typing import Callable, Optional
+from typing import Optional
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject
 
-
-class _Worker(QThread):
-    """Generic background worker that calls a callable and emits progress."""
-    progress = Signal(str, int)   # message, percent
-    finished = Signal()
-    error = Signal(str)
-
-    def __init__(self, fn: Callable, parent: Optional[QObject] = None):
-        super().__init__(parent)
-        self._fn = fn
-
-    def run(self) -> None:
-        try:
-            self._fn()
-            self.finished.emit()
-        except Exception as exc:
-            self.error.emit(f"{exc}\n{traceback.format_exc()}")
+from core.services._shared.qt_tasks import CallableWorker
 
 
 class AISetupService(QObject):
@@ -269,7 +252,7 @@ class AISetupService(QObject):
         def _run():
             spec.install(_progress)
 
-        worker = _Worker(_run, self)
+        worker = CallableWorker(_run, self)
 
         def _on_done():
             try:
@@ -314,7 +297,7 @@ class AISetupService(QObject):
         def _run():
             spec.uninstall(_progress)
 
-        worker = _Worker(_run, self)
+        worker = CallableWorker(_run, self)
 
         def _on_done():
             try:
@@ -382,7 +365,7 @@ class AISetupService(QObject):
             self._settings["active_backend"] = backend_id
             self._save_settings()
 
-        worker = _Worker(_run, self)
+        worker = CallableWorker(_run, self)
 
         def _on_done() -> None:
             try:
@@ -443,7 +426,7 @@ class AISetupService(QObject):
         def _run():
             spec.pull_model(model_id, _progress)
 
-        worker = _Worker(_run, self)
+        worker = CallableWorker(_run, self)
 
         def _on_done():
             try:
@@ -518,7 +501,7 @@ class AISetupService(QObject):
         def _run():
             pull_voice(voice_id, _progress, self._user_data_dir)
 
-        worker = _Worker(_run, self)
+        worker = CallableWorker(_run, self)
 
         def _on_done():
             try:
