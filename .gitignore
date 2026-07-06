@@ -48,3 +48,9 @@ main.patched.spec
 !web/**
 web/**/__pycache__/
 web/frontend/node_modules/
+
+# Cleanup 2026-07: junk artifacts
+.codex_backups/
+MagicMock/
+pyarmor.bug.log
+*.patched.spec
