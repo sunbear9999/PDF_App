@@ -103,6 +103,7 @@ class PromptTraceCall:
     model: str
     query: str
     system_prompt: str
+    model_role: Optional[str] = None
     prompt_key: Optional[str] = None
     explicit_prompt_keys: List[str] = field(default_factory=list)
     implicit_prompt_keys: List[str] = field(default_factory=list)
@@ -114,6 +115,7 @@ class PromptTraceCall:
             "step_id": self.step_id,
             "step_type": self.step_type,
             "model": self.model,
+            "model_role": self.model_role,
             "query": self.query,
             "system_prompt": self.system_prompt,
             "prompt_key": self.prompt_key,
@@ -131,6 +133,7 @@ class PromptTraceCall:
             model=data.get("model", ""),
             query=data.get("query", ""),
             system_prompt=data.get("system_prompt", ""),
+            model_role=data.get("model_role"),
             prompt_key=data.get("prompt_key"),
             explicit_prompt_keys=list(data.get("explicit_prompt_keys") or []),
             implicit_prompt_keys=list(data.get("implicit_prompt_keys") or []),

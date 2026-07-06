@@ -87,7 +87,15 @@ def _get_spacy_nlp():
 
 
 class DocumentIngestionTask(QRunnable):
-    def __init__(self, path, source_id, llm_manager, bus, signals: Optional[IngestionWorkerSignals] = None):
+    def __init__(
+        self,
+        path,
+        source_id,
+        llm_manager,
+        bus,
+        signals: Optional[IngestionWorkerSignals] = None,
+        document_extraction_service=None,
+    ):
         super().__init__()
         self.path = path
         self.source_id = source_id
@@ -99,6 +107,7 @@ class DocumentIngestionTask(QRunnable):
         self._batching = signals is not None
         self._page_offsets: List[int] = []
         self._metadata: Dict[str, str] = {}
+        self._des = document_extraction_service
 
     def _status(self, msg: str, ms: int = 4000) -> None:
         """Emit a status message, silently ignoring a deleted or unavailable bus signal."""
@@ -139,6 +148,28 @@ class DocumentIngestionTask(QRunnable):
             self._status(f"Failed to process '{self.doc_name}'.", 5000)
 
     def _load_pages(self) -> List[PageText]:
+        # Phase 1 adapter: use shared blocks when DocumentExtractionService is available
+        if self._des is not None:
+            try:
+                blocks = self._des.get_blocks(self.path)
+                if blocks:
+                    page_map: Dict[int, List[str]] = {}
+                    for block in blocks:
+                        page_map.setdefault(block.page_num, []).append(block.exact_text)
+                    # Still open the doc briefly to read metadata only
+                    try:
+                        _doc = fitz.open(self.path)
+                        self._metadata = dict(_doc.metadata or {})
+                        _doc.close()
+                    except Exception:
+                        pass
+                    return [
+                        PageText(page_num=p, text="\n".join(page_map[p]))
+                        for p in sorted(page_map)
+                    ]
+            except Exception:
+                pass
+        # Fallback: direct fitz extraction
         doc = fitz.open(self.path)
         try:
             self._metadata = dict(doc.metadata or {})
@@ -781,7 +812,7 @@ class DocumentIngestionTask(QRunnable):
 
 
 class DocumentIngestionService(QObject):
-    def __init__(self, llm_manager, parent=None):
+    def __init__(self, llm_manager, source_format_registry=None, parent=None):
         super().__init__(parent)
         self.llm_manager = llm_manager
         self.bus = EventBus.get_instance()
@@ -789,10 +820,34 @@ class DocumentIngestionService(QObject):
         self._flush_timer = QTimer(self)
         self._flush_timer.setInterval(0)
         self._flush_timer.timeout.connect(self._flush_ingestion_events)
+        self._document_extraction_service = None
+        self._source_format_registry = source_format_registry
         self.bus.document_added.connect(self._on_document_added)
 
+    def set_document_extraction_service(self, svc) -> None:
+        """Inject the shared DocumentExtractionService (Phase 1 adapter)."""
+        self._document_extraction_service = svc
+
+    def set_source_format_registry(self, registry) -> None:
+        self._source_format_registry = registry
+
+    def _accepts_ingestion(self, source_type: Optional[str]) -> bool:
+        """
+        True for source_types whose ingestion path is this generic
+        text/entity extraction pipeline (backed by DocumentExtractionService's
+        per-format DocumentBlock parsers). video/audio have their own
+        transcription-based ingestion; data formats (csv/xlsx) have their own
+        loader-based path — neither goes through here.
+        """
+        if self._source_format_registry is None:
+            # No registry wired (e.g. a bare test construction) — preserve
+            # the historical PDF-only behavior.
+            return (source_type or "pdf") == "pdf"
+        spec = self._source_format_registry.get(source_type or "")
+        return spec is not None and spec.category in ("document", "image")
+
     def _on_document_added(self, event: DocumentEvent, payload: DocumentEventPayload):
-        if event == DocumentEvent.DOCUMENT_ADDED and (payload.source_type or "pdf") == "pdf":
+        if event == DocumentEvent.DOCUMENT_ADDED and self._accepts_ingestion(payload.source_type):
             signals = IngestionWorkerSignals()
             signals.finished.connect(self._queue_ingestion_result)
             task = DocumentIngestionTask(
@@ -801,6 +856,7 @@ class DocumentIngestionService(QObject):
                 llm_manager=self.llm_manager,
                 bus=self.bus,
                 signals=signals,
+                document_extraction_service=self._document_extraction_service,
             )
             task._signals_ref = signals
             QThreadPool.globalInstance().start(task)

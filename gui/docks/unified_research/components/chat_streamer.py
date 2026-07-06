@@ -85,6 +85,22 @@ class ChatMessageWidget(QWidget):
         if hasattr(self, 'lbl_status'):
             self.lbl_status.hide()
 
+    def set_error_text(self, text):
+        self.raw_buffer = text or "Unknown AI error."
+        if self.is_user:
+            self.user_text.setText(self.raw_buffer)
+            return
+        self.hide_status()
+        if hasattr(self, "main_browser"):
+            self.main_browser.show()
+            self.main_browser.setMarkdown(f"**Error:** {self.raw_buffer}")
+            if self.theme:
+                self.main_browser.setStyleSheet(
+                    f"color: {self.theme.get('error', '#ff6666')}; "
+                    "background: transparent; border: none;"
+                )
+            self._resize_browser(self.main_browser)
+
     def append_chunk(self, chunk):
         self.raw_buffer += chunk
 

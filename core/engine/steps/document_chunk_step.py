@@ -47,4 +47,7 @@ class DocumentChunkStep(BaseStep):
         if not chunks:
             raise ValueError("Could not parse document into analysis chunks.")
 
-        return self.build_result(chunks)
+        return self.build_result(
+            chunks,
+            state_updates={"analysis_total_chunks": len(chunks)},
+        )

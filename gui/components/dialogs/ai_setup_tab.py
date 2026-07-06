@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QButtonGroup,
+    QCheckBox,
     QComboBox,
     QFrame,
     QGridLayout,
@@ -637,8 +638,14 @@ class AISetupSettingsTab(QWidget):
         self._voice_catalog_rows: Dict[str, _CatalogVoiceRow] = {}
         self._active_backend_id: str = ""
 
-        self._chat_model_combo: Optional[QComboBox] = None
-        self._embed_model_combo: Optional[QComboBox] = None
+        self._role_combos: Dict[str, QComboBox] = {}
+        self._role_download_buttons: Dict[str, QPushButton] = {}
+        self._role_help_labels: Dict[str, QLabel] = {}
+        self._role_downloads_by_model: Dict[str, set[str]] = {}
+        self._processing_mode_combo: Optional[QComboBox] = None
+        self._background_level_combo: Optional[QComboBox] = None
+        self._auto_transcribe_combo: Optional[QComboBox] = None
+        self._intelligence_checks: Dict[str, QCheckBox] = {}
 
         self._build_ui()
         self._connect_signals()
@@ -969,25 +976,114 @@ class AISetupSettingsTab(QWidget):
         lay.setSpacing(8)
         lay.addWidget(self._make_section_hdr("Defaults", t))
 
-        grid = QGridLayout()
-        grid.setSpacing(8)
-        grid.setColumnStretch(1, 1)
-
         def _lbl(text):
             l = QLabel(text)
             l.setStyleSheet(f"color: {fg}; background: transparent;")
             return l
 
-        self._chat_model_combo = QComboBox()
-        self._chat_model_combo.setStyleSheet(_input_style(t))
-        self._embed_model_combo = QComboBox()
-        self._embed_model_combo.setStyleSheet(_input_style(t))
+        role_hdr = QLabel("Model roles")
+        role_hdr.setStyleSheet(f"color: {muted}; background: transparent; font-weight: 700;")
+        lay.addWidget(role_hdr)
 
-        grid.addWidget(_lbl("Chat / Workflow model:"), 0, 0)
-        grid.addWidget(self._chat_model_combo, 0, 1)
-        grid.addWidget(_lbl("Embedding model:"), 1, 0)
-        grid.addWidget(self._embed_model_combo, 1, 1)
-        lay.addLayout(grid)
+        role_grid = QGridLayout()
+        role_grid.setSpacing(8)
+        role_grid.setColumnStretch(1, 1)
+        self._role_combos.clear()
+        self._role_download_buttons.clear()
+        self._role_help_labels.clear()
+        role_rows = [
+            ("main_answer_model", "Main answer model:"),
+            ("fast_worker_model", "Fast worker model:"),
+            ("embedding_model", "Embedding model:"),
+            ("reranker_model", "Reranker model:"),
+            ("vision_model", "Vision model:"),
+            ("transcription_model", "Transcription model:"),
+            ("extraction_repair_model", "Extraction repair model:"),
+        ]
+        for row, (role, label) in enumerate(role_rows):
+            combo = QComboBox()
+            combo.setStyleSheet(_input_style(t))
+            combo.currentIndexChanged.connect(lambda _idx=0, r=role: self._update_role_download_button(r))
+            download_btn = QPushButton("Download")
+            download_btn.setFixedWidth(92)
+            download_btn.setStyleSheet(_btn_primary(t))
+            download_btn.clicked.connect(lambda _checked=False, r=role: self._on_download_role_model(r))
+            reset_btn = QPushButton("Reset")
+            reset_btn.setFixedWidth(70)
+            reset_btn.setStyleSheet(_btn_default(t))
+            reset_btn.clicked.connect(lambda _checked=False, r=role: self._on_reset_model_role(r))
+            help_lbl = QLabel()
+            help_lbl.setWordWrap(True)
+            help_lbl.setStyleSheet(_label_style(t, muted=True, size=11))
+            role_grid.addWidget(_lbl(label), row, 0)
+            role_grid.addWidget(combo, row, 1)
+            role_grid.addWidget(download_btn, row, 2)
+            role_grid.addWidget(reset_btn, row, 3)
+            role_grid.addWidget(help_lbl, row + len(role_rows), 1, 1, 3)
+            self._role_combos[role] = combo
+            self._role_download_buttons[role] = download_btn
+            self._role_help_labels[role] = help_lbl
+        lay.addLayout(role_grid)
+
+        intel_hdr = QLabel("Background intelligence")
+        intel_hdr.setStyleSheet(f"color: {muted}; background: transparent; font-weight: 700;")
+        lay.addWidget(intel_hdr)
+
+        intel_grid = QGridLayout()
+        intel_grid.setSpacing(8)
+        intel_grid.setColumnStretch(1, 1)
+        self._processing_mode_combo = QComboBox()
+        self._processing_mode_combo.setStyleSheet(_input_style(t))
+        for label, value in [
+            ("Minimal", "minimal"), ("Balanced", "balanced"),
+            ("Deep", "deep"), ("Manual", "manual"),
+        ]:
+            self._processing_mode_combo.addItem(label, value)
+        self._background_level_combo = QComboBox()
+        self._background_level_combo.setStyleSheet(_input_style(t))
+        for label, value in [
+            ("Off", "off"), ("Low", "low"), ("Normal", "normal"), ("Aggressive", "aggressive"),
+        ]:
+            self._background_level_combo.addItem(label, value)
+        self._auto_transcribe_combo = QComboBox()
+        self._auto_transcribe_combo.setStyleSheet(_input_style(t))
+        for label, value in [("Never", "never"), ("Ask", "ask"), ("Always", "always")]:
+            self._auto_transcribe_combo.addItem(label, value)
+        intel_grid.addWidget(_lbl("Default processing mode:"), 0, 0)
+        intel_grid.addWidget(self._processing_mode_combo, 0, 1)
+        intel_grid.addWidget(_lbl("Background level:"), 1, 0)
+        intel_grid.addWidget(self._background_level_combo, 1, 1)
+        intel_grid.addWidget(_lbl("Auto-transcribe audio/video:"), 2, 0)
+        intel_grid.addWidget(self._auto_transcribe_combo, 2, 1)
+        lay.addLayout(intel_grid)
+
+        stored_hdr = QLabel("Stored intelligence")
+        stored_hdr.setStyleSheet(f"color: {muted}; background: transparent; font-weight: 700;")
+        lay.addWidget(stored_hdr)
+        checks = [
+            ("auto_embed_sources", "Auto-embed sources"),
+            ("auto_extract_entities", "Auto-extract entities"),
+            ("auto_extract_dates", "Auto-extract dates"),
+            ("auto_extract_citations", "Auto-extract citations"),
+            ("auto_extract_tables", "Auto-extract tables"),
+            ("store_transcripts", "Store transcripts"),
+            ("store_embeddings", "Store embeddings"),
+            ("pause_background_while_answering", "Pause background jobs while answering"),
+        ]
+        checks_grid = QGridLayout()
+        checks_grid.setSpacing(6)
+        self._intelligence_checks.clear()
+        for idx, (key, label) in enumerate(checks):
+            cb = QCheckBox(label)
+            cb.setStyleSheet(_label_style(t, muted=False, size=12))
+            self._intelligence_checks[key] = cb
+            checks_grid.addWidget(cb, idx // 2, idx % 2)
+        lay.addLayout(checks_grid)
+
+        warn = QLabel("Changing the embedding role marks embedding-dependent artifacts stale for rebuild.")
+        warn.setWordWrap(True)
+        warn.setStyleSheet(_label_style(t, muted=True, size=11))
+        lay.addWidget(warn)
 
         save_btn = QPushButton("Save Defaults")
         save_btn.setFixedHeight(32)
@@ -1012,6 +1108,8 @@ class AISetupSettingsTab(QWidget):
             if payload.message in ("installed", "uninstalled", "active", "startup_check_complete"):
                 self._refresh_models_section()
         elif event == AISetupEvent.MODEL_LIST_CHANGED:
+            self._refresh_models_section()
+        elif event in (AISetupEvent.MODEL_ROLES_CHANGED, AISetupEvent.INTELLIGENCE_SETTINGS_CHANGED):
             self._refresh_models_section()
         elif event == AISetupEvent.TTS_VOICE_LIST_CHANGED:
             self._refresh_tts_section()
@@ -1038,6 +1136,13 @@ class AISetupSettingsTab(QWidget):
             row = self._catalog_rows.get(bid, {}).get(mid)
             if row:
                 row.show_progress(msg, pct)
+            for role in self._role_downloads_by_model.get(mid, set()):
+                btn = self._role_download_buttons.get(role)
+                if btn:
+                    btn.setVisible(True)
+                    btn.setEnabled(False)
+                    label = f"{max(0, min(100, int(pct or 0)))}%" if pct is not None else "Downloading"
+                    btn.setText(label)
         elif vid:
             row = self._voice_catalog_rows.get(vid)
             if row:
@@ -1065,6 +1170,18 @@ class AISetupSettingsTab(QWidget):
             row = self._catalog_rows.get(bid, {}).get(mid)
             if row:
                 row.mark_installed() if success else row.reset_button()
+            for role in list(self._role_downloads_by_model.get(mid, set())):
+                btn = self._role_download_buttons.get(role)
+                if btn:
+                    if success:
+                        btn.setText("Installed")
+                        btn.setEnabled(False)
+                        btn.setVisible(False)
+                    else:
+                        btn.setText("Download")
+                        btn.setEnabled(True)
+                        btn.setVisible(True)
+            self._role_downloads_by_model.pop(mid, None)
             if success:
                 self._refresh_models_section()
         elif vid:
@@ -1261,26 +1378,109 @@ class AISetupSettingsTab(QWidget):
             self._voice_catalog_rows[v.id] = row
 
     def _refresh_defaults_combos(self, installed_models) -> None:
-        if not self._chat_model_combo:
-            return
         svc = getattr(self._ctx, "ai_setup_service", None)
-        current_chat = svc.get_default_chat_model() if svc else ""
-        current_embed = svc.get_default_embedding_model() if svc else ""
+        role_svc = getattr(self._ctx, "model_role_service", None)
+        policy_svc = getattr(self._ctx, "processing_policy_service", None)
+        catalog = svc.get_active_backend_catalog() if svc and hasattr(svc, "get_active_backend_catalog") else []
+        installed_ids = svc.get_installed_model_ids() if svc and hasattr(svc, "get_installed_model_ids") else set()
+        catalog_by_id = {m.id: m for m in catalog}
 
-        chat_models = [m for m in installed_models if "chat" in m.tags or "vision" in m.tags]
-        embed_models = [m for m in installed_models if "embedding" in m.tags]
+        all_models = list(installed_models)
 
-        for combo, models, current in [
-            (self._chat_model_combo, chat_models, current_chat),
-            (self._embed_model_combo, embed_models, current_embed),
-        ]:
+        role_capability = {
+            "embedding_model": "embedding",
+            "vision_model": "vision",
+        }
+        for role, combo in self._role_combos.items():
+            required = role_capability.get(role)
+            recommendations = role_svc.recommendations_for_role(role) if role_svc else []
+            models = [m for m in all_models if not required or required in getattr(m, "tags", [])]
+            current = self._current_role_model(role)
             combo.blockSignals(True)
             combo.clear()
+            combo.addItem("(fallback)", "")
+            added = {""}
+            for rec_id in recommendations[:3]:
+                info = catalog_by_id.get(rec_id)
+                label = info.name if info else rec_id
+                suffix = "installed" if rec_id in installed_ids else "download"
+                if role == "transcription_model":
+                    suffix = "local Whisper"
+                combo.addItem(f"Suggested: {label} ({suffix})", rec_id)
+                added.add(rec_id)
             for m in models:
+                if m.id in added:
+                    continue
                 combo.addItem(m.name or m.id, m.id)
+                added.add(m.id)
+            if current and current not in added:
+                combo.addItem(f"Custom: {current}", current)
             idx = next((i for i in range(combo.count()) if combo.itemData(i) == current), 0)
             combo.setCurrentIndex(idx)
             combo.blockSignals(False)
+            desc = role_svc.describe_role(role) if role_svc else {}
+            guide = desc.get("guide", "")
+            tier = desc.get("hardware_tier")
+            max_ctx = desc.get("max_context_tokens")
+            if tier:
+                guide = f"{guide} Hardware tier: {tier}; suggested context ceiling: {max_ctx or 'auto'} tokens."
+            if guide and role in self._role_help_labels:
+                self._role_help_labels[role].setText(guide)
+            self._update_role_download_button(role)
+
+        if policy_svc:
+            settings = policy_svc.get_project_settings()
+            self._set_combo_data(self._processing_mode_combo, settings.get("default_processing_mode", "balanced"))
+            self._set_combo_data(self._background_level_combo, settings.get("background_level", "normal"))
+            self._set_combo_data(self._auto_transcribe_combo, settings.get("auto_transcribe", "ask"))
+            for key, cb in self._intelligence_checks.items():
+                cb.blockSignals(True)
+                cb.setChecked(bool(settings.get(key, False)))
+                cb.blockSignals(False)
+
+    def _set_combo_data(self, combo: Optional[QComboBox], value: str) -> None:
+        if not combo:
+            return
+        idx = next((i for i in range(combo.count()) if combo.itemData(i) == value), 0)
+        combo.blockSignals(True)
+        combo.setCurrentIndex(idx)
+        combo.blockSignals(False)
+
+    def _current_role_model(self, role: str) -> str:
+        svc = getattr(self._ctx, "ai_setup_service", None)
+        role_svc = getattr(self._ctx, "model_role_service", None)
+        roles = svc.get_model_roles() if svc and hasattr(svc, "get_model_roles") else {}
+        if isinstance(roles, dict) and roles.get(role):
+            return str(roles[role])
+        if role == "main_answer_model" and svc and hasattr(svc, "get_default_chat_model"):
+            return svc.get_default_chat_model() or ""
+        if role == "embedding_model" and svc and hasattr(svc, "get_default_embedding_model"):
+            return svc.get_default_embedding_model() or ""
+        if role_svc:
+            try:
+                return role_svc.resolve_role(role) or ""
+            except Exception:
+                return ""
+        return ""
+
+    def _fallback_save_model_for_role(self, role: str) -> str:
+        svc = getattr(self._ctx, "ai_setup_service", None)
+        role_svc = getattr(self._ctx, "model_role_service", None)
+        if role == "main_answer_model" and svc and hasattr(svc, "get_default_chat_model"):
+            default = svc.get_default_chat_model() or ""
+            if default:
+                return default
+        if role == "embedding_model" and svc and hasattr(svc, "get_default_embedding_model"):
+            default = svc.get_default_embedding_model() or ""
+            if default:
+                return default
+        if role in {"main_answer_model", "embedding_model", "transcription_model"} and role_svc:
+            try:
+                recs = role_svc.recommendations_for_role(role)
+                return recs[0] if recs else ""
+            except Exception:
+                return ""
+        return ""
 
     # -----------------------------------------------------------------------
     # Actions
@@ -1302,16 +1502,84 @@ class AISetupSettingsTab(QWidget):
 
     def _on_save_defaults(self) -> None:
         from core.events.domains.ai_setup_events import AISetupIntent, AISetupPayload
-        chat_id = self._chat_model_combo.currentData() if self._chat_model_combo else ""
-        embed_id = self._embed_model_combo.currentData() if self._embed_model_combo else ""
-        if chat_id:
+        selected_roles = {}
+        for role, combo in self._role_combos.items():
+            model_id = combo.currentData()
+            if model_id is None:
+                model_id = ""
+            if not model_id:
+                model_id = self._fallback_save_model_for_role(role)
+            selected_roles[role] = model_id
+        for role, model_id in selected_roles.items():
             self._bus.ai_setup_action_requested.emit(
-                AISetupIntent.SET_DEFAULT_MODEL, AISetupPayload(model_id=chat_id, data={"type": "chat"}),
+                AISetupIntent.SET_MODEL_ROLE,
+                AISetupPayload(data={"role": role, "model": model_id}),
             )
-        if embed_id:
-            self._bus.ai_setup_action_requested.emit(
-                AISetupIntent.SET_DEFAULT_MODEL, AISetupPayload(model_id=embed_id, data={"type": "embedding"}),
-            )
+        settings = {
+            "default_processing_mode": self._processing_mode_combo.currentData() if self._processing_mode_combo else "balanced",
+            "background_level": self._background_level_combo.currentData() if self._background_level_combo else "normal",
+            "auto_transcribe": self._auto_transcribe_combo.currentData() if self._auto_transcribe_combo else "ask",
+        }
+        settings.update({key: cb.isChecked() for key, cb in self._intelligence_checks.items()})
+        settings["background_processing_enabled"] = settings["background_level"] != "off"
+        self._bus.ai_setup_action_requested.emit(
+            AISetupIntent.SET_INTELLIGENCE_SETTINGS,
+            AISetupPayload(data=settings),
+        )
+        # Refresh models section to show updated saved values
+        QTimer.singleShot(200, self._refresh_models_section)
+
+    def apply_changes(self) -> None:
+        self._on_save_defaults()
+
+    def _on_reset_model_role(self, role: str) -> None:
+        from core.events.domains.ai_setup_events import AISetupIntent, AISetupPayload
+        self._bus.ai_setup_action_requested.emit(
+            AISetupIntent.RESET_MODEL_ROLE,
+            AISetupPayload(data={"role": role}),
+        )
+        QTimer.singleShot(0, self._refresh_models_section)
+
+    def _on_download_role_model(self, role: str) -> None:
+        from core.events.domains.ai_setup_events import AISetupIntent, AISetupPayload
+        combo = self._role_combos.get(role)
+        svc = getattr(self._ctx, "ai_setup_service", None)
+        if not combo or not svc:
+            return
+        model_id = combo.currentData() or ""
+        backend_id = svc.get_active_backend_id() if hasattr(svc, "get_active_backend_id") else ""
+        if not model_id or not backend_id:
+            return
+        self._role_downloads_by_model.setdefault(model_id, set()).add(role)
+        btn = self._role_download_buttons.get(role)
+        if btn:
+            btn.setVisible(True)
+            btn.setEnabled(False)
+            btn.setText("0%")
+        self._bus.ai_setup_action_requested.emit(
+            AISetupIntent.PULL_MODEL,
+            AISetupPayload(backend_id=backend_id, model_id=model_id),
+        )
+
+    def _update_role_download_button(self, role: str) -> None:
+        combo = self._role_combos.get(role)
+        btn = self._role_download_buttons.get(role)
+        svc = getattr(self._ctx, "ai_setup_service", None)
+        if not combo or not btn or not svc:
+            return
+        model_id = combo.currentData() or ""
+        installed = svc.get_installed_model_ids() if hasattr(svc, "get_installed_model_ids") else set()
+        catalog_ids = {m.id for m in svc.get_active_backend_catalog()} if hasattr(svc, "get_active_backend_catalog") else set()
+        can_download = bool(model_id and model_id in catalog_ids and model_id not in installed)
+        if role in self._role_downloads_by_model.get(model_id, set()):
+            btn.setVisible(True)
+            btn.setEnabled(False)
+            if btn.text() == "Download":
+                btn.setText("Downloading")
+            return
+        btn.setText("Download")
+        btn.setVisible(can_download)
+        btn.setEnabled(can_download)
 
     def _on_install_piper(self) -> None:
         from core.events.domains.ai_setup_events import AISetupIntent, AISetupPayload

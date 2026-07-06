@@ -157,6 +157,28 @@ class TestSectionGroupStep(unittest.TestCase):
         result = self._run([])
         self.assertEqual(result.raw_value, [])
 
+    def test_groups_by_real_section_id_when_present(self):
+        evidence = [
+            {"chunk_id": 0, "section_id": "Intro", "refs": [{"quote_id": "q0"}]},
+            {"chunk_id": 1, "section_id": "Intro", "refs": [{"quote_id": "q1"}]},
+            {"chunk_id": 2, "section_id": "Methods", "refs": [{"quote_id": "q2"}]},
+        ]
+        result = self._run(evidence, chunks_per_section=5)
+        groups = result.raw_value
+        # two real sections (Intro, Methods), not one fixed-size-5 group
+        self.assertEqual(len(groups), 2)
+        self.assertEqual(groups[0]["total_sections"], 2)
+
+    def test_falls_back_to_fixed_size_when_section_id_missing(self):
+        # mixed: some chunks lack section_id (e.g. legacy/fallback chunking) —
+        # must use the arbitrary fixed-size grouping, not partial section grouping
+        evidence = [
+            {"chunk_id": 0, "section_id": "Intro", "refs": []},
+            {"chunk_id": 1, "section_id": None, "refs": []},
+        ]
+        result = self._run(evidence, chunks_per_section=5)
+        self.assertEqual(len(result.raw_value), 1)  # single fixed-size group of 2
+
     def test_total_sections_set_correctly(self):
         evidence = self._make_evidence(6)
         result = self._run(evidence, chunks_per_section=5)

@@ -149,6 +149,51 @@ class _PluginSourceNamespace:
             SourcePayload(source_id=source_id or None, path=path or None, timestamp=timestamp),
         )
 
+    def jump(self, source_type: str, locator: dict) -> None:
+        """
+        Trigger "jump to source" navigation for a source_type without
+        needing to reach into plugin_extension_registry directly. Looks up
+        the registered CitationSourceHandlerSpec (built-in or plugin) and
+        invokes its callback with an AppContext-like object if the GUI layer
+        has registered one, else no-ops.
+        """
+        registry = self._core.plugin_extension_registry
+        handler = registry.get_citation_source_handler(source_type) if registry else None
+        if handler is None:
+            return
+        # Built-in handlers (see MainWindow._register_builtin_locate_handlers)
+        # close over their own viewer reference and ignore this argument;
+        # plugin handlers that need GUI context should do the same.
+        handler.callback(locator, None)
+
+
+class _PluginSourceFormatNamespace:
+    """
+    Source format registration, exposed as ``api.source_formats``.
+
+    A plugin adds an entirely new ingestible source type with three calls:
+      1. ``api.source_formats.register(SourceFormatSpec(...))`` — dispatch
+         (extensions/mime types, category, parser/loader id, availability).
+      2. ``api.gui_extensions.add_source_viewer(SourceViewerSpec(...))`` —
+         the viewer widget factory shown in SourceViewerHost.
+      3. ``api.gui_extensions.add_citation_source_handler(CitationSourceHandlerSpec(...))``
+         — jump-to-source navigation for that source_type.
+
+    See core/registries/source_format_registry.py for SourceFormatSpec.
+    """
+
+    def __init__(self, core: "PapyrusCore") -> None:
+        self._core = core
+
+    def register(self, spec) -> None:
+        self._core.source_format_registry.register(spec)
+
+    def available(self) -> List[str]:
+        return [s.source_type for s in self._core.source_format_registry.all()]
+
+    def get(self, source_type: str):
+        return self._core.source_format_registry.get(source_type)
+
 
 class _PluginTagNamespace:
     """Project tag helpers exposed as ``api.tags``.
@@ -303,6 +348,107 @@ class _PluginVideoNamespace:
         )
 
 
+class _PluginIntelligenceNamespace:
+    """Controlled access to source intelligence and artifact retrieval."""
+
+    def __init__(
+        self,
+        core: "PapyrusCore",
+        plugin_id: str,
+        registered_provider_ids: List[str],
+        registered_producer_ids: List[str],
+    ) -> None:
+        self._core = core
+        self._plugin_id = plugin_id
+        self._registered_provider_ids = registered_provider_ids
+        self._registered_producer_ids = registered_producer_ids
+
+    def get_source_status(self, source_id: str) -> dict:
+        svc = getattr(self._core, "source_intelligence_service", None)
+        return svc.get_source_status(source_id) if svc else {}
+
+    def run_stage(self, source_id: str, stage: str):
+        svc = getattr(self._core, "source_intelligence_service", None)
+        return svc.run_stage(source_id, stage) if svc else None
+
+    def run_missing(self, source_id: str):
+        svc = getattr(self._core, "source_intelligence_service", None)
+        return svc.run_missing(source_id) if svc else []
+
+    def rerun_stale(self, source_id: str):
+        svc = getattr(self._core, "source_intelligence_service", None)
+        return svc.rerun_stale(source_id) if svc else []
+
+    def delete_derived(self, source_id: str, stage: str = "") -> int:
+        svc = getattr(self._core, "source_intelligence_service", None)
+        return svc.delete_derived(source_id, stage or None) if svc else 0
+
+    def get_artifacts(self, source_id: str = "", filters: Optional[dict] = None) -> list:
+        svc = getattr(self._core, "source_intelligence_service", None)
+        return svc.get_artifacts(source_id or None, filters or {}) if svc else []
+
+    def get_related_artifacts(self, artifact_id: str) -> dict:
+        svc = getattr(self._core, "source_intelligence_service", None)
+        return svc.get_related_artifacts(artifact_id) if svc else {}
+
+    def build_retrieval_plan(self, query: str, **kwargs) -> dict:
+        from dataclasses import asdict
+        svc = getattr(self._core, "source_intelligence_service", None)
+        plan = svc.build_retrieval_plan(query, **kwargs) if svc else None
+        return asdict(plan) if plan else {"query": query}
+
+    def retrieve(self, plan_or_query, **kwargs) -> list:
+        from dataclasses import asdict, is_dataclass
+        from core.models.intelligence_models import RetrievalPlan
+        service = getattr(self._core, "hybrid_retrieval_service", None)
+        if not service:
+            return []
+        if isinstance(plan_or_query, RetrievalPlan):
+            plan = plan_or_query
+        elif isinstance(plan_or_query, dict):
+            fields = RetrievalPlan.__dataclass_fields__
+            plan = RetrievalPlan(**{key: plan_or_query.get(key) for key in fields if key in plan_or_query})
+        else:
+            plan = service.build_plan(str(plan_or_query or ""), **kwargs) if hasattr(service, "build_plan") else RetrievalPlan(query=str(plan_or_query or ""))
+        return [asdict(item) if is_dataclass(item) else dict(item) for item in service.retrieve(plan)]
+
+    def register_retrieval_provider(self, provider_id: str, callback: Callable) -> str:
+        service = getattr(self._core, "hybrid_retrieval_service", None)
+        if not service:
+            raise RuntimeError("Hybrid retrieval service is not available.")
+        qualified_id = f"{self._plugin_id}:{provider_id}"
+        service.register_provider(qualified_id, callback)
+        if qualified_id not in self._registered_provider_ids:
+            self._registered_provider_ids.append(qualified_id)
+        return qualified_id
+
+    def register_artifact_producer(self, producer_id: str, callback: Callable) -> str:
+        service = getattr(self._core, "artifact_service", None)
+        if not service or not hasattr(service, "register_producer"):
+            raise RuntimeError("Artifact producer registry is not available.")
+        qualified_id = f"{self._plugin_id}:{producer_id}"
+        service.register_producer(qualified_id, callback)
+        if qualified_id not in self._registered_producer_ids:
+            self._registered_producer_ids.append(qualified_id)
+        return qualified_id
+
+    def register_artifact_type(self, artifact_type: str, metadata: Optional[dict] = None) -> str:
+        service = getattr(self._core, "artifact_service", None)
+        if not service or not hasattr(service, "register_artifact_type"):
+            raise RuntimeError("Artifact type registry is not available.")
+        qualified = f"{self._plugin_id}.{artifact_type}" if ":" not in artifact_type and "." not in artifact_type else artifact_type
+        service.register_artifact_type(qualified, metadata or {})
+        return qualified
+
+    def register_edge_type(self, edge_type: str, metadata: Optional[dict] = None) -> str:
+        service = getattr(self._core, "artifact_service", None)
+        if not service or not hasattr(service, "register_edge_type"):
+            raise RuntimeError("Artifact edge type registry is not available.")
+        qualified = f"{self._plugin_id}.{edge_type}" if ":" not in edge_type and "." not in edge_type else edge_type
+        service.register_edge_type(qualified, metadata or {})
+        return qualified
+
+
 class PapyrusAPI:
     """
     Typed facade exposing the backend to plugins.
@@ -329,11 +475,15 @@ class PapyrusAPI:
         # Tracks workflow step types registered by this plugin for cleanup
         self._registered_step_types: List[str] = []
         self._registered_rag_source_ids: List[str] = []
+        self._registered_retrieval_provider_ids: List[str] = []
+        self._registered_artifact_producer_ids: List[str] = []
         # Lazy-initialised namespaces
         self._db_ns: Optional["_PluginDBNamespace"] = None
         self._tasks_ns: Optional["_PluginTaskNamespace"] = None
         self._sources_ns: Optional["_PluginSourceNamespace"] = None
+        self._source_formats_ns: Optional["_PluginSourceFormatNamespace"] = None
         self._video_ns: Optional["_PluginVideoNamespace"] = None
+        self._intelligence_ns: Optional["_PluginIntelligenceNamespace"] = None
         self._tags_ns: Optional["_PluginTagNamespace"] = None
         self._widgets_ns: Optional["_PluginWidgetNamespace"] = None
         # Per-plugin persistent config (lazy import to avoid circular at module level)
@@ -475,6 +625,75 @@ class PapyrusAPI:
         from core.extraction.deterministic import DeterministicExtractorRegistry
         return DeterministicExtractorRegistry
 
+    @property
+    def extraction(self):
+        """Access the DocumentExtractionService to query shared extraction results.
+
+        Usage::
+
+            index = api.extraction.get_citation_index(doc_id)
+            blocks = api.extraction.get_blocks(doc_id)
+        """
+        return getattr(self._core, "document_extraction_service", None)
+
+    @property
+    def pattern_detector_registry(self):
+        """Register custom pattern packs for entity, citation, and date detection.
+
+        Usage::
+
+            from core.registries.pattern_detector_registry import PatternPack
+            api.pattern_detector_registry.register(PatternPack(
+                pack_id="my_plugin_citations",
+                pack_name="My Domain Citations",
+                entity_types=["citation"],
+                raw_patterns=[r"\\bmy_pattern\\b"],
+                plugin_id="my_plugin",
+            ))
+        """
+        return getattr(self._core, "pattern_detector_registry", None)
+
+    @property
+    def table_extraction(self):
+        """Access the TableExtractionService for canonical table objects.
+
+        Usage::
+
+            tables = api.table_extraction.get_tables(doc_id)
+        """
+        return getattr(self._core, "table_extraction_service", None)
+
+    @property
+    def ranking(self):
+        """Access the RankingFeatureService to score and rank document blocks.
+
+        Usage::
+
+            ranked = api.ranking.rank_with_compute(blocks, preferred_features=["contains_in_text_citation"])
+        """
+        return getattr(self._core, "ranking_feature_service", None)
+
+    @property
+    def deterministic_pass_registry(self):
+        """Register named deterministic (no-LLM) block ranking/filtering passes.
+
+        Passes are resolved by pass_id from analysis-template ``deterministic_passes``
+        fields and run by the RANK_BLOCKS step. Call ``remove_by_plugin(plugin_id)``
+        on unload if your plugin registers passes.
+
+        Usage::
+
+            from core.registries.deterministic_pass_registry import DeterministicPassSpec
+            api.deterministic_pass_registry.register(DeterministicPassSpec(
+                pass_id="my_plugin_legal_citation_rank",
+                pass_name="Legal Citation Density",
+                description="Ranks blocks by legal-citation marker density.",
+                run_fn=my_run_fn,
+                plugin_id="my_plugin",
+            ))
+        """
+        return getattr(self._core, "deterministic_pass_registry", None)
+
     # ----------------------------------------------------------------
     # Section B2: Database and task namespaces
     # ----------------------------------------------------------------
@@ -501,11 +720,30 @@ class PapyrusAPI:
         return self._sources_ns
 
     @property
+    def source_formats(self) -> "_PluginSourceFormatNamespace":
+        """Register new ingestible source formats (see _PluginSourceFormatNamespace)."""
+        if self._source_formats_ns is None:
+            self._source_formats_ns = _PluginSourceFormatNamespace(self._core)
+        return self._source_formats_ns
+
+    @property
     def video(self) -> "_PluginVideoNamespace":
         """Video transcript and transcription helpers."""
         if self._video_ns is None:
             self._video_ns = _PluginVideoNamespace(self._core)
         return self._video_ns
+
+    @property
+    def intelligence(self) -> "_PluginIntelligenceNamespace":
+        """Source intelligence, artifact, and retrieval-provider helpers."""
+        if self._intelligence_ns is None:
+            self._intelligence_ns = _PluginIntelligenceNamespace(
+                self._core,
+                self._plugin_id,
+                self._registered_retrieval_provider_ids,
+                self._registered_artifact_producer_ids,
+            )
+        return self._intelligence_ns
 
     @property
     def tags(self) -> "_PluginTagNamespace":
@@ -1009,6 +1247,17 @@ class PapyrusAPI:
         for source_id in self._registered_rag_source_ids:
             self._core.llm_manager.unregister_rag_source(source_id)
         self._registered_rag_source_ids.clear()
+        retrieval = getattr(self._core, "hybrid_retrieval_service", None)
+        if retrieval is not None:
+            for provider_id in self._registered_retrieval_provider_ids:
+                retrieval.unregister_provider(provider_id)
+        self._registered_retrieval_provider_ids.clear()
+        artifact_service = getattr(self._core, "artifact_service", None)
+        if artifact_service is not None:
+            for producer_id in self._registered_artifact_producer_ids:
+                if hasattr(artifact_service, "unregister_producer"):
+                    artifact_service.unregister_producer(producer_id)
+        self._registered_artifact_producer_ids.clear()
         # Remove plugin table registrations (does NOT drop the actual SQLite table)
         from core.plugins.plugin_db_registry import PluginTableRegistry
         PluginTableRegistry.get_instance().remove_by_plugin(self._plugin_id)
@@ -1035,6 +1284,10 @@ class PapyrusAPI:
         data_registry = getattr(self._core, "data_provider_registry", None)
         if data_registry is not None and hasattr(data_registry, "remove_plugin"):
             data_registry.remove_plugin(self._plugin_id)
+        # Remove plugin-contributed source formats (SourceFormatRegistry)
+        source_format_registry = getattr(self._core, "source_format_registry", None)
+        if source_format_registry is not None:
+            source_format_registry.remove_by_plugin(self._plugin_id)
         # Remove plugin-contributed analysis templates
         plugin_templates = getattr(self._core, "_plugin_analysis_templates", None)
         if plugin_templates is not None:

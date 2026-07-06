@@ -92,9 +92,31 @@ class AIWidgetSpec:
 
 @dataclass
 class CitationSourceHandlerSpec:
-    """Navigation handler for citations produced by a plugin-owned RAG source."""
+    """
+    Jump-to-source navigation handler for a source_type.
+
+    Originally citation-only; this is now the single source_type-keyed
+    dispatch point for all "jump to source" navigation (citations, notes,
+    highlights, RAG hits) — see SourceViewerHost.jump_to_source.
+    """
     source_type: str
-    callback: Callable[[dict, Any], None]  # callback(citation, app_context)
+    callback: Callable[[dict, Any], None]  # callback(locator: dict, app_context)
+    plugin_id: str = ""
+
+
+@dataclass
+class SourceViewerSpec:
+    """
+    GUI viewer widget factory for a source_type.
+
+    Registered by core (for built-in formats, from gui/main_window.py — never
+    from core/, since papyrus_core.py must not import gui) or by a plugin via
+    api.gui_extensions.add_source_viewer(). SourceViewerHost builds one widget
+    per registered spec and dispatches to it by source_type.
+    """
+    source_type: str
+    viewer_factory: Callable[[Any, Any], Any]   # factory(app_context, parent) -> QWidget
+    display_name: str = ""
     plugin_id: str = ""
 
 
@@ -308,6 +330,7 @@ class PluginExtensionRegistry:
         self._research_tabs: List[ResearchTabSpec] = []
         self._ai_renderers: List[AIOutputRendererSpec] = []
         self._citation_source_handlers: List[CitationSourceHandlerSpec] = []
+        self._source_viewers: List[SourceViewerSpec] = []
         self._extra_docks: List[DockSpec] = []
         self._menu_items: List[MenuItemSpec] = []
         self._main_toolbar_buttons: List[MainToolbarButtonSpec] = []
@@ -341,6 +364,14 @@ class PluginExtensionRegistry:
             if current.source_type != spec.source_type
         ]
         self._citation_source_handlers.append(spec)
+
+    def add_source_viewer(self, spec: SourceViewerSpec) -> None:
+        """Register (or replace) the viewer widget factory for a source_type."""
+        self._source_viewers = [
+            current for current in self._source_viewers
+            if current.source_type != spec.source_type
+        ]
+        self._source_viewers.append(spec)
 
     def add_dock(self, spec: DockSpec) -> None:
         self._extra_docks.append(spec)
@@ -435,6 +466,15 @@ class PluginExtensionRegistry:
             (spec for spec in self._citation_source_handlers if spec.source_type == source_type),
             None,
         )
+
+    def get_source_viewer(self, source_type: str) -> Optional[SourceViewerSpec]:
+        return next(
+            (spec for spec in self._source_viewers if spec.source_type == source_type),
+            None,
+        )
+
+    def get_source_viewers(self) -> List[SourceViewerSpec]:
+        return list(self._source_viewers)
 
     def get_extra_docks(self) -> List[DockSpec]:
         return list(self._extra_docks)
@@ -533,7 +573,8 @@ class PluginExtensionRegistry:
     def _spec_list_attrs(self) -> List[str]:
         """Canonical list of all spec-list attribute names. Used by hot-reload cleanup and tagging."""
         return [
-            "_toolbar_buttons", "_research_tabs", "_ai_renderers", "_citation_source_handlers", "_extra_docks",
+            "_toolbar_buttons", "_research_tabs", "_ai_renderers", "_citation_source_handlers",
+            "_source_viewers", "_extra_docks",
             "_menu_items", "_main_toolbar_buttons", "_shortcuts", "_commands",
             "_workspace_context_menu_items", "_actions", "_themes", "_dock_actions", "_rag_source_filters",
             "_reading_text_filters", "_reading_token_transforms",

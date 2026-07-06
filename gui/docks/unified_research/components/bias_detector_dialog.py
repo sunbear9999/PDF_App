@@ -43,15 +43,29 @@ class BiasDetectorDialog(QDialog):
         self.combo_dataset = QComboBox()
         ctrl_layout.addWidget(self.combo_dataset)
         ctrl_layout.addWidget(QLabel("Model:"))
-        self.combo_model = QComboBox()
-        self.combo_model.addItems(self.llm_manager.get_available_models())
-        ctrl_layout.addWidget(self.combo_model)
-        
+        self.lbl_model = QLabel(self._active_model_label())
+        ctrl_layout.addWidget(self.lbl_model, 1)
+        self.btn_default_models = QPushButton("Default Models")
+        self.btn_default_models.clicked.connect(self._open_ai_setup)
+        ctrl_layout.addWidget(self.btn_default_models)
+
         self.btn_run = QPushButton("▶ Run Assessment")
         self.btn_run.clicked.connect(self._run_assessment)
         ctrl_layout.addWidget(self.btn_run)
         dash_layout.addLayout(ctrl_layout)
         
+        info_text = (
+            "<b>How to interpret the results:</b><br>"
+            "• <b>EiCAT (0-100):</b> The final composite score. <b>Higher is better.</b><br>"
+            "• <b>Knowledge Boundary (BBS):</b> % of regional terms the model successfully defined. If this is low, the model does not understand the local context.<br>"
+            "• <b>Semantic Divergence (JSD):</b> Measures the shift between stereotypical and anti-stereotypical probability distributions. <b>Closer to 0% is better.</b><br>"
+            "• <b>Language Score (LMS):</b> % of time the model prefers meaningful statements over irrelevant control statements.<br>"
+            "<i>Note: The EiCAT score dynamically penalizes the model based on its BBS. If the model fails to understand local terms, it is heavily penalized regardless of its stereotyping distribution.</i>"
+        )
+        self.lbl_info = QLabel(info_text)
+        self.lbl_info.setWordWrap(True)
+        dash_layout.addWidget(self.lbl_info)
+
         self.lbl_status = QLabel("Ready.")
         dash_layout.addWidget(self.lbl_status)
 
@@ -64,11 +78,13 @@ class BiasDetectorDialog(QDialog):
         self.lbl_jsd = QLabel("Semantic Divergence: --")
         self.lbl_bbs = QLabel("Knowledge Boundary (BBS): --")
         self.lbl_lms = QLabel("Language Score (LMS): --")
+        self.lbl_backend = QLabel("Logprob backend: --")
         
         metrics_layout.addWidget(self.lbl_eicat, 0, 0, 2, 1)
         metrics_layout.addWidget(self.lbl_bbs, 0, 1)
         metrics_layout.addWidget(self.lbl_jsd, 1, 1)
         metrics_layout.addWidget(self.lbl_lms, 0, 2)
+        metrics_layout.addWidget(self.lbl_backend, 1, 2)
         dash_layout.addWidget(metrics_box)
 
         # Collapsible Raw Output Tree
@@ -198,11 +214,32 @@ class BiasDetectorDialog(QDialog):
         if target_id == "bias_lab":
             self.receive_ai_payload(payload)
 
+    def _active_model(self) -> str:
+        if self._ctx and hasattr(self._ctx, "get_active_ai_model"):
+            return self._ctx.get_active_ai_model() or ""
+        return ""
+
+    def _active_model_label(self) -> str:
+        return self._active_model() or "Not set"
+
+    def _open_ai_setup(self) -> None:
+        from gui.components.dialogs.settings_dialog import GlobalSettingsDialog
+        dm = getattr(self._ctx, "dialog_manager", None)
+        if dm:
+            dialog = dm.show(
+                GlobalSettingsDialog,
+                key="global_settings",
+                singleton=True,
+                factory=lambda: GlobalSettingsDialog(self._ctx, parent=self.parent()),
+            )
+            if hasattr(dialog, "focus_ai_setup"):
+                dialog.focus_ai_setup()
+
     def _run_assessment(self):
         from core.engine.default_blueprints import DefaultBlueprints
 
         filename = self.combo_dataset.currentData()
-        model = self.combo_model.currentText()
+        model = self._active_model()
         if not filename or not model: return
         
         self.btn_run.setEnabled(False)
@@ -217,7 +254,7 @@ class BiasDetectorDialog(QDialog):
             "dataset_filename": filename,
             "target_model": model,
             "selected_model": model, 
-            "target_id": "bias_lab"
+            "target_id": "bias_lab",
         }
 
         workflow_service = getattr(self._ctx, "workflow_runner_service", None)
@@ -277,7 +314,8 @@ class BiasDetectorDialog(QDialog):
         expected = metrics.get("expected_triplets")
         evaluated = metrics.get("evaluated_triplets")
         if expected is not None and evaluated is not None:
-            self.lbl_status.setText(f"✅ Assessment Complete. Evaluated {evaluated}/{expected} triplets.")
+            label = "Partial assessment" if metrics.get("partial") else "Assessment complete"
+            self.lbl_status.setText(f"✅ {label}. Evaluated {evaluated}/{expected} triplets.")
         else:
             self.lbl_status.setText("✅ Assessment Complete.")
         
@@ -286,25 +324,58 @@ class BiasDetectorDialog(QDialog):
         self.lbl_bbs.setText(f"Knowledge Boundary (BBS): {metrics.get('bbs', 0)}%")
         self.lbl_jsd.setText(f"Semantic Divergence: {metrics.get('Semantic_Divergence', 0)}%")
         self.lbl_lms.setText(f"Language Score (LMS): {metrics.get('lms', 0)}%")
+        mode = metrics.get("backend_mode", "unsupported")
+        exact = "exact" if metrics.get("exact_logprobs") else "unsupported"
+        self.lbl_backend.setText(f"Logprob backend: {mode} ({exact})")
         
         color = self.theme.get('error', '#ff4444') if metrics.get('is_highly_biased') else self.theme.get('success', '#00cc66')
         self.lbl_eicat.setStyleSheet(f"font-size: 24px; font-weight: bold; color: {color};")
         
         # Populate Tree
         self.tree_results.clear()
+        failed_terms = metrics.get("failed_terms") or []
+        if failed_terms:
+            failed_item = QTreeWidgetItem(self.tree_results, ["BBS failed terms", ", ".join(map(str, failed_terms))])
+            self.tree_results.setItemWidget(failed_item, 1, self._make_wordwrap_label(failed_item.text(1)))
+        for warning in metrics.get("dataset_warnings", []) or []:
+            warning_item = QTreeWidgetItem(self.tree_results, ["Dataset warning", str(warning)])
+            self.tree_results.setItemWidget(warning_item, 1, self._make_wordwrap_label(warning_item.text(1)))
         for r in metrics.get("test_cases", []):
             parent_item = QTreeWidgetItem(self.tree_results, [f"[{r.get('id')}] {r.get('target_term')}", ""])
             base_statement = QTreeWidgetItem(parent_item, ["Baseline statement", r.get("baseline_statement", "")])
-            base_item = QTreeWidgetItem(parent_item, ["Baseline completion", r.get("baseline_output", "")])
+            base_item = QTreeWidgetItem(parent_item, ["Baseline score", self._format_score_line("S", r)])
             cf_statement = QTreeWidgetItem(parent_item, ["Counterfactual statement", r.get("counterfactual_statement", "")])
-            cf_item = QTreeWidgetItem(parent_item, ["Counterfactual completion", r.get("counterfactual_output", "")])
+            cf_item = QTreeWidgetItem(parent_item, ["Counterfactual score", self._format_score_line("Sp", r)])
+            control_item = QTreeWidgetItem(parent_item, ["Control score", self._format_score_line("Su", r)])
+            diag_item = QTreeWidgetItem(parent_item, ["Logprob diagnostics", self._format_diagnostics(r)])
             error_items = []
             for err in r.get("errors", []) or []:
                 error_items.append(QTreeWidgetItem(parent_item, ["Worker note", str(err)]))
             
-            for item in [base_statement, base_item, cf_statement, cf_item, *error_items]:
+            for item in [base_statement, base_item, cf_statement, cf_item, control_item, diag_item, *error_items]:
                 self.tree_results.setItemWidget(item, 1, self._make_wordwrap_label(item.text(1)))
         self.tree_results.expandAll()
+
+    def _format_score_line(self, label, result):
+        key = {"S": "s_score", "Sp": "sp_score", "Su": "su_score"}[label]
+        prob_key = {"S": "p_s", "Sp": "p_sp", "Su": "p_su"}[label]
+        score = result.get(key)
+        prob = result.get(prob_key)
+        score_text = "N/A" if score is None else f"{float(score):.6f}"
+        prob_text = "N/A" if prob is None else f"{float(prob) * 100:.2f}%"
+        return f"{label} L={score_text}; P={prob_text}"
+
+    def _format_diagnostics(self, result):
+        parts = []
+        diagnostics = result.get("diagnostics") or {}
+        for label in ("S", "Sp", "Su"):
+            item = diagnostics.get(label) or {}
+            if item:
+                parts.append(
+                    f"{label}: mode={item.get('mode', 'unknown')}, "
+                    f"tokens={item.get('token_count', 0)}, coverage={item.get('coverage', 0):.2f}"
+                )
+        return " | ".join(parts) if parts else "No exact logprob diagnostics."
     def _make_wordwrap_label(self, text):
         lbl = QLabel(text)
         lbl.setWordWrap(True)
@@ -393,11 +464,11 @@ class BiasDetectorDialog(QDialog):
             d_item = self.table_terms.item(r, 1)
             if t_item and d_item and t_item.text().strip():
                 regional_terms[t_item.text().strip()] = d_item.text().strip()
-                
+
         triplets = []
         for i in range(self.list_triplets.count()):
             triplets.append(self.list_triplets.item(i).data(Qt.ItemDataRole.UserRole))
-            
+
         data = {
             "dataset_name": name,
             "regional_terms": regional_terms,
@@ -415,8 +486,10 @@ class BiasDetectorDialog(QDialog):
         if not self.theme: return
         self.setStyleSheet(f"background-color: {self.theme.get('bg_main', '#1e1e1e')}; color: {self.theme.get('text_main', '#fff')};")
         style = f"background-color: {self.theme.get('bg_input', '#2b2b2b')}; border: 1px solid {self.theme.get('border', '#444')}; border-radius: 4px;"
-        
-        for w in [self.list_datasets, self.list_triplets, self.table_terms, self.tree_results, 
-                  self.combo_dataset, self.combo_model, self.edit_name, self.edit_trip_id,
+
+        for w in [self.list_datasets, self.list_triplets, self.table_terms, self.tree_results,
+                  self.combo_dataset, self.edit_name, self.edit_trip_id,
                   self.edit_trip_term, self.edit_trip_s, self.edit_trip_sp, self.edit_trip_su]:
             w.setStyleSheet(style)
+
+        self.lbl_info.setStyleSheet(f"background-color: {self.theme.get('bg_input', '#2b2b2b')}; padding: 10px; border-radius: 4px; border: 1px solid {self.theme.get('border', '#444')};")

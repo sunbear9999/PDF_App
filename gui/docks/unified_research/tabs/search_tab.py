@@ -2,7 +2,7 @@
 import os
 import urllib.parse
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTextEdit,
-                             QPushButton, QLabel, QCheckBox, QScrollArea, QFrame, QInputDialog, QComboBox)
+                             QPushButton, QLabel, QCheckBox, QScrollArea, QFrame, QInputDialog)
 from PySide6.QtCore import Qt, QThread, Signal, QUrl
 from PySide6.QtGui import QCursor, QDesktopServices
 
@@ -73,11 +73,7 @@ class SearchTab(BaseTab):
         layout.addWidget(self.input_goal)
 
         options_layout = QHBoxLayout()
-        options_layout.addWidget(QLabel("Model:"))
-        self.model_combo = QComboBox()
-        models = self.llm_manager.get_available_models() if self.llm_manager else []
-        if models: self.model_combo.addItems(models)
-        options_layout.addWidget(self.model_combo, 1)
+        options_layout.addWidget(QLabel("Uses default model roles from AI Setup"))
 
         self.chk_advanced = QCheckBox("Advanced (Scan Citations)")
         options_layout.addWidget(self.chk_advanced)
@@ -183,8 +179,7 @@ class SearchTab(BaseTab):
 
     def _trigger_ai_search(self):
         goal = self.input_goal.toPlainText().strip()
-        model = self.model_combo.currentText()
-        if not goal or not model: return
+        if not goal: return
         
         self._clear_results()
         self.btn_generate.setEnabled(False)
@@ -197,7 +192,7 @@ class SearchTab(BaseTab):
             self.math_worker.start()
 
         from core.engine.default_blueprints import DefaultBlueprints
-        blueprint = self.blueprint_manager.get_blueprint("Search Terms", lambda: DefaultBlueprints.get_search_terms_blueprint(self.prompt_manager, model=model))
+        blueprint = self.blueprint_manager.get_blueprint("Search Terms", lambda: DefaultBlueprints.get_search_terms_blueprint(self.prompt_manager))
         
         # Dispatch to engine via BaseTab
         self.send_to_pipeline(blueprint, {"goal": goal})
@@ -216,7 +211,6 @@ class SearchTab(BaseTab):
         input_style = f"background-color: {theme.get('bg_input', '#2b2b2b')}; color: {theme.get('text_main', '#fff')}; border: 1px solid {theme.get('border', '#444')}; padding: 4px; border-radius: 4px;"
         
         self.input_goal.setStyleSheet(input_style)
-        self.model_combo.setStyleSheet(input_style)
         
         self.btn_generate.setStyleSheet(f"background-color: {theme.get('accent', '#b366ff')}; font-weight: bold; color: white; padding: 6px; border: none; border-radius: 4px;")
         self.btn_settings.setStyleSheet(f"background-color: transparent; color: {theme.get('text_muted', '#aaa')}; border: none;")

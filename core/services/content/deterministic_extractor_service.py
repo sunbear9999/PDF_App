@@ -98,15 +98,33 @@ def _extract_pages_fitz(pdf_path: str) -> Tuple[str, List[Tuple[int, str]]]:
     return full_text, page_texts
 
 
+def _blocks_to_page_texts(
+    blocks,
+) -> Tuple[str, List[Tuple[int, str]]]:
+    """Convert a List[DocumentBlock] into the (full_text, page_texts) tuple
+    that the deterministic extractors expect.  Block text already contains
+    Unicode superscript chars from PDFLayoutParser."""
+    page_map: Dict[int, List[str]] = {}
+    for block in blocks:
+        page_map.setdefault(block.page_num, []).append(block.exact_text)
+    page_texts: List[Tuple[int, str]] = [
+        (page_num, "\n".join(page_map[page_num]))
+        for page_num in sorted(page_map)
+    ]
+    full_text = "\n".join(t for _, t in page_texts)
+    return full_text, page_texts
+
+
 class _ExtractionWorker(QThread):
     """Runs extraction off the main thread."""
     finished = Signal(list, str, str)   # groups, entity_type, source_path
     error = Signal(str)
 
-    def __init__(self, pdf_path: str, entity_type: str):
+    def __init__(self, pdf_path: str, entity_type: str, document_extraction_service=None):
         super().__init__()
         self._pdf_path = pdf_path
         self._entity_type = entity_type
+        self._des = document_extraction_service
 
     def run(self):
         try:
@@ -114,7 +132,20 @@ class _ExtractionWorker(QThread):
             if not spec:
                 self.error.emit(f"No extractor registered for '{self._entity_type}'")
                 return
-            full_text, page_texts = _extract_pages_fitz(self._pdf_path)
+
+            # Prefer shared blocks (Phase 1 adapter); fall back to direct fitz parse
+            if self._des is not None:
+                try:
+                    blocks = self._des.get_blocks(self._pdf_path)
+                    if blocks:
+                        full_text, page_texts = _blocks_to_page_texts(blocks)
+                    else:
+                        full_text, page_texts = _extract_pages_fitz(self._pdf_path)
+                except Exception:
+                    full_text, page_texts = _extract_pages_fitz(self._pdf_path)
+            else:
+                full_text, page_texts = _extract_pages_fitz(self._pdf_path)
+
             groups = spec.extractor(full_text, page_texts)
             self.finished.emit(groups, self._entity_type, self._pdf_path)
         except Exception as exc:
@@ -281,9 +312,14 @@ class DeterministicExtractorService(QObject):
         self._last_source_path: str = ""
         self._worker: Optional[_ExtractionWorker] = None
         self._refs_worker: Optional[_RefsWorker] = None
+        self._document_extraction_service = None
 
         self._bus.discovery_action_requested.connect(self._handle_intent)
         self._bus.document_added.connect(self._on_document_added)
+
+    def set_document_extraction_service(self, svc) -> None:
+        """Inject the shared DocumentExtractionService (Phase 1 adapter)."""
+        self._document_extraction_service = svc
 
     # ------------------------------------------------------------------
     # Auto-merge detection
@@ -349,15 +385,65 @@ class DeterministicExtractorService(QObject):
             DiscoveryEventPayload(entity_type=payload.entity_type, source_path=payload.source_path),
         )
 
+        cached_groups = self._groups_from_shared_extraction(payload.source_path, payload.entity_type)
+        if cached_groups:
+            self._on_extraction_done(cached_groups, payload.entity_type, payload.source_path)
+            return
+
         # Run in background thread
         if self._worker and self._worker.isRunning():
             self._worker.terminate()
             self._worker.wait(500)
 
-        self._worker = _ExtractionWorker(payload.source_path, payload.entity_type)
+        self._worker = _ExtractionWorker(
+            payload.source_path,
+            payload.entity_type,
+            self._document_extraction_service,
+        )
         self._worker.finished.connect(self._on_extraction_done)
         self._worker.error.connect(self._on_extraction_error)
         self._worker.start()
+
+    def _groups_from_shared_extraction(self, source_path: str, entity_type: str) -> List[ExtractedEntityGroup]:
+        """Reuse DocumentExtractionService outputs before launching discovery extraction."""
+        des = self._document_extraction_service
+        if not des or entity_type != EntityType.PERSON_ORG.value:
+            return []
+        getter = getattr(des, "get_cached_entities", None)
+        entities = getter(source_path) if callable(getter) else []
+        if not entities:
+            return []
+        try:
+            blocks = des.get_blocks(source_path) or []
+        except Exception:
+            blocks = []
+        block_text = {getattr(block, "block_id", ""): getattr(block, "exact_text", "") for block in blocks}
+        groups: List[ExtractedEntityGroup] = []
+        for entity in entities:
+            if getattr(entity, "entity_type", "") != entity_type:
+                continue
+            mentions = []
+            for mention in getattr(entity, "mentions", []) or []:
+                context = block_text.get(getattr(mention, "block_id", "") or "")
+                if not context:
+                    context = getattr(entity, "canonical_text", "")
+                page_num = getattr(mention, "page_num", None)
+                mentions.append(ExtractedMention(
+                    text=getattr(entity, "canonical_text", ""),
+                    context=context[:500],
+                    page_num=int(page_num or 0),
+                ))
+            if mentions:
+                groups.append(ExtractedEntityGroup(
+                    canonical_text=getattr(entity, "canonical_text", ""),
+                    entity_type=entity_type,
+                    mentions=mentions,
+                    extra_properties={
+                        "aliases": list(getattr(entity, "aliases", []) or []),
+                        "shared_extraction_cache": True,
+                    },
+                ))
+        return groups
 
     def _on_extraction_done(self, groups: List[ExtractedEntityGroup], entity_type: str, source_path: str):
         self._last_results = groups

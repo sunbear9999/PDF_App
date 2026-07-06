@@ -134,6 +134,20 @@ class CitationAppService(QObject):
             CitationEventPayload(works=works, formatted_text=formatted_text),
         )
 
+    def get_citation_index(self, doc_id: str):
+        """Return the CitationIndex for a document via DocumentExtractionService."""
+        des = getattr(self, "_document_extraction_service", None)
+        if des is None:
+            return None
+        try:
+            return des.get_citation_index(doc_id)
+        except Exception:
+            return None
+
+    def set_document_extraction_service(self, svc) -> None:
+        """Inject the shared DocumentExtractionService for citation index access."""
+        self._document_extraction_service = svc
+
     def _provider_entry(self, doc_id: str) -> dict | None:
         for provider in self._providers.values():
             try:

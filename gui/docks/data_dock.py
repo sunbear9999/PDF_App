@@ -697,7 +697,15 @@ class DataDockView(BaseDock, UnifiedThemedMixin):
         self._show_info("Unsupported Selection", "The selected region is not a structured table or quantitative chart.")
 
     def _vision_model(self) -> str:
-        preferred = self.app_context.get_active_ai_model() if hasattr(self.app_context, "get_active_ai_model") else ""
+        preferred = ""
+        role_svc = getattr(self.app_context, "model_role_service", None)
+        if role_svc:
+            try:
+                preferred = role_svc.resolve_role("vision_model")
+            except Exception:
+                preferred = ""
+        if not preferred and hasattr(self.app_context, "get_active_ai_model"):
+            preferred = self.app_context.get_active_ai_model()
         return self.app_context.llm_manager.find_model_with_capability("vision", preferred)
 
     def _offer_chart_actions(self, selection):

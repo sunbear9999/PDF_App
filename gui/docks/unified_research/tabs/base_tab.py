@@ -211,12 +211,39 @@ class BaseTab(QWidget):
 
         if payload_type == "error":
             msg = payload.get("message", "")
-            if hasattr(self, "status_lbl"):
+            if hasattr(self, "chat_layout"):
+                widget = self._active_stream_widget
+                if widget is None:
+                    widget = ChatMessageWidget("AI Error", theme=self.theme, app_context=self.app_context)
+                    self.receive_ai_widget(widget)
+                if hasattr(widget, "set_error_text"):
+                    widget.set_error_text(msg)
+                else:
+                    widget.append_chunk(f"Error: {msg}")
+                if payload.get("trace_id") and hasattr(widget, "set_prompt_trace"):
+                    widget.set_prompt_trace(payload.get("trace_id"))
+                self._active_stream_widget = None
+                if self.project_manager and self.target_id and not getattr(self, "_replaying_history", False):
+                    try:
+                        self.project_manager.save_chat_message(
+                            self.target_id,
+                            "ai",
+                            f"Error: {msg}",
+                            "error",
+                            payload.get("trace_id"),
+                            json.dumps([{"type": "error", "message": msg}]),
+                        )
+                    except Exception:
+                        pass
+                QTimer.singleShot(50, self._scroll_to_bottom_if_alive)
+            elif hasattr(self, "status_lbl"):
                 self.status_lbl.setText(f"❌ Pipeline Failed: {msg}")
                 self.status_lbl.setStyleSheet("font-weight: bold; color: #ff4444;")
             else:
                 widget = self._ensure_stream_widget()
-                if hasattr(widget, "update_status"):
+                if hasattr(widget, "set_error_text"):
+                    widget.set_error_text(msg)
+                elif hasattr(widget, "update_status"):
                     widget.update_status(f"❌ Error: {msg}")
             if hasattr(self, "btn_generate"):
                 self.btn_generate.setEnabled(True)
@@ -360,14 +387,9 @@ class BaseTab(QWidget):
                 if k not in initial_state:
                     initial_state[k] = v
 
-        # Selected model: prefer tab-local combo, fall back to AppContext
+        # Selected model: centralized in AI Setup default model roles.
         if "selected_model" not in initial_state:
-            if hasattr(self, "model_combo"):
-                initial_state["selected_model"] = self.model_combo.currentText()
-            elif hasattr(self, "combo_models"):
-                initial_state["selected_model"] = self.combo_models.currentText()
-            else:
-                initial_state["selected_model"] = self.app_context.get_active_ai_model()
+            initial_state["selected_model"] = self.app_context.get_active_ai_model()
 
         EventBus.get_instance().workflow_action_requested.emit(
             WorkflowIntent.RUN_BLUEPRINT,

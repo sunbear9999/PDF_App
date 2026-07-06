@@ -76,9 +76,9 @@ class ChatHistoryRenderer:
     def _is_chat_message(payloads):
         chat_types = {
             "replace_stream_text", "citation_cards", "prompt_trace_available",
-            "hide_status", "manifest_updated", "status", "stream_chunk",
+            "hide_status", "manifest_updated", "status", "stream_chunk", "error",
         }
-        return any(payload.get("type") in {"replace_stream_text", "citation_cards", "stream_chunk", "manifest_updated"}
+        return any(payload.get("type") in {"replace_stream_text", "citation_cards", "stream_chunk", "manifest_updated", "error"}
                    for payload in payloads) and all(payload.get("type") in chat_types for payload in payloads)
 
     def _render_chat_payloads(self, payloads):

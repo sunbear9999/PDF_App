@@ -15,6 +15,7 @@ class ActionStep:
     output_key: str = "result"
     
     model: str = "{selected_model}"
+    model_role: Optional[str] = None
     required_model_capabilities: List[str] = field(default_factory=list)
     required_prompt_keys: List[str] = field(default_factory=list)
     prompt_key: Optional[str] = None          

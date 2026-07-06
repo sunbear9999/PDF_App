@@ -52,7 +52,7 @@ class WorkspaceAnnotationService:
         if getattr(node, "pdf_path", None) and self.pm and hasattr(self.pm, "get_source_type"):
             source_type = self.pm.get_source_type(node.pdf_path)
 
-        if source_type == "video":
+        if source_type in ("video", "audio"):
             source_id = getattr(node, "source_id", None)
             if not source_id and self.pm and hasattr(self.pm, "get_source_entity_by_path"):
                 source_entity = self.pm.get_source_entity_by_path(getattr(node, "pdf_path", None))

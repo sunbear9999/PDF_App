@@ -141,7 +141,7 @@ class BlueprintHelpDialog(QDialog):
             <table style='border-collapse:collapse; width:100%;'>
               <tr style='background:#333;'><th style='padding:6px; text-align:left;'>Key</th><th style='padding:6px; text-align:left;'>Value</th></tr>
               <tr><td style='padding:5px;'><code>{user_input}</code></td><td style='padding:5px;'>The user's typed message when launching the blueprint</td></tr>
-              <tr style='background:#2a2a2a;'><td style='padding:5px;'><code>{selected_model}</code></td><td style='padding:5px;'>The AI model currently selected in the UI</td></tr>
+              <tr style='background:#2a2a2a;'><td style='padding:5px;'><code>{selected_model}</code></td><td style='padding:5px;'>The main-answer model configured in AI Setup</td></tr>
               <tr><td style='padding:5px;'><code>{doc_path}</code></td><td style='padding:5px;'>Path to the active document</td></tr>
               <tr style='background:#2a2a2a;'><td style='padding:5px;'><code>{project_manifest}</code></td><td style='padding:5px;'>JSON project strategy / manifest</td></tr>
               <tr><td style='padding:5px;'><code>{workspace_data}</code></td><td style='padding:5px;'>Current workspace graph JSON</td></tr>

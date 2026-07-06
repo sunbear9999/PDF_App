@@ -108,6 +108,8 @@ class LLMQueryStep(BaseStep):
             options["json_mode"] = str(options["json_mode"]).strip().lower() in {"1", "true", "yes", "on"}
         if options.get("num_predict", 1) <= 0:
             options["num_predict"] = 2048
+        role = getattr(step, "_resolved_model_role", None) or getattr(step, "model_role", None)
+        options = self._clamp_options_for_model(options, resolved_model, role, context)
 
         output_schema = getattr(step, "output_schema", None)
         if output_schema:
@@ -132,8 +134,16 @@ class LLMQueryStep(BaseStep):
                 )
             system_prompt += "\n\n" + directive
 
+        query_text = str(inputs.get("query", "") or "")
+        query_text, context_notice = self._fit_query_to_context(query_text, system_prompt, options)
+        if context_notice:
+            system_prompt += "\n\n" + context_notice
+
+        trace_inputs = dict(inputs)
+        trace_inputs["query"] = query_text
+
         # ------- Prompt trace -------
-        trace_event = self._build_trace_event(step, inputs, resolved_model, system_prompt, options, context)
+        trace_event = self._build_trace_event(step, trace_inputs, resolved_model, system_prompt, options, context)
 
         # ------- LLM call -------
         lm = context.llm_manager
@@ -159,7 +169,7 @@ class LLMQueryStep(BaseStep):
                 context.api.emit_event("stream_chunk", {"chunk": visible_chunk})
 
         raw_result = lm.query(
-            question=inputs.get("query", ""),
+            question=query_text,
             selected_model=resolved_model,
             custom_system_prompt=system_prompt,
             abort_event=abort_event,
@@ -301,6 +311,7 @@ class LLMQueryStep(BaseStep):
                 "step_id": getattr(step, "step_id", ""),
                 "step_type": self.step_type,
                 "model": str(model or ""),
+                "model_role": getattr(step, "_resolved_model_role", None) or getattr(step, "model_role", None),
                 "query": str(inputs.get("query", "")),
                 "system_prompt": str(system_prompt or ""),
                 "prompt_key": getattr(step, "prompt_key", None),
@@ -314,3 +325,36 @@ class LLMQueryStep(BaseStep):
             print(f"[LLMQueryStep] Trace event build failed for step "
                   f"'{getattr(step, 'step_id', '?')}': {exc}\n{_tb.format_exc()}")
             return None
+
+    def _clamp_options_for_model(self, options: dict, model: str, role: str, context: StepContext) -> dict:
+        options = dict(options or {})
+        svc = getattr(context, "model_role_service", None)
+        max_ctx = 8192
+        if svc and hasattr(svc, "max_context_tokens_for_model"):
+            try:
+                max_ctx = int(svc.max_context_tokens_for_model(model, role=role or ""))
+            except Exception:
+                pass
+        requested_ctx = int(options.get("num_ctx") or max_ctx)
+        options["num_ctx"] = max(2048, min(requested_ctx, max_ctx))
+        requested_predict = int(options.get("num_predict") or 1024)
+        options["num_predict"] = max(128, min(requested_predict, max(256, options["num_ctx"] // 3)))
+        options["context_clamped"] = requested_ctx != options["num_ctx"] or requested_predict != options["num_predict"]
+        options["model_context_ceiling"] = max_ctx
+        return options
+
+    def _fit_query_to_context(self, query: str, system_prompt: str, options: dict) -> tuple[str, str]:
+        num_ctx = int(options.get("num_ctx") or 8192)
+        reserve_tokens = int(options.get("num_predict") or 1024) + 512
+        budget_tokens = max(512, num_ctx - reserve_tokens)
+        system_chars = len(system_prompt or "")
+        max_query_chars = max(1000, int(budget_tokens * 3.4) - system_chars)
+        if len(query) <= max_query_chars:
+            return query, ""
+        clipped = query[:max_query_chars].rstrip()
+        notice = (
+            "Context safety notice: Papyrus shortened the user/context payload "
+            f"to fit the selected model's {num_ctx}-token context budget. "
+            "Prefer artifact retrieval or narrower source filters if important evidence is missing."
+        )
+        return clipped, notice

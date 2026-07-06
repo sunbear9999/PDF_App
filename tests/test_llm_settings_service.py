@@ -1,6 +1,7 @@
 import json
 
 from core.engine.action_model import AIActionBlueprint, ActionStep
+from core.engine.steps.llm_schema_query_step import LLMSchemaQueryStep
 from core.registries.blueprint_registry import BlueprintDefinition, BlueprintRegistry
 from core.services.ai.llm_settings_service import LLMSettingsService
 
@@ -14,6 +15,18 @@ class _PM:
 
     def set_metadata(self, key, value):
         self.meta[key] = value
+
+
+class _NodeType:
+    def __init__(self, step_cls):
+        self.step_cls = step_cls
+
+
+class _NodeTypeRegistry:
+    def get_by_step_type(self, step_type):
+        if step_type == "LLM_SCHEMA_QUERY":
+            return _NodeType(LLMSchemaQueryStep)
+        return None
 
 
 def _blueprint():
@@ -67,6 +80,34 @@ def test_llm_settings_service_discovers_nested_llm_steps():
         "router.if_true.manifest",
         "loop.sub.child_answer",
     }
+
+
+def test_llm_settings_service_discovers_schema_query_subclasses():
+    registry = BlueprintRegistry()
+    registry.register(BlueprintDefinition(
+        id="extract_claims",
+        label="Extract Claims",
+        description="",
+        factory=lambda **_: AIActionBlueprint(name="Extract Claims", description="", steps=[
+            ActionStep(
+                step_id="extract_claims",
+                step_type="LLM_SCHEMA_QUERY",
+                llm_options={"temperature": 0.1},
+            )
+        ]),
+    ))
+    service = LLMSettingsService(
+        project_manager=_PM(),
+        blueprint_registry=registry,
+        node_type_registry=_NodeTypeRegistry(),
+    )
+
+    steps = service.list_blueprint_steps("extract_claims")
+
+    assert len(steps) == 1
+    assert steps[0]["step_path"] == "extract_claims"
+    assert steps[0]["step_type"] == "LLM_SCHEMA_QUERY"
+    assert steps[0]["effective"]["json_mode"] is True
 
 
 def test_llm_settings_service_applies_and_resets_project_overrides_without_mutating_blueprint():

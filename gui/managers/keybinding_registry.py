@@ -485,6 +485,8 @@ def build_builtin_key_specs() -> List[KeySpec]:
                 "Clear the active grid values",                  ""),
         KeySpec("data_dock.generate_chart", "Generate Chart",     "data_dock",
                 "Refresh the chart preview",                     ""),
+        KeySpec("csv_preview.open_in_data_dock", "Open in Data Dock", "csv_preview",
+                "Send the currently previewed CSV/TSV/XLSX file into the Data Dock for editing", ""),
 
         # ── Research Assistant ────────────────────────────────────────────────
         KeySpec("research.send",          "Send Message",      "research",

@@ -76,6 +76,7 @@ class SourceMetricsDialog(QDialog):
         is_retracted: bool = False,
         needs_manual_review: bool = False,
         theme: Optional[Dict] = None,
+        source_intelligence_service=None,
         parent=None,
     ) -> None:
         # WindowMaximizeButtonHint signals DialogManager to use resizable flags
@@ -89,6 +90,7 @@ class SourceMetricsDialog(QDialog):
         self._is_retracted = is_retracted
         self._needs_review = needs_manual_review
         self._theme = theme or {}
+        self._source_intelligence_service = source_intelligence_service
 
         self.setWindowTitle("Source Quality Metrics")
         self.setMinimumSize(700, 650)
@@ -203,6 +205,9 @@ class SourceMetricsDialog(QDialog):
         self._detail.setObjectName("DetailPanel")
         root.addWidget(self._detail)
 
+        if self._source_intelligence_service is not None:
+            root.addWidget(self._build_intelligence_panel())
+
         root.addWidget(_hsep())
 
         # ── Update Metadata + Databases + Disclaimer in a compact footer ──
@@ -262,6 +267,51 @@ class SourceMetricsDialog(QDialog):
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         btns.rejected.connect(self.reject)
         root.addWidget(btns)
+
+    def _build_intelligence_panel(self) -> QWidget:
+        box = QGroupBox("Intelligence")
+        layout = QVBoxLayout(box)
+        layout.setSpacing(6)
+        self._intel_status_lbl = QLabel()
+        self._intel_status_lbl.setWordWrap(True)
+        layout.addWidget(self._intel_status_lbl)
+
+        actions = QHBoxLayout()
+        run_missing = QPushButton("Run missing")
+        rerun_stale = QPushButton("Re-run stale")
+        delete_derived = QPushButton("Delete derived data")
+        run_missing.clicked.connect(lambda: self._source_intelligence_service.run_missing(self._pdf_path))
+        rerun_stale.clicked.connect(lambda: self._source_intelligence_service.rerun_stale(self._pdf_path))
+        delete_derived.clicked.connect(lambda: self._refresh_intelligence_status(
+            self._source_intelligence_service.delete_derived(self._pdf_path)
+        ))
+        actions.addWidget(run_missing)
+        actions.addWidget(rerun_stale)
+        actions.addWidget(delete_derived)
+        actions.addStretch()
+        layout.addLayout(actions)
+        self._refresh_intelligence_status()
+        return box
+
+    def _refresh_intelligence_status(self, _unused=None) -> None:
+        if not self._source_intelligence_service or not hasattr(self, "_intel_status_lbl"):
+            return
+        status = self._source_intelligence_service.get_source_status(self._pdf_path)
+        stages = status.get("stages", {})
+        important = [
+            "parsed_blocks", "sections", "transcript", "embeddings",
+            "entities", "dates", "citations", "tables",
+        ]
+        parts = [
+            f"{stage.replace('_', ' ')}: {stages.get(stage, 'not_run')}"
+            for stage in important
+            if stage in stages
+        ]
+        mode = status.get("processing_mode") or "balanced"
+        count = status.get("artifact_count", 0)
+        self._intel_status_lbl.setText(
+            f"Mode: {mode} | Artifacts: {count}\n" + " | ".join(parts)
+        )
 
     # ------------------------------------------------------------------
     # Metadata field prefill

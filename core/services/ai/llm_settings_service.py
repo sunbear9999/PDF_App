@@ -128,6 +128,8 @@ class LLMSettingsService:
         overrides = self._overrides_for_blueprint(blueprint_id).get(step_path, {})
         merged = dict(defaults)
         merged.update({k: v for k, v in (overrides or {}).items() if k in LLM_SETTING_KEYS})
+        if self._step_forces_json(step):
+            merged["json_mode"] = True
         return merged
 
     def set_step_overrides(self, blueprint_id: str, step_path: str, overrides: dict) -> None:
@@ -150,6 +152,8 @@ class LLMSettingsService:
         options = base_options if base_options is not None else getattr(step, "llm_options", {})
         if isinstance(options, dict):
             defaults.update({k: v for k, v in options.items() if k in LLM_SETTING_KEYS})
+        if self._step_forces_json(step):
+            defaults["json_mode"] = True
         return defaults
 
     # ------------------------------------------------------------------
@@ -164,6 +168,8 @@ class LLMSettingsService:
             defaults = self.step_defaults(step)
             effective = dict(defaults)
             effective.update({k: v for k, v in step_overrides.items() if k in LLM_SETTING_KEYS})
+            if self._step_forces_json(step):
+                effective["json_mode"] = True
             items.append(LLMSettingsStep(
                 blueprint_id=blueprint_id,
                 blueprint_label=label,
@@ -200,6 +206,12 @@ class LLMSettingsService:
             return issubclass(step_cls, LLMQueryStep)
         except Exception:
             return False
+
+    @staticmethod
+    def _step_forces_json(step) -> bool:
+        if step is None:
+            return False
+        return bool(getattr(step, "output_schema", None)) or getattr(step, "step_type", "") == "LLM_SCHEMA_QUERY"
 
     def _iter_blueprint_instances(self) -> Iterable[tuple[str, str, Any]]:
         seen: set[str] = set()

@@ -152,29 +152,12 @@ class PDFViewer(QGraphicsView):
         """)
         toolbar_layout = QHBoxLayout(self.viewer_toolbar)
         toolbar_layout.setContentsMargins(8, 4, 8, 4)
-        self.dark_mode_btn = QPushButton("Dark Mode", self.viewer_toolbar)
-        self.dark_mode_btn.setCheckable(True)
-        self.dark_mode_btn.setStyleSheet("""
-            background: #444;
-            color: white;
-            border-radius: 4px;
-            padding: 2px 8px;
-        """)
-        self.dark_mode_btn.clicked.connect(self.toggle_dark_mode)
-        toolbar_layout.addWidget(self.dark_mode_btn)
-        self.theme_mode_btn = QPushButton("Theme Mode", self.viewer_toolbar)
-        self.theme_mode_btn.setCheckable(True)
-        self.theme_mode_btn.setStyleSheet("""
-            background: #2b2b2b;
-            color: white;
-            border-radius: 4px;
-            padding: 2px 8px;
-        """)
-        self.theme_mode_btn.clicked.connect(self.toggle_theme_mode)
-        toolbar_layout.addWidget(self.theme_mode_btn)
-        
+
         # Subscribe to global theme changes
         self.bus.theme_changed.connect(self._on_global_theme_changed)
+        # Subscribe to display settings changes from SourceViewerHost toolbar
+        self.bus.gui_action_requested.connect(self._on_gui_action)
+
         self.data_select_btn = QPushButton("Data Select", self.viewer_toolbar)
         self.data_select_btn.setCheckable(True)
         self.data_select_btn.setToolTip("Drag over a table or chart to send structured data to Data Dock")
@@ -815,29 +798,19 @@ class PDFViewer(QGraphicsView):
         img.setDevicePixelRatio(dpi_scale)
         self.page_pixmaps[page_num].setPixmap(QPixmap.fromImage(img))
     def toggle_theme_mode(self):
-        if self.theme_mode_btn.isChecked():
-            self.dark_mode_enabled = False
-            if hasattr(self, 'dark_mode_btn'):
-                self.dark_mode_btn.setChecked(False)
-        
-        self.theme_mode_enabled = self.theme_mode_btn.isChecked()
+        """Apply theme mode (use app theme colors)."""
+        self.dark_mode_enabled = False
+        self.theme_mode_enabled = not self.theme_mode_enabled
         self._force_full_rerender()
 
     def toggle_dark_mode(self):
-        if hasattr(self, 'dark_mode_btn') and self.dark_mode_btn.isChecked():
-            self.theme_mode_enabled = False
-            if hasattr(self, 'theme_mode_btn'):
-                self.theme_mode_btn.setChecked(False)
-        
+        """Apply dark mode (invert colors)."""
+        self.theme_mode_enabled = False
         self.dark_mode_enabled = not self.dark_mode_enabled
-        if hasattr(self, 'dark_mode_btn'):
-            self.dark_mode_btn.setChecked(self.dark_mode_enabled)
 
         if not self._doc_valid() or not self.page_pixmaps:
             return
 
-        # Apply to all currently rendered pages; off-screen pages rendered later
-        # will follow self.dark_mode_enabled in _on_page_ready.
         for pixmap_item in self.page_pixmaps:
             if pixmap_item is None:
                 continue
@@ -848,6 +821,16 @@ class PDFViewer(QGraphicsView):
             img.invertPixels(QImage.InvertMode.InvertRgb)
             pixmap_item.setPixmap(QPixmap.fromImage(img))
         self._update_placeholders()
+
+    def _on_gui_action(self, event, payload):
+        """Handle display settings changes from SourceViewerHost toolbar."""
+        from core.events.domains.gui_events import GuiEvent
+        if event == GuiEvent.SOURCE_VIEWER_SETTINGS_CHANGED:
+            settings = getattr(payload, 'settings', None)
+            if settings:
+                self.dark_mode_enabled = getattr(settings, 'dark_mode_enabled', False)
+                self.theme_mode_enabled = getattr(settings, 'theme_mode_enabled', False)
+                self._force_full_rerender()
     def _get_placeholder_brush(self):
         from PySide6.QtGui import QBrush, QColor
         if getattr(self, 'theme_mode_enabled', False):

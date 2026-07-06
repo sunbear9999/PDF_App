@@ -227,6 +227,13 @@ class AnalysisRuntime:
         )
 
     def section_synthesis_system_prompt(self, template: dict, contract: dict) -> str:
+        # Deliberately bare (no CONTRACT/schema injection): section synthesis
+        # only needs to summarize compact evidence refs into themes and
+        # quote_ids — it does NOT build a typed subgraph. A per-section
+        # map-reduce subgraph design was tried and reliably produced sparse,
+        # low-quality graphs with small local models (asking for a full
+        # summary + typed n/e schema in one small call was too much) — full
+        # graph construction is a single-call job for graph_assembly_pass.
         prompt = self.prompt_manager.get_prompt(
             template.get("section_synthesis_prompt_key") or "Graph Analysis Section Synthesis System"
         )

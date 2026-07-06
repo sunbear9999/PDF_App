@@ -98,6 +98,23 @@ class DataDockService:
         self._track(state)
         return state
 
+    def dataset_from_file(self, path: str, loader_id: str) -> Optional[DataGridState]:
+        """
+        Load a standalone data file (CSV/XLSX/...) into a DataGridState via
+        the DataSourceLoaderSpec registered under loader_id, and track it as
+        an open dataset — the file-driven counterpart to
+        dataset_from_selection() (which builds a DataGridState from a
+        clipboard paste / PDF region selection instead).
+        """
+        spec = self.provider_registry.get_data_source_loader(loader_id)
+        if spec is None or spec.callback is None:
+            return None
+        state = spec.callback(path)
+        if state is None:
+            return None
+        self._track(state)
+        return state
+
     def load_dataset(self, dataset_id: str) -> Optional[DataGridState]:
         if dataset_id in self._open:
             return self._open[dataset_id]

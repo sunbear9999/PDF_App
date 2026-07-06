@@ -59,6 +59,15 @@ class MasterActionRunner(QThread):
         node_type_registry=None,
         data_provider_registry=None,
         llm_settings_service=None,
+        document_extraction_service=None,
+        ranking_feature_service=None,
+        pattern_detector_registry=None,
+        deterministic_pass_registry=None,
+        artifact_service=None,
+        hybrid_retrieval_service=None,
+        context_packing_service=None,
+        model_role_service=None,
+        source_intelligence_service=None,
     ):
         super().__init__()
         self.llm_manager = llm_manager
@@ -71,6 +80,15 @@ class MasterActionRunner(QThread):
         self.node_type_registry = node_type_registry
         self.data_provider_registry = data_provider_registry
         self.llm_settings_service = llm_settings_service
+        self.document_extraction_service = document_extraction_service
+        self.ranking_feature_service = ranking_feature_service
+        self.pattern_detector_registry = pattern_detector_registry
+        self.deterministic_pass_registry = deterministic_pass_registry
+        self.artifact_service = artifact_service
+        self.hybrid_retrieval_service = hybrid_retrieval_service
+        self.context_packing_service = context_packing_service
+        self.model_role_service = model_role_service
+        self.source_intelligence_service = source_intelligence_service
 
         import copy
         self.blueprint = copy.deepcopy(blueprint)
@@ -124,6 +142,15 @@ class MasterActionRunner(QThread):
                         llm_settings_service=runner.llm_settings_service,
                         blueprint_id=runner.blueprint_id,
                         step_path=runner.current_step_path,
+                        document_extraction_service=runner.document_extraction_service,
+                        ranking_feature_service=runner.ranking_feature_service,
+                        pattern_detector_registry=runner.pattern_detector_registry,
+                        deterministic_pass_registry=runner.deterministic_pass_registry,
+                        artifact_service=runner.artifact_service,
+                        hybrid_retrieval_service=runner.hybrid_retrieval_service,
+                        context_packing_service=runner.context_packing_service,
+                        model_role_service=runner.model_role_service,
+                        source_intelligence_service=runner.source_intelligence_service,
                     )
                     return instance.execute(ctx, inputs)
                 return _handler
@@ -177,6 +204,15 @@ class MasterActionRunner(QThread):
             llm_settings_service=self.llm_settings_service,
             blueprint_id=self.blueprint_id,
             step_path=self.current_step_path,
+            document_extraction_service=self.document_extraction_service,
+            ranking_feature_service=self.ranking_feature_service,
+            pattern_detector_registry=self.pattern_detector_registry,
+            deterministic_pass_registry=self.deterministic_pass_registry,
+            artifact_service=self.artifact_service,
+            hybrid_retrieval_service=self.hybrid_retrieval_service,
+            context_packing_service=self.context_packing_service,
+            model_role_service=self.model_role_service,
+            source_intelligence_service=self.source_intelligence_service,
             _pause_mutex=self._pause_mutex,
             _wait_condition=self._wait_condition,
             _user_response_holder=self._user_response_holder,
@@ -303,8 +339,11 @@ class MasterActionRunner(QThread):
                 resolved_inputs[k] = StateResolver.resolve_val(v, self.state, self.prompt_manager)
 
         resolved_model = StateResolver.resolve_val(step.model, self.state, self.prompt_manager)
-        if not resolved_model or resolved_model == "None":
-            resolved_model = self.state.get("selected_model")
+        resolved_model, resolved_role = self._resolve_step_model(step, resolved_model)
+        step._resolved_model_role = resolved_role  # type: ignore[attr-defined]
+        if self.job and resolved_model:
+            self.job.model_role = resolved_role
+            self.job.model_name = resolved_model
 
         if step.step_type == "LIBRARY_REF":
             raise ValueError(f"Missing Tool: Could not find '{step.step_ref}' in the Step Library.")
@@ -328,6 +367,45 @@ class MasterActionRunner(QThread):
         if not self.job or not self.job.abort_event.is_set():
             self.step_result.emit(step.step_id, exec_result)
             self.step_complete.emit(step.step_id, str(exec_result.raw_value), self.state.copy())
+
+    def _resolve_step_model(self, step: ActionStep, resolved_model):
+        role_svc = self.model_role_service
+        placeholder = resolved_model in ("{selected_model}", "", None, "None")
+        if not placeholder:
+            return resolved_model, getattr(step, "model_role", None)
+
+        role = self._role_for_step(step)
+        if role_svc and role:
+            try:
+                model = role_svc.resolve_role(role)
+                if model:
+                    return model, role
+            except Exception:
+                pass
+
+        if role == "fast_worker_model":
+            fallback = self.state.get("fast_worker_model") or self.state.get("selected_model")
+        elif role == "vision_model":
+            fallback = self.state.get("vision_model") or self.state.get("selected_model")
+        elif role == "extraction_repair_model":
+            fallback = self.state.get("extraction_repair_model") or self.state.get("fast_worker_model") or self.state.get("selected_model")
+        else:
+            fallback = self.state.get("selected_model")
+            role = role or "main_answer_model"
+        return fallback, role
+
+    def _role_for_step(self, step: ActionStep) -> str:
+        explicit = getattr(step, "model_role", None)
+        if explicit:
+            return str(explicit)
+        capabilities = set(getattr(step, "required_model_capabilities", []) or [])
+        if "vision" in capabilities:
+            return "vision_model"
+        if getattr(step, "step_type", "") == "LLM_SCHEMA_QUERY":
+            return "fast_worker_model"
+        if getattr(step, "output_schema", None):
+            return "fast_worker_model"
+        return "main_answer_model"
 
     def _dispatch_step(self, step: ActionStep, resolved_inputs: dict, resolved_model=None):
         # 1. Registry-first: step class from BlueprintNodeTypeRegistry
@@ -451,6 +529,11 @@ class MasterActionRunner(QThread):
                     for k, v in sub_step.inputs.items()
                 }
                 res_model = StateResolver.resolve_val(sub_step.model, sub_state, self.prompt_manager)
+                res_model, res_role = self._resolve_step_model(sub_step, res_model)
+                sub_step._resolved_model_role = res_role  # type: ignore[attr-defined]
+                if self.job and res_model:
+                    self.job.model_role = res_role
+                    self.job.model_name = res_model
 
                 parent_state = self.state
                 parent_path = self.current_step_path

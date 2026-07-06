@@ -16,6 +16,9 @@ class AISetupIntent(Enum):
     REMOVE_TTS_VOICE = auto()
     SET_ACTIVE_BACKEND = auto()
     SET_DEFAULT_MODEL = auto()
+    SET_MODEL_ROLE = auto()
+    RESET_MODEL_ROLE = auto()
+    SET_INTELLIGENCE_SETTINGS = auto()
     REFRESH = auto()
     TOGGLE_AI = auto()          # payload.data = {"enabled": bool}
 
@@ -29,6 +32,8 @@ class AISetupEvent(Enum):
     OPERATION_FAILED = auto()
     HARDWARE_INFO_READY = auto()
     DEFAULTS_CHANGED = auto()
+    MODEL_ROLES_CHANGED = auto()
+    INTELLIGENCE_SETTINGS_CHANGED = auto()
     AI_TOGGLE_CHANGED = auto()  # payload.data = {"enabled": bool}
 
 

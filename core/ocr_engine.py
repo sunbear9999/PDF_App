@@ -6,6 +6,30 @@ import os
 import platform
 
 
+def _configure_tesseract_cmd():
+    if platform.system() == "Windows":
+        tess_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+        if os.path.exists(tess_path):
+            pytesseract.pytesseract.tesseract_cmd = tess_path
+
+
+def run_ocr_on_image(image_path):
+    """
+    OCR a standalone image file (png/jpg/tiff/bmp/webp/...), returning
+    word-level data (text + bbox + confidence) via pytesseract.image_to_data
+    — not just image_to_string — so images get the same highlight-quality
+    granularity as PDF pages (word rects). Used by ImageOcrParser to build
+    DocumentBlocks with populated `bbox`.
+    """
+    _configure_tesseract_cmd()
+    try:
+        with Image.open(image_path) as img:
+            img = img.convert("RGB")
+            return pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+    except Exception as e:
+        return {"error": str(e)}
+
+
 def run_ocr_on_pdf(pdf_path, mode="text", save_path=None, progress_callback=None):
     """
     Runs OCR. 
@@ -30,11 +54,7 @@ def run_ocr_on_pdf(pdf_path, mode="text", save_path=None, progress_callback=None
             
             img_data = pix.tobytes("png")
             img = Image.open(io.BytesIO(img_data))
-            if platform.system() == "Windows":
-                # Explicitly tell pytesseract where the installer put the binary
-                tess_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-                if os.path.exists(tess_path):
-                    pytesseract.pytesseract.tesseract_cmd = tess_path
+            _configure_tesseract_cmd()
             if mode == "text":
                 text = pytesseract.image_to_string(img)
                 full_text += f"\n\n--- Page {page_num + 1} ---\n\n{text}"

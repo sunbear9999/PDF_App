@@ -95,12 +95,31 @@ class DocumentExplorer(QWidget):
         self.add_pdf_btn.clicked.connect(self._add_pdf)
         layout.addWidget(self.add_pdf_btn)
 
+    def _icon_for_source_type(self, source_type: str) -> str:
+        registry = getattr(self._ctx, "source_format_registry", None)
+        spec = registry.get(source_type) if registry else None
+        return spec.icon if spec else "📄"
+
+    def _file_dialog_filter(self) -> str:
+        """Build the Open Files filter string from every registered source
+        format, instead of a hardcoded pdf/video-only extension list."""
+        registry = getattr(self._ctx, "source_format_registry", None)
+        if registry is None:
+            return "Sources (*.pdf *.mp4 *.mov *.mkv *.webm *.avi *.m4v)"
+        specs = registry.all()
+        all_exts = sorted({ext for spec in specs for ext in spec.extensions})
+        parts = [f"Sources ({' '.join(f'*{e}' for e in all_exts)})"]
+        for spec in specs:
+            if spec.extensions:
+                parts.append(f"{spec.label} ({' '.join(f'*{e}' for e in spec.extensions)})")
+        return ";;".join(parts)
+
     def _add_pdf(self):
         paths, _ = QFileDialog.getOpenFileNames(
             self,
-            "Add PDFs",
+            "Add Sources",
             "",
-            "Sources (*.pdf *.mp4 *.mov *.mkv *.webm *.avi *.m4v);;PDF Files (*.pdf);;Video Files (*.mp4 *.mov *.mkv *.webm *.avi *.m4v)",
+            self._file_dialog_filter(),
         )
         if paths:
             self.bus.document_action_requested.emit(
@@ -157,7 +176,7 @@ class DocumentExplorer(QWidget):
             w_layout.setContentsMargins(5, 2, 5, 2)
             w_layout.setSpacing(4)
 
-            icon = "🎬" if source_type == "video" else "📄"
+            icon = self._icon_for_source_type(source_type)
             lbl = ElidedLabel(f"{icon} {source.properties.get('title') or os.path.basename(path)}")
             lbl.setStyleSheet("background: transparent;")
             lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -217,6 +236,7 @@ class DocumentExplorer(QWidget):
             source_type = item_at_pos.data(self.SOURCE_TYPE_ROLE) or "pdf"
             manage_tags_action = menu.addAction("🏷️ Manage Tags for This Document")
             menu.addSeparator()
+            intelligence_actions = self._add_intelligence_menu(menu, doc_path)
             metrics_action = menu.addAction("📊 View Source Metrics")
             workspace_action = menu.addAction("📌 Add to Workspace")
             menu.addSeparator()
@@ -230,6 +250,8 @@ class DocumentExplorer(QWidget):
 
             if chosen == metrics_action:
                 self._open_source_metrics(doc_path)
+            elif chosen in intelligence_actions:
+                self._handle_intelligence_action(doc_path, intelligence_actions[chosen])
             elif chosen == workspace_action:
                 self._add_to_workspace(doc_path)
             elif chosen == manage_tags_action:
@@ -256,6 +278,61 @@ class DocumentExplorer(QWidget):
                 else:
                     if exec_as_modal(_dlg2):
                         self.refresh_list()
+
+    def _add_intelligence_menu(self, menu: QMenu, doc_path: str) -> dict:
+        svc = getattr(self._ctx, "source_intelligence_service", None)
+        actions = {}
+        intel_menu = menu.addMenu("🧠 Intelligence")
+        if not svc:
+            intel_menu.addAction("Intelligence service unavailable").setEnabled(False)
+            return actions
+        try:
+            status = svc.get_source_status(doc_path)
+        except Exception:
+            status = {"stages": {}}
+        stages = status.get("stages", {}) or {}
+        details = status.get("stage_details", {}) or {}
+        mode = status.get("processing_mode") or "balanced"
+        intel_menu.addAction(f"Mode: {mode}").setEnabled(False)
+        intel_menu.addSeparator()
+        stage_order = [
+            "source_registered", "parsed_blocks", "sections", "full_text_index",
+            "entities", "dates", "citations", "tables", "transcript",
+            "embeddings", "summaries", "claims", "graph_seeds", "figures",
+        ]
+        for stage in stage_order:
+            if stage not in stages:
+                continue
+            state = stages.get(stage, "not_run")
+            detail = details.get(stage, {})
+            suffix = ""
+            if detail.get("updated_at"):
+                suffix = f" · {str(detail.get('updated_at'))[:16]}"
+            action = intel_menu.addAction(f"{_stage_icon(state)} {stage.replace('_', ' ')}: {state}{suffix}")
+            action.setToolTip("Run or re-run this intelligence pass for the selected source.")
+            actions[action] = ("stage", stage)
+        intel_menu.addSeparator()
+        run_missing = intel_menu.addAction("Run missing passes")
+        rerun_stale = intel_menu.addAction("Re-run stale passes")
+        delete_derived = intel_menu.addAction("Delete derived intelligence")
+        actions[run_missing] = ("run_missing", None)
+        actions[rerun_stale] = ("rerun_stale", None)
+        actions[delete_derived] = ("delete_derived", None)
+        return actions
+
+    def _handle_intelligence_action(self, doc_path: str, action_spec) -> None:
+        svc = getattr(self._ctx, "source_intelligence_service", None)
+        if not svc or not action_spec:
+            return
+        kind, stage = action_spec
+        if kind == "stage":
+            svc.run_stage(doc_path, stage)
+        elif kind == "run_missing":
+            svc.run_missing(doc_path)
+        elif kind == "rerun_stale":
+            svc.rerun_stale(doc_path)
+        elif kind == "delete_derived":
+            svc.delete_derived(doc_path)
 
     def _inject_plugin_doc_items(self, menu: "QMenu", doc_paths: list) -> None:
         """Append plugin-registered document_list context menu actions."""
@@ -352,6 +429,7 @@ class DocumentExplorer(QWidget):
             is_retracted=is_retracted,
             needs_manual_review=needs_review,
             theme=theme,
+            source_intelligence_service=getattr(self._ctx, "source_intelligence_service", None),
             parent=self,
         )
         from gui.managers.dialog_manager import get_for_widget
@@ -462,7 +540,11 @@ class DocumentExplorer(QWidget):
 
         if not ok or not new_name.strip() or new_name == old_name: return
         if "." not in os.path.basename(new_name):
-            new_name += ".pdf" if source_type == "pdf" else os.path.splitext(old_name)[1]
+            # Always keep the source's real extension — was special-cased to
+            # ".pdf" for source_type == "pdf", which happened to be a no-op
+            # for pdf files (same result) but was wrong in spirit; every
+            # other format already fell through to the real extension.
+            new_name += os.path.splitext(old_name)[1]
         new_path = os.path.join(os.path.dirname(old_path), new_name)
 
         if os.path.exists(new_path):
@@ -545,3 +627,14 @@ class DocumentExplorer(QWidget):
             properties={"path": path, "title": os.path.basename(path)},
             state={"is_verified": True, "ai_generated": False},
         )
+
+
+def _stage_icon(status: str) -> str:
+    return {
+        "complete": "✓",
+        "running": "…",
+        "queued": "◷",
+        "stale": "!",
+        "failed": "×",
+        "disabled": "-",
+    }.get(str(status or ""), "○")

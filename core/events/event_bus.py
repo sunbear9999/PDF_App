@@ -66,6 +66,8 @@ class EventBus(QObject):
     tts_status_updated = Signal(object, object)
     tts_text_extracted = Signal(object, object)
     ocr_status_updated = Signal(object, object)
+    # --- GUI Domain ---
+    gui_action_requested = Signal(object, object)  # GuiIntent/GuiEvent, GuiPayload
     # --- Data Dock Domain ---
     data_dock_action_requested = Signal(object, object)
     data_dock_state_changed = Signal(object, object)
@@ -136,6 +138,14 @@ class EventBus(QObject):
     # --- Source Evaluation Domain ---
     source_eval_action_requested = Signal(object, object)   # SourceEvalIntent, SourceEvalPayload
     source_eval_state_changed = Signal(object, object)      # SourceEvalEvent, SourceEvalEventPayload
+
+    # --- Deterministic Extraction Layer ---
+    extraction_action_requested = Signal(object, object)    # ExtractionIntent, ExtractionPayload
+    extraction_state_changed = Signal(object, object)       # ExtractionEvent, ExtractionPayload
+
+    # --- Intelligence Layer ---
+    intelligence_action_requested = Signal(object, object)
+    intelligence_state_changed = Signal(object, object)
 
     # --- UI Render Domain ---
     # Emitted by BlueprintUIRouter to dispatch AI output to tabs without direct method calls.

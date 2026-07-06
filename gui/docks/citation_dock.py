@@ -3,9 +3,27 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTableWidget,
                                QTableWidgetItem, QPushButton, QComboBox, QLabel,
                                QHeaderView, QApplication, QMessageBox, QPlainTextEdit,
                                QMenu)
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal
 from core.events.event_bus import EventBus
 from core.events.domains.tool_events import CitationEvent, CitationEventPayload, CitationIntent, CitationPayload
+
+
+class _CitationIndexWorker(QThread):
+    """Fetch the citation index in a background thread to avoid blocking the GUI."""
+    finished = Signal(object)   # CitationIndex or None
+
+    def __init__(self, svc, doc_id: str):
+        super().__init__()
+        self._svc = svc
+        self._doc_id = doc_id
+
+    def run(self):
+        try:
+            result = self._svc.get_citation_index(self._doc_id)
+        except Exception:
+            result = None
+        self.finished.emit(result)
+
 
 class CitationDock(QWidget):
     def __init__(self, app_context=None, parent=None):
@@ -13,6 +31,7 @@ class CitationDock(QWidget):
         self.app_context = app_context
         self.bus = EventBus.get_instance()
         self._row_records = {}
+        self._index_worker = None
 
         self._build_ui()
 
@@ -31,9 +50,15 @@ class CitationDock(QWidget):
         toolbar.addWidget(self.style_combo)
         toolbar.addStretch()
 
-        self.btn_refresh = QPushButton("🔄 Refresh Data")
+        self.btn_refresh = QPushButton("Refresh Data")
         self.btn_refresh.clicked.connect(lambda: self.bus.citation_action_requested.emit(CitationIntent.REFRESH_TABLE, CitationPayload()))
         toolbar.addWidget(self.btn_refresh)
+
+        self.btn_analyze = QPushButton("Citation Analysis")
+        self.btn_analyze.setToolTip("Extract and analyze in-text citations for the selected document")
+        self.btn_analyze.clicked.connect(self._run_citation_analysis)
+        toolbar.addWidget(self.btn_analyze)
+
         layout.addLayout(toolbar)
 
         # Plugin buttons are injected here by DockManager after construction
@@ -56,7 +81,21 @@ class CitationDock(QWidget):
         self.details.setPlaceholderText("Select a citation row to inspect all available metadata.")
         layout.addWidget(self.details)
 
-        self.btn_generate = QPushButton("📝 Generate Works Cited")
+        # Phase 8: Citation index diagnostics panel
+        self.analysis_label = QLabel("Citation Analysis")
+        self.analysis_label.setVisible(False)
+        layout.addWidget(self.analysis_label)
+
+        self.analysis_panel = QPlainTextEdit()
+        self.analysis_panel.setReadOnly(True)
+        self.analysis_panel.setMaximumHeight(180)
+        self.analysis_panel.setPlaceholderText(
+            "Click 'Citation Analysis' with a document selected to see match confidence and diagnostics."
+        )
+        self.analysis_panel.setVisible(False)
+        layout.addWidget(self.analysis_panel)
+
+        self.btn_generate = QPushButton("Generate Works Cited")
         self.btn_generate.clicked.connect(self._request_generation)
         layout.addWidget(self.btn_generate)
 
@@ -211,6 +250,101 @@ class CitationDock(QWidget):
             text = f"{record.get('authors', '')} ({record.get('year', '')}). {record.get('title', '')}."
         QApplication.clipboard().setText(text)
         QMessageBox.information(self, "Copied!", "Citation copied to clipboard.")
+
+    # ------------------------------------------------------------------
+    # Phase 8: Citation index diagnostics
+    # ------------------------------------------------------------------
+
+    def _run_citation_analysis(self):
+        """Fetch the citation index for the selected doc and display diagnostics."""
+        row = self.table.currentRow()
+        if row < 0:
+            self.analysis_panel.setVisible(True)
+            self.analysis_label.setVisible(True)
+            self.analysis_panel.setPlainText("Select a document row first.")
+            return
+
+        doc_id = self.table.item(row, 0).data(Qt.ItemDataRole.UserRole) if self.table.item(row, 0) else None
+        if not doc_id:
+            return
+
+        cas = getattr(self.app_context, "citation_app_service", None) if self.app_context else None
+        if cas is None or not hasattr(cas, "get_citation_index"):
+            self.analysis_panel.setVisible(True)
+            self.analysis_label.setVisible(True)
+            self.analysis_panel.setPlainText("Citation analysis not available (extraction service not wired).")
+            return
+
+        self.btn_analyze.setEnabled(False)
+        self.btn_analyze.setText("Analyzing...")
+        self.analysis_panel.setVisible(True)
+        self.analysis_label.setVisible(True)
+        self.analysis_panel.setPlainText("Running citation extraction...")
+
+        self._index_worker = _CitationIndexWorker(cas, doc_id)
+        self._index_worker.finished.connect(self._on_citation_index_ready)
+        self._index_worker.start()
+
+    def _on_citation_index_ready(self, index):
+        self.btn_analyze.setEnabled(True)
+        self.btn_analyze.setText("Citation Analysis")
+
+        if index is None:
+            self.analysis_panel.setPlainText("No citation index available for this document.")
+            return
+
+        lines = []
+        bib = getattr(index, "bibliography_entries", [])
+        in_text = getattr(index, "in_text_citations", [])
+        matches = getattr(index, "citation_matches", [])
+        unmatched_bib = getattr(index, "unmatched_bib_entry_ids", [])
+        unmatched_in = getattr(index, "unmatched_in_text_ids", [])
+        ambiguous = getattr(index, "ambiguous_match_ids", [])
+        page_index = getattr(index, "entry_page_index", {})
+
+        lines.append(f"Bibliography entries detected:  {len(bib)}")
+        lines.append(f"In-text citations detected:     {len(in_text)}")
+        lines.append(f"Matched pairs:                  {len([m for m in matches if m.confidence >= 0.3])}")
+        lines.append(f"Unmatched bibliography entries: {len(unmatched_bib)}")
+        lines.append(f"Unmatched in-text citations:    {len(unmatched_in)}")
+        lines.append(f"Ambiguous matches:              {len(ambiguous)}")
+        lines.append("")
+
+        # Show top matched entries with confidence indicators
+        if matches:
+            lines.append("-- Top citation matches (confidence: H=high M=mid L=low A=ambiguous) --")
+            matched = [m for m in matches if m.confidence >= 0.3]
+            matched.sort(key=lambda m: -m.confidence)
+            for m in matched[:10]:
+                conf = m.confidence
+                if conf >= 0.7:
+                    badge = "H"
+                elif conf >= 0.4:
+                    badge = "M"
+                else:
+                    badge = "L"
+                if m.is_ambiguous:
+                    badge = "A"
+                # Find bibliography entry raw text
+                entry_raw = next(
+                    (e.raw_text[:60] for e in bib if e.entry_id == m.bibliography_entry_id),
+                    m.bibliography_entry_id[:40],
+                )
+                pages = page_index.get(m.bibliography_entry_id, [])
+                page_str = f"pp.{','.join(str(p+1) for p in pages[:5])}" if pages else ""
+                lines.append(f"  [{badge} {conf:.0%}] {entry_raw}...  {page_str}")
+                if m.reason:
+                    lines.append(f"          Reason: {m.reason}")
+
+        if unmatched_in:
+            lines.append("")
+            lines.append(f"-- Unmatched in-text citations ({len(unmatched_in)}) --")
+            for cit_id in unmatched_in[:5]:
+                cit = next((c for c in in_text if c.citation_id == cit_id), None)
+                if cit:
+                    lines.append(f"  {cit.raw_text[:60]}  (type={cit.citation_type})")
+
+        self.analysis_panel.setPlainText("\n".join(lines))
 
     def update_theme(self, theme):
         self.setStyleSheet(f"CitationDock {{ background-color: {theme['bg_main']}; color: {theme['text_main']}; }}")

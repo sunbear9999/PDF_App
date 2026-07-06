@@ -95,7 +95,8 @@ class AnalysisResultCard(QFrame):
 
 
 class AnalysisChunkCard(QFrame):
-    def __init__(self, chunk_number: int, total_chunks: int, chunk: dict, theme: dict, doc_name: str = "", viewer=None, parent=None):
+    def __init__(self, chunk_number: int, total_chunks: int, chunk: dict, theme: dict, doc_name: str = "",
+                 viewer=None, parent=None, section_number: int = None, total_sections: int = None):
         super().__init__(parent)
         self.viewer = viewer
         self.setStyleSheet(f"""
@@ -115,7 +116,11 @@ class AnalysisChunkCard(QFrame):
         self.btn_toggle.setChecked(True)
         self.btn_toggle.clicked.connect(self._set_expanded)
         header.addWidget(self.btn_toggle)
-        title = QLabel(f"<b>Section {chunk_number}/{total_chunks}</b>")
+        if section_number is not None and total_sections:
+            title_text = f"Chunk {chunk_number}/{total_chunks} (Section {section_number}/{total_sections})"
+        else:
+            title_text = f"Section {chunk_number}/{total_chunks}"
+        title = QLabel(f"<b>{title_text}</b>")
         header.addWidget(title)
         header.addStretch()
         layout.addLayout(header)
@@ -263,7 +268,9 @@ class AnalysisTab(BaseTab):
             summary = str(payload.result.get("summary", ""))[:120]
             self.status_lbl.setText(f"Section {n}/{total} synthesised. {summary}{'...' if len(summary) == 120 else ''}")
         elif event == AnalysisEvent.GRAPH_PLAN_READY:
-            self.status_lbl.setText("Graph plan ready. Assembling final graph...")
+            self.status_lbl.setText(
+                payload.result.get("message", "Merge complete. Connecting and polishing final graph...")
+            )
         elif event == AnalysisEvent.GRAPH_HYDRATED:
             n_nodes = payload.result.get("hydrated_entity_count", 0)
             missing = len(payload.result.get("missing_quote_ids") or [])
@@ -527,7 +534,10 @@ class AnalysisTab(BaseTab):
         self._load_run_existing_analysis()
 
     def _open_template_editor(self):
-        dlg = TemplateEditorDialog(self.pm, self.theme, self)
+        dlg = TemplateEditorDialog(
+            self.pm, self.theme, self,
+            deterministic_pass_registry=getattr(self.app_context, "deterministic_pass_registry", None),
+        )
         dlg.accepted.connect(self._refresh_selectors)
         dm = get_for_widget(self)
         if dm:
@@ -665,6 +675,8 @@ class AnalysisTab(BaseTab):
             doc_name,
             self.app_context.viewer,
             self,
+            section_number=result.get("section_number"),
+            total_sections=result.get("total_sections"),
         )
         self.results_layout.insertWidget(self.results_layout.count() - 1, card)
 

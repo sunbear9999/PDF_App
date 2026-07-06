@@ -128,15 +128,46 @@ class AppContext:
     # Source evaluation service
     source_evaluation_service: Optional[Any] = field(default=None)
 
+    # Deterministic extraction layer
+    document_extraction_service: Optional[Any] = field(default=None)
+    extraction_cache: Optional[Any] = field(default=None)
+    pattern_detector_registry: Optional[Any] = field(default=None)
+    table_extraction_service: Optional[Any] = field(default=None)
+    ranking_feature_service: Optional[Any] = field(default=None)
+    deterministic_pass_registry: Optional[Any] = field(default=None)
+
+    # Citation services (Phase 8 diagnostics)
+    citation_app_service: Optional[Any] = field(default=None)
+
+    # Source format dispatch registry — see core/registries/source_format_registry.py
+    source_format_registry: Optional[Any] = field(default=None)
+
+    # Source viewer display settings service — manages global viewer preferences (Phase 8)
+    source_viewer_settings_service: Optional[Any] = field(default=None)
+
+    # Intelligence layer services
+    model_role_service: Optional[Any] = field(default=None)
+    processing_policy_service: Optional[Any] = field(default=None)
+    artifact_service: Optional[Any] = field(default=None)
+    intelligence_scheduler: Optional[Any] = field(default=None)
+    source_intelligence_service: Optional[Any] = field(default=None)
+    hybrid_retrieval_service: Optional[Any] = field(default=None)
+    context_packing_service: Optional[Any] = field(default=None)
+
     # Currently selected AI model — updated by UnifiedResearchDock when model combo changes
     active_model: str = field(default="")
 
     # ------------------------------------------------------------------ helpers
 
     def get_active_ai_model(self) -> str:
-        """Return the currently selected AI model, falling back to the first available."""
-        if self.active_model:
-            return self.active_model
+        """Return the configured main-answer model from AI Setup."""
+        if self.model_role_service:
+            try:
+                model = self.model_role_service.resolve_role("main_answer_model")
+                if model:
+                    return model
+            except Exception:
+                pass
         # Prefer the persisted default from AISetupService
         if self.ai_setup_service:
             try:
@@ -232,5 +263,21 @@ class AppContext:
             prompt_app_service=getattr(core, "prompt_app_service", None),
             llm_settings_service=getattr(core, "llm_settings_service", None),
             widget_registry=getattr(core, "widget_registry", None),
+            document_extraction_service=getattr(core, "document_extraction_service", None),
+            extraction_cache=getattr(core, "extraction_cache", None),
+            pattern_detector_registry=getattr(core, "pattern_detector_registry", None),
+            table_extraction_service=getattr(core, "table_extraction_service", None),
+            ranking_feature_service=getattr(core, "ranking_feature_service", None),
+            deterministic_pass_registry=getattr(core, "deterministic_pass_registry", None),
+            citation_app_service=getattr(core, "citation_app_service", None),
+            source_format_registry=getattr(core, "source_format_registry", None),
+            source_viewer_settings_service=getattr(core, "source_viewer_settings_service", None),
+            model_role_service=getattr(core, "model_role_service", None),
+            processing_policy_service=getattr(core, "processing_policy_service", None),
+            artifact_service=getattr(core, "artifact_service", None),
+            intelligence_scheduler=getattr(core, "intelligence_scheduler", None),
+            source_intelligence_service=getattr(core, "source_intelligence_service", None),
+            hybrid_retrieval_service=getattr(core, "hybrid_retrieval_service", None),
+            context_packing_service=getattr(core, "context_packing_service", None),
             core=core,
         )

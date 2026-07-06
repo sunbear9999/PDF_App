@@ -25,6 +25,15 @@ class WorkflowRunnerService(QObject):
         node_type_registry=None,
         data_provider_registry=None,
         llm_settings_service=None,
+        document_extraction_service=None,
+        ranking_feature_service=None,
+        pattern_detector_registry=None,
+        deterministic_pass_registry=None,
+        artifact_service=None,
+        hybrid_retrieval_service=None,
+        context_packing_service=None,
+        model_role_service=None,
+        source_intelligence_service=None,
         event_bus: Optional[EventBus] = None,
         ui_router=None,
         model_provider: Optional[Callable[[], str]] = None,
@@ -41,6 +50,15 @@ class WorkflowRunnerService(QObject):
         self.node_type_registry = node_type_registry
         self.data_provider_registry = data_provider_registry
         self.llm_settings_service = llm_settings_service
+        self.document_extraction_service = document_extraction_service
+        self.ranking_feature_service = ranking_feature_service
+        self.pattern_detector_registry = pattern_detector_registry
+        self.deterministic_pass_registry = deterministic_pass_registry
+        self.artifact_service = artifact_service
+        self.hybrid_retrieval_service = hybrid_retrieval_service
+        self.context_packing_service = context_packing_service
+        self.model_role_service = model_role_service
+        self.source_intelligence_service = source_intelligence_service
         self.bus = event_bus or EventBus.get_instance()
         self.ui_router = ui_router
         self.model_provider = model_provider
@@ -84,6 +102,23 @@ class WorkflowRunnerService(QObject):
         if blueprint is None:
             raise ValueError("Workflow blueprint is required.")
         state = dict(initial_state or {})
+        if self.model_role_service:
+            for role_key, state_key in {
+                "main_answer_model": "selected_model",
+                "fast_worker_model": "fast_worker_model",
+                "embedding_model": "embedding_model",
+                "reranker_model": "reranker_model",
+                "vision_model": "vision_model",
+                "transcription_model": "transcription_model",
+                "extraction_repair_model": "extraction_repair_model",
+            }.items():
+                if state_key not in state:
+                    try:
+                        model = self.model_role_service.resolve_role(role_key)
+                        if model:
+                            state[state_key] = model
+                    except Exception:
+                        pass
         if "selected_model" not in state and self.model_provider:
             state["selected_model"] = self.model_provider()
 
@@ -103,6 +138,15 @@ class WorkflowRunnerService(QObject):
             node_type_registry=self.node_type_registry,
             data_provider_registry=self.data_provider_registry,
             llm_settings_service=self.llm_settings_service,
+            document_extraction_service=self.document_extraction_service,
+            ranking_feature_service=self.ranking_feature_service,
+            pattern_detector_registry=self.pattern_detector_registry,
+            deterministic_pass_registry=self.deterministic_pass_registry,
+            artifact_service=self.artifact_service,
+            hybrid_retrieval_service=self.hybrid_retrieval_service,
+            context_packing_service=self.context_packing_service,
+            model_role_service=self.model_role_service,
+            source_intelligence_service=self.source_intelligence_service,
         )
         self._attach_runner(runner)
         return runner

@@ -37,8 +37,9 @@ class NoteBubble(QFrame):
 
         header_layout = QHBoxLayout()
         doc_name = os.path.basename(self.pdf_path)
-        if self.source_type == "video":
-            self.lbl_page = QLabel(f"🎬 {doc_name} - {self._fmt_time(self.page_num)}")
+        if self.source_type in ("video", "audio"):
+            icon = "🎬" if self.source_type == "video" else "🎧"
+            self.lbl_page = QLabel(f"{icon} {doc_name} - {self._fmt_time(self.page_num)}")
         else:
             self.lbl_page = QLabel(f"📄 {doc_name} - Pg {self.page_num + 1}")
         header_layout.addWidget(self.lbl_page)
@@ -113,7 +114,7 @@ class NoteBubble(QFrame):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            if self.source_type == "video":
+            if self.source_type in ("video", "audio"):
                 ctx = getattr(self.tab, "_ctx", None)
                 viewer = getattr(ctx, "viewer", None) if ctx else None
                 source = None

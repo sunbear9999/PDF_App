@@ -226,7 +226,12 @@ class BlueprintUIRouter(QObject):
         current_step = getattr(runner, 'current_executing_step', None)
         target_id = getattr(current_step, 'ui_target', 'floating') if current_step else 'floating'
 
-        self._dispatch(target_id, {"type": "error", "message": err_msg})
+        self._dispatch(target_id, {
+            "type": "error",
+            "message": err_msg,
+            "trace_id": getattr(runner, "trace_id", None),
+            "blueprint_id": getattr(runner, "blueprint_id", None),
+        })
 
     def _dispatch(self, target_id: str, payload: dict):
         # Direct-call path for already-registered targets (existing tabs).

@@ -248,6 +248,10 @@ class DatabaseSchema(BaseDB):
                 col_defs = ", ".join(f"{col} {typ}" for col, typ in meta["schema"].items())
                 cursor.execute(f"CREATE TABLE IF NOT EXISTS {tbl_name} ({col_defs})")
 
+            # Deterministic extraction layer tables
+            self.manager.db_extraction.init_tables()
+            self.manager.db_intelligence.init_tables()
+
             self.manager._conn.commit()
 
         except sqlite3.Error as e:

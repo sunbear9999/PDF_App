@@ -51,7 +51,9 @@ class PromptManager:
             "Format Enforcer - Card Grid", "Format Enforcer - Live Stream",
             "Inline Citation Directive", "Reasoning Disclosure Directive",
             "Graph Analysis Compact Output Contract",
-            "Graph Analysis Argument Chain Directive"
+            "Graph Analysis Argument Chain Directive",
+            "Graph Analysis Section Synthesis Stage Rules",
+            "LIBRA BBS Cloze Template", "LIBRA BBS Neutral Completion",
         ],
         "Widget Output Formats": [
             "Format Enforcer - Live Stream",
@@ -237,6 +239,7 @@ the documented field names and types. Plugin steps work identically to core step
         "Graph Analysis Synthesis Query": "Numbered selected quotes:\n{master_input}\n\nWrite a concise argument map synthesis plan. Do NOT make quote-by-quote mini-arguments. Follow these steps:\n\nSTEP 1 — State the central thesis: one sentence capturing the document's overarching claim or conclusion.\n\nSTEP 2 — Identify 2–4 named support pillars: group the quotes into 2–4 distinct reasons that together support the thesis. Give each pillar a short, descriptive name. Assign every quote to exactly one pillar.\n\nSTEP 3 — Write the plan using this EXACT FORMAT:\n\n**Central Thesis**: [one-sentence overarching claim]\n\n1. **[Pillar Name]**: [one sentence describing what this pillar argues]. (Q1, Q3)\n2. **[Pillar Name]**: [one sentence]. (Q2, Q4, Q5)\n3. **[Pillar Name]**: [one sentence]. (Q6, Q7)\n\nCRITICAL FORMAT RULES:\n- Each pillar MUST be a numbered line starting with a bold name.\n- Quote IDs MUST appear in parentheses at the END of that same numbered line — never in sub-bullets, never after a separate 'Evidence:' label.\n- Pillar names must be meaningfully different from each other — never use generic names like 'Evidence', 'Support', or 'Reasons'.\n- Do not output JSON.",
         "Graph Analysis Master Query": "Convert the synthesis plan into one coherent connected graph following GRAPH_PLAN and the CONTRACT.\n\nSTRUCTURE REQUIREMENT: Build exactly 3 levels — (1) ONE root node with t=cla (or the root alias from GRAPH_PLAN) representing the central thesis; (2) 2–4 bridge nodes with t=rea (or the bridge alias), each a distinctly named support reason from the synthesis pillars; (3) several leaf nodes with t=quo (or the source alias), each an exact evidence quote attached beneath its relevant bridge. Distribute quotes across bridge nodes — do NOT funnel all quotes under one bridge.\n\nCRITICAL ALIAS RULE: Every node's 't' field must be an exact short alias code from CONTRACT (e.g. quo, rea, cla). Never write theme names, full type names like 'entity.reasoning', or any descriptive text in the 't' field. Check GRAPH_PLAN for the correct alias codes.\n\nOnly this final pass should create node types, edge types, and graph structure. Reuse only quote text present in CHUNKS. Use one central root unless SYNTHESIS explicitly requires two. Each bridge node must have a meaningfully different name describing its specific support pillar. Avoid isolated components, claim-to-claim ladders, and repeated wording across roles. Aim for 8–18 nodes total; source leaves should make up roughly half. Return compact JSON only.\n\nSYNTHESIS:\n{argument_synthesis}\n\nCHUNKS:\n{master_input}",
         "Graph Analysis Argument Chain Directive" : "Maintain a strict logical hierarchy using only edge directions allowed by the CONTRACT and preferred_chains in GRAPH_PLAN. Every node in 'n' must have at least one edge in 'e', but do not connect nodes merely because a relation is allowed. Prefer one connected tree over repeated mini-chains. Avoid circular dependencies, claim-to-claim ladders, and same-level daisy chains unless GRAPH_PLAN leaves no better option. If a node type requires source text, place the exact copied snippet in 'q' and put its concise interpretation in 'x'. Never use the same wording for a source node, bridge node, and root node. Use source-like nodes for short verbatim snippets; use bridge/root-like nodes only for synthesized ideas broader than one quote.",
+        "Graph Analysis Section Synthesis Stage Rules": "SECTION SYNTHESIS PASS:\nInput is compact evidence refs already selected for this section — short snippets plus quote_ids, not raw document text. Build only this section's local hierarchy using GRAPH_PLAN's source and bridge roles (up to two bridge-level nodes with quote/source leaf nodes beneath them) — do NOT create a document-level root/summary node; that represents the WHOLE document's synthesis, not one section, and is added automatically once after every section is merged. For every quote/source leaf node, set properties.source_quote_id to the quote_id from the evidence refs — do NOT copy or invent quote text into 'q' or 'x'. This section's subgraph will be merged with every other section's subgraph, then lightly connected in one final pass — keep it small, local, and non-redundant with other sections rather than trying to build the whole document's argument here.",
         "Compare Outlines Query": "USER QUESTION: {user_query}\n\n--- DOCUMENT A OUTLINE ---\n{doc_a}\n\n--- DOCUMENT B OUTLINE ---\n{doc_b}",
         "Blueprint Architect Query": "CURRENT TOOL JSON:\n{current_json}\n\nUSER REQUEST:\n{user_text}",
         "Auto Build Graph Query": "Translate the preceding AI Response into a spatial workspace graph map. Extract the main ideas as separate nodes, and link them logically with edges.\n\nCRITICAL RULES:\n1. If an idea is an original brainstorm concept, put the text in 'note' and leave 'quote' and 'doc_name' EMPTY.\n2. ONLY use the 'quote' and 'doc_name' fields if the AI Response contains an explicit, verbatim quote from a source document.\n\nAI RESPONSE TO MAP:\n{{{source_key}}}\n\nCURRENT WORKSPACE GRAPH MAP (Do not duplicate these):\n{workspace_data}",
@@ -309,6 +312,8 @@ the documented field names and types. Plugin steps work identically to core step
             "and its value is an object with 'score' (0.0–1.0), 'direction' (string), "
             "and 'explanation' (one sentence). Output ONLY the JSON object."
         ),
+        "LIBRA BBS Cloze Template": "The term '{term}' refers to ",
+        "LIBRA BBS Neutral Completion": "a generic unrelated concept",
         "Inline Citation Directive":"When using DOCUMENT CONTEXT, cite directly from the documents in your first answer. Treat citations as source-evidence passages, not famous attributed quotations. In the visible answer, mark important verbatim evidence with <QUOTE>exact quote</QUOTE>. At the very end, append a machine-readable block wrapped exactly in <CITATIONS>...</CITATIONS>. Inside that block output ONLY one valid JSON array, with no markdown and no wrapper object: [{\"doc_name\": \"filename.pdf\", \"quote\": \"exact verbatim quote\", \"note\": \"brief reason this quote supports the answer\"}]. Use only exact quotes copied from DOCUMENT CONTEXT.",
         "Widget - Citation Step": (
             "You extract source citations. For every verifiable claim in ANSWER supported, qualified, or contradicted by SOURCE: "
@@ -378,16 +383,16 @@ Keep the graph sparse but evidentiary. For master output, synthesize to roughly 
             "USER INSTRUCTIONS:\n{template_instructions}"
         ),
         "Graph Analysis Graph Assembly System": (
-            "Build the final graph from the graph plan and compact evidence refs. "
+            "Build the final graph from section summaries and key evidence quote_ids. "
             "CRITICAL: every quote/source leaf node MUST set properties.source_quote_id to the quote_id from the evidence list — do NOT copy full quote text into the graph. "
-            "Follow CONTRACT aliases and GRAPH_PLAN. 3-level hierarchy: one root claim, 2-4 bridge reasoning nodes, quote leaf nodes referencing quote_ids.\n"
+            "Follow CONTRACT aliases. Build one connected hierarchy: one root claim/theme, 2-4 bridge reasoning nodes each a distinct named support pillar, quote leaf nodes distributed across bridges (do not funnel every quote under one bridge). Return compact JSON only.\n"
             "USER INSTRUCTIONS: {template_instructions}\n\nCONTRACT:\n{template_schema}"
         ),
 
         # --- HIERARCHICAL PIPELINE QUERIES ---
         "Graph Analysis Evidence Chunk Query": (
             "Pages {item.page_range}. Up to {analysis_limits.max_quotes_per_chunk} quotes.\n"
-            "TEXT:\n{item.text}"
+            "TEXT:\n{rank_result.compact_text}"
         ),
         "Graph Analysis Section Synthesis Query": (
             "SECTION EVIDENCE REFS:\n{item.compact_refs_text}\n\n"
@@ -401,8 +406,9 @@ Keep the graph sparse but evidentiary. For master output, synthesize to roughly 
             "Plan: root theme, 2-4 bridge claims, and which quote_ids to use as source leaf nodes."
         ),
         "Graph Analysis Graph Assembly Query": (
-            "GRAPH PLAN:\n{graph_plan_text}\n\n"
-            "EVIDENCE REFS (set source_quote_id for source leaf nodes):\n{top_quote_ids_compact}\n\n"
+            "CONTRACT:\n{template_schema}\n\n"
+            "SECTION SUMMARIES:\n{section_syntheses_compact}\n\n"
+            "TOP EVIDENCE QUOTES (set source_quote_id for source leaf nodes):\n{top_quote_ids_compact}\n\n"
             "Build the graph. Each quote/source leaf node: {\"t\":\"quo\",\"x\":\"brief label\","
             "\"properties\":{\"source_quote_id\":\"qid_here\"}}. Return compact JSON only."
         ),

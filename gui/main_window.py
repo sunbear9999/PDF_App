@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt, QSettings, QTimer
 
 from core.engine.ui_router import BlueprintUIRouter
 from gui.components.source_viewer_host import SourceViewerHost
+from gui.components.source_viewer_builtins import register_builtin_source_viewers
 from gui.components.process_monitor import ProcessMonitorWidget
 from gui.theme.theme import ThemeManager
 from gui.components.dialogs.prompt_editor_dialog import PromptEditorDialog
@@ -43,7 +44,7 @@ class MainWindow(QMainWindow):
         self.workflow_node_type_registry = core.workflow_node_type_registry
         self.dictionary_manager = core.dictionary_manager
         self.citation_manager = core.citation_manager
-        self.active_ai_model = self._load_active_ai_model()
+        self.active_ai_model = ""
 
         self.workspace_ai_tools_registry = core.workspace_ai_tools_registry
         self.workspace_node_type_registry = core.workspace_node_type_registry
@@ -84,7 +85,9 @@ class MainWindow(QMainWindow):
         from core.services.gui_bridge.ai_bootstrap_service import AIBootstrapService
         self.ai_bootstrap_service = AIBootstrapService(self)
 
+        register_builtin_source_viewers(self.app_context)
         self.viewer = SourceViewerHost(app_context=self.app_context)
+        self._register_builtin_locate_handlers()
 
 
         # 3. CONFIGURE DOCKS
@@ -264,6 +267,91 @@ class MainWindow(QMainWindow):
         )
 
 
+    def _register_builtin_locate_handlers(self) -> None:
+        """
+        Register the built-in "jump to source" handlers for pdf/video/audio
+        so plugin_extension_registry.get_citation_source_handler(source_type)
+        always resolves for the built-in formats — the single dispatch point
+        used by SourceViewerHost.jump_to_source, the citation dock, and note
+        bubbles (see chat_streamer.py::add_bubble). Registered here (not in
+        core/papyrus_core.py) because the callback needs a live reference to
+        self.viewer, and core must never import/depend on gui.
+
+        Closing over self.viewer directly is simpler than threading a viewer
+        reference through AppContext.
+        """
+        registry = getattr(self.app_context, "plugin_extension_registry", None)
+        if registry is None:
+            return
+        from core.plugins.extension_registry import CitationSourceHandlerSpec
+
+        def _pdf_locate(locator: dict, ctx) -> None:
+            viewer = self.viewer
+            if viewer is not None and hasattr(viewer, "jump_to_source"):
+                # Bypass SourceViewerHost.jump_to_source's own handler lookup
+                # (that would recurse back into this same handler) — call the
+                # pdf viewer's fuzzy full-text search directly, unchanged.
+                pdf_viewer = getattr(viewer, "pdf_viewer", viewer)
+                pdf_viewer.jump_to_source(locator.get("doc_name", ""), locator.get("quote", ""))
+
+        def _video_locate(locator: dict, ctx) -> None:
+            viewer = self.viewer
+            if viewer is None:
+                return
+            source_id = locator.get("source_id")
+            path = locator.get("path")
+            timestamp = self._timestamp_for_video_quote(source_id, locator.get("quote", ""))
+            if hasattr(viewer, "jump_to_video"):
+                viewer.jump_to_video(source_id=source_id, path=path, timestamp=timestamp)
+
+        if registry.get_citation_source_handler("pdf") is None:
+            registry.add_citation_source_handler(
+                CitationSourceHandlerSpec(source_type="pdf", callback=_pdf_locate)
+            )
+        if registry.get_citation_source_handler("video") is None:
+            registry.add_citation_source_handler(
+                CitationSourceHandlerSpec(source_type="video", callback=_video_locate)
+            )
+        if registry.get_citation_source_handler("audio") is None:
+            registry.add_citation_source_handler(
+                CitationSourceHandlerSpec(source_type="audio", callback=_video_locate)
+            )
+
+        def _image_locate(locator: dict, ctx) -> None:
+            viewer = self.viewer
+            image_viewer = getattr(viewer, "_viewers", {}).get("image") if viewer else None
+            if image_viewer is not None and hasattr(image_viewer, "jump_to_source"):
+                image_viewer.jump_to_source(locator.get("doc_name", ""), locator.get("quote", ""))
+
+        if registry.get_citation_source_handler("image") is None:
+            registry.add_citation_source_handler(
+                CitationSourceHandlerSpec(source_type="image", callback=_image_locate)
+            )
+
+    def _timestamp_for_video_quote(self, source_id, quote):
+        """
+        Match a quoted passage against a video/audio transcript to find its
+        timestamp. Relocated verbatim from the old
+        SourceViewerHost._timestamp_for_video_quote — same substring-match
+        algorithm, just invoked via the handler registry now.
+        """
+        pm = getattr(self.app_context, "project_manager", None)
+        transcript = pm.get_video_transcript(source_id) if pm and source_id and hasattr(pm, "get_video_transcript") else {}
+        needle = " ".join((quote or "").lower().split())
+        if not needle:
+            return 0
+        for segment in transcript.get("segments", []) or []:
+            text = " ".join(str(segment.get("text", "")).lower().split())
+            if needle in text or text in needle:
+                return float(segment.get("start", 0) or 0)
+        words = needle.split()
+        if len(words) > 6:
+            partial = " ".join(words[:6])
+            for segment in transcript.get("segments", []) or []:
+                if partial in " ".join(str(segment.get("text", "")).lower().split()):
+                    return float(segment.get("start", 0) or 0)
+        return 0
+
     def _register_help_targets(self) -> None:
         """Register stable UITargetRegistry targets for key UI regions."""
         hs = getattr(self.app_context, "help_service", None)
@@ -355,24 +443,27 @@ class MainWindow(QMainWindow):
         return None
 
     def _get_active_ai_model(self):
-        if getattr(self, "active_ai_model", None):
-            return self.active_ai_model
+        role_svc = getattr(self.core, "model_role_service", None)
+        if role_svc:
+            try:
+                model = role_svc.resolve_role("main_answer_model")
+                if model:
+                    return model
+            except Exception:
+                pass
+        ai_setup = getattr(self.core, "ai_setup_service", None)
+        if ai_setup:
+            try:
+                model = ai_setup.get_default_chat_model()
+                if model:
+                    return model
+            except Exception:
+                pass
         models = self.shared_llm_manager.get_available_models() or []
         return models[0] if models else ""
 
     def _load_active_ai_model(self):
-        try:
-            settings = json.loads(self.project_manager.get_metadata("global_ai_settings", "{}"))
-            model = settings.get("selected_model") or settings.get("active_model")
-            if model:
-                return model
-        except Exception:
-            pass
-        models = self.shared_llm_manager.get_available_models() or []
-        preferred = "gemma4:e2b"
-        if preferred in models:
-            return preferred
-        return models[0] if models else preferred
+        return self._get_active_ai_model()
 
     def _run_startup_sequence(self):
         settings = QSettings("PDFMultitool", "Workspace")

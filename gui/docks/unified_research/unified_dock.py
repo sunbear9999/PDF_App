@@ -1,5 +1,5 @@
 from PySide6.QtWidgets import (QCheckBox, QDockWidget, QWidget, QHBoxLayout, QVBoxLayout,
-                             QStackedWidget, QDialog, QPushButton, QLabel, QComboBox, QFrame, QButtonGroup, QMessageBox, QMenu, QTextEdit, QScrollArea, QLineEdit)
+                             QStackedWidget, QDialog, QPushButton, QLabel, QFrame, QButtonGroup, QMessageBox, QMenu, QTextEdit, QScrollArea, QLineEdit)
 from PySide6.QtCore import Qt, Signal, QThread, QTimer
 from PySide6.QtGui import QCursor, QAction
 from gui.managers.dialog_manager import exec_as_modal, get_for_widget
@@ -84,12 +84,11 @@ class UnifiedResearchDock(QDockWidget):
         self.bus.plugin_loaded.connect(self._on_plugin_loaded)
         # Auto-update theme whenever the app theme changes
         self.bus.theme_changed.connect(self._on_bus_theme_changed)
-        # Track active model changes so app_context.active_model stays current
         self.bus.active_model_changed.connect(self._on_active_model_changed)
 
     def _on_active_model_changed(self, event, payload):
-        if event == WorkspaceEvent.ACTIVE_MODEL_CHANGED and hasattr(payload, "model_name"):
-            self.app_context.active_model = payload.model_name
+        if hasattr(self, "lbl_model_default"):
+            self.lbl_model_default.setText(f"Model: {self.app_context.get_active_ai_model() or 'Not set'}")
 
     def _open_bias_lab(self):
         from gui.docks.unified_research.components.bias_detector_dialog import BiasDetectorDialog
@@ -178,42 +177,25 @@ class UnifiedResearchDock(QDockWidget):
         header_layout.setContentsMargins(8, 4, 8, 4)
         header_layout.setSpacing(3)
 
-        # Row 1: index status + model selector
+        # Row 1: index status + centralized model defaults
         row1 = QHBoxLayout()
         row1.setSpacing(6)
         self.lbl_status = QLabel("🔴 Unindexed")
         row1.addWidget(self.lbl_status)
 
-        self.model_combo = QComboBox()
-        available_models = self.llm_manager.get_available_models() or ["llama3"]
-        self.model_combo.addItems(available_models)
-        active_model = self.app_context.get_active_ai_model()
-        if active_model in available_models:
-            self.model_combo.setCurrentText(active_model)
-        row1.addWidget(self.model_combo, 1)
+        self.lbl_model_default = QLabel(f"Model: {self.app_context.get_active_ai_model() or 'Not set'}")
+        row1.addWidget(self.lbl_model_default, 1)
+
+        self.btn_default_models = QPushButton("Default Models")
+        self.btn_default_models.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_default_models.clicked.connect(self._open_ai_setup)
+        row1.addWidget(self.btn_default_models)
 
         self.btn_index = QPushButton("🔄 Index")
         self.btn_index.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_index.clicked.connect(self.start_indexing)
         row1.addWidget(self.btn_index)
         header_layout.addLayout(row1)
-
-        def _on_model_changed(txt):
-            self.app_context.active_model = txt
-            self.bus.active_model_changed.emit(
-                WorkspaceEvent.ACTIVE_MODEL_CHANGED,
-                WorkspaceEventPayload(model_name=txt),
-            )
-
-        self.model_combo.currentTextChanged.connect(_on_model_changed)
-        # Fire once on startup so background services cache the initial state
-        QTimer.singleShot(
-            100,
-            lambda: self.bus.active_model_changed.emit(
-                WorkspaceEvent.ACTIVE_MODEL_CHANGED,
-                WorkspaceEventPayload(model_name=self.model_combo.currentText()),
-            ),
-        )
 
         # Row 2: action buttons
         row2 = QHBoxLayout()
@@ -304,26 +286,22 @@ class UnifiedResearchDock(QDockWidget):
         from gui.components.dialogs.settings_dialog import GlobalSettingsDialog
         dm = getattr(self.app_context, "dialog_manager", None)
         if dm:
-            dm.show(
+            dialog = dm.show(
                 GlobalSettingsDialog,
-                key="settings",
+                key="global_settings",
                 singleton=True,
                 factory=lambda: GlobalSettingsDialog(
                     self.app_context,
                     parent=self.parent(),
                 ),
             )
+            if hasattr(dialog, "focus_ai_setup"):
+                dialog.focus_ai_setup()
 
     def _on_ai_availability_changed(self, available: bool) -> None:
         self._content_stack.setCurrentIndex(0 if available else 1)
         if available:
-            # Refresh model combo when backend comes online
-            try:
-                models = self.llm_manager.get_available_models() or []
-                self.model_combo.clear()
-                self.model_combo.addItems(models)
-            except Exception:
-                pass
+            self._on_active_model_changed(None, None)
 
     def _inject_plugin_tabs(self) -> None:
         """Inject research tabs contributed by plugins via PluginExtensionRegistry."""
@@ -479,7 +457,8 @@ class UnifiedResearchDock(QDockWidget):
         # Apply standard styling to the remaining top header widgets
         widget_style = f"background-color: {theme.get('bg_panel', '#333')}; color: {theme.get('text_main', '#fff')}; border: 1px solid {theme.get('border', '#444')}; padding: 4px 8px; border-radius: 4px;"
 
-        self.model_combo.setStyleSheet(widget_style)
+        self.lbl_model_default.setStyleSheet(f"color: {theme.get('text_main', '#fff')};")
+        self.btn_default_models.setStyleSheet(widget_style)
         self.btn_brief.setStyleSheet(widget_style)
         self.btn_bias.setStyleSheet(widget_style)
         self.btn_filter.setStyleSheet(widget_style)

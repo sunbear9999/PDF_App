@@ -112,6 +112,7 @@ class VideoTranscriptionService(QObject):
         self.pm = project_manager
         self.llm = llm_manager
         self.model_name = os.environ.get("PAPYRUS_WHISPER_MODEL", "small")
+        self.processing_policy_service = None
         self.bus = EventBus.get_instance()
         self._signals = []
         self.bus.source_added.connect(self._on_source_added)
@@ -119,16 +120,25 @@ class VideoTranscriptionService(QObject):
         self.bus.source_renamed.connect(self._on_source_renamed)
         self.bus.source_action_requested.connect(self._on_source_intent)
 
+    def set_processing_policy_service(self, service) -> None:
+        self.processing_policy_service = service
+
     def _on_source_added(self, event: SourceEvent, payload: DocumentEventPayload):
-        if event == SourceEvent.ADDED and payload.source_type == "video":
+        # Audio uses the exact same Whisper transcription pipeline as video —
+        # it's "video without a picture."
+        if event == SourceEvent.ADDED and payload.source_type in ("video", "audio"):
+            if self.processing_policy_service is not None:
+                source = {"id": payload.source_id, "path": payload.path, "source_type": payload.source_type}
+                if not self.processing_policy_service.should_auto_transcribe(source):
+                    return
             self.start_transcription(payload.source_id, payload.path)
 
     def _on_source_removed(self, event: SourceEvent, payload: DocumentEventPayload):
-        if event == SourceEvent.REMOVED and payload.source_type == "video" and self.llm:
+        if event == SourceEvent.REMOVED and payload.source_type in ("video", "audio") and self.llm:
             self.llm.remove_source_from_index(payload.source_id, fallback_path=payload.path)
 
     def _on_source_renamed(self, event: SourceEvent, payload: DocumentEventPayload):
-        if event != SourceEvent.RENAMED or payload.source_type != "video" or not self.llm:
+        if event != SourceEvent.RENAMED or payload.source_type not in ("video", "audio") or not self.llm:
             return
         source_id = payload.new_source_id or payload.old_source_id
         self.llm.remove_source_from_index(source_id, fallback_path=payload.old_path)

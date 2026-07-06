@@ -25,7 +25,7 @@ class SchemaFormBuilder(QWidget, ThemedMixin):
             choices = field.get("choices", [])
 
             widget = None
-            if choices or f_type == "select":
+            if choices or f_type in ("select", "choice"):
                 widget = QComboBox()
                 widget.addItems([str(c) for c in choices])
                 if default in choices:
@@ -33,9 +33,9 @@ class SchemaFormBuilder(QWidget, ThemedMixin):
             elif f_type == "boolean":
                 widget = QCheckBox()
                 widget.setChecked(bool(default))
-            elif f_type == "number":
-                widget = QDoubleSpinBox() if isinstance(default, float) else QSpinBox()
-                widget.setRange(-999999, 999999)
+            elif f_type in ("number", "integer", "float"):
+                widget = QDoubleSpinBox() if (f_type == "float" or isinstance(default, float)) else QSpinBox()
+                widget.setRange(field.get("min", -999999), field.get("max", 999999))
                 widget.setValue(default if default else 0)
             elif f_type == "long_text":
                 widget = QTextEdit()

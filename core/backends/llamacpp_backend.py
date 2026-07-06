@@ -9,6 +9,7 @@ The LlamaCppProvider implements LLMProvider by talking to that HTTP server.
 from __future__ import annotations
 
 import json
+import math
 import os
 import platform
 import shutil
@@ -19,6 +20,15 @@ from typing import Callable, List, Optional
 
 import requests
 
+from core.llm_manager import (
+    CompletionLogprobResult,
+    TokenLogprob,
+    _LOGPROB_CONNECT_TIMEOUT,
+    _LOGPROB_READ_TIMEOUT,
+    fetch_openai_completion_logprobs,
+    fetch_openai_next_token_logprobs,
+    normalize_top_logprobs,
+)
 from core.registries.llm_backend_registry import BackendSpec, ModelInfo
 
 # ---------------------------------------------------------------------------
@@ -536,6 +546,167 @@ class LlamaCppProvider:
 
     def check_and_pull_embedding_model(self, progress_callback=None) -> None:
         pass  # Embedding handled by the model in use
+
+    def calculate_completion_pll(self, prefix: str, completion: str, model: str) -> float:
+        """Return LIBRA Eq. 1 PLL using exact completion logprobs."""
+        return self.score_completion_logprobs(prefix, completion, model).score
+
+    def score_completion_logprobs(
+        self, prefix: str, completion: str, model: str
+    ) -> CompletionLogprobResult:
+        active_model = self._current_model or model or "default"
+        try:
+            return fetch_openai_completion_logprobs(
+                self._base_url,
+                prefix,
+                completion,
+                active_model,
+                provider_name="LlamaCppProvider",
+            )
+        except RuntimeError as openai_exc:
+            try:
+                return self._score_native_prompt_logprobs(prefix, completion)
+            except RuntimeError as native_exc:
+                raise RuntimeError(
+                    "LOGPROBS_UNSUPPORTED: llama.cpp exact scoring failed through both "
+                    f"OpenAI echo ({openai_exc}) and native prompt probabilities "
+                    f"({native_exc})."
+                ) from native_exc
+
+    def _score_native_prompt_logprobs(
+        self, prefix: str, completion: str
+    ) -> CompletionLogprobResult:
+        payload = {
+            "prompt": prefix + completion,
+            "n_predict": 0,
+            "temperature": 0,
+            "n_probs": 0,
+            "echo": True,
+        }
+        try:
+            resp = requests.post(
+                f"{self._base_url}/completion",
+                json=payload,
+                timeout=(_LOGPROB_CONNECT_TIMEOUT, _LOGPROB_READ_TIMEOUT),
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except requests.exceptions.RequestException as exc:
+            raise RuntimeError(f"native HTTP error: {exc}") from exc
+
+        raw_items = (
+            data.get("prompt_probs")
+            or data.get("prompt_probabilities")
+            or data.get("prompt_logprobs")
+            or []
+        )
+        if not isinstance(raw_items, list) or not raw_items:
+            raise RuntimeError("native response did not include prompt probabilities")
+
+        expected = prefix + completion
+        cursor = 0
+        selected: list[TokenLogprob] = []
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            token = item.get("tok_str") or item.get("token") or item.get("text")
+            value = item.get("logprob")
+            if value is None and item.get("prob") is not None:
+                value = math.log(float(item["prob"]))
+            if token is None or value is None:
+                continue
+            token = str(token)
+            start = cursor
+            end = start + len(token)
+            cursor = end
+            if end > len(prefix):
+                selected.append(TokenLogprob(token=token, logprob=float(value), start=start, end=end))
+
+        if cursor != len(expected):
+            raise RuntimeError("native prompt tokens did not reconstruct prompt+completion")
+        if not selected:
+            raise RuntimeError("native response included no completion token logprobs")
+
+        score = sum(item.logprob for item in selected) / len(selected)
+        return CompletionLogprobResult(
+            score=score,
+            token_logprobs=selected,
+            mode="llamacpp_native_prompt",
+            exact=True,
+            prompt=prefix,
+            completion=completion,
+            diagnostics={
+                "endpoint": f"{self._base_url}/completion",
+                "completion_token_count": len(selected),
+            },
+        )
+
+    def _get_next_token_logprobs(
+        self, prefix: str, model: str, top_k: int = 100
+    ) -> dict[str, float]:
+        try:
+            return fetch_openai_next_token_logprobs(
+                self._base_url,
+                prefix,
+                self._current_model or model or "default",
+                top_k=top_k,
+                provider_name="LlamaCppProvider",
+            )
+        except RuntimeError as openai_exc:
+            try:
+                return self._get_native_next_token_logprobs(prefix, top_k=top_k)
+            except RuntimeError as native_exc:
+                raise RuntimeError(
+                    "LOGPROBS_UNAVAILABLE: llama.cpp scoring failed through both "
+                    f"OpenAI /v1/completions ({openai_exc}) and native /completion "
+                    f"({native_exc})."
+                ) from native_exc
+
+    def _get_native_next_token_logprobs(
+        self, prefix: str, top_k: int = 100
+    ) -> dict[str, float]:
+        payload = {
+            "prompt": prefix,
+            "n_predict": 1,
+            "temperature": 0,
+            "n_probs": top_k,
+            "stream": False,
+        }
+        try:
+            resp = requests.post(
+                f"{self._base_url}/completion",
+                json=payload,
+                timeout=(_LOGPROB_CONNECT_TIMEOUT, _LOGPROB_READ_TIMEOUT),
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            probabilities = data.get("completion_probabilities") or []
+            if not probabilities:
+                raise RuntimeError("'completion_probabilities' missing or empty.")
+            first = probabilities[0] if isinstance(probabilities[0], dict) else {}
+            raw_probs = (
+                first.get("probs")
+                or first.get("top_logprobs")
+                or first.get("probabilities")
+                or []
+            )
+            normalized = normalize_top_logprobs(raw_probs)
+            if normalized:
+                return normalized
+
+            token = first.get("tok_str") or first.get("token") or first.get("content")
+            prob = first.get("prob")
+            if token is not None and prob is not None:
+                return {str(token): math.log(float(prob))}
+            raise RuntimeError("could not parse native completion probabilities.")
+        except requests.exceptions.RequestException as exc:
+            raise RuntimeError(
+                f"[LlamaCppProvider] native /completion HTTP error: {exc}"
+            ) from exc
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"[LlamaCppProvider] native /completion parse error: {exc}"
+            ) from exc
 
     def shutdown(self) -> None:
         if self._server_proc and self._server_proc.poll() is None:

@@ -35,7 +35,11 @@ class PythonScriptStep(BaseStep):
         # backward-compat shims still import from runner environment
         try:
             from core.engine.bias_evaluator import BiasEvaluator
-            local_scope["bias_api"] = BiasEvaluator(context.llm_manager, context.project_manager)
+            local_scope["bias_api"] = BiasEvaluator(
+                context.llm_manager,
+                context.project_manager,
+                context.prompt_manager,
+            )
         except Exception:
             local_scope["bias_api"] = None
 

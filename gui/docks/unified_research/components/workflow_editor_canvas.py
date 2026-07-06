@@ -41,6 +41,7 @@ _LLM_STEP_TYPES = {"LLM_QUERY", "LLM_SCHEMA_QUERY"}
 _STEP_CATEGORIES = [
     ("LLM", ["LLM_QUERY", "LLM_SCHEMA_QUERY"]),
     ("Search", ["RAG_SEARCH"]),
+    ("Intelligence", ["BUILD_RETRIEVAL_PLAN", "ARTIFACT_RETRIEVE", "PACK_ARTIFACT_CONTEXT", "SOURCE_STAGE"]),
     ("Context", ["SOURCE_STATISTICS", "ONTOLOGY_CATALOG"]),
     ("Flow", ["BRANCH", "FOREACH", "USER_INPUT"]),
     ("Code / Data", ["PYTHON_SCRIPT", "DATABASE_WRITE"]),
@@ -57,6 +58,10 @@ _STEP_HINTS = {
     "LLM_QUERY": "Calls the LLM with an optional system prompt and context. Set Prompt Key to use a saved prompt template, or write the system prompt directly. Query/Input passes context from state. ui_format on the connected GUI node controls how output is rendered.",
     "LLM_SCHEMA_QUERY": "Same as LLM Query but forces JSON mode. Output must match the output_schema you define.",
     "RAG_SEARCH": "Searches indexed documents. 'queries' input = list of search strings (or key holding list). n_results = chunks per query (default 5). tag_filters = CSV of tags. tag_logic = AND or OR.",
+    "BUILD_RETRIEVAL_PLAN": "Creates an artifact-aware retrieval plan from a query.",
+    "ARTIFACT_RETRIEVE": "Retrieves annotations, entities, citations, transcript segments, blocks, and vector fallback results.",
+    "PACK_ARTIFACT_CONTEXT": "Packs artifact retrieval results into compact citation-ready context.",
+    "SOURCE_STAGE": "Requests a source intelligence stage through the background scheduler.",
     "SOURCE_STATISTICS": "Collects reusable source facts such as page count, indexed chunk count, and file size. Choose metrics in the inputs and reference the output from any later blueprint step.",
     "ONTOLOGY_CATALOG": "Loads registered entity and relation categories on demand. Feed its output into graph builders or any tool that must use exact ontology types.",
     "BRANCH": "Conditional router. Query = condition like `{confidence} > 0.8` or `{tag} == 'yes'`. Routes to true or false child branches.",
@@ -86,6 +91,10 @@ _STEP_TYPE_COLORS = {
     "LLM_QUERY": "#7c4dff",
     "LLM_SCHEMA_QUERY": "#5e35b1",
     "RAG_SEARCH": "#0288d1",
+    "BUILD_RETRIEVAL_PLAN": "#2e7d32",
+    "ARTIFACT_RETRIEVE": "#00796b",
+    "PACK_ARTIFACT_CONTEXT": "#558b2f",
+    "SOURCE_STAGE": "#5d4037",
     "SOURCE_STATISTICS": "#00838f",
     "ONTOLOGY_CATALOG": "#00695c",
     "BRANCH": "#e65100",
@@ -433,7 +442,19 @@ class VisualWorkflowEditor(QWidget):
 
         self.input_model = QLineEdit()
         self.input_model.setPlaceholderText("{selected_model}")
-        self.input_model.setToolTip("AI model to use. {selected_model} = whatever's chosen in the toolbar. Or type a model name like 'llama3'.")
+        self.input_model.setToolTip("AI model to use. {selected_model} = the main-answer model configured in AI Setup.")
+
+        self.combo_model_role = QComboBox()
+        self.combo_model_role.setToolTip("Optional model role from AI Setup. Leave automatic unless this step has a specific job.")
+        for label, value in [
+            ("Automatic", ""),
+            ("Main answer", "main_answer_model"),
+            ("Fast worker", "fast_worker_model"),
+            ("Vision", "vision_model"),
+            ("Extraction repair", "extraction_repair_model"),
+            ("Reranker", "reranker_model"),
+        ]:
+            self.combo_model_role.addItem(label, value)
 
         self.input_prompt_key = QLineEdit()
         self.input_prompt_key.setPlaceholderText("e.g. Citation Extractor")
@@ -493,6 +514,7 @@ class VisualWorkflowEditor(QWidget):
 
         for lbl, w in [
             ("Model", self.input_model),
+            ("Model Role", self.combo_model_role),
             ("Prompt Key", self._prompt_key_row_widget),
             ("System", self._system_wrap_widget),
             ("LLM Options", self.input_llm_options),
@@ -712,7 +734,7 @@ class VisualWorkflowEditor(QWidget):
             ("{user_input}", "User's typed message when launching the blueprint"),
             ("{selected_text}", "Text highlighted in PDF viewer (source_viewer actions)"),
             ("{source_path}", "File path of the active/selected document"),
-            ("{selected_model}", "Model selected in the toolbar"),
+            ("{selected_model}", "Main-answer model configured in AI Setup"),
             ("{active_rag_docs}", "List of docs currently enabled for RAG"),
             ("{project_manifest}", "JSON summary of all project documents"),
             ("{workspace_data}", "JSON of the active workspace graph"),
@@ -1046,6 +1068,11 @@ class VisualWorkflowEditor(QWidget):
             self._llm_group.setVisible(is_llm)
             if is_llm:
                 self.input_model.setText(step.model or "")
+                role_idx = next(
+                    (i for i in range(self.combo_model_role.count()) if self.combo_model_role.itemData(i) == (step.model_role or "")),
+                    0,
+                )
+                self.combo_model_role.setCurrentIndex(role_idx)
                 self.input_prompt_key.setText(step.prompt_key or "")
                 self.input_system.setPlainText(step.system_prompt or "")
                 self.input_llm_options.setPlainText(json.dumps(step.llm_options, indent=2) if step.llm_options else "")
@@ -1094,6 +1121,7 @@ class VisualWorkflowEditor(QWidget):
             # LLM properties (only applied when visible)
             if self._llm_group.isVisible():
                 step.model = self.input_model.text().strip() or "{selected_model}"
+                step.model_role = self.combo_model_role.currentData() or None
                 step.prompt_key = self.input_prompt_key.text().strip() or None
                 step.system_prompt = self.input_system.toPlainText().strip() or None
                 step.llm_options = self._parse_json_or_none(self.input_llm_options.toPlainText()) or {}

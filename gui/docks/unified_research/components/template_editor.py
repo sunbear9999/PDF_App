@@ -1,23 +1,26 @@
 import json
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton,
-                             QLabel, QLineEdit, QTextEdit,
+                             QLabel, QLineEdit, QTextEdit, QWidget,
                              QMessageBox, QListWidget, QCheckBox, QListWidgetItem, QSpinBox, QGroupBox)
 from PySide6.QtCore import Qt
 from gui.managers.dialog_manager import exec_as_modal, get_for_widget
+from gui.base.forms import SchemaFormBuilder
 from core.models.ontology_model import EntityType
 from core.ontology.registry import OntologyRegistry, RelationTrait
 
 class TemplateEditorDialog(QDialog):
-    def __init__(self, project_manager, theme=None, parent=None):
+    def __init__(self, project_manager, theme=None, parent=None, deterministic_pass_registry=None):
         super().__init__(parent)
         self.pm = project_manager
         self.theme = theme
+        self.deterministic_pass_registry = deterministic_pass_registry
         self.setWindowTitle("Analysis Modes Builder")
         self.resize(920, 640)
         self.templates = self.pm.get_analysis_templates()
         self.current_template_id = None
         self.registry = OntologyRegistry()
-        
+        self._det_pass_forms = {}
+
         self._build_ui()
         self._load_template_list()
         self._apply_theme()
@@ -96,7 +99,27 @@ class TemplateEditorDialog(QDialog):
         graph_row.addLayout(graph_col_rels, 1)
         right_panel.addLayout(graph_row)
         self._populate_registry_lists()
-        
+
+        # Deterministic pre-filter passes: no-LLM ranking/filtering run before each
+        # chunk's evidence-extraction call — see DeterministicPassRegistry.
+        self.det_pass_box = QGroupBox("Deterministic Pre-Filter Passes")
+        det_pass_layout = QVBoxLayout(self.det_pass_box)
+        det_pass_layout.addWidget(QLabel(
+            "Enable no-LLM passes that pre-rank each chunk's text before the evidence-extraction "
+            "call, so the model only sees the most relevant content. Check a pass to configure it."
+        ))
+        self.det_pass_list = QListWidget()
+        self.det_pass_list.setMaximumHeight(90)
+        self.det_pass_list.itemChanged.connect(self._rebuild_det_pass_forms)
+        det_pass_layout.addWidget(self.det_pass_list)
+        self.det_pass_forms_widget = QWidget()
+        self.det_pass_forms_layout = QVBoxLayout(self.det_pass_forms_widget)
+        self.det_pass_forms_layout.setContentsMargins(0, 0, 0, 0)
+        det_pass_layout.addWidget(self.det_pass_forms_widget)
+        self._populate_det_pass_list()
+        right_panel.addWidget(self.det_pass_box)
+        self.det_pass_box.setVisible(self.deterministic_pass_registry is not None)
+
         # Save Area
         save_layout = QHBoxLayout()
         save_layout.addStretch()
@@ -146,6 +169,78 @@ class TemplateEditorDialog(QDialog):
         self._set_checked_types(self.node_type_list, {EntityType.CLAIM.value, EntityType.REASONING.value, EntityType.QUOTE.value})
         self._set_checked_types(self.relation_type_list, self._default_argument_relation_types())
         self.allow_text_nodes.setChecked(False)
+        self._set_checked_det_passes([{"pass_id": "quote_candidate_rank", "top_n": 25, "params": {}}])
+
+    # ── Deterministic pass configuration ─────────────────────────────────
+
+    def _populate_det_pass_list(self):
+        if not self.deterministic_pass_registry:
+            return
+        for spec in self.deterministic_pass_registry.all():
+            item = QListWidgetItem(spec.pass_name)
+            item.setData(Qt.ItemDataRole.UserRole, spec.pass_id)
+            item.setToolTip(spec.description)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked)
+            self.det_pass_list.addItem(item)
+
+    def _rebuild_det_pass_forms(self, *_args):
+        # Preserve in-progress values for passes that stay checked.
+        current_values = {pid: form.get_values() for pid, form in self._det_pass_forms.items()}
+        while self.det_pass_forms_layout.count():
+            child = self.det_pass_forms_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+        self._det_pass_forms = {}
+
+        if not self.deterministic_pass_registry:
+            return
+        for idx in range(self.det_pass_list.count()):
+            item = self.det_pass_list.item(idx)
+            if item.checkState() != Qt.CheckState.Checked:
+                continue
+            pass_id = item.data(Qt.ItemDataRole.UserRole)
+            spec = self.deterministic_pass_registry.get(pass_id)
+            if not spec:
+                continue
+            schema_list = [{"key": key, **field} for key, field in (spec.param_schema or {}).items()]
+            if not schema_list:
+                continue
+            self.det_pass_forms_layout.addWidget(QLabel(f"<b>{spec.pass_name}</b>"))
+            form = SchemaFormBuilder(schema_list, self.theme)
+            if pass_id in current_values:
+                form.set_values(current_values[pass_id])
+            self.det_pass_forms_layout.addWidget(form)
+            self._det_pass_forms[pass_id] = form
+
+    def _set_checked_det_passes(self, deterministic_passes):
+        by_id = {p.get("pass_id"): p for p in (deterministic_passes or []) if isinstance(p, dict)}
+        for idx in range(self.det_pass_list.count()):
+            item = self.det_pass_list.item(idx)
+            pass_id = item.data(Qt.ItemDataRole.UserRole)
+            item.setCheckState(Qt.CheckState.Checked if pass_id in by_id else Qt.CheckState.Unchecked)
+        self._rebuild_det_pass_forms()
+        for pass_id, form in self._det_pass_forms.items():
+            saved = by_id.get(pass_id) or {}
+            values = dict(saved.get("params") or {})
+            if "top_n" in saved:
+                values.setdefault("top_n", saved["top_n"])
+            form.set_values(values)
+
+    def _collect_det_passes(self) -> list:
+        passes = []
+        for idx in range(self.det_pass_list.count()):
+            item = self.det_pass_list.item(idx)
+            if item.checkState() != Qt.CheckState.Checked:
+                continue
+            pass_id = item.data(Qt.ItemDataRole.UserRole)
+            form = self._det_pass_forms.get(pass_id)
+            values = form.get_values() if form else {}
+            entry = {"pass_id": pass_id, "params": values}
+            if "top_n" in values:
+                entry["top_n"] = values["top_n"]
+            passes.append(entry)
+        return passes
 
     def _create_new(self):
         self.current_template_id = None
@@ -173,6 +268,7 @@ class TemplateEditorDialog(QDialog):
         self._set_checked_types(self.node_type_list, set(template.get("node_types") or []))
         self._set_checked_types(self.relation_type_list, set(template.get("relation_types") or []))
         self.allow_text_nodes.setChecked(bool(template.get("allow_text_nodes", True)))
+        self._set_checked_det_passes(template.get("deterministic_passes") or [])
 
     def _save_current(self):
         title = self.title_input.text().strip()
@@ -223,6 +319,7 @@ class TemplateEditorDialog(QDialog):
                 "max_quote_words": self.max_quote_words.value(),
                 "explanation_words": self.explanation_words.value(),
             },
+            "deterministic_passes": self._collect_det_passes(),
         }
 
         if self.current_template_id:

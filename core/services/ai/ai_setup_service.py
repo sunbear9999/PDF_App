@@ -48,6 +48,8 @@ class AISetupService(QObject):
         self._settings_path = os.path.join(user_data_dir, "ai_settings.json")
         self._settings: dict = self._load_settings()
         self._active_workers: set = set()
+        self._model_role_service = None
+        self._processing_policy_service = None
 
         # Subscribe to GUI-driven action requests
         self._bus.ai_setup_action_requested.connect(self._on_action_requested)
@@ -125,6 +127,10 @@ class AISetupService(QObject):
     def is_ai_disabled_by_user(self) -> bool:
         return self._ai_disabled
 
+    def set_intelligence_services(self, model_role_service=None, processing_policy_service=None) -> None:
+        self._model_role_service = model_role_service
+        self._processing_policy_service = processing_policy_service
+
     def get_hardware_info(self) -> dict:
         import subprocess
         info: dict = {"ram_gb": 0, "gpu_name": "Not detected", "vram_gb": 0}
@@ -201,8 +207,40 @@ class AISetupService(QObject):
     def get_default_embedding_model(self) -> str:
         return self._settings.get("default_embedding_model", "nomic-embed-text")
 
+    def get_model_roles(self) -> dict:
+        roles = self._settings.get("model_roles", {})
+        roles = dict(roles) if isinstance(roles, dict) else {}
+        if self._settings.get("default_chat_model") and not roles.get("main_answer_model"):
+            roles["main_answer_model"] = self._settings.get("default_chat_model")
+        if self._settings.get("default_embedding_model") and not roles.get("embedding_model"):
+            roles["embedding_model"] = self._settings.get("default_embedding_model")
+        return roles
+
+    def save_model_roles(self, roles: dict) -> None:
+        self._settings["model_roles"] = dict(roles or {})
+        main = self._settings["model_roles"].get("main_answer_model")
+        embed = self._settings["model_roles"].get("embedding_model")
+        if main:
+            self._settings["default_chat_model"] = main
+        if embed:
+            self._settings["default_embedding_model"] = embed
+        self._save_settings()
+
     def get_active_backend_id(self) -> str:
         return self._settings.get("active_backend", "")
+
+    def get_active_backend_catalog(self) -> list:
+        spec = self._registry.get(self.get_active_backend_id())
+        return list(getattr(spec, "catalog", []) or []) if spec else []
+
+    def get_installed_model_ids(self) -> set[str]:
+        spec = self._registry.get(self.get_active_backend_id())
+        if not spec:
+            return set()
+        try:
+            return {m.id for m in spec.list_installed_models()}
+        except Exception:
+            return set()
 
     # -----------------------------------------------------------------------
     # Intent dispatch (from EventBus)
@@ -227,6 +265,12 @@ class AISetupService(QObject):
             self._async_set_active_backend(payload.backend_id)
         elif intent == AISetupIntent.SET_DEFAULT_MODEL:
             self._set_default_model(payload.model_id, payload.data or {})
+        elif intent == AISetupIntent.SET_MODEL_ROLE:
+            self._set_model_role(payload.data or {})
+        elif intent == AISetupIntent.RESET_MODEL_ROLE:
+            self._reset_model_role(payload.data or {})
+        elif intent == AISetupIntent.SET_INTELLIGENCE_SETTINGS:
+            self._set_intelligence_settings(payload.data or {})
         elif intent == AISetupIntent.REFRESH:
             self._emit_full_refresh()
         elif intent == AISetupIntent.TOGGLE_AI:
@@ -483,6 +527,75 @@ class AISetupService(QObject):
             AISetupEvent.DEFAULTS_CHANGED,
             AISetupPayload(model_id=model_id, data={"type": model_type}),
         )
+
+    def _set_model_role(self, data: dict) -> None:
+        from core.events.domains.ai_setup_events import AISetupEvent, AISetupPayload
+        role = data.get("role")
+        model = data.get("model", "")
+        old_main = self.get_default_chat_model() if role == "main_answer_model" else ""
+        if self._model_role_service and role:
+            self._model_role_service.set_role(role, model)
+        roles = self.get_model_roles()
+        if role:
+            if model:
+                roles[role] = model
+            else:
+                roles.pop(role, None)
+            self.save_model_roles(roles)
+        if role == "main_answer_model":
+            new_main = model or self.get_default_chat_model()
+            self._bus.active_model_changed.emit(role, new_main)
+            if new_main and new_main != old_main:
+                self._async_warm_main_model(new_main)
+        self._bus.ai_setup_state_changed.emit(
+            AISetupEvent.MODEL_ROLES_CHANGED,
+            AISetupPayload(model_id=model, data={"role": role}),
+        )
+
+    def _reset_model_role(self, data: dict) -> None:
+        from core.events.domains.ai_setup_events import AISetupEvent, AISetupPayload
+        role = data.get("role")
+        if self._model_role_service and role:
+            self._model_role_service.reset_role(role)
+        roles = self.get_model_roles()
+        if role in roles:
+            roles.pop(role, None)
+            self.save_model_roles(roles)
+        if role == "main_answer_model":
+            self._bus.active_model_changed.emit(role, self.get_default_chat_model())
+            self._async_warm_main_model(self.get_default_chat_model())
+        self._bus.ai_setup_state_changed.emit(
+            AISetupEvent.MODEL_ROLES_CHANGED,
+            AISetupPayload(data={"role": role}),
+        )
+
+    def _set_intelligence_settings(self, data: dict) -> None:
+        from core.events.domains.ai_setup_events import AISetupEvent, AISetupPayload
+        settings = {}
+        if self._processing_policy_service:
+            settings = self._processing_policy_service.set_project_settings(data)
+        self._bus.ai_setup_state_changed.emit(
+            AISetupEvent.INTELLIGENCE_SETTINGS_CHANGED,
+            AISetupPayload(data=settings or data),
+        )
+
+    def _async_warm_main_model(self, model_id: str) -> None:
+        model_id = str(model_id or "").strip()
+        if not model_id or not self._llm or not getattr(self._llm, "ai_enabled", False):
+            return
+
+        def _run() -> None:
+            self._llm.preload_model(model_id)
+
+        worker = CallableWorker(_run, self)
+
+        def _cleanup(*_args):
+            self._active_workers.discard(worker)
+
+        worker.finished.connect(_cleanup)
+        worker.error.connect(_cleanup)
+        self._active_workers.add(worker)
+        worker.start()
 
     # -----------------------------------------------------------------------
     # TTS voice management

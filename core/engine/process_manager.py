@@ -4,7 +4,8 @@ import uuid
 from PySide6.QtCore import QObject, Signal
 
 class LLMJob:
-    def __init__(self, job_name, runner=None, job_type="Agent"):
+    def __init__(self, job_name, runner=None, job_type="Agent", metadata=None):
+        metadata = metadata or {}
         self.id = str(uuid.uuid4())
         self.name = job_name
         self.type = job_type
@@ -17,6 +18,21 @@ class LLMJob:
         self.blueprint_name = getattr(blueprint, "name", job_name)
         self.target_id = getattr(runner, "target_id", None)
         self.trace_id = getattr(runner, "trace_id", None)
+        self.source_id = metadata.get("source_id")
+        self.source_path = metadata.get("source_path")
+        self.artifact_id = metadata.get("artifact_id")
+        self.stage = metadata.get("stage")
+        self.priority = metadata.get("priority", 100)
+        self.progress_current = metadata.get("progress_current", 0)
+        self.progress_total = metadata.get("progress_total", 0)
+        self.model_role = metadata.get("model_role")
+        self.model_name = metadata.get("model_name")
+        self.created_by = metadata.get("created_by", "core")
+        self.can_pause = bool(metadata.get("can_pause", False))
+        self.can_cancel = bool(metadata.get("can_cancel", True))
+        self.is_background = bool(metadata.get("is_background", False))
+        self.input_hash = metadata.get("input_hash")
+        self.error_text = metadata.get("error_text")
 
     def kill(self):
         self.abort_event.set()
@@ -27,6 +43,7 @@ class ProcessRegistry(QObject):
     job_removed = Signal(str)
     job_updated = Signal(object)
     queue_updated = Signal()
+    job_progress_updated = Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -38,9 +55,9 @@ class ProcessRegistry(QObject):
         # thread. Dropping the last wrapper while run() is unwinding is fatal.
         self._retiring_runners = set()
 
-    def enqueue_runner(self, runner, job_name, job_type="Agent", is_express=False):
+    def enqueue_runner(self, runner, job_name, job_type="Agent", is_express=False, metadata=None):
         """Takes an instantiated MasterActionRunner, assigns it a job, and queues or runs it."""
-        job = LLMJob(job_name, runner, job_type)
+        job = LLMJob(job_name, runner, job_type, metadata=metadata)
         job.is_express = is_express
         runner.job = job 
         runner.workflow_request_id = getattr(runner, "workflow_request_id", None) or job.id
@@ -55,11 +72,36 @@ class ProcessRegistry(QObject):
                 runner.start()
         else:
             self.pending_queue.append(job)
+            self.pending_queue.sort(key=lambda queued: getattr(queued, "priority", 100))
             self.job_added.emit(job)
             self.queue_updated.emit()
             self._process_next()
             
         return job
+
+    def update_job_progress(self, job_id, current=None, total=None, message=None):
+        job = self._find_job(job_id)
+        if not job:
+            return
+        if current is not None:
+            job.progress_current = current
+        if total is not None:
+            job.progress_total = total
+        if message:
+            job.status = message
+            self.job_updated.emit(job)
+        self.job_progress_updated.emit(job)
+
+    def _find_job(self, job_id):
+        if self.active_job and self.active_job.id == job_id:
+            return self.active_job
+        for job in self.express_jobs:
+            if job.id == job_id:
+                return job
+        for job in self.pending_queue:
+            if job.id == job_id:
+                return job
+        return None
 
     def _process_next(self):
         if self.active_job is None and self.pending_queue:

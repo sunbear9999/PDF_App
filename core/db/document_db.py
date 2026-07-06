@@ -251,6 +251,13 @@ class DocumentDB(BaseDB):
                     "max_quote_words": 18,
                     "explanation_words": 10
                 },
+                # Deterministic (no-LLM) pre-filter passes run before each chunk's
+                # evidence-extraction LLM call — see DeterministicPassRegistry.
+                # Empty list = no filtering (unchanged legacy behavior) for any
+                # template that doesn't declare this key.
+                "deterministic_passes": [
+                    {"pass_id": "quote_candidate_rank", "top_n": 25, "params": {}},
+                ],
             }
         ]
 

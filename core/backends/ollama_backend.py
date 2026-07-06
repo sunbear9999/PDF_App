@@ -37,6 +37,33 @@ OLLAMA_CATALOG: List[ModelInfo] = [
     ),
     # Chat — small
     ModelInfo(
+        id="qwen2.5:0.5b",
+        name="Qwen 2.5 0.5B",
+        size_gb=0.4,
+        description="Very small helper model for labels, JSON repair, simple planning, and cheap background work.",
+        tags=["chat"],
+        recommended=True,
+        requires_vram_gb=0.7,
+    ),
+    ModelInfo(
+        id="lfm2:1.2b",
+        name="Liquid LFM2 1.2B",
+        size_gb=0.9,
+        description="Small Liquid AI model for fast helper tasks on low-memory machines.",
+        tags=["chat"],
+        recommended=True,
+        requires_vram_gb=1.2,
+    ),
+    ModelInfo(
+        id="llama3.2:1b",
+        name="Llama 3.2 1B",
+        size_gb=1.3,
+        description="Tiny general-purpose helper model for low-memory systems.",
+        tags=["chat"],
+        recommended=True,
+        requires_vram_gb=1.5,
+    ),
+    ModelInfo(
         id="llama3.2:3b",
         name="Llama 3.2 3B",
         size_gb=2.0,

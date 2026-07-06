@@ -28,7 +28,7 @@ class NotesFetchWorker(QThread):
 
             for path in paths_to_check:
                 source_type = self.pm.get_source_type(path) if hasattr(self.pm, "get_source_type") else "pdf"
-                if source_type == "video":
+                if source_type in ("video", "audio"):
                     doc_tags = [t["name"] for t in self.pm.get_tags_for_doc(path)]
                     for record in (self.pm.get_highlights() or {}).values():
                         if record.get("doc_id") != path:
@@ -137,7 +137,7 @@ class NotesAppService(QObject):
         
         try:
             source_type = self.pm.get_source_type(pdf_path) if hasattr(self.pm, "get_source_type") else "pdf"
-            if source_type == "video":
+            if source_type in ("video", "audio"):
                 if action == "delete":
                     self.pm.delete_highlight_record(annot_id)
                     self.bus.highlight_deleted.emit(DocumentEvent.HIGHLIGHT_DELETED, DocumentEventPayload(annot_id=annot_id))

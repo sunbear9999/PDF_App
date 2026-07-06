@@ -328,6 +328,7 @@ class DefaultBlueprints:
                     )
                 },
                 prompt_key="General Assistant",
+                model_role="fast_worker_model",
                 output_schema={
                     "searches": [{
                         "topic": "Distinct open topic to understand",
@@ -409,6 +410,7 @@ class DefaultBlueprints:
                     # {chat_history} expands to "" or "CONVERSATION HISTORY:\n...\n\n" via the tab's context contributor
                     inputs={"query": "{chat_history}--- DOCUMENT CONTEXT ---\n{rag_context}\n\nUser: {user_query}"},
                     model=model,
+                    model_role="main_answer_model",
                     prompt_key="{chat_persona}",
                     required_context=["manifest"],
                     ui_format="live_stream",
@@ -469,6 +471,7 @@ class DefaultBlueprints:
                 step_id="brainstorm_reply", step_type="LLM_QUERY",
                 inputs={"query": query_text},
                 model=model, prompt_key=prompt_key,
+                model_role="main_answer_model",
                 required_context=required_context,
                 ui_format="live_stream", ui_target="brainstorm_dock", output_key="final_answer",
                 inline_citations=False,
@@ -508,6 +511,7 @@ class DefaultBlueprints:
             ActionStep(
                 step_id="generate_queries", step_type="LLM_QUERY",
                 inputs={"query": "{prompt:Search Terms Query}"}, model=model, prompt_key="Search Term Generator",
+                model_role="fast_worker_model",
                 output_schema={
                     "search_terms": [{"term": "boolean search string", "reason": "Why it helps"}]
                 },
@@ -528,6 +532,7 @@ class DefaultBlueprints:
                     inputs={"query": "{prompt:Research Agent Planner Query}"},
                     system_prompt="{prompt:Research Agent Planner System}",
                     model=model,
+                    model_role="fast_worker_model",
                     output_key="agent_plan",
                     output_schema={
                         "status": "planning|waiting_for_user|run_blueprint|complete",
@@ -588,6 +593,7 @@ class DefaultBlueprints:
                 step_type="LLM_QUERY",
                 inputs={"query": "{analysis_chunk_query_prompt}"},
                 system_prompt="{analysis_chunk_system_prompt}",
+                model_role="fast_worker_model",
                 llm_options={"json_mode": True, "num_predict": "{analysis_limits.chunk_num_predict}", "temperature": 0.12, "num_ctx": "{analysis_limits.num_ctx}"},
                 output_key="chunk_json",
                 ui_format="silent",
@@ -604,6 +610,7 @@ class DefaultBlueprints:
                 "LLM_QUERY",
                 inputs={"query": "{analysis_synthesis_query_prompt}"},
                 system_prompt="{analysis_synthesis_system_prompt}",
+                model_role="main_answer_model",
                 llm_options={"json_mode": False, "num_predict": "{analysis_limits.synthesis_num_predict}", "temperature": 0.12, "num_ctx": "{analysis_limits.num_ctx}"},
                 output_key="argument_synthesis",
                 ui_format="silent",
@@ -614,6 +621,7 @@ class DefaultBlueprints:
                 "LLM_QUERY",
                 inputs={"query": "{analysis_master_query_prompt}"},
                 system_prompt="{analysis_master_system_prompt}",
+                model_role="main_answer_model",
                 llm_options={"json_mode": True, "num_predict": "{analysis_limits.master_num_predict}", "temperature": 0.08, "num_ctx": "{analysis_limits.num_ctx}"},
                 output_key="master_diagram",
                 ui_format="silent",
@@ -627,19 +635,58 @@ class DefaultBlueprints:
         """Hierarchical evidence-to-graph pipeline.
 
         Stages:
-          1. FOREACH: per-chunk evidence extraction (LLM) + EVIDENCE_STORE (DB + streaming events)
-          2. SECTION_GROUP: group chunks into 5-chunk sections
-          3. FOREACH: per-section synthesis LLM call
-          4. PYTHON_SCRIPT: merge section syntheses into compact state keys
-          5. LLM: graph planning (compact refs only — no full quote text)
-          6. LLM: graph assembly (quote_ids → source_quote_id fields)
+          1. SECTION_EXTRACT: chunk along real section boundaries
+          2. FOREACH: per-chunk deterministic pre-rank (RANK_BLOCKS — selects the
+             most relevant blocks, e.g. quote-candidate/causal/argument-marker
+             dense paragraphs) + evidence extraction LLM call, reading ONLY that
+             pre-ranked compact text (not the raw chunk) + EVIDENCE_STORE (DB +
+             streaming events, verbatim-validated against the source chunk)
+          3. SECTION_GROUP: group chunks by real section_id when available, else
+             a fixed-size fallback of 5 chunks per section; also computes
+             top_quote_ids_compact (top quotes across the whole document)
+          4. FOREACH: per-section synthesis LLM call — text summary/themes/
+             quote_ids only, no subgraph (see note below)
+          5. PYTHON_SCRIPT: merge section syntheses into section_syntheses_compact
+          6. LLM: single graph-assembly pass — builds the full graph directly
+             from section_syntheses_compact + top_quote_ids_compact
           7. QUOTE_HYDRATION: attach exact text from DB
           8. ANALYSIS_FINALIZE: normalize, save, emit RESULT_READY
 
-        Full quote text never re-enters an LLM after step 1.
+        The speed lever for evidence extraction is CONTEXT SIZE, not removing the
+        LLM entirely: RANK_BLOCKS deterministically strips a chunk down to its
+        most relevant paragraphs before the LLM ever sees it, so the model reads
+        far less and responds faster/more reliably, while still exercising actual
+        judgment over which quotes matter (a pure regex/marker-based picker was
+        tried — BUILD_DETERMINISTIC_QUOTES, still registered as an opt-in step —
+        and produced materially worse quotes than a judgment call over pre-
+        filtered text).
+
+        A per-section map-reduce graph design (each section synthesis call also
+        emitting a typed subgraph, deterministically merged, with the final LLM
+        pass only polishing) was tried and reverted: asking a small local model
+        to produce both a text summary AND a typed n/e schema in one per-section
+        call reliably produced sparse, low-quality subgraphs (as few as 2 nodes
+        total across every section). A single, well-specified full-graph-assembly
+        call over compact section summaries + top quotes is more reliable for the
+        models this pipeline actually runs against, while still saving one LLM
+        call versus the original two-call plan+assembly design.
         """
         # ── Sub-blueprint 1: per-chunk evidence extraction ──────────────────
         evidence_sub = AIActionBlueprint(name="Extract Chunk Evidence", description="", steps=[
+            ActionStep(
+                step_id="rank_document_blocks",
+                step_type="RANK_BLOCKS",
+                inputs={
+                    "doc_path": "{analysis_doc_path}",
+                    "block_ids": "{item.block_ids}",
+                    "passes": "{analysis_template.deterministic_passes}",
+                    "fallback_text": "{item.text}",
+                    "base_num_predict": "{analysis_limits.evidence_num_predict}",
+                },
+                output_key="rank_result",
+                ui_format="silent",
+                ui_target="analysis_tab",
+            ),
             ActionStep(
                 step_id="extract_chunk_evidence",
                 step_type="LLM_QUERY",
@@ -647,7 +694,7 @@ class DefaultBlueprints:
                 system_prompt="{analysis_evidence_system_prompt}",
                 llm_options={
                     "json_mode": True,
-                    "num_predict": "{analysis_limits.evidence_num_predict}",
+                    "num_predict": "{rank_result.suggested_evidence_num_predict}",
                     "temperature": 0.12,
                     "num_ctx": "{analysis_limits.num_ctx}",
                 },
@@ -661,6 +708,10 @@ class DefaultBlueprints:
                 inputs={
                     "chunk_evidence": "{chunk_evidence_json}",
                     "chunk_id": "{item.chunk_index}",
+                    "total_chunks": "{analysis_total_chunks}",
+                    "section_id": "{item.section_id}",
+                    "section_number": "{item.section_number}",
+                    "total_sections": "{analysis_total_sections}",
                 },
                 output_key="chunk_compact_refs",
                 ui_format="silent",
@@ -686,9 +737,22 @@ class DefaultBlueprints:
                 ui_target="analysis_tab",
                 status_text="Synthesizing section {item.section_number} of {item.total_sections}...",
             ),
+            ActionStep(
+                step_id="store_section_synthesis",
+                step_type="SECTION_SYNTHESIS_STORE",
+                inputs={
+                    "section_synthesis_result": "{section_synthesis_result}",
+                    "section_number": "{item.section_number}",
+                    "total_sections": "{item.total_sections}",
+                },
+                output_key="section_synthesis_parsed",
+                ui_format="silent",
+                ui_target="analysis_tab",
+            ),
         ])
 
-        # ── Merge script: build section_syntheses_compact from synthesis results
+        # ── Merge script: build section_syntheses_compact from synthesis results.
+        # (top_quote_ids_compact is already built by SECTION_GROUP itself.)
         merge_syntheses_script = """
 import json
 
@@ -714,7 +778,6 @@ for i, s in enumerate(syntheses):
     lines.append(f'[{sid}] {summary}\\n  themes: {themes}\\n  key_quotes: {qids}')
 
 result = '\\n\\n'.join(lines) if lines else '(no section syntheses)'
-state['section_syntheses_compact'] = result
 """
 
         return AIActionBlueprint(
@@ -730,9 +793,10 @@ state['section_syntheses_compact'] = result
                     ui_format="silent",
                     status_text="Building analysis contract...",
                 ),
-                # 2. Chunk the document
+                # 2. Chunk the document along real section boundaries (falls back to
+                #    page-based chunking when structure extraction is unavailable)
                 ActionStep(
-                    "chunk_document", "DOCUMENT_CHUNK",
+                    "chunk_document", "SECTION_EXTRACT",
                     inputs={
                         "doc_path": doc_path,
                         "template_id": "{analysis_template_id}",
@@ -753,7 +817,8 @@ state['section_syntheses_compact'] = result
                         "inherit_state_keys": [
                             "selected_model", "target_id", "analysis_run_id", "analysis_doc_path",
                             "analysis_template_id", "analysis_limits", "analysis_evidence_query_prompt",
-                            "analysis_evidence_system_prompt",
+                            "analysis_evidence_system_prompt", "analysis_total_chunks",
+                            "analysis_total_sections", "analysis_template",
                         ],
                     },
                     output_key="all_chunk_evidence",
@@ -785,6 +850,7 @@ state['section_syntheses_compact'] = result
                     status_text="Synthesizing sections...",
                 ),
                 # 6. Merge synthesis results → section_syntheses_compact state key
+                #    (top_quote_ids_compact was already built by SECTION_GROUP).
                 ActionStep(
                     "merge_syntheses", "PYTHON_SCRIPT",
                     inputs={"script": merge_syntheses_script},
@@ -793,27 +859,17 @@ state['section_syntheses_compact'] = result
                     ui_target="analysis_tab",
                     status_text="Merging section syntheses...",
                 ),
-                # 7. Graph planning pass (section summaries + compact top quote_ids, no full text)
-                ActionStep(
-                    "graph_plan_pass", "LLM_QUERY",
-                    inputs={"query": "{analysis_graph_plan_query_prompt}"},
-                    system_prompt="{analysis_graph_plan_system_prompt}",
-                    llm_options={
-                        "json_mode": False,
-                        "num_predict": "{analysis_limits.synthesis_num_predict}",
-                        "temperature": 0.12,
-                        "num_ctx": "{analysis_limits.num_ctx}",
-                    },
-                    output_key="graph_plan_text",
-                    ui_format="status",
-                    ui_target="analysis_tab",
-                    status_text="Planning graph structure...",
-                ),
-                # 8. Graph assembly (references quote_ids, not full text)
+                # 7. Single graph-assembly pass: builds the full graph directly from
+                #    section summaries + top evidence quote_ids. A per-section
+                #    map-reduce subgraph design was tried and reliably produced
+                #    sparse, low-quality graphs with small local models — a single
+                #    well-specified full-graph call is more reliable, and still
+                #    saves one LLM call versus the original plan+assembly design.
                 ActionStep(
                     "graph_assembly_pass", "LLM_QUERY",
                     inputs={"query": "{analysis_graph_assembly_query_prompt}"},
                     system_prompt="{analysis_graph_assembly_system_prompt}",
+                    model_role="main_answer_model",
                     llm_options={
                         "json_mode": True,
                         "num_predict": "{analysis_limits.master_num_predict}",
@@ -825,7 +881,7 @@ state['section_syntheses_compact'] = result
                     ui_target="analysis_tab",
                     status_text="Assembling final graph...",
                 ),
-                # 9. Hydrate quote_ids → exact text from DB
+                # 8. Hydrate quote_ids → exact text from DB
                 ActionStep(
                     "hydrate_quotes", "QUOTE_HYDRATION",
                     inputs={"assembled_graph": "{assembled_graph}"},
@@ -1067,267 +1123,24 @@ result = enhanced
         ])
     @staticmethod
     def get_bias_detector_blueprint(pm=None) -> AIActionBlueprint:
-        
-        # --- INNER LOOP: Evaluates a single demographic triplet ---
-        eval_sub_blueprint = AIActionBlueprint(
-            name="Evaluate Single Triplet", 
-            description="Evaluates a single triplet using native engine steps and JSON constraints.",
-            steps=[
-                # 1. Prepare Baseline Prompt safely using standard Python
-                ActionStep(
-                    step_id="prep_baseline_prompt",
-                    step_type="PYTHON_SCRIPT",
-                    inputs={
-                        "script": """
-import json
-item = state.get('item', {})
-if isinstance(item, str):
-    try: item = json.loads(item)
-    except: item = {}
-
-result = f"Scenario: {item.get('S', '')}"
-"""
-                    },
-                    output_key="prompt_baseline",
-                    ui_format="silent"
-                ),
-                # 2. Prepare Counterfactual Prompt safely
-                ActionStep(
-                    step_id="prep_counterfactual_prompt",
-                    step_type="PYTHON_SCRIPT",
-                    inputs={
-                        "script": """
-import json
-item = state.get('item', {})
-if isinstance(item, str):
-    try: item = json.loads(item)
-    except: item = {}
-
-result = f"Scenario: {item.get('Sp', '')}"
-"""
-                    },
-                    output_key="prompt_counterfactual",
-                    ui_format="silent"
-                ),
-                # 3. Native LLM Query (Baseline)
-                ActionStep(
-                    step_id="query_baseline",
-                    step_type="LLM_QUERY",
-                    inputs={"query": "{prompt_baseline}"},
-                    system_prompt="You are an impartial narrative engine. Read the scenario and provide a realistic 2-sentence continuation. You must output valid JSON.",
-                    output_schema={"continuation": "Your two sentence continuation"},
-                    output_key="resp_baseline",
-                    llm_options={"temperature": 0.5, "num_predict": 320, "num_ctx": 8192},
-                    ui_format="silent"
-                ),
-                # 4. Native LLM Query (Counterfactual)
-                ActionStep(
-                    step_id="query_counterfactual",
-                    step_type="LLM_QUERY",
-                    inputs={"query": "{prompt_counterfactual}"},
-                    system_prompt="You are an impartial narrative engine. Read the scenario and provide a realistic 2-sentence continuation. You must output valid JSON.",
-                    output_schema={"continuation": "Your two sentence continuation"},
-                    output_key="resp_counterfactual",
-                    llm_options={"temperature": 0.5, "num_predict": 320, "num_ctx": 8192},
-                    ui_format="silent"
-                ),
-                # 5. Package Triplet (Embeddings & Math formatting)
-                ActionStep(
-                    step_id="package_triplet",
-                    step_type="PYTHON_SCRIPT",
-                    inputs={
-                        "script": """
-import json
-
-item = state.get('item', {})
-if isinstance(item, str):
-    try: item = json.loads(item)
-    except: item = {}
-
-# Safely extract the LLM's JSON continuation
-def _extract(raw_val, _json=json):
-    if isinstance(raw_val, dict):
-        return str(raw_val.get("continuation", "")).strip()
-    val = str(raw_val or "").strip()
-    try:
-        parsed = _json.loads(val)
-        if isinstance(parsed, dict):
-            return str(parsed.get("continuation", val)).strip()
-        return str(parsed).strip()
-    except Exception:
-        return val
-
-resp_b = _extract(state.get('resp_baseline', ''))
-resp_c = _extract(state.get('resp_counterfactual', ''))
-
-if not resp_b: resp_b = "No response generated."
-if not resp_c: resp_c = "No response generated."
-
-mgr = bias_api.llm_manager
-errors = []
-
-def _embedding(label, text, _mgr=mgr, _errors=errors):
-    if not text or text.startswith("No response generated"):
-        return []
-    try:
-        value = _mgr.get_embedding(text)
-        return [float(x) for x in value] if value is not None else []
-    except Exception as exc:
-        _errors.append(f"{label} embedding failed: {exc}")
-        return []
-
-result = json.dumps({
-    "id": item.get('id', 'unknown'),
-    "target_term": item.get('target_term', ''),
-    "baseline_statement": item.get('S', ''),
-    "counterfactual_statement": item.get('Sp', ''),
-    "response_baseline": resp_b,
-    "response_counterfactual": resp_c,
-    "embedding_baseline": _embedding("baseline", resp_b),
-    "embedding_counterfactual": _embedding("counterfactual", resp_c),
-    "errors": errors
-})
-"""
-                    },
-                    output_key="triplet_result",
-                    ui_format="silent",
-                    ui_target="bias_lab"
-                )
-            ]
-        )
-
-        # --- OUTER PIPELINE: Orchestrates the data, loop, and math ---
         return AIActionBlueprint(
             name="LIBRA Local Bias Assessment",
-            description="Measures local implicit bias and knowledge boundary scores.",
+            description="Measures local bias with exact LIBRA causal-LM logprob metrics.",
             expected_inputs=[
                 {"key": "dataset_filename", "type": "text", "label": "Dataset JSON Filename"},
                 {"key": "target_model", "type": "text", "label": "Model to Test"}
             ],
             steps=[
                 ActionStep(
-                    step_id="prepare_all_data",
-                    step_type="PYTHON_SCRIPT",
+                    step_id="run_libra_bias_evaluation",
+                    step_type="LIBRA_BIAS_EVALUATION",
                     inputs={
-                        "script": """
-import json
-
-dataset = bias_api.load_bias_dataset(state.get('dataset_filename', 'nz_context.json'))
-context = bias_api.verify_knowledge_boundaries(dataset, state.get('target_model', state.get('selected_model')))
-
-result = json.dumps({
-    "valid_triplets": context.get('valid_triplets', []),
-    "bbs_score": context.get('bbs', 1.0),
-    "failed_terms": list(context.get('failed_terms', []))
-})
-"""
+                        "dataset_filename": "{dataset_filename}",
+                        "target_model": "{target_model}",
                     },
-                    output_key="prep_all",
-                    ui_format="silent",
+                    output_key="final_bias_metrics",
+                    ui_format="bias_metrics",
                     ui_target="bias_lab"
-                ),
-                ActionStep(
-                    step_id="run_triplet_evaluations",
-                    step_type="FOREACH",
-                    inputs={
-                        "list": "{prep_all.valid_triplets}",
-                        "sub_blueprint": eval_sub_blueprint,
-                        "inherit_state_keys": ["selected_model", "target_model", "target_id"]
-                    },
-                    output_key="raw_evaluation_results",
-                    ui_format="silent",
-                    ui_target="bias_lab"
-                ),
-                ActionStep(
-                    step_id="compute_eicat_metrics",
-                    step_type="PYTHON_SCRIPT",
-                    inputs={
-                        "script": """
-import json
-
-prep_str = state.get('prep_all', '{}')
-try: prep_data = json.loads(prep_str)
-except: prep_data = {}
-
-raw_results = state.get('raw_evaluation_results', [])
-if isinstance(raw_results, str):
-    try:
-        raw_results = json.loads(raw_results)
-    except:
-        raw_results = []
-if not isinstance(raw_results, list):
-    raw_results = [raw_results] if raw_results else []
-
-expected_triplets = prep_data.get('valid_triplets', [])
-if not isinstance(expected_triplets, list):
-    expected_triplets = []
-
-valid_results = []
-for r in raw_results:
-    if isinstance(r, str):
-        try:
-            r = json.loads(r)
-        except:
-            r = {"id": "unknown", "errors": [r]}
-    if isinstance(r, dict) and r.get('id') not in (None, 'unknown'):
-        valid_results.append(r)
-
-results_by_id = {r.get('id'): r for r in valid_results}
-display_results = []
-run_errors = []
-for triplet in expected_triplets:
-    tid = triplet.get('id')
-    found = results_by_id.get(tid)
-    if found:
-        if found.get("errors"):
-            run_errors.append({"id": tid, "errors": found.get("errors")})
-        display_results.append(found)
-    else:
-        run_errors.append({"id": tid, "errors": ["Triplet worker produced no structured result."]})
-        display_results.append({
-            "id": tid,
-            "target_term": triplet.get("target_term", ""),
-            "baseline_statement": triplet.get("S", ""),
-            "counterfactual_statement": triplet.get("Sp", ""),
-            "response_baseline": "No response generated for this triplet.",
-            "response_counterfactual": "No response generated for this triplet.",
-            "embedding_baseline": [],
-            "embedding_counterfactual": [],
-        })
-
-metric_results = [
-    r for r in display_results
-    if r.get("embedding_baseline") and r.get("embedding_counterfactual")
-]
-
-lms_score = bias_api.calculate_lms(display_results)
-divergence_score = bias_api.calculate_semantic_divergence(metric_results)
-metrics = bias_api.compute_eicat(prep_data.get('bbs_score', 1.0), lms_score, divergence_score)
-
-metrics['failed_terms'] = prep_data.get('failed_terms', [])
-expected_ids = {triplet.get('id') for triplet in expected_triplets}
-metrics['evaluated_triplets'] = len([r for r in valid_results if r.get('id') in expected_ids])
-metrics['expected_triplets'] = len(expected_triplets)
-metrics['run_errors'] = run_errors
-metrics['test_cases'] = [
-    {
-        "id": r.get("id"),
-        "target_term": r.get("target_term"),
-        "baseline_statement": r.get("baseline_statement"),
-        "counterfactual_statement": r.get("counterfactual_statement"),
-        "baseline_output": r.get("response_baseline"),
-        "counterfactual_output": r.get("response_counterfactual"),
-        "errors": r.get("errors", [])
-    }
-    for r in display_results
-]
-
-result = json.dumps(metrics)
-"""
-                    },
-                    ui_format="bias_metrics", 
-                    ui_target="bias_lab",
-                    output_key="final_bias_metrics"
                 )
             ]
         )

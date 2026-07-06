@@ -616,10 +616,16 @@ class LLMControlsTab(QWidget):
         hdr = self._table.horizontalHeader()
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         for col in range(1, 7):
-            hdr.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+            hdr.setSectionResizeMode(col, QHeaderView.ResizeMode.Fixed)
+        self._table.setColumnWidth(1, 92)
+        self._table.setColumnWidth(2, 116)
+        self._table.setColumnWidth(3, 116)
+        self._table.setColumnWidth(4, 64)
+        self._table.setColumnWidth(5, 150)
+        self._table.setColumnWidth(6, 78)
         right_layout.addWidget(self._table)
         splitter.addWidget(right)
-        splitter.setSizes([260, 700])
+        splitter.setSizes([300, 820])
         outer.addWidget(splitter)
 
     def _populate_blueprints(self) -> None:
@@ -692,7 +698,11 @@ class LLMControlsTab(QWidget):
             step_path = step["step_path"]
 
             overridden = bool(step.get("overrides"))
-            label = QTableWidgetItem(f"{step['step_id']}{' *' if overridden else ''}\n{step_path}")
+            step_name = str(step.get("step_id") or step_path)
+            label_text = f"{step_name}{' *' if overridden else ''}"
+            if step_path != step_name:
+                label_text = f"{label_text}\n{step_path}"
+            label = QTableWidgetItem(label_text)
             label.setToolTip(f"Defaults: {json.dumps(default, sort_keys=True)}")
             label.setForeground(QColor(self._theme.get("text_main", "#fff")))
             self._table.setItem(row, 0, label)
@@ -702,12 +712,14 @@ class LLMControlsTab(QWidget):
             temp.setSingleStep(0.05)
             temp.setDecimals(2)
             temp.setValue(self._float(effective.get("temperature"), 0.7))
+            temp.setMinimumWidth(86)
             temp.setStyleSheet(self._input_style)
             self._table.setCellWidget(row, 1, temp)
 
             predict = QSpinBox()
             predict.setRange(1, 200000)
             predict.setValue(self._int(effective.get("num_predict"), 2048))
+            predict.setMinimumWidth(110)
             predict.setStyleSheet(self._input_style)
             self._table.setCellWidget(row, 2, predict)
 
@@ -715,6 +727,7 @@ class LLMControlsTab(QWidget):
             ctx.setRange(512, 262144)
             ctx.setSingleStep(1024)
             ctx.setValue(self._int(effective.get("num_ctx"), 16384))
+            ctx.setMinimumWidth(110)
             ctx.setStyleSheet(self._input_style)
             self._table.setCellWidget(row, 3, ctx)
 
@@ -727,11 +740,13 @@ class LLMControlsTab(QWidget):
             raw_stops = effective.get("stop_sequences", "")
             stops.setText("\n".join(raw_stops) if isinstance(raw_stops, list) else str(raw_stops or ""))
             stops.setPlaceholderText("one stop per line")
+            stops.setMinimumWidth(140)
             stops.setStyleSheet(self._input_style)
             self._table.setCellWidget(row, 5, stops)
 
             reset = QPushButton("Reset")
             reset.clicked.connect(lambda checked=False, path=step_path: self._reset_step(path))
+            reset.setMinimumWidth(68)
             reset.setStyleSheet(self._button_style)
             self._table.setCellWidget(row, 6, reset)
 
@@ -973,6 +988,10 @@ class GlobalSettingsDialog(BaseDialog):
         self._btn_ok.clicked.connect(self._on_ok)
         self._btn_cancel.clicked.connect(self.reject)
         outer.addWidget(btn_bar)
+
+    def focus_ai_setup(self) -> None:
+        if hasattr(self, "_ai_setup_tab"):
+            self.tabs.setCurrentWidget(self._ai_setup_tab)
 
     def _apply_theme(self) -> None:
         t = self._theme

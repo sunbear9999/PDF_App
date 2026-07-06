@@ -21,6 +21,8 @@ from core.db.graph_db import GraphDB
 from core.db.data_dock_db import DataDockDB
 from core.db.media_asset_db import MediaAssetDB
 from core.db.evidence_db import EvidenceDB
+from core.db.extraction_db import ExtractionDB
+from core.db.intelligence_db import IntelligenceDB
 from core.events.event_bus import EventBus
 from core.events.domains.document_events import DocumentEvent, DocumentEventPayload
 
@@ -36,6 +38,7 @@ class ProjectManager:
         self.max_cache_size = max_cache_size
         self.active_file = None
         self._conn = None
+        self._source_format_registry = None
         # Set by the GUI layer to stop the viewer before saving the active PDF.
         self._halt_viewer_callback = None
 
@@ -57,6 +60,8 @@ class ProjectManager:
         self.db_data_dock = DataDockDB(self)
         self.db_media_assets = MediaAssetDB(self)
         self.db_evidence = EvidenceDB(self)
+        self.db_extraction = ExtractionDB(self)
+        self.db_intelligence = IntelligenceDB(self)
 
         self.db_docs.ensure_default_templates()
 
@@ -225,7 +230,16 @@ class ProjectManager:
         tf.close()
         return temp_path
 
+    def set_source_format_registry(self, registry) -> None:
+        self._source_format_registry = registry
+
     def detect_source_type(self, path):
+        if self._source_format_registry is not None:
+            detected = self._source_format_registry.detect_source_type(path)
+            if detected != "unknown":
+                return detected
+        # Legacy fallback (no registry wired — e.g. a headless ProjectManager()
+        # constructed directly in an older test without PapyrusCore).
         ext = os.path.splitext(path or "")[1].lower()
         if ext == ".pdf":
             return "pdf"
@@ -234,7 +248,7 @@ class ProjectManager:
         mime = self._guess_mime_type(path)
         if mime.startswith("video/"):
             return "video"
-        return "pdf"
+        return "unknown"
 
     def _guess_mime_type(self, path):
         return mimetypes.guess_type(path or "")[0] or ""
@@ -416,7 +430,9 @@ class ProjectManager:
         source_type = source_type or self.detect_source_type(path)
         if source_type == "pdf" and path not in self.pdfs:
             self.pdfs.append(path)
-        elif source_type == "video" and path in {s.get("path") for s in self.list_sources()}:
+        elif source_type != "pdf" and path in {s.get("path") for s in self.list_sources()}:
+            # Already-tracked non-PDF source (video/audio/docx/csv/...) — skip
+            # re-adding. PDF's own duplicate check is the branch above.
             return False
         elif source_type == "pdf" and path in {s.get("path") for s in self.list_sources()}:
             return False

@@ -1,5 +1,6 @@
 # core/services/ai_bootstrap_service.py
 from PySide6.QtCore import QObject, QThread, QTimer
+import os
 
 class PreloadWorker(QThread):
     def __init__(self, llm_manager, model, parent=None):
@@ -20,6 +21,8 @@ class AIBootstrapService(QObject):
 
     def _trigger_background_preload(self):
         try:
+            if os.environ.get("PAPYRUS_PRELOAD_AI", "1").strip().lower() in {"0", "false", "no", "off"}:
+                return
             # --- THE PRE-WARM FIX ---
             # Boot the heavy graphics engine using a Page instead of a View.
             from PySide6.QtWebEngineCore import QWebEnginePage

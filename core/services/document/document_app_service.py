@@ -150,15 +150,15 @@ class DocumentAppService(QObject):
 
         if not path or not os.path.exists(path): return
         source_type = self.pm.get_source_type(path) if hasattr(self.pm, "get_source_type") else "pdf"
-        
+
         self.pm.set_active_file(path)
-        if source_type == "video":
+        if source_type in ("video", "audio"):
             open_context = dict(context or {})
             open_context["transcript"] = self.pm.get_video_transcript(source_id) if source_id and hasattr(self.pm, "get_video_transcript") else {}
             payload = DocumentEventPayload(
                 path=path,
                 source_id=source_id,
-                source_type="video",
+                source_type=source_type,
                 timestamp=timestamp,
                 context=open_context,
             )
@@ -167,16 +167,27 @@ class DocumentAppService(QObject):
             self.bus.document_opened.emit(DocumentEvent.DOCUMENT_OPENED, payload)
             return
 
-        doc = self.pm.get_doc(path)
-        
-        if doc:
-            needs_ocr = self._check_needs_ocr(doc)
-            # We emit the raw doc object to the bus. The PDFViewer will catch this and render it.
-            payload = DocumentEventPayload(path=path, source_id=source_id, source_type="pdf", doc=doc, needs_ocr=needs_ocr)
-            self.bus.source_opened.emit(SourceEvent.OPENED, payload)
-            self.bus.source_switched.emit(SourceEvent.SWITCHED, payload)
-            self.bus.document_opened.emit(DocumentEvent.DOCUMENT_OPENED, payload)
-            self.bus.pdf_switched.emit(DocumentEvent.PDF_SWITCHED, payload)
+        if source_type == "pdf":
+            doc = self.pm.get_doc(path)
+            if doc:
+                needs_ocr = self._check_needs_ocr(doc)
+                # We emit the raw doc object to the bus. The PDFViewer will catch this and render it.
+                payload = DocumentEventPayload(path=path, source_id=source_id, source_type="pdf", doc=doc, needs_ocr=needs_ocr)
+                self.bus.source_opened.emit(SourceEvent.OPENED, payload)
+                self.bus.source_switched.emit(SourceEvent.SWITCHED, payload)
+                self.bus.document_opened.emit(DocumentEvent.DOCUMENT_OPENED, payload)
+                self.bus.pdf_switched.emit(DocumentEvent.PDF_SWITCHED, payload)
+            return
+
+        # Every other registered format (docx/epub/txt/csv/xlsx/image/...) —
+        # no fitz doc object to attach. The target viewer widget (registered
+        # via SourceViewerSpec) loads its own content from `path` once it
+        # observes this event — see ReflowableTextViewer/CsvPreviewViewer/
+        # ImageViewer's own source_opened subscriptions.
+        payload = DocumentEventPayload(path=path, source_id=source_id, source_type=source_type)
+        self.bus.source_opened.emit(SourceEvent.OPENED, payload)
+        self.bus.source_switched.emit(SourceEvent.SWITCHED, payload)
+        self.bus.document_opened.emit(DocumentEvent.DOCUMENT_OPENED, payload)
 
     def _check_needs_ocr(self, doc) -> bool:
         """Determines if the document requires OCR without touching the UI."""
@@ -273,6 +284,14 @@ class DocumentAppService(QObject):
         if not path or not payload.text:
             return
 
+        if payload.locator is not None and payload.rects is None:
+            # Reflowable format (docx/epub/txt/...) — no fitz page/rect
+            # search possible; the char-offset locator is already resolved
+            # by the caller (TextAnnotationManager). PDF's rects-based path
+            # below is untouched.
+            self._create_reflowable_highlight(path, payload)
+            return
+
         try:
             import fitz
 
@@ -314,6 +333,50 @@ class DocumentAppService(QObject):
             self.bus.status_message_requested.emit("Could not locate the exact text bounds.", 5000)
         except Exception as exc:
             self.bus.status_message_requested.emit(f"Could not create highlight: {exc}", 8000)
+
+    def _create_reflowable_highlight(self, path: str, payload: DocumentPayload) -> None:
+        """
+        Persist a highlight for a reflowable/non-PDF source, keyed by
+        char_start/char_end (docx/epub/txt/...) or bbox (image — pixel
+        coordinates from ImageOcrParser) instead of a fitz page/rect. Reuses
+        the same `highlights` table as PDF highlights (schema is already
+        generic: id/doc_id/page_num/rect_coords/text_content/note_content/
+        color) — rect_coords just stores a JSON locator instead of a fitz
+        rect repr.
+        """
+        import json
+
+        locator = payload.locator
+        annot_id = payload.annot_id or f"AINote|{uuid.uuid4()}"
+        color = payload.color or (0.7, 0.4, 1.0)
+        hex_color = self._rgb_to_hex(color)
+        rect_coords = json.dumps({
+            "char_start": locator.char_start,
+            "char_end": locator.char_end,
+            "bbox": locator.bbox,
+        })
+        self.pm.upsert_highlight({
+            "id": annot_id,
+            "doc_id": path,
+            "page_num": locator.page_num,
+            "rect_coords": rect_coords,
+            "text_content": payload.text,
+            "note_content": payload.note or "",
+            "color": hex_color,
+        })
+        self.bus.highlight_created.emit(
+            DocumentEvent.HIGHLIGHT_CREATED,
+            DocumentEventPayload(highlight_data={
+                "id": annot_id,
+                "subject": payload.text,
+                "content": payload.note or "",
+                "pdf_path": path,
+                "source_path": path,
+                "page_num": locator.page_num,
+                "rect_coords": rect_coords,
+                "color": hex_color,
+            }),
+        )
 
     def _update_highlight_note(self, payload: DocumentPayload):
         page, annot = self._find_annot(payload.path, payload.page_num, payload.annot_id)
