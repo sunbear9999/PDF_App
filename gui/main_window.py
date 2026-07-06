@@ -703,6 +703,19 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'autosave_timer') and self.autosave_timer.isActive():
             self.autosave_timer.stop()
 
+        if hasattr(self, 'process_registry') and self.process_registry:
+            # Snapshot running runner threads before kill_all() clears the job lists,
+            # then bound-wait each so no QThread is destroyed mid-run on exit.
+            registry = self.process_registry
+            jobs = list(registry.express_jobs) + list(registry.pending_queue)
+            if registry.active_job:
+                jobs.append(registry.active_job)
+            runners = [job.runner for job in jobs if getattr(job, "runner", None)]
+            registry.kill_all()
+            for runner in runners:
+                if runner.isRunning() and not runner.wait(3000):
+                    runner.terminate()
+
         if hasattr(self, 'shared_llm_manager'):
             self.shared_llm_manager.shutdown()
 

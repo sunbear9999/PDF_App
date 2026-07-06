@@ -121,6 +121,15 @@ class ResearchAgentToolRun:
         )
 
 
+# Caps on the per-session history lists. These grow on every planner step and
+# are serialized into project metadata, so they must stay bounded within a
+# session. Oldest entries are dropped; consumers only read recent entries
+# (pending_checkpoint scans from the end). Artifacts are user deliverables and
+# are intentionally not capped.
+MAX_TOOL_RUNS = 500
+MAX_CHECKPOINTS = 100
+
+
 @dataclass
 class ResearchAgentSession:
     goal: str
@@ -145,6 +154,18 @@ class ResearchAgentSession:
 
     def add_artifact(self, kind: str, title: str, content: Any, source: Optional[str] = None):
         self.artifacts.append(ResearchAgentArtifact(kind=kind, title=title, content=content, source=source))
+        self.touch()
+
+    def add_tool_run(self, run: ResearchAgentToolRun):
+        self.tool_runs.append(run)
+        if len(self.tool_runs) > MAX_TOOL_RUNS:
+            del self.tool_runs[: len(self.tool_runs) - MAX_TOOL_RUNS]
+        self.touch()
+
+    def add_checkpoint(self, checkpoint: ResearchAgentCheckpoint):
+        self.checkpoints.append(checkpoint)
+        if len(self.checkpoints) > MAX_CHECKPOINTS:
+            del self.checkpoints[: len(self.checkpoints) - MAX_CHECKPOINTS]
         self.touch()
 
     def to_dict(self) -> Dict[str, Any]:

@@ -121,6 +121,13 @@ class _PluginTaskNamespace:
         job = self._core.process_registry.enqueue_runner(
             worker, name, job_type="Plugin", is_express=True
         )
+        # Connected last so the plugin's on_done/on_error above fire first.
+        # PluginWorker never calls complete_job itself (unlike MasterActionRunner),
+        # so without this the job stays in ProcessRegistry.express_jobs forever,
+        # pinning the dead QThread and its connected closures.
+        registry = self._core.process_registry
+        worker.finished.connect(lambda _r, j=job: registry.complete_job_threadsafe(j.id))
+        worker.error.connect(lambda _e, j=job: registry.complete_job_threadsafe(j.id))
         return job
 
     def kill_all(self) -> None:

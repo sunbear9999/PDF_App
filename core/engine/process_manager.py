@@ -44,9 +44,13 @@ class ProcessRegistry(QObject):
     job_updated = Signal(object)
     queue_updated = Signal()
     job_progress_updated = Signal(object)
+    # Internal relay so completions reported from worker threads are queued
+    # onto the registry's own thread before touching the job lists.
+    _job_finished_threadsafe = Signal(str)
 
     def __init__(self):
         super().__init__()
+        self._job_finished_threadsafe.connect(self.complete_job)
         self.active_job = None
         self.pending_queue = []
         self.express_jobs = []  # <-- NEW TRACKER FOR CONCURRENT JOBS
@@ -155,6 +159,15 @@ class ProcessRegistry(QObject):
         self._retiring_runners = {
             runner for runner in self._retiring_runners if runner.isRunning()
         }
+
+    def complete_job_threadsafe(self, job_id):
+        """Complete a job from any thread.
+
+        Runners that finish on a background thread must use this instead of
+        complete_job(); the signal relay queues the call onto the registry's
+        thread so the job lists are never mutated concurrently.
+        """
+        self._job_finished_threadsafe.emit(job_id)
 
     def complete_job(self, job_id):
         if self.active_job and self.active_job.id == job_id:
