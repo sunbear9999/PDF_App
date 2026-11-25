@@ -7,6 +7,9 @@ from pathlib import Path
 from typing import Any
 
 
+_SKIP_KEYS = {"doc", "runner", "blueprint"}
+
+
 def json_safe(value: Any, *, depth: int = 0) -> Any:
     """Copy an EventBus payload into a JSON-only, path-safe representation."""
     if depth > 12:
@@ -18,9 +21,16 @@ def json_safe(value: Any, *, depth: int = 0) -> Any:
     if isinstance(value, Path):
         return value.name
     if dataclasses.is_dataclass(value):
-        return json_safe(dataclasses.asdict(value), depth=depth + 1)
+        # dataclasses.asdict() deep-copies every field before callers can filter
+        # it. Workflow payloads can contain live QThread runners, which are not
+        # pickleable, so filter fields before recursing.
+        return {
+            field.name: json_safe(getattr(value, field.name), depth=depth + 1)
+            for field in dataclasses.fields(value)
+            if field.name not in _SKIP_KEYS
+        }
     if isinstance(value, dict):
-        return {str(k): json_safe(v, depth=depth + 1) for k, v in value.items() if str(k) not in {"doc", "runner", "blueprint"}}
+        return {str(k): json_safe(v, depth=depth + 1) for k, v in value.items() if str(k) not in _SKIP_KEYS}
     if isinstance(value, (list, tuple, set)):
         return [json_safe(v, depth=depth + 1) for v in value]
     if hasattr(value, "to_dict"):

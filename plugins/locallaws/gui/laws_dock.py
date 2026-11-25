@@ -205,6 +205,7 @@ class LocalLawsDock(QWidget):
         self.active_db_label = ""
         self.is_caselaw = False
         self._current_db_data = None   # data from the combo box
+        self._pending_citation: Optional[dict] = None
 
         # Search worker + debounce
         self._search_revision: int = 0
@@ -443,62 +444,63 @@ class LocalLawsDock(QWidget):
         key_row = QHBoxLayout()
         key_row.addWidget(QLabel("API Key:"))
         self.api_key_input = QLineEdit()
-        self.api_key_input.setPlaceholderText("CourtListener Token")
+        self.api_key_input.setPlaceholderText("CourtListener Token (only needed for first download)")
         self.api_key_input.setText(self.api.config.get("courtlistener_token", ""))
         self.api_key_input.setEchoMode(QLineEdit.EchoMode.PasswordEchoOnEdit)
         key_row.addWidget(self.api_key_input, 1)
         case_layout.addLayout(key_row)
 
-        # Download mode toggle
-        dl_mode_row = QHBoxLayout()
-        dl_mode_row.addWidget(QLabel("Download mode:"))
-        self._case_mode_search = QRadioButton("Search API (targeted, up to N results)")
-        self._case_mode_bulk = QRadioButton("Bulk Archive (entire court, streaming)")
-        self._case_mode_search.setChecked(True)
-        self._case_mode_search.toggled.connect(self._update_case_mode)
-        dl_mode_row.addWidget(self._case_mode_search)
-        dl_mode_row.addWidget(self._case_mode_bulk)
-        dl_mode_row.addStretch()
-        case_layout.addLayout(dl_mode_row)
-
-        bulk_note = QLabel(
-            '<small><b>Bulk mode</b> streams the full court archive '
-            '(<code>opinions/{court}.tar.gz</code>) in memory-safe batches — '
-            'ideal for the 9th Circuit or similar large corpora. '
-            'No query field needed; the court ID is sufficient.</small>'
+        how_note = QLabel(
+            '<small>Enter your search criteria below. The bulk archive for each court is '
+            'downloaded <b>once</b> and stored permanently on this device — subsequent queries '
+            'for the same court run entirely <b>offline</b> via DuckDB with no API calls. '
+            'Manage stored archives and free disk space in the <b>Manage</b> tab.</small>'
         )
-        bulk_note.setWordWrap(True)
-        bulk_note.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
-        case_layout.addWidget(bulk_note)
+        how_note.setWordWrap(True)
+        how_note.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        case_layout.addWidget(how_note)
 
         court_row = QHBoxLayout()
         court_row.addWidget(QLabel("Court(s):"))
         self.court_input = QLineEdit()
-        self.court_input.setPlaceholderText("scotus  |  ca9  |  ca9,ca10  |  blank = all")
+        self.court_input.setPlaceholderText("ca9  |  ca1  |  cadc  |  ca9,ca10")
+        self.court_input.textChanged.connect(self._on_court_input_changed)
         court_row.addWidget(self.court_input, 1)
         case_layout.addLayout(court_row)
 
-        # Search-API-only fields (hidden in bulk mode)
-        self._case_search_widget = QWidget()
-        search_form = QVBoxLayout(self._case_search_widget)
-        search_form.setContentsMargins(0, 0, 0, 0)
-        search_form.setSpacing(4)
+        court_avail_note = QLabel(
+            '<small>Not every court has a hosted bulk archive — circuit courts '
+            '(<code>ca1</code>–<code>ca11</code>, <code>cadc</code>, <code>cafc</code>) '
+            'are the most reliably available. See '
+            '<a href="https://www.courtlistener.com/api/bulk-info/">courtlistener.com/api/bulk-info/</a> '
+            'for the full list.</small>'
+        )
+        court_avail_note.setWordWrap(True)
+        court_avail_note.setOpenExternalLinks(True)
+        court_avail_note.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        case_layout.addWidget(court_avail_note)
+
+        self._court_bulk_status_lbl = QLabel("")
+        self._court_bulk_status_lbl.setWordWrap(True)
+        self._court_bulk_status_lbl.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        case_layout.addWidget(self._court_bulk_status_lbl)
 
         query_row = QHBoxLayout()
         query_row.addWidget(QLabel("Query:"))
         self.query_input = QLineEdit()
         self.query_input.setPlaceholderText('"excessive force" AND "qualified immunity"')
         query_row.addWidget(self.query_input, 1)
-        search_form.addLayout(query_row)
+        case_layout.addLayout(query_row)
 
         case_hint = QLabel(
-            '<small><b>Boolean:</b>  <code>"phrase"</code>  ·  <code>AND</code>  <code>OR</code>  <code>NOT</code>  ·  '
-            '<code>qualif*</code> (wildcard)  ·  <code>caseName:Miranda</code>  ·  <code>status:Precedential</code>'
-            ' — e.g. <code>"excessive force" AND "section 1983"</code></small>'
+            '<small><b>Boolean:</b>  <code>"phrase"</code>  ·  <code>AND</code>  '
+            '<code>OR</code>  <code>NOT</code>  —  '
+            'e.g. <code>"excessive force" AND "section 1983"</code>  ·  '
+            'Leave blank to embed the entire court archive.</small>'
         )
         case_hint.setWordWrap(True)
         case_hint.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
-        search_form.addWidget(case_hint)
+        case_layout.addWidget(case_hint)
 
         date_row = QHBoxLayout()
         date_row.addWidget(QLabel("After:"))
@@ -509,20 +511,18 @@ class LocalLawsDock(QWidget):
         self.date_to_input = QLineEdit()
         self.date_to_input.setPlaceholderText("YYYY-MM-DD")
         date_row.addWidget(self.date_to_input, 1)
-        search_form.addLayout(date_row)
+        case_layout.addLayout(date_row)
 
         limit_row = QHBoxLayout()
         limit_row.addWidget(QLabel("Max results:"))
         self.limit_input = QSpinBox()
-        self.limit_input.setRange(1, 500)
-        self.limit_input.setValue(25)
+        self.limit_input.setRange(1, 5000)
+        self.limit_input.setValue(500)
         limit_row.addWidget(self.limit_input)
         limit_row.addStretch()
-        search_form.addLayout(limit_row)
+        case_layout.addLayout(limit_row)
 
-        case_layout.addWidget(self._case_search_widget)
-
-        self.download_case_btn = QPushButton("🔍  Search & Embed Case Law")
+        self.download_case_btn = QPushButton("⬇  Build Targeted Database")
         self.download_case_btn.clicked.connect(self._run_caselaw_ingestion)
         case_layout.addWidget(self.download_case_btn)
         scroll_layout.addWidget(case_group)
@@ -797,6 +797,10 @@ class LocalLawsDock(QWidget):
 
         self._records = records
         self._render_law_list(records)
+        if self._pending_citation is not None:
+            citation = self._pending_citation
+            self._pending_citation = None
+            self._locate_citation(citation)
 
     def _render_law_list(self, records: list) -> None:
         """
@@ -928,16 +932,41 @@ class LocalLawsDock(QWidget):
     def open_citation(self, citation: dict) -> bool:
         locator = citation.get("source_locator") or {}
         jurisdiction_id = locator.get("jurisdiction_id") or citation.get("source_id", "")
+        target_index = None
         for index in range(self.db_selector.count()):
             data = self.db_selector.itemData(index)
             if isinstance(data, dict) and data.get("file_id") == jurisdiction_id:
-                self.db_selector.setCurrentIndex(index)
+                target_index = index
                 break
 
+        if jurisdiction_id and target_index is None:
+            self.api.notify(
+                "The cited law database is not installed.", level="warning"
+            )
+            return False
+
+        needs_search = bool(self.search_input.text()) or not self._records
+        if target_index is not None:
+            needs_search = needs_search or target_index != self.db_selector.currentIndex()
+        if needs_search:
+            self.search_input.blockSignals(True)
+            self.search_input.clear()
+            self.search_input.blockSignals(False)
+            self._search_debounce.stop()
+            self._pending_citation = dict(citation)
+            if target_index is not None and target_index != self.db_selector.currentIndex():
+                self.db_selector.setCurrentIndex(target_index)
+            else:
+                self._execute_search()
+            return True
+
+        return self._locate_citation(citation)
+
+    def _locate_citation(self, citation: dict) -> bool:
         quote = str(citation.get("quote", "") or "").strip()
         normalized_quote = " ".join(quote.lower().split())
 
-        def score(record):
+        def score(record: dict) -> int:
             v = 0
             normalized_text = " ".join(str(record["text"]).lower().split())
             if normalized_quote and normalized_quote in normalized_text:
@@ -953,7 +982,6 @@ class LocalLawsDock(QWidget):
             )
             return False
 
-        self.search_input.clear()
         for index in range(self.law_list.count()):
             item = self.law_list.item(index)
             if item.data(Qt.ItemDataRole.UserRole) == best:
@@ -1116,12 +1144,28 @@ class LocalLawsDock(QWidget):
         self._mun_city_widget.setVisible(city_mode)
         self._mun_subject_widget.setVisible(not city_mode)
 
-    def _update_case_mode(self, search_mode: bool):
-        self._case_search_widget.setVisible(search_mode)
-        if search_mode:
-            self.download_case_btn.setText("🔍  Search & Embed Case Law")
-        else:
-            self.download_case_btn.setText("⬇  Bulk Download & Embed Court")
+    def _on_court_input_changed(self, text: str):
+        """Update the status label showing which courts have local bulk archives."""
+        import os as _os
+        parts = [c.strip().lower() for c in text.split(",") if c.strip()]
+        if not parts:
+            self._court_bulk_status_lbl.setText("")
+            return
+        lines = []
+        for court_id in parts:
+            path = self.law_manager._bulk_parquet_path(court_id)
+            if _os.path.exists(path):
+                sz = self.law_manager._format_size(_os.path.getsize(path))
+                lines.append(
+                    f"<span style='color:green;'>✓ {court_id.upper()} bulk archive "
+                    f"found locally ({sz}) — query will run offline</span>"
+                )
+            else:
+                lines.append(
+                    f"<span style='color:#888;'>⬇ {court_id.upper()} — no local archive, "
+                    f"will download on first run (API key required)</span>"
+                )
+        self._court_bulk_status_lbl.setText("<br>".join(lines))
 
     def _run_municipal_ingestion(self):
         if self._mun_mode_city.isChecked():
@@ -1166,43 +1210,79 @@ class LocalLawsDock(QWidget):
             )
 
     def _run_caselaw_ingestion(self):
-        token = self.api_key_input.text().strip()
-        if not token:
-            QMessageBox.warning(self, "API Key Missing", "A CourtListener API token is required.")
-            return
-        court = self.court_input.text().strip()
-        if not court:
+        import os as _os, re as _re
+
+        court_raw = self.court_input.text().strip()
+        if not court_raw:
             self.api.notify("Please enter a Court ID (e.g. scotus, ca9).", level="warning")
             return
-        self.api.config.set("courtlistener_token", token)
 
-        if self._case_mode_bulk.isChecked():
-            # Bulk archive path — no query needed
-            self._pending_auto_tag = (None, [court.upper(), "caselaw", "bulk"])
-            self._start_job(
-                self.law_manager.stream_bulk_caselaw,
-                court, token, self._make_progress_callback(),
-                job_name=f"Bulk download: {court.upper()}",
+        courts = [c.strip().lower() for c in court_raw.split(",") if c.strip()]
+        query = self.query_input.text().strip()
+        limit = self.limit_input.value()
+        date_from = self.date_from_input.text().strip()
+        date_to = self.date_to_input.text().strip()
+        token = self.api_key_input.text().strip()
+
+        # Token is required only for courts whose bulk archive is not yet local
+        missing_bulk = [
+            c for c in courts
+            if not _os.path.exists(self.law_manager._bulk_parquet_path(c))
+        ]
+        if missing_bulk and not token:
+            QMessageBox.warning(
+                self, "API Key Required",
+                "A CourtListener API token is needed to download bulk archives for:\n"
+                + ", ".join(c.upper() for c in missing_bulk)
+                + "\n\nEnter your token in the API Key field above."
             )
-        else:
-            # Search API path
-            query = self.query_input.text().strip()
-            limit = self.limit_input.value()
-            date_from = self.date_from_input.text().strip()
-            date_to = self.date_to_input.text().strip()
-            import re as _re
-            query_tags = [
-                t.strip('"') for t in _re.split(r'\s+(?:AND|OR|NOT)\s+|\s+', query)
-                if t.strip('"')
-            ][:4]
-            auto_tags = [court.upper(), "caselaw"] + query_tags
-            self._pending_auto_tag = (None, auto_tags)
-            self._start_job(
-                self.law_manager.index_courtlistener_caselaw,
-                court, query, limit, token, date_from, date_to,
-                self._make_progress_callback(),
-                job_name=f"Fetching case law: {court.upper()}",
-            )
+            return
+
+        if token:
+            self.api.config.set("courtlistener_token", token)
+
+        query_tags = [
+            t.strip('"') for t in _re.split(r'\s+(?:AND|OR|NOT)\s+|\s+', query)
+            if t.strip('"')
+        ][:4]
+        self._pending_auto_tag = (
+            None,
+            [c.upper() for c in courts] + ["caselaw"] + query_tags,
+        )
+
+        lm = self.law_manager
+        progress = self._make_progress_callback()
+
+        def _run_courts(progress_cb, cancel_check):
+            n = len(courts)
+            for i, court_id in enumerate(courts):
+                if cancel_check():
+                    return {"success": False, "error": "Cancelled."}
+                court_start = i / n
+                court_end = (i + 1) / n
+
+                def _scaled(msg, pct, _s=court_start, _e=court_end):
+                    progress_cb(msg, _s + (_e - _s) * pct)
+
+                result = lm.build_targeted_from_bulk(
+                    court_id=court_id,
+                    query=query,
+                    max_results=limit,
+                    api_key=token,
+                    date_from=date_from,
+                    date_to=date_to,
+                    progress_callback=_scaled,
+                    cancel_check=cancel_check,
+                )
+                if not result.get("success"):
+                    return result
+            return {"success": True, "courts": courts}
+
+        label = ", ".join(c.upper() for c in courts)
+        self._start_job(
+            _run_courts, progress,
+            job_name=f"Building case law DB: {label}",
+        )
 
     def _make_progress_callback(self):
         q = self._status_queue
@@ -1434,14 +1514,56 @@ class LocalLawsDock(QWidget):
                 w.deleteLater()
         self._manage_checkbox_map.clear()
 
+        # ── Bulk Archives section ──────────────────────────────────────────────
+        bulk_archives = self.law_manager.get_bulk_archives()
+        if bulk_archives:
+            hdr_bulk = QLabel("<b>Bulk Archives</b>  <small>(raw court data — not in RAG)</small>")
+            self._manage_scroll_layout.addWidget(hdr_bulk)
+
+            total_bytes = sum(a["size_bytes"] for a in bulk_archives)
+            for archive in bulk_archives:
+                row = QWidget()
+                rl = QHBoxLayout(row)
+                rl.setContentsMargins(0, 0, 0, 0)
+                rl.addWidget(QLabel(f"🗄  {archive['label']}  —  {archive['size_display']}"))
+                rl.addStretch()
+                del_btn = QPushButton("🗑 Delete")
+                del_btn.setFixedWidth(80)
+                del_btn.clicked.connect(
+                    lambda _, cid=archive["court_id"], lbl=archive["label"]:
+                        self._delete_bulk_archive(cid, lbl)
+                )
+                rl.addWidget(del_btn)
+                self._manage_scroll_layout.addWidget(row)
+
+            total_lbl = QLabel(
+                f"<small>Total bulk storage: {self.law_manager._format_size(total_bytes)}</small>"
+            )
+            self._manage_scroll_layout.addWidget(total_lbl)
+
+            sep = QFrame()
+            sep.setFrameShape(QFrame.Shape.HLine)
+            sep.setFrameShadow(QFrame.Shadow.Sunken)
+            self._manage_scroll_layout.addWidget(sep)
+
+        # ── Targeted Databases section ─────────────────────────────────────────
         active_dbs = self.api.config.get("active_laws", [])
         dbs = self.law_manager.get_installed_dbs()
 
-        if not dbs:
+        if not dbs and not bulk_archives:
             self._manage_scroll_layout.addWidget(
                 QLabel("No databases installed yet. Use the Download tab.")
             )
             return
+
+        if not dbs:
+            self._manage_scroll_layout.addWidget(
+                QLabel("<small>No targeted databases yet — use the Download tab to build one.</small>")
+            )
+            return
+
+        hdr_tgt = QLabel("<b>Targeted Databases</b>  <small>(RAG-enabled)</small>")
+        self._manage_scroll_layout.addWidget(hdr_tgt)
 
         for db in dbs:
             is_complete = db.get("index_complete", True)
@@ -1502,6 +1624,25 @@ class LocalLawsDock(QWidget):
                 cl.addWidget(chip_row)
 
             self._manage_scroll_layout.addWidget(container)
+
+    def _delete_bulk_archive(self, court_id: str, label: str) -> None:
+        answer = QMessageBox.question(
+            self, "Delete Bulk Archive",
+            f"Delete the {label} bulk archive from disk?\n\n"
+            f"Targeted databases derived from this archive will NOT be deleted "
+            f"and will remain available for RAG. You can re-download the archive "
+            f"at any time.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.law_manager.remove_bulk_archive(court_id)
+            self.api.notify(f"{label} bulk archive deleted.", level="info")
+        except Exception as exc:
+            QMessageBox.critical(self, "Delete Failed", str(exc))
+        self._refresh_manage_tab()
+        # Refresh court status label if the deleted court is currently entered
+        self._on_court_input_changed(self.court_input.text())
 
     def _edit_db_tags(self, file_id: str, label: str) -> None:
         from PySide6.QtWidgets import QDialog, QDialogButtonBox

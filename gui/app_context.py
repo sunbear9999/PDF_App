@@ -28,9 +28,10 @@ if TYPE_CHECKING:
         WorkspaceNodeTypeRegistry,
         OntologyRegistry,
     )
-    from core.services.workspace_services import WorkspaceService, WorkspaceGraphService
-    from core.services.workflow_runner_service import WorkflowRunnerService
-    from core.services.research_agent_service import ResearchAgentService
+    from core.services.workspace.workspace_service import WorkspaceService
+    from core.services.workspace.workspace_graph_service import WorkspaceGraphService
+    from core.services.ai.workflow_runner_service import WorkflowRunnerService
+    from core.services.ai.research_agent_service import ResearchAgentService
     from core.plugins.extension_registry import PluginExtensionRegistry
     from gui.registry.action_spec import ActionRegistry
     from gui.registry.context_menu_registry import ContextMenuRegistry
@@ -78,6 +79,7 @@ class AppContext:
     pdf_data_selection_service: Any = None
     pdf_grid_extraction_service: Any = None
     video_transcription_service: Any = None
+    tag_app_service: Any = None
 
     # Plugin extension specs collected at startup
     plugin_extension_registry: Optional["PluginExtensionRegistry"] = field(default=None)
@@ -91,6 +93,8 @@ class AppContext:
     theme_manager: Optional[Any] = field(default=None)
     viewer: Optional[Any] = field(default=None)
     dialog_manager: Optional[Any] = field(default=None)
+    # GUI-owned, lazily created shared reference cache/worker; no backend singleton.
+    reference_hydrator: Optional[Any] = field(default=None)
     # Central keybinding registry – set by MainWindow after KeybindingRegistry is created
     keybinding_registry: Optional[Any] = field(default=None)
 
@@ -106,6 +110,10 @@ class AppContext:
 
     # Prompt management service — fully wired with blueprint_registry and step_manager
     prompt_app_service: Optional["PromptAppService"] = field(default=None)
+    llm_settings_service: Optional[Any] = field(default=None)
+
+    # AI widget registry — maps ui_format → AIWidgetDefinition (prompt, parser, metadata)
+    widget_registry: Optional[Any] = field(default=None)
 
     # Raw core reference — used by AI setup tab to access user_data_dir and registry
     core: Optional[Any] = field(default=None)
@@ -123,15 +131,63 @@ class AppContext:
     # Source evaluation service
     source_evaluation_service: Optional[Any] = field(default=None)
 
+    # Deterministic extraction layer
+    document_extraction_service: Optional[Any] = field(default=None)
+    extraction_cache: Optional[Any] = field(default=None)
+    pattern_detector_registry: Optional[Any] = field(default=None)
+    table_extraction_service: Optional[Any] = field(default=None)
+    ranking_feature_service: Optional[Any] = field(default=None)
+    deterministic_pass_registry: Optional[Any] = field(default=None)
+
+    # Citation services (Phase 8 diagnostics)
+    citation_app_service: Optional[Any] = field(default=None)
+
+    # Source format dispatch registry — see core/registries/source_format_registry.py
+    source_format_registry: Optional[Any] = field(default=None)
+
+    # Source viewer display settings service — manages global viewer preferences (Phase 8)
+    source_viewer_settings_service: Optional[Any] = field(default=None)
+
+    # Intelligence layer services
+    model_role_service: Optional[Any] = field(default=None)
+    model_dependency_service: Optional[Any] = field(default=None)
+    processing_policy_service: Optional[Any] = field(default=None)
+    document_link_service: Optional[Any] = None
+    artifact_service: Optional[Any] = field(default=None)
+    source_anchor_resolver: Optional[Any] = field(default=None)
+    reference_note_service: Optional[Any] = field(default=None)
+    processing_plan_service: Optional[Any] = field(default=None)
+    model_readiness_service: Optional[Any] = field(default=None)
+    memory_manager_service: Optional[Any] = field(default=None)
+    intelligence_stage_registry: Optional[Any] = field(default=None)
+    intelligence_producer_registry: Optional[Any] = field(default=None)
+    sentence_classifier_service: Optional[Any] = field(default=None)
+    intelligence_scheduler: Optional[Any] = field(default=None)
+    source_intelligence_service: Optional[Any] = field(default=None)
+    hybrid_retrieval_service: Optional[Any] = field(default=None)
+    context_packing_service: Optional[Any] = field(default=None)
+    structured_query_service: Optional[Any] = field(default=None)
+    entity_extractor_registry: Optional[Any] = field(default=None)
+    analysis_mode_registry: Optional[Any] = field(default=None)
+    analysis_mode_service: Optional[Any] = field(default=None)
+    intelligence_view_registry: Optional[Any] = field(default=None)
+    intelligence_review_registry: Optional[Any] = field(default=None)
+    deterministic_graph_analysis_service: Optional[Any] = field(default=None)
+
     # Currently selected AI model — updated by UnifiedResearchDock when model combo changes
     active_model: str = field(default="")
 
     # ------------------------------------------------------------------ helpers
 
     def get_active_ai_model(self) -> str:
-        """Return the currently selected AI model, falling back to the first available."""
-        if self.active_model:
-            return self.active_model
+        """Return the configured main-answer model from AI Setup."""
+        if self.model_role_service:
+            try:
+                model = self.model_role_service.resolve_role("main_answer_model")
+                if model:
+                    return model
+            except Exception:
+                pass
         # Prefer the persisted default from AISetupService
         if self.ai_setup_service:
             try:
@@ -217,6 +273,7 @@ class AppContext:
             pdf_data_selection_service=getattr(core, "pdf_data_selection_service", None),
             pdf_grid_extraction_service=getattr(core, "pdf_grid_extraction_service", None),
             video_transcription_service=getattr(core, "video_transcription_service", None),
+            tag_app_service=getattr(core, "tag_app_service", None),
             plugin_extension_registry=getattr(core, "plugin_extension_registry", None),
             pack_service=getattr(core, "pack_service", None),
             help_service=getattr(core, "help_service", None),
@@ -225,5 +282,40 @@ class AppContext:
             llm_backend_registry=getattr(core, "llm_backend_registry", None),
             ai_setup_service=getattr(core, "ai_setup_service", None),
             prompt_app_service=getattr(core, "prompt_app_service", None),
+            llm_settings_service=getattr(core, "llm_settings_service", None),
+            widget_registry=getattr(core, "widget_registry", None),
+            document_extraction_service=getattr(core, "document_extraction_service", None),
+            extraction_cache=getattr(core, "extraction_cache", None),
+            pattern_detector_registry=getattr(core, "pattern_detector_registry", None),
+            table_extraction_service=getattr(core, "table_extraction_service", None),
+            ranking_feature_service=getattr(core, "ranking_feature_service", None),
+            deterministic_pass_registry=getattr(core, "deterministic_pass_registry", None),
+            citation_app_service=getattr(core, "citation_app_service", None),
+            source_format_registry=getattr(core, "source_format_registry", None),
+            source_viewer_settings_service=getattr(core, "source_viewer_settings_service", None),
+            model_role_service=getattr(core, "model_role_service", None),
+            model_dependency_service=getattr(core, "model_dependency_service", None),
+            memory_manager_service=getattr(core, "memory_manager_service", None),
+            processing_policy_service=getattr(core, "processing_policy_service", None),
+            artifact_service=getattr(core, "artifact_service", None),
+            document_link_service=getattr(core, "document_link_service", None),
+            source_anchor_resolver=getattr(core, "source_anchor_resolver", None),
+            reference_note_service=getattr(core, "reference_note_service", None),
+            processing_plan_service=getattr(core, "processing_plan_service", None),
+            model_readiness_service=getattr(core, 'model_readiness_service', None),
+            intelligence_stage_registry=getattr(core, "intelligence_stage_registry", None),
+            intelligence_producer_registry=getattr(core, "intelligence_producer_registry", None),
+            sentence_classifier_service=getattr(core, "sentence_classifier_service", None),
+            intelligence_scheduler=getattr(core, "intelligence_scheduler", None),
+            source_intelligence_service=getattr(core, "source_intelligence_service", None),
+            hybrid_retrieval_service=getattr(core, "hybrid_retrieval_service", None),
+            context_packing_service=getattr(core, "context_packing_service", None),
+            structured_query_service=getattr(core, "structured_query_service", None),
+            entity_extractor_registry=getattr(core, "entity_extractor_registry", None),
+            analysis_mode_registry=getattr(core, "analysis_mode_registry", None),
+            analysis_mode_service=getattr(core, "analysis_mode_service", None),
+            intelligence_view_registry=getattr(core, "intelligence_view_registry", None),
+            intelligence_review_registry=getattr(core, "intelligence_review_registry", None),
+            deterministic_graph_analysis_service=getattr(core, "deterministic_graph_analysis_service", None),
             core=core,
         )

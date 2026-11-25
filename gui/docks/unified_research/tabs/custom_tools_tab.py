@@ -189,7 +189,11 @@ class CustomToolsTab(BaseTab):
         if ui_target == "custom_tools_tab":
             self.add_message_widget(msg)
             
-        self.send_to_pipeline(blueprint, state_dict, output_workspace=state_dict.get("output_workspace", False))
+        self.send_to_pipeline(
+            blueprint,
+            state_dict,
+            output_workspace=state_dict.get("output_workspace"),
+        )
 
     def update_theme(self, theme):
         super().update_theme(theme)

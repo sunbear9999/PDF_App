@@ -3,6 +3,20 @@ import json
 
 class StateResolver:
     @staticmethod
+    def input_value(inputs: dict, state: dict, name: str):
+        """Read an optional opaque state reference without interpolating its data.
+
+        A literal <name>_state_key takes precedence over the legacy inline value.
+        Missing explicit references fail rather than silently changing the input.
+        """
+        key = inputs.get(name + '_state_key')
+        if key:
+            if not isinstance(key, str) or key not in state:
+                raise ValueError(f'Workflow input {name} references an unavailable state key.')
+            return state[key]
+        return inputs.get(name)
+
+    @staticmethod
     def safe_format(template_str: str, state_dict: dict) -> str:
         if not isinstance(template_str, str): return template_str
 
@@ -36,6 +50,9 @@ class StateResolver:
             # Convert array brackets to dots for easy splitting (e.g. item[0] -> item.0)
             clean_path = var_path.replace('[', '.').replace(']', '')
             keys = [k for k in clean_path.split('.') if k]
+            if not keys:
+                start_idx = end + 1
+                continue
             
             try:
                 for key in keys:

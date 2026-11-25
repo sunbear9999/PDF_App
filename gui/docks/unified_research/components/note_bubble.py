@@ -12,7 +12,7 @@ class NoteBubbleWidget(BaseCard):
     citation_jump_requested = Signal(dict)
     search_requested = Signal(str)         # quote (for finding similar context)
 
-    def __init__(self, doc_name, quote, note="", theme=None, parent=None, source_meta=None):
+    def __init__(self, doc_name, quote, note="", theme=None, parent=None, source_meta=None, *, app_context=None):
         super().__init__(theme=theme, accent_color=(theme or {}).get("accent", "#b366ff"), parent=parent)
         self.doc_name = doc_name
         self.quote = quote
@@ -40,7 +40,7 @@ class NoteBubbleWidget(BaseCard):
         toolbar = QHBoxLayout()
         toolbar.setContentsMargins(0, 0, 0, 0)
 
-        self.btn_save = QPushButton("💾 Save Highlight")
+        self.btn_save = QPushButton("Save linked note…")
         self.btn_save.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_save.clicked.connect(lambda: self.save_requested.emit(self.quote, self.note_edit.toPlainText(), self.doc_name))
 
@@ -58,9 +58,20 @@ class NoteBubbleWidget(BaseCard):
         toolbar.addStretch()
 
         self.body_layout.addLayout(toolbar)
+        self.reference_widget = None
+        if app_context is not None:
+            from gui.components.artifact_reference import ArtifactReferenceWidget
+            reference = {**self.source_meta, "quote": quote, "doc_name": doc_name}
+            self.reference_widget = ArtifactReferenceWidget(app_context, reference, self)
+            self.body_layout.addWidget(self.reference_widget)
+            if self.reference_widget.reference.artifact_id:
+                self.btn_jump.hide()
         self.update_theme(self.theme)
 
     def _emit_jump(self):
+        if self.reference_widget is not None and self.reference_widget.reference.artifact_id:
+            self.reference_widget.jump()
+            return
         citation = dict(self.source_meta)
         citation.setdefault("doc_name", self.doc_name)
         citation.setdefault("quote", self.quote)

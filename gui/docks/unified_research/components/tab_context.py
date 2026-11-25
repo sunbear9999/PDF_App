@@ -105,13 +105,21 @@ class ChatHistoryContextWidget(QWidget, TabContextContributor):
 
         depth = self._spin.value()
         history_data = self._pm.get_chat_history(self._target_id)
+        # Filter non-conversation artifacts before applying depth. Manifest
+        # status/citation rows are persisted after an answer and previously
+        # consumed the newest slots even though they were never rendered into
+        # the prompt, so a depth of one could produce an empty history block.
+        eligible_messages = [
+            msg for msg in history_data
+            if msg.get("ui_format") in ("live_stream", "text")
+            and str(msg.get("content") or "").strip()
+        ]
         lines: list[str] = []
-        for msg in history_data[-depth:]:
+        for msg in eligible_messages[-depth:]:
             role = "User" if msg["role"] == "user" else "AI"
-            if msg.get("ui_format") in ("live_stream", "text"):
-                content = strip_tagged_block(msg.get("content") or "", "UPDATE_MANIFEST").strip()
-                if content:
-                    lines.append(f"{role}: {content}")
+            content = strip_tagged_block(msg.get("content") or "", "UPDATE_MANIFEST").strip()
+            if content:
+                lines.append(f"{role}: {content}")
 
         if not lines:
             return {"chat_history": ""}

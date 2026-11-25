@@ -77,6 +77,24 @@ class GridExtractorSpec:
 
 
 @dataclass
+class DataSourceLoaderSpec:
+    """
+    Loads a whole file (CSV, XLSX, ...) directly into a DataGridState.
+
+    Distinct from GridExtractorSpec, which extracts a table from a PDF
+    region — this loads a standalone data file, invoked from the CSV/XLSX
+    dual-mode preview viewer and the Data Dock's "open file" action.
+    """
+    loader_id: str
+    label: str
+    extensions: List[str] = field(default_factory=list)
+    callback: Optional[Callable[[str], DataGridState]] = None   # (file_path) -> DataGridState
+    is_available: Callable[[], bool] = field(default=lambda: True)
+    unavailable_reason: str = ""
+    plugin_id: str = ""
+
+
+@dataclass
 class GridMappingStrategySpec:
     strategy_id: str
     label: str
@@ -177,6 +195,7 @@ class DataProviderRegistry:
         self._cleaners: Dict[str, DataCleanerSpec] = {}
         self._grid_actions: Dict[str, GridActionSpec] = {}
         self._grid_extractors: Dict[str, GridExtractorSpec] = {}
+        self._data_source_loaders: Dict[str, DataSourceLoaderSpec] = {}
         self._grid_mapping_strategies: Dict[str, GridMappingStrategySpec] = {}
         self._chart_types: Dict[str, ChartTypeSpec] = {}
         self._palettes: Dict[str, List[str]] = {
@@ -233,6 +252,15 @@ class DataProviderRegistry:
 
     def register_grid_extractor(self, spec: GridExtractorSpec) -> None:
         self._grid_extractors[spec.extractor_id] = spec
+
+    def register_data_source_loader(self, spec: DataSourceLoaderSpec) -> None:
+        self._data_source_loaders[spec.loader_id] = spec
+
+    def get_data_source_loader(self, loader_id: str) -> Optional[DataSourceLoaderSpec]:
+        return self._data_source_loaders.get(loader_id)
+
+    def data_source_loaders(self) -> Dict[str, DataSourceLoaderSpec]:
+        return dict(self._data_source_loaders)
 
     def register_grid_mapping_strategy(self, spec: GridMappingStrategySpec) -> None:
         self._grid_mapping_strategies[spec.strategy_id] = spec
@@ -299,6 +327,10 @@ class DataProviderRegistry:
         }
         self._grid_extractors = {
             key: spec for key, spec in self._grid_extractors.items()
+            if getattr(spec, "plugin_id", "") != plugin_id
+        }
+        self._data_source_loaders = {
+            key: spec for key, spec in self._data_source_loaders.items()
             if getattr(spec, "plugin_id", "") != plugin_id
         }
         self._grid_mapping_strategies = {

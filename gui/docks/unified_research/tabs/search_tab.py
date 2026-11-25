@@ -2,37 +2,23 @@
 import os
 import urllib.parse
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTextEdit,
-                             QPushButton, QLabel, QCheckBox, QScrollArea, QFrame, QInputDialog, QComboBox)
-from PySide6.QtCore import Qt, QThread, Signal, QUrl
+                             QPushButton, QLabel, QCheckBox, QScrollArea, QFrame, QInputDialog)
+from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QCursor, QDesktopServices
 
-from core.api.search_api import SearchAPI
+from gui.components.artifact_tasks import ArtifactTaskRunner
 from gui.docks.unified_research.tabs.base_tab import BaseTab
-from gui.utils.document_helpers import active_pdf_names, active_pdf_paths
+from gui.utils.document_helpers import active_pdf_paths
 from gui.docks.unified_research.components.universal_search_components import UniversalSearchBar, ReusableCitationCard, ReusableTermCard
-
-class AsyncCitationWorker(QThread):
-    """Offloads the mathematical SearchAPI call so the GUI doesn't freeze."""
-    citation_received = Signal(str, str, float)
-    finished_extraction = Signal()
-    
-    def __init__(self, goal, allowed_docs, pm, llm, parent=None):
-        super().__init__(parent)
-        self.goal = goal
-        self.allowed_docs = allowed_docs
-        self.pm = pm
-        self.llm = llm
-        
-    def run(self):
-        citations = SearchAPI.extract_mathematical_citations(self.goal, self.allowed_docs, self.pm, self.llm)
-        for c in citations:
-            self.citation_received.emit(c['doc'], c['text'], c['score'])
-        self.finished_extraction.emit()
 
 class SearchTab(BaseTab):
     def __init__(self, app_context, parent=None):
         super().__init__(app_context, target_id="search_tab", parent=parent)
         self._build_ui()
+        self.citation_runner = ArtifactTaskRunner(app_context, self, service_name="hybrid_retrieval_service")
+        self.citation_runner.completed.connect(self._citations_ready)
+        self.citation_runner.failed.connect(lambda error: self.status_lbl.setText(f"Citation search: {error}"))
+        self.destroyed.connect(self.citation_runner.shutdown)
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -73,13 +59,10 @@ class SearchTab(BaseTab):
         layout.addWidget(self.input_goal)
 
         options_layout = QHBoxLayout()
-        options_layout.addWidget(QLabel("Model:"))
-        self.model_combo = QComboBox()
-        models = self.llm_manager.get_available_models() if self.llm_manager else []
-        if models: self.model_combo.addItems(models)
-        options_layout.addWidget(self.model_combo, 1)
+        options_layout.addWidget(QLabel("Uses default model roles from AI Setup"))
 
         self.chk_advanced = QCheckBox("Advanced (Scan Citations)")
+        self.chk_advanced.setToolTip("Search indexed citation-bearing passages. Run Citations in Intelligence → Processing for unprocessed sources.")
         options_layout.addWidget(self.chk_advanced)
         options_layout.addStretch()
         
@@ -132,6 +115,7 @@ class SearchTab(BaseTab):
             self.project_manager.set_metadata("custom_search_url", new_url)
 
     def _clear_results(self):
+        self.citation_runner.cancel()
         while self.results_layout.count() > 1:
             item = self.results_layout.takeAt(0)
             if item.widget(): item.widget().deleteLater()
@@ -176,28 +160,33 @@ class SearchTab(BaseTab):
             return
         super().receive_ai_payload(payload)
 
-    def _add_citation_card(self, doc_name, text, score):
-        card = ReusableCitationCard(doc_name, text, score, theme=self.theme)
+    def _add_citation_card(self, doc_name, text, score, metadata=None):
+        card = ReusableCitationCard(doc_name, text, score, metadata=metadata, theme=self.theme,
+                                   app_context=self.app_context)
         card.action_requested.connect(lambda action, data: self._jump_to_source(data["doc_name"], data["text"]) if action == "jump" else None)
         self.results_layout.insertWidget(self.results_layout.count() - 1, card)
 
+    def _citations_ready(self, operation):
+        if not self.citation_runner.result:
+            self.status_lbl.setText("No indexed citation passages matched. Check Citations in Intelligence → Processing.")
+        for item in self.citation_runner.result or []:
+            self._add_citation_card(item.get("source_title", ""), item.get("exact_text", ""),
+                                    item.get("score"), item)
+
     def _trigger_ai_search(self):
         goal = self.input_goal.toPlainText().strip()
-        model = self.model_combo.currentText()
-        if not goal or not model: return
+        if not goal: return
         
         self._clear_results()
         self.btn_generate.setEnabled(False)
         self.status_lbl.setText("⏳ Initializing AI Engine...")
 
         if self.chk_advanced.isChecked():
-            allowed_docs = active_pdf_names(self.project_manager)
-            self.math_worker = AsyncCitationWorker(goal, allowed_docs, self.project_manager, self.llm_manager, parent=self)
-            self.math_worker.citation_received.connect(self._add_citation_card)
-            self.math_worker.start()
+            allowed_docs = active_pdf_paths(self.project_manager)
+            self.citation_runner.start("search_citations", query=goal, allowed_docs=allowed_docs)
 
         from core.engine.default_blueprints import DefaultBlueprints
-        blueprint = self.blueprint_manager.get_blueprint("Search Terms", lambda: DefaultBlueprints.get_search_terms_blueprint(self.prompt_manager, model=model))
+        blueprint = self.blueprint_manager.get_blueprint("Search Terms", lambda: DefaultBlueprints.get_search_terms_blueprint(self.prompt_manager))
         
         # Dispatch to engine via BaseTab
         self.send_to_pipeline(blueprint, {"goal": goal})
@@ -216,7 +205,6 @@ class SearchTab(BaseTab):
         input_style = f"background-color: {theme.get('bg_input', '#2b2b2b')}; color: {theme.get('text_main', '#fff')}; border: 1px solid {theme.get('border', '#444')}; padding: 4px; border-radius: 4px;"
         
         self.input_goal.setStyleSheet(input_style)
-        self.model_combo.setStyleSheet(input_style)
         
         self.btn_generate.setStyleSheet(f"background-color: {theme.get('accent', '#b366ff')}; font-weight: bold; color: white; padding: 6px; border: none; border-radius: 4px;")
         self.btn_settings.setStyleSheet(f"background-color: transparent; color: {theme.get('text_muted', '#aaa')}; border: none;")

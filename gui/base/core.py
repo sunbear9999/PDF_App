@@ -181,6 +181,15 @@ class BaseDock(QWidget):
     def on_project_cleared(self) -> None:
         """Called before the project is cleared. Override to reset state."""
 
+    def shutdown(self) -> None:
+        """Called once before the application quits.
+
+        Override to stop background workers. Qt destroys dock widgets without
+        sending ``closeEvent`` to their inner widget, so a dock that owns a
+        ``QThread`` must release it here or the thread is destroyed while
+        running and aborts the process.
+        """
+
     def _on_ai_availability_changed_event(self, available: bool) -> None:
         self.on_ai_availability_changed(available)
 

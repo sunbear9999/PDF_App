@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Any, Dict, List, Optional
 from .base import BasePayload
+from core.models.extraction_models import SourceLocation
 class DocumentIntent(Enum):
     OPEN = auto()
     ADD_FILES = auto()
@@ -34,6 +35,10 @@ class DocumentPayload(BasePayload):
     color: Any = None
     rects: Optional[List[Any]] = None
     doc_name: Optional[str] = None
+    # Format-neutral location (char_start/char_end for reflowable formats,
+    # page_num/bbox for paginated ones) — additive; existing page_num/rects
+    # consumers are untouched. See core.models.extraction_models.SourceLocation.
+    locator: Optional[SourceLocation] = None
     context: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -48,7 +53,9 @@ class AnnotationPayload(BasePayload):
     target_annot: object = None
     annot_id: Optional[str] = None
     page_num: Optional[int] = None
-    pdf_path: Optional[str] = None
+    pdf_path: Optional[str] = None    # legacy PDF-only name; kept for existing readers
+    source_path: Optional[str] = None  # format-neutral successor to pdf_path
+    locator: Optional[SourceLocation] = None
 
 
 class DocumentEvent(Enum):
@@ -82,6 +89,7 @@ class SourcePayload(BasePayload):
     page_num: Optional[int] = None
     timestamp: Optional[float] = None
     rects: Optional[List[Any]] = None
+    locator: Optional[SourceLocation] = None
     context: Dict[str, Any] = field(default_factory=dict)
 
 

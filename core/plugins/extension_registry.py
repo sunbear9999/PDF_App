@@ -55,10 +55,68 @@ class AIOutputRendererSpec:
 
 
 @dataclass
+class AIWidgetSpec:
+    """
+    Full widget registration: backend definition + optional GUI renderer.
+
+    Plugins use api.widgets.register(AIWidgetSpec(...)) in on_load().
+    This bundles the AIWidgetDefinition (prompt, parser, metadata) with an
+    optional renderer_factory so a single call wires everything end-to-end.
+
+    Example::
+
+        from core.registries.ai_widget_registry import AIWidgetDefinition
+        from core.plugins.extension_registry import AIWidgetSpec
+
+        api.widgets.register(AIWidgetSpec(
+            definition=AIWidgetDefinition(
+                widget_id="my_timeline",
+                label="Timeline",
+                prompt_key="My Timeline Format",
+                default_prompt="Output a JSON array of {date, event, description} objects...",
+                payload_parser=_parse_timeline,
+                plugin_id=plugin_id,
+            ),
+            renderer_factory=lambda payload, parent: TimelineWidget(payload, parent),
+        ))
+    """
+    definition: Any  # AIWidgetDefinition — typed as Any to avoid circular import
+    renderer_factory: Optional[Callable] = None
+    # convenience: forward the plugin_id from definition.plugin_id if not overridden
+    plugin_id: str = ""
+
+    def __post_init__(self):
+        if not self.plugin_id and self.definition is not None:
+            self.plugin_id = getattr(self.definition, "plugin_id", "") or ""
+
+
+@dataclass
 class CitationSourceHandlerSpec:
-    """Navigation handler for citations produced by a plugin-owned RAG source."""
+    """
+    Jump-to-source navigation handler for a source_type.
+
+    Originally citation-only; this is now the single source_type-keyed
+    dispatch point for all "jump to source" navigation (citations, notes,
+    highlights, RAG hits) — see SourceViewerHost.jump_to_source.
+    """
     source_type: str
-    callback: Callable[[dict, Any], None]  # callback(citation, app_context)
+    callback: Callable[[dict, Any], None]  # callback(locator: dict, app_context)
+    plugin_id: str = ""
+
+
+@dataclass
+class SourceViewerSpec:
+    """
+    GUI viewer widget factory for a source_type.
+
+    Registered by core (for built-in formats, from gui/main_window.py — never
+    from core/, since papyrus_core.py must not import gui) or by a plugin via
+    api.gui_extensions.add_source_viewer(). SourceViewerHost builds one widget
+    per registered spec and dispatches to it by source_type.
+    """
+    source_type: str
+    viewer_factory: Callable[[Any, Any], Any]   # factory(app_context, parent) -> QWidget
+    display_name: str = ""
     plugin_id: str = ""
 
 
@@ -211,6 +269,26 @@ class RagSourceFilterSpec:
 
 
 @dataclass
+class ReadingTextFilterSpec:
+    """Plugin callback that can refine reading-mode page text before tokenization."""
+    filter_id: str
+    label: str
+    callback: Optional[Callable[[List[Any]], Optional[List[Any]]]] = None
+    position: int = 50
+    plugin_id: str = ""
+
+
+@dataclass
+class ReadingTokenTransformSpec:
+    """Plugin callback that can refine reading-mode tokens before display."""
+    transform_id: str
+    label: str
+    callback: Optional[Callable[[List[Any]], Optional[List[Any]]]] = None
+    position: int = 50
+    plugin_id: str = ""
+
+
+@dataclass
 class TabContextContributorSpec:
     """
     A context contributor injected into one or more research tabs by a plugin.
@@ -252,6 +330,7 @@ class PluginExtensionRegistry:
         self._research_tabs: List[ResearchTabSpec] = []
         self._ai_renderers: List[AIOutputRendererSpec] = []
         self._citation_source_handlers: List[CitationSourceHandlerSpec] = []
+        self._source_viewers: List[SourceViewerSpec] = []
         self._extra_docks: List[DockSpec] = []
         self._menu_items: List[MenuItemSpec] = []
         self._main_toolbar_buttons: List[MainToolbarButtonSpec] = []
@@ -263,6 +342,8 @@ class PluginExtensionRegistry:
         self._dock_actions: List[DockActionSpec] = []
         self._tab_context_contributors: List[TabContextContributorSpec] = []
         self._rag_source_filters: List[RagSourceFilterSpec] = []
+        self._reading_text_filters: List[ReadingTextFilterSpec] = []
+        self._reading_token_transforms: List[ReadingTokenTransformSpec] = []
 
     # ----------------------------------------------------------------
     # Registration
@@ -283,6 +364,14 @@ class PluginExtensionRegistry:
             if current.source_type != spec.source_type
         ]
         self._citation_source_handlers.append(spec)
+
+    def add_source_viewer(self, spec: SourceViewerSpec) -> None:
+        """Register (or replace) the viewer widget factory for a source_type."""
+        self._source_viewers = [
+            current for current in self._source_viewers
+            if current.source_type != spec.source_type
+        ]
+        self._source_viewers.append(spec)
 
     def add_dock(self, spec: DockSpec) -> None:
         self._extra_docks.append(spec)
@@ -321,6 +410,20 @@ class PluginExtensionRegistry:
             if not (s.source_id == spec.source_id and s.plugin_id == spec.plugin_id)
         ]
         self._rag_source_filters.append(spec)
+
+    def add_reading_text_filter(self, spec: ReadingTextFilterSpec) -> None:
+        self._reading_text_filters[:] = [
+            s for s in self._reading_text_filters
+            if not (s.filter_id == spec.filter_id and s.plugin_id == spec.plugin_id)
+        ]
+        self._reading_text_filters.append(spec)
+
+    def add_reading_token_transform(self, spec: ReadingTokenTransformSpec) -> None:
+        self._reading_token_transforms[:] = [
+            s for s in self._reading_token_transforms
+            if not (s.transform_id == spec.transform_id and s.plugin_id == spec.plugin_id)
+        ]
+        self._reading_token_transforms.append(spec)
 
     def get_rag_source_filters(self) -> List["RagSourceFilterSpec"]:
         return list(self._rag_source_filters)
@@ -364,6 +467,15 @@ class PluginExtensionRegistry:
             None,
         )
 
+    def get_source_viewer(self, source_type: str) -> Optional[SourceViewerSpec]:
+        return next(
+            (spec for spec in self._source_viewers if spec.source_type == source_type),
+            None,
+        )
+
+    def get_source_viewers(self) -> List[SourceViewerSpec]:
+        return list(self._source_viewers)
+
     def get_extra_docks(self) -> List[DockSpec]:
         return list(self._extra_docks)
 
@@ -382,6 +494,12 @@ class PluginExtensionRegistry:
 
     def get_commands(self) -> List[CommandSpec]:
         return list(self._commands)
+
+    def get_reading_text_filters(self) -> List[ReadingTextFilterSpec]:
+        return sorted(self._reading_text_filters, key=lambda s: s.position)
+
+    def get_reading_token_transforms(self) -> List[ReadingTokenTransformSpec]:
+        return sorted(self._reading_token_transforms, key=lambda s: s.position)
 
     def get_workspace_context_menu_items(self, context: str = "") -> List[WorkspaceContextMenuSpec]:
         if context:
@@ -421,6 +539,12 @@ class PluginExtensionRegistry:
     def register_workspace_context_menu_item(self, spec: WorkspaceContextMenuSpec) -> None:
         self.add_workspace_context_menu_item(spec)
 
+    def register_reading_text_filter(self, spec: ReadingTextFilterSpec) -> None:
+        self.add_reading_text_filter(spec)
+
+    def register_reading_token_transform(self, spec: ReadingTokenTransformSpec) -> None:
+        self.add_reading_token_transform(spec)
+
     def get_themes(self) -> List["ThemeSpec"]:
         return list(self._themes)
 
@@ -449,9 +573,11 @@ class PluginExtensionRegistry:
     def _spec_list_attrs(self) -> List[str]:
         """Canonical list of all spec-list attribute names. Used by hot-reload cleanup and tagging."""
         return [
-            "_toolbar_buttons", "_research_tabs", "_ai_renderers", "_citation_source_handlers", "_extra_docks",
+            "_toolbar_buttons", "_research_tabs", "_ai_renderers", "_citation_source_handlers",
+            "_source_viewers", "_extra_docks",
             "_menu_items", "_main_toolbar_buttons", "_shortcuts", "_commands",
             "_workspace_context_menu_items", "_actions", "_themes", "_dock_actions", "_rag_source_filters",
+            "_reading_text_filters", "_reading_token_transforms",
         ]
 
     def remove_plugin_specs(self, plugin_id: str) -> None:

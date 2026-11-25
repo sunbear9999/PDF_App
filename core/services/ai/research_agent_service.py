@@ -233,7 +233,7 @@ class ResearchAgentService(QObject):
             reason=str(action.get("reason", "")),
             inputs=dict(inputs),
         )
-        session.tool_runs.append(run)
+        session.add_tool_run(run)
         session.status = "running_tool"
         self._emit_update(f"Running {blueprint_id}...")
 
@@ -278,9 +278,8 @@ class ResearchAgentService(QObject):
             prompt=str(checkpoint_data.get("prompt", "What should the agent do next?")),
             options=self._coerce_options(checkpoint_data.get("options", [])),
         )
-        self.session.checkpoints.append(checkpoint)
+        self.session.add_checkpoint(checkpoint)
         self.session.status = "waiting_for_user"
-        self.session.touch()
         self.checkpoint_requested.emit(
             ResearchAgentEvent.CHECKPOINT_REQUESTED,
             ResearchAgentPayload(checkpoint=checkpoint.to_dict()),

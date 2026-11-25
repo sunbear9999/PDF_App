@@ -16,7 +16,11 @@ Usage in a plugin::
 """
 from __future__ import annotations
 
+import re
 from typing import Dict
+
+
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class PluginTableRegistry:
@@ -48,7 +52,21 @@ class PluginTableRegistry:
         :param plugin_id: Plugin that owns this table; used for cleanup tracking.
         """
         safe_name = table_name if table_name.startswith("plugin_") else f"plugin_{table_name}"
+        if not _IDENTIFIER_RE.fullmatch(safe_name):
+            raise ValueError(f"Invalid plugin table name: {table_name!r}")
+        if not schema_dict or any(not _IDENTIFIER_RE.fullmatch(col) for col in schema_dict):
+            raise ValueError("Plugin table column names must be safe SQL identifiers.")
         self._tables[safe_name] = {"plugin_id": plugin_id, "schema": dict(schema_dict)}
+
+    def ensure_tables(self, conn, plugin_id: str = "") -> None:
+        """Create registered tables immediately for an already-open project."""
+        for table_name, meta in self._tables.items():
+            if plugin_id and meta.get("plugin_id") != plugin_id:
+                continue
+            columns = ", ".join(
+                f"{name} {definition}" for name, definition in meta["schema"].items()
+            )
+            conn.execute(f"CREATE TABLE IF NOT EXISTS {table_name} ({columns})")
 
     def get_tables(self) -> Dict[str, dict]:
         return dict(self._tables)

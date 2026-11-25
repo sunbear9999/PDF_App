@@ -20,6 +20,16 @@ class MainToolbar(QToolBar):
         
         self._build_ui()
 
+    def _add_artifact_guide(self, menu):
+        from gui.components.artifact_actions import bind_artifact_action
+        menu.addAction("Intelligence Artifact Guide", self._show_artifact_guide)
+        if self._ctx:
+            bind_artifact_action(self._ctx, self, "intelligence.show_guide", "Intelligence Artifact Guide",
+                                 self._show_artifact_guide, "menu:help")
+
+    def _show_artifact_guide(self):
+        self.bus.help_action_requested.emit(HelpIntent.SHOW_TOPIC, HelpPayload(topic_id="core.intelligence.artifacts"))
+
     def _build_ui(self):
         mw = self.main_window # Shorthand
         
@@ -67,6 +77,7 @@ class MainToolbar(QToolBar):
         other_menu.addAction("📄 Source Viewer").triggered.connect(lambda c=False: mw.show_source_viewer())
         other_menu.addSeparator()
         other_menu.addAction("📝 Notes List").triggered.connect(lambda c=False: self._spawn_dock("notes"))
+        other_menu.addAction("🧠 Intelligence").triggered.connect(lambda c=False: self._spawn_dock("intelligence"))
         other_menu.addAction("✍️ Scratchpad").triggered.connect(lambda c=False: self._spawn_dock("scratchpads"))
         other_menu.addAction("📖 Dictionary").triggered.connect(lambda c=False: self._spawn_dock("dicts"))
         other_menu.addAction("📚 Citations").triggered.connect(lambda c=False: self._spawn_dock("citations"))
@@ -120,6 +131,7 @@ class MainToolbar(QToolBar):
         _bus = mw.bus
         help_menu = QMenu(self)
         help_menu.addAction("📖  Help Center", lambda: _bus.help_action_requested.emit(HelpIntent.SHOW_CENTER, HelpPayload()))
+        self._add_artifact_guide(help_menu)
         help_menu.addAction("🎓  Interactive Tutorials", lambda: _bus.help_action_requested.emit(HelpIntent.SHOW_CENTER, HelpPayload()))
         help_menu.addSeparator()
         help_menu.addAction("❓  What's This?  (Shift+F1)", lambda: _bus.help_action_requested.emit(HelpIntent.SHOW_WHATS_THIS, HelpPayload()))
@@ -270,7 +282,9 @@ class MainToolbar(QToolBar):
             exec_as_modal(dlg)
 
     def _open_plugin_settings(self, plugin, api) -> None:
-        from PySide6.QtWidgets import QDialog, QVBoxLayout, QDialogButtonBox
+        from PySide6.QtWidgets import (
+            QCheckBox, QDialog, QDialogButtonBox, QLabel, QVBoxLayout,
+        )
         from gui.components.plugin_widgets import PluginForm
         schema = getattr(plugin, "settings_schema", [])
         dlg = QDialog(self.main_window)
@@ -280,24 +294,64 @@ class MainToolbar(QToolBar):
         form = PluginForm(schema, theme=tm.get_theme() if tm else {})
         form.set_values({k: api.config.get(k) for field in schema for k in [field["key"]] if api.config.get(k) is not None})
         layout.addWidget(form)
+        network_box = self._add_plugin_network_setting(
+            plugin, layout, QCheckBox, QLabel
+        )
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(dlg.accept)
         buttons.rejected.connect(dlg.reject)
         layout.addWidget(buttons)
-        def _on_settings_accepted():
+
+        def _save_and_accept():
             try:
                 for key, value in form.get_values().items():
                     api.config.set(key, value)
             except RuntimeError:
                 pass
+            if not self._save_plugin_network_setting(dlg, plugin, network_box):
+                return
+            dlg.accept()
 
-        dlg.accepted.connect(_on_settings_accepted)
+        buttons.accepted.connect(_save_and_accept)
         dm2 = get_for_widget(self)
         if dm2:
             dm2.show_instance(dlg)
         else:
-            if exec_as_modal(dlg):
-                _on_settings_accepted()
+            exec_as_modal(dlg)
+
+    def _add_plugin_network_setting(self, plugin, layout, checkbox_cls, label_cls):
+        service = getattr(
+            getattr(self.main_window, "core", None),
+            "network_access_service",
+            None,
+        )
+        if not getattr(plugin, "requires_internet", False) or service is None:
+            return None
+        checkbox = checkbox_cls("Allow this plugin to access the internet")
+        checkbox.setChecked(service.is_granted(plugin.plugin_id))
+        layout.addWidget(checkbox)
+        hosts = ", ".join(getattr(plugin, "network_hosts", []) or [])
+        destination = hosts or "public HTTPS hosts entered explicitly by you"
+        hint = label_cls(f"Allowed destinations: {destination}")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        return checkbox
+
+    def _save_plugin_network_setting(self, parent, plugin, checkbox) -> bool:
+        if checkbox is None:
+            return True
+        core = self.main_window.core
+        service = core.network_access_service
+        desired = checkbox.isChecked()
+        if desired == service.is_granted(plugin.plugin_id):
+            return True
+        from gui.components.plugin_network_access import set_plugin_network_permission
+        return set_plugin_network_permission(
+            parent,
+            core,
+            plugin.plugin_id,
+            getattr(plugin, "network_hosts", []),
+            desired,
+        )
 
     def _inject_plugin_buttons(self) -> None:
         """Inject MainToolbarButtonSpec entries registered by plugins."""
@@ -338,7 +392,20 @@ class MainToolbar(QToolBar):
             "",
             "Sources (*.pdf *.mp4 *.mov *.mkv *.webm *.avi *.m4v);;PDF Files (*.pdf);;Video Files (*.mp4 *.mov *.mkv *.webm *.avi *.m4v)",
         )
-        if paths: self.bus.document_action_requested.emit(DocumentIntent.ADD_FILES, DocumentPayload(paths=paths))
+        if paths:
+            from gui.components.dialogs.processing_import_dialog import ProcessingImportDialog
+            from gui.managers.dialog_manager import exec_as_modal
+            policy = getattr(self._ctx, "processing_policy_service", None) if self._ctx else None
+            default = (
+                policy.get_project_settings().get("default_processing_mode", "balanced")
+                if policy else "balanced"
+            )
+            dialog = ProcessingImportDialog(default, self, app_context=self._ctx, paths=paths)
+            if exec_as_modal(dialog):
+                self.bus.document_action_requested.emit(
+                    DocumentIntent.ADD_FILES,
+                    DocumentPayload(paths=paths, context={"processing_selection": dialog.selection()}),
+                )
 
     def _trigger_export_log(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export LLM Log", "LLM_Log.pdf", "PDF Documents (*.pdf)")

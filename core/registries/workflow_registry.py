@@ -56,6 +56,9 @@ def build_default_blueprint_node_type_registry() -> BlueprintNodeTypeRegistry:
     from core.engine.steps.graph_validator_step import GraphValidatorStep
     from core.engine.steps.analysis_contract_step import AnalysisContractStep
     from core.engine.steps.document_chunk_step import DocumentChunkStep
+    from core.engine.steps.section_extract_step import SectionExtractStep
+    from core.engine.steps.section_subgraph_merge_step import SectionSubgraphMergeStep
+    from core.engine.steps.section_synthesis_store_step import SectionSynthesisStoreStep
     from core.engine.steps.analysis_compact_step import AnalysisCompactStep
     from core.engine.steps.analysis_finalize_step import AnalysisFinalizeStep
     from core.engine.steps.analysis_send_to_workspace_step import AnalysisSendToWorkspaceStep
@@ -76,13 +79,80 @@ def build_default_blueprint_node_type_registry() -> BlueprintNodeTypeRegistry:
     from core.engine.steps.ontology_catalog_step import OntologyCatalogStep
     from core.engine.steps.extract_pdf_grid_step import ExtractPdfGridStep
     from core.engine.steps.select_pdf_region_step import SelectPdfRegionStep
+    from core.engine.steps.extract_document_blocks_step import ExtractDocumentBlocksStep
+    from core.engine.steps.extract_entities_step import ExtractEntitiesStep
+    from core.engine.steps.extract_dates_step import ExtractDatesStep
+    from core.engine.steps.extract_citations_step import ExtractCitationsStep
+    from core.engine.steps.extract_tables_step import ExtractTablesStep
+    from core.engine.steps.detect_patterns_step import DetectPatternsStep
+    from core.engine.steps.rank_blocks_step import RankBlocksStep
+    from core.engine.steps.build_deterministic_quotes_step import BuildDeterministicQuotesStep
+    from core.engine.steps.libra_bias_evaluation_step import LibraBiasEvaluationStep
+    from core.engine.steps.intelligence_steps import (
+        ArtifactRetrieveStep,
+        BuildRetrievalPlanStep,
+        PackArtifactContextStep,
+        SourceStageStep,
+        CitationValidateStep,
+        GraphEnrichmentValidateStep,
+        DeterministicGraphAnalysisStep,
+        AnalysisOutputWriteStep,
+    )
+    from core.engine.steps.artifact_write_step import ArtifactWriteStep
+    from core.engine.steps.relate_step import RelateStep
 
     registry = BlueprintNodeTypeRegistry()
     defaults = [
         WorkflowNodeType(
+            "workflow.libra_bias_evaluation", "LIBRA Bias Evaluation", "Evaluation", "LIBRA_BIAS_EVALUATION",
+            LibraBiasEvaluationStep.description, step_cls=LibraBiasEvaluationStep,
+            input_schema=LibraBiasEvaluationStep.input_schema,
+            output_schema=LibraBiasEvaluationStep.output_schema,
+        ),
+        WorkflowNodeType(
             "workflow.select_pdf_region", "Select PDF Region", "Interaction", "SELECT_PDF_REGION",
             SelectPdfRegionStep.description, step_cls=SelectPdfRegionStep,
             input_schema=SelectPdfRegionStep.input_schema, output_schema=SelectPdfRegionStep.output_schema,
+        ),
+        WorkflowNodeType(
+            "workflow.extract_document_blocks", "Extract Document Blocks", "Extraction", "EXTRACT_DOCUMENT_BLOCKS",
+            ExtractDocumentBlocksStep.description, step_cls=ExtractDocumentBlocksStep,
+            input_schema=ExtractDocumentBlocksStep.input_schema, output_schema=ExtractDocumentBlocksStep.output_schema,
+        ),
+        WorkflowNodeType(
+            "workflow.extract_entities", "Extract Entities", "Extraction", "EXTRACT_ENTITIES",
+            ExtractEntitiesStep.description, step_cls=ExtractEntitiesStep,
+            input_schema=ExtractEntitiesStep.input_schema, output_schema=ExtractEntitiesStep.output_schema,
+        ),
+        WorkflowNodeType(
+            "workflow.extract_dates", "Extract Dates", "Extraction", "EXTRACT_DATES",
+            ExtractDatesStep.description, step_cls=ExtractDatesStep,
+            input_schema=ExtractDatesStep.input_schema, output_schema=ExtractDatesStep.output_schema,
+        ),
+        WorkflowNodeType(
+            "workflow.extract_citations", "Extract Citations", "Extraction", "EXTRACT_CITATIONS",
+            ExtractCitationsStep.description, step_cls=ExtractCitationsStep,
+            input_schema=ExtractCitationsStep.input_schema, output_schema=ExtractCitationsStep.output_schema,
+        ),
+        WorkflowNodeType(
+            "workflow.extract_tables", "Extract Tables", "Extraction", "EXTRACT_TABLES",
+            ExtractTablesStep.description, step_cls=ExtractTablesStep,
+            input_schema=ExtractTablesStep.input_schema, output_schema=ExtractTablesStep.output_schema,
+        ),
+        WorkflowNodeType(
+            "workflow.detect_patterns", "Detect Patterns", "Extraction", "DETECT_PATTERNS",
+            DetectPatternsStep.description, step_cls=DetectPatternsStep,
+            input_schema=DetectPatternsStep.input_schema, output_schema=DetectPatternsStep.output_schema,
+        ),
+        WorkflowNodeType(
+            "workflow.rank_blocks", "Rank Blocks", "Extraction", "RANK_BLOCKS",
+            RankBlocksStep.description, step_cls=RankBlocksStep,
+            input_schema=RankBlocksStep.input_schema, output_schema=RankBlocksStep.output_schema,
+        ),
+        WorkflowNodeType(
+            "workflow.build_deterministic_quotes", "Build Deterministic Quotes", "Analysis", "BUILD_DETERMINISTIC_QUOTES",
+            BuildDeterministicQuotesStep.description, step_cls=BuildDeterministicQuotesStep,
+            input_schema=BuildDeterministicQuotesStep.input_schema, output_schema=BuildDeterministicQuotesStep.output_schema,
         ),
         WorkflowNodeType(
             "workflow.extract_pdf_grid", "Extract PDF Grid", "Data", "EXTRACT_PDF_GRID",
@@ -107,6 +177,13 @@ def build_default_blueprint_node_type_registry() -> BlueprintNodeTypeRegistry:
                     "label": "Image Inputs",
                     "description": "Optional image objects containing base64 data and mime_type. Requires a vision-capable local model.",
                     "placeholder": "{selection_images}",
+                },
+                "context_items_key": {
+                    "type": "string", "label": "Atomic context items (state key)",
+                    "description": "Optional name of a workflow state list of JSON objects. Whole objects "
+                                   "are packed after the query, without expanding variables inside source text. "
+                                   "The receipt is saved under llm_context_receipts[output_key]. This uses a "
+                                   "conservative text estimate, not exact provider token accounting.",
                 },
             },
         ),
@@ -147,6 +224,68 @@ def build_default_blueprint_node_type_registry() -> BlueprintNodeTypeRegistry:
                     "default": "AND",
                 },
             },
+        ),
+        WorkflowNodeType(
+            "workflow.build_retrieval_plan", "Build Retrieval Plan", "Intelligence", "BUILD_RETRIEVAL_PLAN",
+            BuildRetrievalPlanStep.description,
+            step_cls=BuildRetrievalPlanStep,
+            input_schema=BuildRetrievalPlanStep.input_schema,
+        ),
+        WorkflowNodeType(
+            "workflow.artifact_retrieve", "Artifact Retrieve", "Intelligence", "ARTIFACT_RETRIEVE",
+            ArtifactRetrieveStep.description,
+            step_cls=ArtifactRetrieveStep,
+            input_schema=ArtifactRetrieveStep.input_schema,
+        ),
+        WorkflowNodeType(
+            "workflow.pack_artifact_context", "Pack Artifact Context", "Intelligence", "PACK_ARTIFACT_CONTEXT",
+            PackArtifactContextStep.description,
+            step_cls=PackArtifactContextStep,
+            input_schema=PackArtifactContextStep.input_schema,
+        ),
+        WorkflowNodeType(
+            "workflow.source_stage", "Source Stage", "Intelligence", "SOURCE_STAGE",
+            SourceStageStep.description,
+            step_cls=SourceStageStep,
+            input_schema=SourceStageStep.input_schema,
+        ),
+        WorkflowNodeType(
+            "workflow.citation_validate", "Validate Citations", "Intelligence", "CITATION_VALIDATE",
+            CitationValidateStep.description,
+            step_cls=CitationValidateStep,
+            input_schema=CitationValidateStep.input_schema,
+        ),
+        WorkflowNodeType(
+            "workflow.graph_enrich_validate", "Validate Graph Enrichment", "Intelligence", "GRAPH_ENRICH_VALIDATE",
+            GraphEnrichmentValidateStep.description,
+            step_cls=GraphEnrichmentValidateStep,
+            input_schema=GraphEnrichmentValidateStep.input_schema,
+        ),
+        WorkflowNodeType(
+            "workflow.deterministic_graph_analysis", "Deterministic Graph Analysis", "Intelligence", "DETERMINISTIC_GRAPH_ANALYSIS",
+            DeterministicGraphAnalysisStep.description,
+            step_cls=DeterministicGraphAnalysisStep,
+            input_schema=DeterministicGraphAnalysisStep.input_schema,
+        ),
+        WorkflowNodeType(
+            "workflow.analysis_output_write", "Write Analysis Result", "Intelligence", "ANALYSIS_OUTPUT_WRITE",
+            AnalysisOutputWriteStep.description,
+            step_cls=AnalysisOutputWriteStep,
+            input_schema=AnalysisOutputWriteStep.input_schema,
+        ),
+        WorkflowNodeType(
+            "workflow.artifact_write", "Write Knowledge Artifacts", "Intelligence", "ARTIFACT_WRITE",
+            ArtifactWriteStep.description,
+            step_cls=ArtifactWriteStep,
+            input_schema=ArtifactWriteStep.input_schema,
+            output_schema=ArtifactWriteStep.output_schema,
+        ),
+        WorkflowNodeType(
+            "workflow.relate", "Score Relations", "Intelligence", "RELATE",
+            RelateStep.description,
+            step_cls=RelateStep,
+            input_schema=RelateStep.input_schema,
+            output_schema=RelateStep.output_schema,
         ),
         WorkflowNodeType(
             "workflow.source_statistics", "Source Statistics", "Context", "SOURCE_STATISTICS",
@@ -291,6 +430,21 @@ def build_default_blueprint_node_type_registry() -> BlueprintNodeTypeRegistry:
             "Split a document into analysis chunks and run the extraction prompt on each. "
             "Chain after Analysis Contract.",
             step_cls=DocumentChunkStep,
+        ),
+        WorkflowNodeType(
+            "workflow.section_extract", "Section Extract", "Analysis", "SECTION_EXTRACT",
+            SectionExtractStep.description, step_cls=SectionExtractStep,
+            input_schema=SectionExtractStep.input_schema, output_schema=SectionExtractStep.output_schema,
+        ),
+        WorkflowNodeType(
+            "workflow.section_subgraph_merge", "Section Subgraph Merge", "Analysis", "SECTION_SUBGRAPH_MERGE",
+            SectionSubgraphMergeStep.description, step_cls=SectionSubgraphMergeStep,
+            input_schema=SectionSubgraphMergeStep.input_schema, output_schema=SectionSubgraphMergeStep.output_schema,
+        ),
+        WorkflowNodeType(
+            "workflow.section_synthesis_store", "Section Synthesis Store", "Analysis", "SECTION_SYNTHESIS_STORE",
+            SectionSynthesisStoreStep.description, step_cls=SectionSynthesisStoreStep,
+            input_schema=SectionSynthesisStoreStep.input_schema,
         ),
         WorkflowNodeType(
             "workflow.analysis_compact", "Analysis Compact", "Analysis", "ANALYSIS_COMPACT",

@@ -151,7 +151,7 @@ def scan_plugin_dirs() -> List[Dict]:
     Reads only class-level attributes from each plugin.py without calling any
     lifecycle methods.  Safe to call at any time.
 
-    Returns a list of dicts with keys: plugin_id, name, version, dir_name.
+    Returns class-level metadata without invoking plugin lifecycle methods.
     """
     plugins_dir = _plugins_dir()
     if not os.path.isdir(plugins_dir):
@@ -176,6 +176,8 @@ def scan_plugin_dirs() -> List[Dict]:
                 "name": getattr(cls, "name", entry),
                 "version": getattr(cls, "version", "?"),
                 "dir_name": entry,
+                "requires_internet": bool(getattr(cls, "requires_internet", False)),
+                "network_hosts": list(getattr(cls, "network_hosts", []) or []),
             })
         except Exception:
             results.append({"plugin_id": entry, "name": entry, "version": "?", "dir_name": entry})
@@ -223,7 +225,11 @@ def load_plugins(core: "PapyrusCore") -> List[PapyrusPlugin]:
     loaded: List[PapyrusPlugin] = []
 
     for instance in ordered:
-        api = PapyrusAPI(core, plugin_id=instance.plugin_id)
+        api = PapyrusAPI(
+            core,
+            plugin_id=instance.plugin_id,
+            network_hosts=getattr(instance, "network_hosts", ()) or (),
+        )
         try:
             # Primary lifecycle hook
             if hasattr(instance, "on_load") and callable(instance.on_load):
@@ -314,7 +320,11 @@ def reload_plugin(core: "PapyrusCore", plugin_id: str) -> bool:
         return False
 
     # 6. Re-run lifecycle
-    new_api = PapyrusAPI(core, plugin_id=plugin_id)
+    new_api = PapyrusAPI(
+        core,
+        plugin_id=plugin_id,
+        network_hosts=getattr(new_instance, "network_hosts", ()) or (),
+    )
     try:
         if hasattr(new_instance, "on_load") and callable(new_instance.on_load):
             new_instance.on_load(new_api)
@@ -413,7 +423,11 @@ def enable_plugin(core: "PapyrusCore", plugin_id: str) -> bool:
         PluginEnableRegistry.get_instance().disable(plugin_id)  # roll back
         return False
 
-    api = PapyrusAPI(core, plugin_id=plugin_id)
+    api = PapyrusAPI(
+        core,
+        plugin_id=plugin_id,
+        network_hosts=getattr(instance, "network_hosts", ()) or (),
+    )
     try:
         if hasattr(instance, "on_load") and callable(instance.on_load):
             instance.on_load(api)

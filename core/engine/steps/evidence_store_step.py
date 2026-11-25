@@ -30,6 +30,10 @@ class EvidenceStoreStep(BaseStep):
     input_schema = {
         "chunk_evidence": {"type": "string", "label": "Raw chunk evidence JSON from LLM"},
         "chunk_id": {"type": "integer", "label": "Chunk index (0-based)"},
+        "total_chunks": {"type": "integer", "label": "Total chunk count (optional)"},
+        "section_id": {"type": "string", "label": "Section identifier (optional; None if section-unaware)"},
+        "section_number": {"type": "integer", "label": "1-based section number (optional)"},
+        "total_sections": {"type": "integer", "label": "Total section count (optional)"},
     }
 
     def execute(self, context: StepContext, inputs: dict):
@@ -41,6 +45,12 @@ class EvidenceStoreStep(BaseStep):
         run_id = str(context.state.get("analysis_run_id") or "")
         doc_path = str(context.state.get("analysis_doc_path") or "")
         chunk_id = int(inputs.get("chunk_id") or 0)
+        total_chunks = _safe_int(inputs.get("total_chunks"))
+        if total_chunks is None:
+            total_chunks = _safe_int(context.state.get("analysis_total_chunks")) or 0
+        section_id = inputs.get("section_id")
+        section_number = _safe_int(inputs.get("section_number"))
+        total_sections = _safe_int(inputs.get("total_sections")) or 0
 
         # --- parse LLM output -----------------------------------------------
         raw = inputs.get("chunk_evidence") or ""
@@ -141,6 +151,9 @@ class EvidenceStoreStep(BaseStep):
                     result={
                         "chunk_id": chunk_id,
                         "chunk_number": chunk_id + 1,
+                        "total_chunks": total_chunks,
+                        "section_number": section_number,
+                        "total_sections": total_sections,
                         "compact_refs": compact_refs,
                         "doc_path": doc_path,
                     },
@@ -150,7 +163,13 @@ class EvidenceStoreStep(BaseStep):
 
         # Return a dict (not list) so FOREACH uses append, not extend
         return self.build_result(
-            {"chunk_id": chunk_id, "refs": compact_refs},
+            {
+                "chunk_id": chunk_id,
+                "refs": compact_refs,
+                "section_id": section_id,
+                "section_number": section_number,
+                "total_sections": total_sections,
+            },
             system_events=system_events,
         )
 

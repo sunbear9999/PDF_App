@@ -69,7 +69,12 @@ class PromptEditorDialog(QDialog):
 
         # View Mode Switcher
         self.view_mode_combo = QComboBox()
-        self.view_mode_combo.addItems(["📂 View by Category", "🗺️ View by Blueprint Pipeline", "📊 View by Analysis Mode"])
+        self.view_mode_combo.addItems([
+            "📂 View by Category",
+            "🗺️ View by Blueprint Pipeline",
+            "📊 View by Analysis Mode",
+            "🧩 View by Widget",
+        ])
         self.view_mode_combo.currentIndexChanged.connect(self._on_view_mode_changed)
         left_layout.addWidget(self.view_mode_combo)
 
@@ -188,9 +193,11 @@ class PromptEditorDialog(QDialog):
     def _on_view_mode_changed(self, index):
         is_blueprint_mode = (index == 1)
         self.blueprint_combo.setVisible(is_blueprint_mode)
+        # New/Delete buttons are only relevant in Category mode (index 0)
         for i in range(self.tree_btn_layout.count()):
             widget = self.tree_btn_layout.itemAt(i).widget()
-            if widget: widget.setVisible(not is_blueprint_mode)
+            if widget:
+                widget.setVisible(index == 0)
         self._populate_tree()
 
     def _load_blueprint_dropdown(self):
@@ -215,12 +222,15 @@ class PromptEditorDialog(QDialog):
         self.tree.blockSignals(True)
         self.tree.clear()
 
-        if self.view_mode_combo.currentIndex() == 0:
+        idx = self.view_mode_combo.currentIndex()
+        if idx == 0:
             self._populate_category_tree()
-        elif self.view_mode_combo.currentIndex() == 1:
+        elif idx == 1:
             self._populate_blueprint_tree()
-        else:
+        elif idx == 2:
             self._populate_analysis_mode_tree()
+        else:
+            self._populate_widget_tree()
 
         self.tree.blockSignals(False)
 
@@ -392,6 +402,56 @@ class PromptEditorDialog(QDialog):
             detail.setFlags(detail.flags() & ~Qt.ItemFlag.ItemIsSelectable)
             detail = QTreeWidgetItem(mode_node, [f"Relations: {', '.join(row['relation_types']) or 'registry defaults'}"])
             detail.setFlags(detail.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+
+    def _populate_widget_tree(self):
+        """'By Widget' view — groups prompts under their widget type."""
+        from core.registries.ai_widget_registry import AIWidgetRegistry
+        registry = AIWidgetRegistry.get_instance()
+        by_cat = registry.by_category()
+
+        if not by_cat:
+            empty = QTreeWidgetItem(self.tree, ["No widgets registered"])
+            empty.setFlags(empty.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            return
+
+        # Also include the Inline Citation Directive under a shared section
+        _added_keys: set = set()
+
+        for category, defns in by_cat.items():
+            cat_item = QTreeWidgetItem(self.tree, [f"── {category} ──"])
+            cat_item.setFlags(cat_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            cat_item.setExpanded(True)
+
+            for defn in defns:
+                widget_item = QTreeWidgetItem(cat_item, [f"{defn.icon}  {defn.label}"])
+                widget_item.setFlags(widget_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+                widget_item.setExpanded(True)
+
+                if defn.description:
+                    desc_item = QTreeWidgetItem(widget_item, [f"ℹ️  {defn.description}"])
+                    desc_item.setFlags(desc_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+                    desc_item.setForeground(0, Qt.GlobalColor.gray)
+
+                if defn.prompt_key:
+                    prompt_item = QTreeWidgetItem(widget_item, [f"📝  {defn.prompt_key}"])
+                    prompt_item.setData(0, Qt.ItemDataRole.UserRole, defn.prompt_key)
+                    _added_keys.add(defn.prompt_key)
+
+                    if defn.auto_citations:
+                        cite_item = QTreeWidgetItem(widget_item, ["⚡  Inline Citation Directive (auto-injected when RAG present)"])
+                        cite_item.setData(0, Qt.ItemDataRole.UserRole, "Inline Citation Directive")
+                        cite_item.setForeground(0, Qt.GlobalColor.yellow)
+
+        # Any Widget Output Formats prompts not yet shown (e.g. Inline Citation Directive alone)
+        widget_category = self.prompt_manager.CATEGORIES.get("Widget Output Formats", [])
+        remaining = [k for k in widget_category if k not in _added_keys]
+        if remaining:
+            extra_item = QTreeWidgetItem(self.tree, ["── Shared ──"])
+            extra_item.setFlags(extra_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            extra_item.setExpanded(True)
+            for key in remaining:
+                prompt_item = QTreeWidgetItem(extra_item, [key])
+                prompt_item.setData(0, Qt.ItemDataRole.UserRole, key)
 
     def _on_item_selected(self):
         selected = self.tree.selectedItems()

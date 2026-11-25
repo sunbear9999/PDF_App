@@ -932,7 +932,9 @@ class _ThemeManager(QObject):
                 border: 1px solid {t['border']}; background: {t['bg_main']};
             }}
         """
-        app.setStyleSheet(style)
+        from gui.theme.app_palette import base_rules, build_palette
+        app.setPalette(build_palette(t))
+        app.setStyleSheet(base_rules(t) + style)
 
 
 # ---------------------------------------------------------------------------

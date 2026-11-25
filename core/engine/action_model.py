@@ -15,11 +15,15 @@ class ActionStep:
     output_key: str = "result"
     
     model: str = "{selected_model}"
+    model_role: Optional[str] = None
     required_model_capabilities: List[str] = field(default_factory=list)
     required_prompt_keys: List[str] = field(default_factory=list)
     prompt_key: Optional[str] = None          
     system_prompt: Optional[str] = None       
     llm_options: Dict[str, Any] = field(default_factory=dict)
+    # Step-scoped transport retries. Keep this separate from provider/model
+    # options so settings services never forward it to an LLM backend.
+    llm_retry_attempts: int = 0
     
     permissions: List[str] = field(default_factory=lambda: ["all"])
     output_mode: str = "workspace_update" 
@@ -28,14 +32,20 @@ class ActionStep:
     ui_target: str = "floating" 
     ui_title: str = "AI Result"
     status_text: str = "Processing..."
+    conversation_role: Optional[str] = None
+    show_reasoning: bool = False
     inline_citations: bool = False
     citation_source_key: Optional[str] = None
     # Manifest mutations must run in a dedicated silent step so protocol data
     # can never leak into a user-visible answer stream.
     allow_manifest_updates: bool = False
+    # ``tagged`` preserves existing/custom blueprint behavior. ``structured``
+    # uses the step output schema and gives the router an explicit result.
+    manifest_update_protocol: str = "tagged"
     
     html_template: Optional[str] = None
     output_schema: Optional[Dict[str, Any]] = None
+    output_schema_prompt_key: str = "JSON Schema Enforcer"
     workspace_filters: List[str] = field(default_factory=lambda: ["text", "color", "edges", "layout"])
     required_context: List[str] = field(default_factory=list)
 
@@ -50,6 +60,7 @@ class WorkflowBlueprint:
     active_contexts: List[str] = field(default_factory=list)
     expected_inputs: List[Dict[str, Any]] = field(default_factory=list) 
     steps: List[ActionStep] = field(default_factory=list)
+    requires_model_setup: bool = True
 
     @classmethod
     def from_dict(cls, data: dict):
@@ -72,7 +83,8 @@ class WorkflowBlueprint:
             mount_points=data.get('mount_points', ["custom_tools_tab"]),
             active_contexts=data.get('active_contexts', []),
             expected_inputs=data.get('expected_inputs', []),
-            steps=steps
+            steps=steps,
+            requires_model_setup=data.get('requires_model_setup', True)
         )
 
 

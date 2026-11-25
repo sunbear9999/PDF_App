@@ -64,6 +64,20 @@ class GraphDB(BaseDB):
         cursor.execute("SELECT id, entity_type, origin_id, properties, state FROM entities WHERE entity_type = ?", (entity_type,))
         return [self._entity_from_row(row) for row in cursor.fetchall()]
 
+    def query_saved_discoveries(self, *, after_id='', limit=25):
+        """Preserve explicitly saved legacy discovery entities without eager type scans."""
+        if type(limit) is not int or not 1 <= limit <= 50:
+            raise ValueError('Choose between 1 and 50 saved discoveries.')
+        if not self._conn:
+            return []
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_discovery_inbox ON entities(id) WHERE json_extract(state,'$.origin')='deterministic'")
+        rows = self._conn.execute("SELECT id,entity_type,origin_id,properties,state FROM entities "
+            "WHERE id>? AND json_extract(state,'$.origin')='deterministic' "
+            "AND entity_type NOT IN (?,?) AND NOT (entity_type=? AND COALESCE(json_extract(properties,'$.path'),'')!='' "
+            "AND COALESCE(json_extract(properties,'$.citation_key'),'')='') ORDER BY id LIMIT ?",
+            (after_id, EntityType.QUOTE.value, EntityType.EVIDENCE.value, EntityType.SOURCE.value, limit)).fetchall()
+        return [self._entity_from_row(row) for row in rows]
+
     def ensure_source_entity(self, pdf_path: str, properties: Optional[Dict] = None, commit: bool = True) -> Optional[EntityModel]:
         if not pdf_path:
             return None

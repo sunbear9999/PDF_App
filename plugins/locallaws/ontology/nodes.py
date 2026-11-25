@@ -163,6 +163,23 @@ class PolicyNode(BaseOntologyNodePlugin):
     default_properties = {"text": "", "policy_area": "institutional"}
 
 
+class CourtCaseNode(BaseOntologyNodePlugin):
+    type_key = "law.court_case"
+    display_name = "Court Case"
+    description = "A cited court case or precedent extracted from legal text."
+    requires_source = False
+    plugin_id: Optional[str] = None
+    visual_style = VisualStyleDefinition("#1565c0")
+    fields: List[FieldDefinition] = [
+        FieldDefinition("name", "Case Name", "string", ""),
+        FieldDefinition("citation", "Reporter Citation", "string", ""),
+        FieldDefinition("court_year", "Court / Year", "string", ""),
+        FieldDefinition("description", "Notes", "string", ""),
+    ]
+    default_properties = {"name": "", "citation": "", "court_year": "", "description": ""}
+    default_state = {"is_verified": True, "ai_generated": False}
+
+
 ALL_NODE_TYPES = [
     IssueNode,
     HoldingNode,
@@ -173,4 +190,5 @@ ALL_NODE_TYPES = [
     StatuteNode,
     ReasoningNode,
     PolicyNode,
+    CourtCaseNode,
 ]

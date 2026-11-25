@@ -105,7 +105,7 @@ class UIEventCoordinator(QObject):
         w = self._w
         if hasattr(w, "doc_explorer") and hasattr(w.doc_explorer, "refresh_list"):
             try:
-                w.doc_explorer.refresh_list()
+                getattr(w.doc_explorer, "schedule_refresh", w.doc_explorer.refresh_list)()
             except RuntimeError:
                 pass
 
@@ -119,12 +119,8 @@ class UIEventCoordinator(QObject):
             except RuntimeError:
                 pass
         w.current_file_path = None
-        # Refresh doc explorer
-        if hasattr(w, "doc_explorer") and hasattr(w.doc_explorer, "refresh_list"):
-            try:
-                w.doc_explorer.refresh_list()
-            except RuntimeError:
-                pass
+        # DocumentExplorer clears/reloads itself on project_loaded. Rebuilding
+        # the old project's full tree here made project startup do the work twice.
 
     def _on_project_saved(self, event, payload) -> None:
         if hasattr(self._w, "_show_save_indicator"):

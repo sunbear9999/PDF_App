@@ -9,13 +9,16 @@ from PySide6.QtCore import Qt, QSettings, QTimer
 
 from core.engine.ui_router import BlueprintUIRouter
 from gui.components.source_viewer_host import SourceViewerHost
+from gui.components.source_viewer_builtins import register_builtin_source_viewers
 from gui.components.process_monitor import ProcessMonitorWidget
 from gui.theme.theme import ThemeManager
 from gui.components.dialogs.prompt_editor_dialog import PromptEditorDialog
 from gui.components.dialogs.tag_manager_dialog import TagManagerDialog
 from gui.components.universal_overlay import UniversalInternalOverlay
+from gui.managers.knowledge_review_controller import KnowledgeReviewController
 from gui.managers.layout_manager import LayoutManager
 from gui.components.main_toolbar import MainToolbar
+from gui.components.pdf_anchor_navigation import show_pdf_anchor
 from core.events.domains.project_events import ProjectIntent, ProjectPayload
 class MainWindow(QMainWindow):
     # ADD `core` to the signature
@@ -43,7 +46,7 @@ class MainWindow(QMainWindow):
         self.workflow_node_type_registry = core.workflow_node_type_registry
         self.dictionary_manager = core.dictionary_manager
         self.citation_manager = core.citation_manager
-        self.active_ai_model = self._load_active_ai_model()
+        self.active_ai_model = ""
 
         self.workspace_ai_tools_registry = core.workspace_ai_tools_registry
         self.workspace_node_type_registry = core.workspace_node_type_registry
@@ -70,7 +73,11 @@ class MainWindow(QMainWindow):
         # 3. Initialize GUI-dependent services locally
         from core.services.gui_bridge.workspace_annotation_service import WorkspaceAnnotationService
         from core.services.gui_bridge.workspace_ai_service import WorkspaceAIService
-        self.workspace_annotation_service = WorkspaceAnnotationService(self, self.bus)
+        from gui.components.dialogs.reference_note_dialog import open_reference_note
+        from gui.components.dialogs.linked_note_dialog import open_linked_note, open_linked_notes
+        self.workspace_annotation_service = WorkspaceAnnotationService(self, self.bus,
+            reference_note_opener=lambda reference, body, **kwargs: open_reference_note(self.app_context, reference, body, **kwargs),
+            linked_note_manager=lambda identity: (open_linked_notes(self.app_context, identity, parent=self) if isinstance(identity, (list, tuple)) else open_linked_note(self.app_context, identity, parent=self)))
         self.workspace_ai_service = WorkspaceAIService(
             self, self.workspace_service, self.workspace_graph_service,
             self.workspace_annotation_service, self.workspace_ai_tools_registry,
@@ -84,7 +91,9 @@ class MainWindow(QMainWindow):
         from core.services.gui_bridge.ai_bootstrap_service import AIBootstrapService
         self.ai_bootstrap_service = AIBootstrapService(self)
 
+        register_builtin_source_viewers(self.app_context)
         self.viewer = SourceViewerHost(app_context=self.app_context)
+        self._register_builtin_locate_handlers()
 
 
         # 3. CONFIGURE DOCKS
@@ -148,6 +157,7 @@ class MainWindow(QMainWindow):
         self.app_context.theme_manager = self.theme_manager
         self.app_context.viewer = self.viewer
         self.app_context.dialog_manager = self.dialog_manager
+        self.knowledge_review_controller = KnowledgeReviewController(self.app_context,self)
         self.app_context.dock_manager = self.dock_manager
         self.app_context.workspace_annotation_service = self.workspace_annotation_service
         self.app_context.workspace_ai_service = self.workspace_ai_service
@@ -160,8 +170,18 @@ class MainWindow(QMainWindow):
         # Register any AI renderers contributed by plugins
         if self.app_context.plugin_extension_registry:
             from gui.components.base.ai_output_factory import AIOutputWidgetFactory
+            from gui.theme.plugin_widgets import prepare_plugin_widget
             for payload_type, spec in self.app_context.plugin_extension_registry.get_ai_renderers().items():
-                AIOutputWidgetFactory.register(payload_type, spec.factory)
+                def themed_factory(
+                    payload, parent=None, *, _factory=spec.factory,
+                    _plugin_id=spec.plugin_id,
+                ):
+                    widget = _factory(payload, parent)
+                    return prepare_plugin_widget(
+                        widget, _plugin_id, self.theme_manager.get_theme()
+                    )
+
+                AIOutputWidgetFactory.register(payload_type, themed_factory)
 
         # Register any themes contributed by plugins
         if self.app_context.plugin_extension_registry:
@@ -173,6 +193,12 @@ class MainWindow(QMainWindow):
         # Wire UIEventCoordinator (replaces direct bus connections from MainWindow)
         from gui.managers.ui_event_coordinator import UIEventCoordinator
         self._ui_coordinator = UIEventCoordinator(self, self.app_context, parent=self)
+        from gui.managers.ocr_prompt_coordinator import OcrPromptCoordinator
+        self._ocr_prompt_coordinator = OcrPromptCoordinator(self.app_context, self, parent=self)
+        from gui.managers.memory_consumer_bridge import MemoryConsumerBridge
+        from gui.managers.ui_stall_monitor import UiStallMonitor
+        self._memory_bridge = MemoryConsumerBridge(getattr(core, "memory_manager_service", None), parent=self)
+        self._stall_monitor = UiStallMonitor(core.user_data_dir, parent=self)
 
         # Wire GUI-dependent pieces into the services that now live in PapyrusCore
         self.workflow_runner_service = core.workflow_runner_service
@@ -225,6 +251,8 @@ class MainWindow(QMainWindow):
             )
         self.app_context.action_registry = self._action_registry
         self.app_context.context_menu_registry = self._context_menu_registry
+        from gui.components.dialogs.memory_tab import register_memory_actions
+        register_memory_actions(self.app_context, self)
 
         # Toast notifications for api.notify()
         from gui.components.toast_manager import ToastManager
@@ -263,6 +291,108 @@ class MainWindow(QMainWindow):
             self,
         )
 
+
+    def _register_builtin_locate_handlers(self) -> None:
+        """
+        Register the built-in "jump to source" handlers for pdf/video/audio
+        so plugin_extension_registry.get_citation_source_handler(source_type)
+        always resolves for the built-in formats — the single dispatch point
+        used by SourceViewerHost.jump_to_source, the citation dock, and note
+        bubbles (see chat_streamer.py::add_bubble). Registered here (not in
+        core/papyrus_core.py) because the callback needs a live reference to
+        self.viewer, and core must never import/depend on gui.
+
+        Closing over self.viewer directly is simpler than threading a viewer
+        reference through AppContext.
+        """
+        registry = getattr(self.app_context, "plugin_extension_registry", None)
+        if registry is None:
+            return
+        from core.plugins.extension_registry import CitationSourceHandlerSpec
+
+        def _pdf_locate(locator: dict, ctx) -> None:
+            viewer = self.viewer
+            if viewer is None:
+                return
+            pdf_viewer = getattr(viewer, "pdf_viewer", viewer)
+            anchor = locator.get("anchor") or {}
+            if anchor.get("navigable") and locator.get("path"):
+                # Resolved anchor: open by source path and highlight the exact
+                # recorded occurrence; never fall back to text search.
+                show_pdf_anchor(pdf_viewer, locator["path"], anchor.get("spans") or [])
+                return
+            if not locator.get("legacy_search") and hasattr(viewer, "jump_to_source"):
+                # Free-text quote (e.g. a chat citation): resolve it to a
+                # recorded passage first; the host falls back to search.
+                viewer.jump_to_source(locator.get("doc_name", ""), locator.get("quote", ""))
+            elif hasattr(pdf_viewer, "jump_to_source"):
+                # Host fallback: fuzzy search directly on the PDF viewer
+                # (never back through the host, which would recurse).
+                pdf_viewer.jump_to_source(locator.get("doc_name", ""), locator.get("quote", ""))
+
+        def _video_locate(locator: dict, ctx) -> None:
+            viewer = self.viewer
+            if viewer is None:
+                return
+            source_id = locator.get("source_id")
+            path = locator.get("path")
+            spans = (locator.get("anchor") or {}).get("spans") or []
+            timestamp = next(
+                (span["time_start"] for span in spans if span.get("time_start") is not None),
+                None,
+            )
+            if timestamp is None:
+                timestamp = self._timestamp_for_video_quote(source_id, locator.get("quote", ""))
+            if hasattr(viewer, "jump_to_video"):
+                viewer.jump_to_video(source_id=source_id, path=path, timestamp=timestamp)
+
+        if registry.get_citation_source_handler("pdf") is None:
+            registry.add_citation_source_handler(
+                CitationSourceHandlerSpec(source_type="pdf", callback=_pdf_locate)
+            )
+        if registry.get_citation_source_handler("video") is None:
+            registry.add_citation_source_handler(
+                CitationSourceHandlerSpec(source_type="video", callback=_video_locate)
+            )
+        if registry.get_citation_source_handler("audio") is None:
+            registry.add_citation_source_handler(
+                CitationSourceHandlerSpec(source_type="audio", callback=_video_locate)
+            )
+
+        def _image_locate(locator: dict, ctx) -> None:
+            viewer = self.viewer
+            image_viewer = getattr(viewer, "_viewers", {}).get("image") if viewer else None
+            if image_viewer is not None and hasattr(image_viewer, "jump_to_source"):
+                image_viewer.jump_to_source(locator.get("doc_name", ""), locator.get("quote", ""))
+
+        if registry.get_citation_source_handler("image") is None:
+            registry.add_citation_source_handler(
+                CitationSourceHandlerSpec(source_type="image", callback=_image_locate)
+            )
+
+    def _timestamp_for_video_quote(self, source_id, quote):
+        """
+        Match a quoted passage against a video/audio transcript to find its
+        timestamp. Relocated verbatim from the old
+        SourceViewerHost._timestamp_for_video_quote — same substring-match
+        algorithm, just invoked via the handler registry now.
+        """
+        pm = getattr(self.app_context, "project_manager", None)
+        transcript = pm.get_video_transcript(source_id) if pm and source_id and hasattr(pm, "get_video_transcript") else {}
+        needle = " ".join((quote or "").lower().split())
+        if not needle:
+            return 0
+        for segment in transcript.get("segments", []) or []:
+            text = " ".join(str(segment.get("text", "")).lower().split())
+            if needle in text or text in needle:
+                return float(segment.get("start", 0) or 0)
+        words = needle.split()
+        if len(words) > 6:
+            partial = " ".join(words[:6])
+            for segment in transcript.get("segments", []) or []:
+                if partial in " ".join(str(segment.get("text", "")).lower().split()):
+                    return float(segment.get("start", 0) or 0)
+        return 0
 
     def _register_help_targets(self) -> None:
         """Register stable UITargetRegistry targets for key UI regions."""
@@ -309,12 +439,17 @@ class MainWindow(QMainWindow):
             lambda: next(iter(dm.get_inner_widgets("workspaces")), None),
             topic_id="core.workspace.overview",
         )
+        reg.register_resolver(
+            "dock.intelligence",
+            lambda: next(iter(dm.get_inner_widgets("intelligence")), None),
+            topic_id="core.intelligence.artifact_review",
+        )
 
         # Analysis tab inner widgets (exist once the research dock is open)
         reg.register_resolver(
             "analysis.run_button",
             lambda: getattr(getattr(_research(), "tab_analysis", None), "btn_run", None),
-            topic_id="core.analysis.overview",
+            topic_id="core.analysis.intelligence_graphs",
         )
         reg.register_resolver(
             "analysis.template_selector",
@@ -355,24 +490,27 @@ class MainWindow(QMainWindow):
         return None
 
     def _get_active_ai_model(self):
-        if getattr(self, "active_ai_model", None):
-            return self.active_ai_model
+        role_svc = getattr(self.core, "model_role_service", None)
+        if role_svc:
+            try:
+                model = role_svc.resolve_role("main_answer_model")
+                if model:
+                    return model
+            except Exception:
+                pass
+        ai_setup = getattr(self.core, "ai_setup_service", None)
+        if ai_setup:
+            try:
+                model = ai_setup.get_default_chat_model()
+                if model:
+                    return model
+            except Exception:
+                pass
         models = self.shared_llm_manager.get_available_models() or []
         return models[0] if models else ""
 
     def _load_active_ai_model(self):
-        try:
-            settings = json.loads(self.project_manager.get_metadata("global_ai_settings", "{}"))
-            model = settings.get("selected_model") or settings.get("active_model")
-            if model:
-                return model
-        except Exception:
-            pass
-        models = self.shared_llm_manager.get_available_models() or []
-        preferred = "gemma4:e2b"
-        if preferred in models:
-            return preferred
-        return models[0] if models else preferred
+        return self._get_active_ai_model()
 
     def _run_startup_sequence(self):
         settings = QSettings("PDFMultitool", "Workspace")
@@ -612,6 +750,27 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'autosave_timer') and self.autosave_timer.isActive():
             self.autosave_timer.stop()
 
+        if hasattr(self, 'dock_manager') and self.dock_manager:
+            self.dock_manager.shutdown_all()
+
+        if hasattr(self, 'process_registry') and self.process_registry:
+            # Snapshot running runner threads before kill_all() clears the job lists,
+            # then bound-wait each so no QThread is destroyed mid-run on exit.
+            registry = self.process_registry
+            jobs = list(registry.express_jobs) + list(registry.pending_queue)
+            if registry.active_job:
+                jobs.append(registry.active_job)
+            runners = [job.runner for job in jobs if getattr(job, "runner", None)]
+            registry.kill_all()
+            for runner in runners:
+                if runner.isRunning() and not runner.wait(3000):
+                    runner.terminate()
+
+        if hasattr(self, "_stall_monitor"):
+            self._stall_monitor.stop()
+        memory = getattr(self.core, "memory_manager_service", None)
+        if memory is not None:
+            memory.shutdown()   # unloads the models Papyrus loaded, before the provider stops
         if hasattr(self, 'shared_llm_manager'):
             self.shared_llm_manager.shutdown()
 

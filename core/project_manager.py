@@ -2,6 +2,7 @@
 import sqlite3
 import json
 import os
+import threading
 import shutil
 import tempfile
 import fitz
@@ -21,8 +22,14 @@ from core.db.graph_db import GraphDB
 from core.db.data_dock_db import DataDockDB
 from core.db.media_asset_db import MediaAssetDB
 from core.db.evidence_db import EvidenceDB
+from core.db.extraction_db import ExtractionDB
+from core.db.intelligence_db import IntelligenceDB
+from core.db import source_records
 from core.events.event_bus import EventBus
 from core.events.domains.document_events import DocumentEvent, DocumentEventPayload
+
+# Estimated memory of one open PDF handle (object tables, page cache).
+OPEN_DOC_BYTES_CAP = 48 * 1024 * 1024
 
 class ProjectManager:
     def __init__(self, max_cache_size=5):
@@ -32,10 +39,16 @@ class ProjectManager:
         self.sources = []
 
         self.open_docs = {}
+        self._document_owner_thread = threading.get_ident()
         self.dirty_docs = set()
         self.max_cache_size = max_cache_size
         self.active_file = None
         self._conn = None
+        # Serializes every statement on the shared project connection and makes
+        # the close/reopen swap in init_database() and save_project() atomic
+        # against in-flight background-worker queries.
+        self.db_lock = threading.RLock()
+        self._source_format_registry = None
         # Set by the GUI layer to stop the viewer before saving the active PDF.
         self._halt_viewer_callback = None
 
@@ -57,6 +70,8 @@ class ProjectManager:
         self.db_data_dock = DataDockDB(self)
         self.db_media_assets = MediaAssetDB(self)
         self.db_evidence = EvidenceDB(self)
+        self.db_extraction = ExtractionDB(self)
+        self.db_intelligence = IntelligenceDB(self)
 
         self.db_docs.ensure_default_templates()
 
@@ -183,27 +198,24 @@ class ProjectManager:
 
     def save_project(self):
         if not self._conn or not self.project_filepath: return
-        tmp_db = None
+        # Serialize the checkpoint with writes while retaining cursor identity.
+        with self.db_lock:
+            self._save_project_locked()
+
+    def _save_project_locked(self):
+        """Persist without closing the shared connection.
+
+        Statements are autocommitted in WAL mode, so data is already durable;
+        saving folds the write-ahead log into the project file. The previous
+        backup → close → swap → reopen invalidated cursors that long-running
+        stages (embeddings over a 400-page book) were still reading:
+        "Cannot operate on a closed database".
+        """
         try:
             self._conn.commit()
-            tmp_db = self._create_closed_temp_path(self.project_filepath, suffix=".tmp")
-            tmp_conn = sqlite3.connect(tmp_db)
-            try:
-                self._conn.backup(tmp_conn)
-                tmp_conn.commit()
-            finally:
-                tmp_conn.close()
-
-            self._conn.close()
-            self._conn = None
-            self._safe_swap_file(tmp_db, self.project_filepath)
-            tmp_db = None
-
-            self.db_schema.init_database()
+            self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
         except Exception as e:
-            print(f"Error saving project safely: {e}")
-            if tmp_db and os.path.exists(tmp_db):
-                os.remove(tmp_db)
+            print(f"Error saving project: {e}")
 
     def _safe_swap_file(self, tmp_file, original_file):
         try:
@@ -225,7 +237,16 @@ class ProjectManager:
         tf.close()
         return temp_path
 
+    def set_source_format_registry(self, registry) -> None:
+        self._source_format_registry = registry
+
     def detect_source_type(self, path):
+        if self._source_format_registry is not None:
+            detected = self._source_format_registry.detect_source_type(path)
+            if detected != "unknown":
+                return detected
+        # Legacy fallback (no registry wired — e.g. a headless ProjectManager()
+        # constructed directly in an older test without PapyrusCore).
         ext = os.path.splitext(path or "")[1].lower()
         if ext == ".pdf":
             return "pdf"
@@ -234,7 +255,7 @@ class ProjectManager:
         mime = self._guess_mime_type(path)
         if mime.startswith("video/"):
             return "video"
-        return "pdf"
+        return "unknown"
 
     def _guess_mime_type(self, path):
         return mimetypes.guess_type(path or "")[0] or ""
@@ -275,7 +296,13 @@ class ProjectManager:
     def _migrate_pdfs_to_sources(self):
         if not self._conn:
             return
-        for path in list(self.pdfs or []):
+        existing = {
+            row[0] for row in self._conn.execute("SELECT path FROM sources").fetchall()
+        }
+        missing = [path for path in list(self.pdfs or []) if path not in existing]
+        if not missing:
+            return
+        for path in missing:
             self._upsert_source_row(path, "pdf", commit=False)
             self.db_graph.ensure_source_entity(path, properties={"source_type": "pdf"}, commit=False)
         self._conn.commit()
@@ -312,7 +339,19 @@ class ProjectManager:
             return []
 
     def get_source_record_by_path(self, path):
-        return next((s for s in self.list_sources(include_removed=True) if s.get("path") == path), None)
+        return source_records.by_path(self._conn, path)
+
+    def get_source_records(self, source_ids):
+        return source_records.by_ids(self._conn, source_ids)
+
+    def query_source_records(self, after_id='', limit=1):
+        return source_records.page(self._conn, after_id, limit)
+
+    def query_tags(self, limit=200):
+        return self.db_tags.query_tags(limit)
+
+    def get_source_record(self, source_id):
+        return self.get_source_records([source_id]).get(source_id)
 
     def get_source_type(self, path):
         rec = self.get_source_record_by_path(path)
@@ -416,7 +455,9 @@ class ProjectManager:
         source_type = source_type or self.detect_source_type(path)
         if source_type == "pdf" and path not in self.pdfs:
             self.pdfs.append(path)
-        elif source_type == "video" and path in {s.get("path") for s in self.list_sources()}:
+        elif source_type != "pdf" and path in {s.get("path") for s in self.list_sources()}:
+            # Already-tracked non-PDF source (video/audio/docx/csv/...) — skip
+            # re-adding. PDF's own duplicate check is the branch above.
             return False
         elif source_type == "pdf" and path in {s.get("path") for s in self.list_sources()}:
             return False
@@ -443,7 +484,11 @@ class ProjectManager:
 
     def remove_source(self, pdf_path):
         source = self.get_source_entity_by_path(pdf_path) if self._conn else None
-        source_type = self.get_source_type(pdf_path)
+        self.prepare_source_removal(pdf_path)
+        return self.remove_source_data(pdf_path, source.id if source else None)
+
+    def prepare_source_removal(self, pdf_path):
+        """Release viewer/native resources on the UI thread before DB cleanup."""
         self._halt_viewer_if_active(pdf_path)
         if pdf_path in self.open_docs:
             doc = self.open_docs.pop(pdf_path)
@@ -454,25 +499,31 @@ class ProjectManager:
         if pdf_path in self.pdfs:
             self.pdfs.remove(pdf_path)
 
-        if self._conn:
+        if self.active_file == pdf_path:
+            self.active_file = None
+
+    def remove_source_data(self, pdf_path, source_id=None):
+        """Delete persisted source data. Safe to call from a background worker."""
+        if not self._conn:
+            return False
+
+        with self.db_lock:
             try:
                 cursor = self._conn.cursor()
                 cursor.execute("BEGIN TRANSACTION")
                 cursor.execute("DELETE FROM pdfs WHERE path = ?", (pdf_path,))
                 cursor.execute("DELETE FROM sources WHERE path = ?", (pdf_path,))
-                if source:
-                    cursor.execute("DELETE FROM video_transcripts WHERE source_id = ?", (source.id,))
+                if source_id:
+                    cursor.execute("DELETE FROM video_transcripts WHERE source_id = ?", (source_id,))
                 cursor.execute("DELETE FROM highlights WHERE doc_id = ?", (pdf_path,))
                 cursor.execute("DELETE FROM nodes WHERE pdf_path = ?", (pdf_path,))
                 cursor.execute("DELETE FROM citations WHERE doc_id = ?", (pdf_path,))
                 self.db_graph.remove_source_entity(pdf_path, purge=False, commit=False)
                 self._conn.commit()
-            except sqlite3.Error as e:
+            except sqlite3.Error as exc:
                 self._conn.rollback()
-                print(f"Error removing PDF from DB: {e}")
-
-        if self.active_file == pdf_path:
-            self.active_file = None
+                print(f"Error removing source from DB: {exc}")
+                return False
         self.sources = self.list_sources()
         return True
 
@@ -529,6 +580,45 @@ class ProjectManager:
         self.sources = self.list_sources()
         return True
 
+    def relink_source(self, old_path, new_path):
+        """Update source references after project-owned files are copied elsewhere."""
+        if not self._conn or not old_path or not new_path or not os.path.exists(new_path):
+            return False
+        try:
+            cursor = self._conn.cursor()
+            cursor.execute("BEGIN TRANSACTION")
+            for table, column in (
+                ("pdfs", "path"),
+                ("sources", "path"),
+                ("highlights", "doc_id"),
+                ("nodes", "pdf_path"),
+                ("doc_tags", "doc_id"),
+                ("citations", "doc_id"),
+                ("extraction_blocks", "doc_id"),
+                ("extraction_results", "doc_id"),
+                ("extraction_citation_index", "doc_id"),
+            ):
+                cursor.execute(
+                    f"UPDATE {table} SET {column} = ? WHERE {column} = ?",
+                    (new_path, old_path),
+                )
+            cursor.execute(
+                "UPDATE sources SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE path = ?",
+                (os.path.basename(new_path), new_path),
+            )
+            self.db_graph.rename_source_entity(old_path, new_path, commit=False)
+            self._conn.commit()
+        except sqlite3.Error as exc:
+            self._conn.rollback()
+            print(f"Error relinking managed source: {exc}")
+            return False
+        if old_path in self.pdfs:
+            self.pdfs[self.pdfs.index(old_path)] = new_path
+        if self.active_file == old_path:
+            self.active_file = new_path
+        self.sources = self.list_sources()
+        return True
+
     # ---------------------------------------------------------
     # PDF Cache Management
     # ---------------------------------------------------------
@@ -550,6 +640,8 @@ class ProjectManager:
             print(f"Error clearing cache: {e}")
 
     def get_doc(self, filepath):
+        if threading.get_ident() != self._document_owner_thread:
+            raise RuntimeError('Cached PDF handles belong to the project owner thread. Open an independent read-only handle in workers.')
         try:
             if filepath in self.open_docs:
                 doc = self.open_docs.pop(filepath)
@@ -561,6 +653,17 @@ class ProjectManager:
         except Exception as e:
             print(f"Failed to open document {filepath}: {e}")
             return None
+
+    def open_docs_bytes(self) -> int:
+        """Rough memory held by cached PDF handles. PyMuPDF reads pages lazily,
+        so a handle holds far less than the file; cap the per-file estimate."""
+        total = 0
+        for path in list(self.open_docs):
+            try:
+                total += min(os.path.getsize(path), OPEN_DOC_BYTES_CAP)
+            except OSError:
+                continue
+        return total
 
     def _evict_old_docs(self):
         try:
@@ -647,6 +750,7 @@ class ProjectManager:
     # --- Global Graph ---
     def upsert_entity(self, entity): return self.db_graph.upsert_entity(entity)
     def get_entity(self, entity_id): return self.db_graph.get_entity(entity_id)
+    def query_saved_discoveries(self, **query): return self.db_graph.query_saved_discoveries(**query)
     def get_entities_by_type(self, entity_type): return self.db_graph.get_entities_by_type(entity_type)
     def get_unverified_entities(self, limit=None, entity_type=None, offset=0): return self.db_graph.get_unverified_entities(limit=limit, entity_type=entity_type, offset=offset)
     def delete_entity(self, entity_id): return self.db_graph.delete_entity(entity_id)
@@ -684,13 +788,15 @@ class ProjectManager:
     def get_media_asset(self, asset_id): return self.db_media_assets.get(asset_id)
 
     # --- Annotations ---
-    def upsert_highlight(self, highlight_data): return self.db_annotations.upsert_highlight(highlight_data)
+    def upsert_highlight(self, highlight_data, *, commit=True): return self.db_annotations.upsert_highlight(highlight_data, commit=commit)
     def get_highlights(self): return self.db_annotations.get_highlights()
     def get_highlight(self, highlight_id): return self.db_annotations.get_highlight(highlight_id)
+    def query_highlights(self, source_path, **filters): return self.db_annotations.query_highlights(source_path, **filters)
+    def iter_highlights(self, source_path, **filters): return self.db_annotations.iter_highlights(source_path, **filters)
     def get_unused_highlights(self, workspace_id): return self.db_annotations.get_unused_highlights(workspace_id)
     def delete_highlight_record(self, highlight_id): return self.db_annotations.delete_highlight_record(highlight_id)
     def update_highlight_text(self, highlight_id, new_text): return self.db_annotations.update_highlight_text(highlight_id, new_text)
-    def update_highlight_note(self, highlight_id, new_text): return self.db_annotations.update_highlight_note(highlight_id, new_text)
+    def update_highlight_note(self, highlight_id, new_text, *, commit=True): return self.db_annotations.update_highlight_note(highlight_id, new_text, commit=commit)
     def update_highlight_color(self, highlight_id, hex_color): return self.db_annotations.update_highlight_color(highlight_id, hex_color)
 
     # --- Tags ---
@@ -698,18 +804,25 @@ class ProjectManager:
     def delete_tag(self, tag_id): return self.db_tags.delete_tag(tag_id)
     def rename_tag(self, tag_id, new_name): return self.db_tags.rename_tag(tag_id, new_name)
     def update_tag_color(self, tag_id, color): return self.db_tags.update_tag_color(tag_id, color)
+    def set_tag_parent(self, tag_id, parent_tag_id): return self.db_tags.set_tag_parent(tag_id, parent_tag_id)
     def get_all_tags(self): return self.db_tags.get_all_tags()
     def assign_tag_to_doc(self, doc_id, tag_id): return self.db_tags.assign_tag_to_doc(doc_id, tag_id)
+    def assign_tag_to_docs(self, doc_ids, tag_id): return self.db_tags.assign_tag_to_docs(doc_ids, tag_id)
     def remove_tag_from_doc(self, doc_id, tag_id): return self.db_tags.remove_tag_from_doc(doc_id, tag_id)
     def assign_tag_to_node(self, node_id, tag_id): return self.db_tags.assign_tag_to_node(node_id, tag_id)
     def remove_tag_from_node(self, node_id, tag_id): return self.db_tags.remove_tag_from_node(node_id, tag_id)
     def get_tags_for_doc(self, doc_id): return self.db_tags.get_tags_for_doc(doc_id)
+    def get_doc_tag_map(self): return self.db_tags.get_doc_tag_map()
     def get_tags_for_node(self, node_id): return self.db_tags.get_tags_for_node(node_id)
     def get_docs_for_tag(self, tag_id): return self.db_tags.get_docs_for_tag(tag_id)
 
     # --- AI & Logging ---
     def save_chat_message(self, tab_name, role, content, ui_format="live_stream", trace_id=None, ui_payload=None): return self.db_ai.save_chat_message(tab_name, role, content, ui_format, trace_id, ui_payload)
     def get_chat_history(self, tab_name): return self.db_ai.get_chat_history(tab_name)
+
+    def query_chat_history(self, tab_name, cursor='', limit=12):
+        from core.db.chat_queries import page
+        return page(self, tab_name, cursor, limit)
     def clear_chat_history(self, tab_name): return self.db_ai.clear_chat_history(tab_name)
     def log_ai_interaction(self, prompt, response, model): return self.db_ai.log_ai_interaction(prompt, response, model)
     def log_ai_interaction_threadsafe(self, prompt, response, model): return self.db_ai.log_ai_interaction_threadsafe(prompt, response, model)

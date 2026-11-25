@@ -6,6 +6,7 @@ from PySide6.QtCore import QObject
 
 from core.engine.master_runner import MasterActionRunner
 from core.events.domains.workflow_events import WorkflowEvent, WorkflowIntent, WorkflowPayload
+from core.events.domains.workspace_events import WorkspaceEvent
 from core.events.event_bus import EventBus
 
 
@@ -24,6 +25,16 @@ class WorkflowRunnerService(QObject):
         blueprint_manager=None,
         node_type_registry=None,
         data_provider_registry=None,
+        llm_settings_service=None,
+        document_extraction_service=None,
+        ranking_feature_service=None,
+        pattern_detector_registry=None,
+        deterministic_pass_registry=None,
+        artifact_service=None,
+        hybrid_retrieval_service=None,
+        context_packing_service=None,
+        model_role_service=None,
+        source_intelligence_service=None,
         event_bus: Optional[EventBus] = None,
         ui_router=None,
         model_provider: Optional[Callable[[], str]] = None,
@@ -39,10 +50,24 @@ class WorkflowRunnerService(QObject):
         self.blueprint_manager = blueprint_manager
         self.node_type_registry = node_type_registry
         self.data_provider_registry = data_provider_registry
+        self.llm_settings_service = llm_settings_service
+        self.document_extraction_service = document_extraction_service
+        self.ranking_feature_service = ranking_feature_service
+        self.pattern_detector_registry = pattern_detector_registry
+        self.deterministic_pass_registry = deterministic_pass_registry
+        self.artifact_service = artifact_service
+        self.hybrid_retrieval_service = hybrid_retrieval_service
+        self.context_packing_service = context_packing_service
+        self.model_role_service = model_role_service
+        self.source_intelligence_service = source_intelligence_service
         self.bus = event_bus or EventBus.get_instance()
         self.ui_router = ui_router
         self.model_provider = model_provider
+        self._selected_workspace_node_ids: list[str] = []
         self.bus.workflow_action_requested.connect(self.handle_intent)
+        selection_signal = getattr(self.bus, "workspace_selection_changed", None)
+        if selection_signal and hasattr(selection_signal, "connect"):
+            selection_signal.connect(self._on_workspace_selection_changed)
 
     def set_ui_router(self, ui_router):
         self.ui_router = ui_router
@@ -54,8 +79,22 @@ class WorkflowRunnerService(QObject):
         if isinstance(payload, dict):
             payload = WorkflowPayload(**payload)
         if intent == WorkflowIntent.RUN_BLUEPRINT:
+            blueprint = payload.blueprint
+            if blueprint is None and payload.blueprint_id:
+                registry = getattr(self.blueprint_manager, "registry", None)
+                if registry:
+                    blueprint = registry.create(
+                        payload.blueprint_id,
+                        pm=self.prompt_manager,
+                        ui_target=payload.target_id or "chat_dock",
+                    )
+            if blueprint is None:
+                raise ValueError(
+                    f"Registered workflow blueprint not found: "
+                    f"{payload.blueprint_id or '<unspecified>'}"
+                )
             self.run_blueprint(
-                payload.blueprint,
+                blueprint,
                 payload.initial_state,
                 is_express=payload.is_express,
                 job_name=payload.job_name,
@@ -65,7 +104,10 @@ class WorkflowRunnerService(QObject):
                 blueprint_id=getattr(payload, "blueprint_id", None),
             )
         elif intent == WorkflowIntent.ABORT_WORKFLOW:
-            self._abort_active_workflow()
+            if payload.job_id:
+                self._abort_requested_workflow(payload.job_id)
+            else:
+                self._abort_active_workflow()
 
     def run_blueprint(self, blueprint, initial_state: Optional[dict] = None, request_id: Optional[str] = None, **kwargs):
         runner = self.prepare_runner(blueprint, initial_state or {})
@@ -82,10 +124,31 @@ class WorkflowRunnerService(QObject):
         if blueprint is None:
             raise ValueError("Workflow blueprint is required.")
         state = dict(initial_state or {})
-        if "selected_model" not in state and self.model_provider:
+        state.setdefault(
+            "_selected_workspace_node_ids",
+            list(self._selected_workspace_node_ids),
+        )
+        if self.model_role_service and getattr(blueprint, "requires_model_setup", True):
+            for role_key, state_key in {
+                "main_answer_model": "selected_model",
+                "fast_worker_model": "fast_worker_model",
+                "embedding_model": "embedding_model",
+                "reranker_model": "reranker_model",
+                "vision_model": "vision_model",
+                "transcription_model": "transcription_model",
+                "extraction_repair_model": "extraction_repair_model",
+            }.items():
+                if state_key not in state:
+                    try:
+                        model = self.model_role_service.resolve_role(role_key)
+                        if model:
+                            state[state_key] = model
+                    except Exception:
+                        pass
+        if "selected_model" not in state and self.model_provider and getattr(blueprint, "requires_model_setup", True):
             state["selected_model"] = self.model_provider()
 
-        if self.llm_manager and getattr(self.llm_manager, "collection", None) is None and self.project_manager:
+        if getattr(blueprint, "requires_model_setup", True) and self.llm_manager and getattr(self.llm_manager, "collection", None) is None and self.project_manager:
             self.project_manager._mount_project_database()
 
         runner = MasterActionRunner(
@@ -100,9 +163,30 @@ class WorkflowRunnerService(QObject):
             blueprint_manager=self.blueprint_manager,
             node_type_registry=self.node_type_registry,
             data_provider_registry=self.data_provider_registry,
+            llm_settings_service=self.llm_settings_service,
+            document_extraction_service=self.document_extraction_service,
+            ranking_feature_service=self.ranking_feature_service,
+            pattern_detector_registry=self.pattern_detector_registry,
+            deterministic_pass_registry=self.deterministic_pass_registry,
+            artifact_service=self.artifact_service,
+            hybrid_retrieval_service=self.hybrid_retrieval_service,
+            context_packing_service=self.context_packing_service,
+            model_role_service=self.model_role_service,
+            source_intelligence_service=self.source_intelligence_service,
         )
         self._attach_runner(runner)
         return runner
+
+    def _on_workspace_selection_changed(self, event, payload):
+        if event == WorkspaceEvent.SELECTION_CHANGED:
+            selected_ids = (
+                payload.get("selected_ids", [])
+                if isinstance(payload, dict)
+                else getattr(payload, "selected_ids", [])
+            )
+            self._selected_workspace_node_ids = list(
+                selected_ids or []
+            )
 
     def start_runner(self, runner, is_express: bool = False, job_name: Optional[str] = None, job_type: Optional[str] = None):
         blueprint = getattr(runner, "blueprint", None)
@@ -127,6 +211,8 @@ class WorkflowRunnerService(QObject):
         trace = getattr(runner, "prompt_trace", None)
         if not trace:
             return None
+        if not getattr(getattr(runner, "blueprint", None), "requires_model_setup", True) and not trace.calls:
+            return None
         # Always save — even with 0 calls — so the Trace button appears and the
         # user can see "run attempted but no LLM step completed" rather than silence.
         trace.trace_id = getattr(runner, "trace_id", None) or trace.trace_id
@@ -145,6 +231,7 @@ class WorkflowRunnerService(QObject):
         return trace_id
 
     def _attach_runner(self, runner):
+        runner.finished.connect(self._on_runner_finished)
         if self.ui_router:
             self.ui_router.attach_runner(runner)
         runner.progress_update.connect(
@@ -184,6 +271,13 @@ class WorkflowRunnerService(QObject):
                     WorkflowPayload(blueprint=getattr(r, "blueprint", None), job_id=getattr(r, "workflow_request_id", None), data={"step_id": step_id, "expected_inputs": expected}, runner=r),
                 )
             )
+
+    def _on_runner_finished(self):
+        runner = self.sender()
+        job = getattr(runner, "job", None)
+        if job and job.abort_event.is_set():
+            self.bus.workflow_state_changed.emit(WorkflowEvent.CANCELLED,
+                WorkflowPayload(job_id=getattr(runner, "workflow_request_id", None)))
 
     def _trace_payload_data(self, runner):
         return {
@@ -231,3 +325,16 @@ class WorkflowRunnerService(QObject):
         job = getattr(registry, "active_job", None) if registry else None
         if job and hasattr(job, "kill"):
             job.kill()
+
+    def _abort_requested_workflow(self, request_id):
+        registry = self.process_registry
+        if not registry:
+            return
+        jobs = [getattr(registry, "active_job", None), *registry.pending_queue, *registry.express_jobs]
+        for job in jobs:
+            if job and getattr(getattr(job, "runner", None), "workflow_request_id", None) == request_id:
+                pending = job in registry.pending_queue
+                registry.cancel_job(job.id)
+                if pending:
+                    self.bus.workflow_state_changed.emit(WorkflowEvent.CANCELLED, WorkflowPayload(job_id=request_id))
+                return

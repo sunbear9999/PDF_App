@@ -42,7 +42,31 @@ def active_pdf_names(project_manager) -> List[str]:
     return [os.path.basename(path) for path in active_pdf_paths(project_manager)]
 
 
-def prune_doc_names(project_manager, doc_names: Iterable[str]) -> List[str]:
-    """Drop document names that no longer correspond to active project PDFs."""
-    allowed = set(active_pdf_names(project_manager))
-    return [name for name in (doc_names or []) if name in allowed]
+def prune_doc_names(project_manager, doc_refs: Iterable[str]) -> List[str]:
+    """Active source paths for saved document references, dropping removed documents.
+
+    References are stored as paths: file names are not unique (the same name in two
+    folders), and retrieval refuses a filter it cannot resolve to exactly one source.
+    Older projects saved file names; such a name selects every active file of that name."""
+    paths = active_pdf_paths(project_manager)
+    by_name: dict = {}
+    for path in paths:
+        by_name.setdefault(os.path.basename(path), []).append(path)
+    active = set(paths)
+    result: List[str] = []
+    for ref in doc_refs or []:
+        for path in ([ref] if ref in active else by_name.get(ref, [])):
+            if path not in result:
+                result.append(path)
+    return result
+
+
+def document_labels(paths: Iterable[str]) -> dict:
+    """Display label per path: the file name, plus its folder when another file shares the name."""
+    paths = list(paths)
+    counts: dict = {}
+    for path in paths:
+        counts[os.path.basename(path)] = counts.get(os.path.basename(path), 0) + 1
+    return {path: os.path.basename(path) if counts[os.path.basename(path)] == 1
+            else f"{os.path.basename(path)}  ({os.path.basename(os.path.dirname(path)) or os.path.dirname(path)})"
+            for path in paths}

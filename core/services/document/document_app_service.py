@@ -1,6 +1,5 @@
 # core/services/document_app_service.py
 import os
-import uuid
 from PySide6.QtCore import QObject, QThread, Signal
 from core.events.event_bus import EventBus
 from core.events.domains.document_events import (
@@ -84,7 +83,7 @@ class DocumentAppService(QObject):
 
     def _handle_intent(self, intent: DocumentIntent, payload: DocumentPayload):
         if intent == DocumentIntent.ADD_FILES:
-            self._add_sources(payload.paths or [])
+            self._add_sources(payload.paths or [], payload.context)
         elif intent == DocumentIntent.OPEN:
             self._open_source(payload.path, source_id=payload.source_id, timestamp=payload.timestamp, context=payload.context)
         elif intent == DocumentIntent.TRANSCRIBE:
@@ -107,19 +106,21 @@ class DocumentAppService(QObject):
 
     def _handle_source_intent(self, intent: SourceIntent, payload: SourcePayload):
         if intent == SourceIntent.ADD_FILES:
-            self._add_sources(payload.paths or [])
+            self._add_sources(payload.paths or [], payload.context)
         elif intent == SourceIntent.OPEN:
             self._open_source(payload.path, source_id=payload.source_id, timestamp=payload.timestamp, context=payload.context)
         elif intent == SourceIntent.JUMP_TO_LOCATION:
             self._open_source(payload.path, source_id=payload.source_id, timestamp=payload.timestamp, context=payload.context)
 
-    def _add_sources(self, paths: list):
+    def _add_sources(self, paths: list, context=None):
         if not self.pm.project_filepath or not paths:
             return
             
         added = False
+        added_paths = []
         last_source_id = None
         last_path = None
+        import_tags = self._import_tag_ids(context)
         for path in paths:
             source_type = self.pm.detect_source_type(path) if hasattr(self.pm, "detect_source_type") else "pdf"
             if self.pm.add_source(path, source_type):
@@ -127,8 +128,12 @@ class DocumentAppService(QObject):
                 source = self.pm.get_source_entity_by_path(path) if hasattr(self.pm, "get_source_entity_by_path") else None
                 last_source_id = source.id if source else last_source_id
                 last_path = path
+                added_paths.append(path)
                 
-                payload = DocumentEventPayload(path=path, source_id=last_source_id, source_type=source_type)
+                payload = DocumentEventPayload(
+                    path=path, source_id=last_source_id, source_type=source_type,
+                    context=dict(context or {}),
+                )
                 self.bus.source_added.emit(SourceEvent.ADDED, payload)
                 self.bus.document_added.emit(
                     DocumentEvent.DOCUMENT_ADDED,
@@ -136,7 +141,20 @@ class DocumentAppService(QObject):
                 )
             
         if added:
+            for tag_id in import_tags:
+                if hasattr(self.pm, "assign_tag_to_docs"):
+                    self.pm.assign_tag_to_docs(added_paths, tag_id)
+                else:
+                    for path in added_paths:
+                        self.pm.assign_tag_to_doc(path, tag_id)
             self._open_source(last_path or paths[-1], source_id=last_source_id)
+
+    @staticmethod
+    def _import_tag_ids(context):
+        context = dict(context or {})
+        selection = context.get("processing_selection") or {}
+        values = context.get("tag_ids", selection.get("tag_ids", []))
+        return list(dict.fromkeys(value for value in values if value is not None))
 
     def _open_pdf(self, path: str = None, source_id: str = None):
         self._open_source(path, source_id=source_id)
@@ -150,15 +168,15 @@ class DocumentAppService(QObject):
 
         if not path or not os.path.exists(path): return
         source_type = self.pm.get_source_type(path) if hasattr(self.pm, "get_source_type") else "pdf"
-        
+
         self.pm.set_active_file(path)
-        if source_type == "video":
+        if source_type in ("video", "audio"):
             open_context = dict(context or {})
             open_context["transcript"] = self.pm.get_video_transcript(source_id) if source_id and hasattr(self.pm, "get_video_transcript") else {}
             payload = DocumentEventPayload(
                 path=path,
                 source_id=source_id,
-                source_type="video",
+                source_type=source_type,
                 timestamp=timestamp,
                 context=open_context,
             )
@@ -167,16 +185,27 @@ class DocumentAppService(QObject):
             self.bus.document_opened.emit(DocumentEvent.DOCUMENT_OPENED, payload)
             return
 
-        doc = self.pm.get_doc(path)
-        
-        if doc:
-            needs_ocr = self._check_needs_ocr(doc)
-            # We emit the raw doc object to the bus. The PDFViewer will catch this and render it.
-            payload = DocumentEventPayload(path=path, source_id=source_id, source_type="pdf", doc=doc, needs_ocr=needs_ocr)
-            self.bus.source_opened.emit(SourceEvent.OPENED, payload)
-            self.bus.source_switched.emit(SourceEvent.SWITCHED, payload)
-            self.bus.document_opened.emit(DocumentEvent.DOCUMENT_OPENED, payload)
-            self.bus.pdf_switched.emit(DocumentEvent.PDF_SWITCHED, payload)
+        if source_type == "pdf":
+            doc = self.pm.get_doc(path)
+            if doc:
+                needs_ocr = self._check_needs_ocr(doc)
+                # We emit the raw doc object to the bus. The PDFViewer will catch this and render it.
+                payload = DocumentEventPayload(path=path, source_id=source_id, source_type="pdf", doc=doc, needs_ocr=needs_ocr)
+                self.bus.source_opened.emit(SourceEvent.OPENED, payload)
+                self.bus.source_switched.emit(SourceEvent.SWITCHED, payload)
+                self.bus.document_opened.emit(DocumentEvent.DOCUMENT_OPENED, payload)
+                self.bus.pdf_switched.emit(DocumentEvent.PDF_SWITCHED, payload)
+            return
+
+        # Every other registered format (docx/epub/txt/csv/xlsx/image/...) —
+        # no fitz doc object to attach. The target viewer widget (registered
+        # via SourceViewerSpec) loads its own content from `path` once it
+        # observes this event — see ReflowableTextViewer/CsvPreviewViewer/
+        # ImageViewer's own source_opened subscriptions.
+        payload = DocumentEventPayload(path=path, source_id=source_id, source_type=source_type, context=dict(context or {}))
+        self.bus.source_opened.emit(SourceEvent.OPENED, payload)
+        self.bus.source_switched.emit(SourceEvent.SWITCHED, payload)
+        self.bus.document_opened.emit(DocumentEvent.DOCUMENT_OPENED, payload)
 
     def _check_needs_ocr(self, doc) -> bool:
         """Determines if the document requires OCR without touching the UI."""
@@ -233,136 +262,35 @@ class DocumentAppService(QObject):
         return page, None
 
     def _create_highlight(self, payload: DocumentPayload):
-        try:
-            import fitz
-
-            page = self._get_page(payload.path, payload.page_num)
-            if not page or not payload.rects:
-                return
-
-            quads = [fitz.Rect(rect).quad for rect in payload.rects]
-            annot = page.add_highlight_annot(quads)
-            color = payload.color or (1.0, 0.9, 0.0)
-            annot.set_colors(stroke=color)
-
-            annot_id = payload.annot_id or f"UserNote|{uuid.uuid4()}"
-            note = payload.note or ""
-            subject = payload.text or ""
-            annot.set_info(info={"title": annot_id, "content": note, "subject": subject})
-            annot.update()
-
-            hex_color = self._rgb_to_hex(color)
-            self.bus.highlight_created.emit(
-                DocumentEvent.HIGHLIGHT_CREATED,
-                DocumentEventPayload(highlight_data={
-                    "id": annot_id,
-                    "subject": subject,
-                    "content": note,
-                    "pdf_path": payload.path,
-                    "page_num": payload.page_num,
-                    "rect_coords": repr(list(annot.rect)),
-                    "color": hex_color,
-                }),
-            )
-            self._reload_if_active(payload.path, payload.page_num)
-        except Exception as exc:
-            self.bus.status_message_requested.emit(f"Could not create highlight: {exc}", 8000)
+        # Physical mutation cannot atomically publish project artifacts. GUI
+        # selections now use the shared verified project-note editor instead.
+        self.bus.status_message_requested.emit(
+            "Use the source viewer's selection note editor, or prepare_selection_note/save_reference_note with project guards. Unguarded physical highlight creation is unsupported.", 6000)
 
     def _create_highlight_from_text(self, payload: DocumentPayload):
-        path = payload.path or self._path_for_doc_name(payload.doc_name)
-        if not path or not payload.text:
+        context = payload.context or {}
+        if context.get("artifact_ref") or context.get("artifact_id"):
+            self.bus.status_message_requested.emit("Artifact-backed notes require the guarded linked-note command; source search cannot replace their recorded location.", 6000)
             return
-
-        try:
-            import fitz
-
-            page_numbers = [payload.page_num] if payload.page_num is not None else range(len(self.pm.get_doc(path)))
-            doc = self.pm.get_doc(path)
-            for page_num in page_numbers:
-                page = doc.load_page(page_num)
-                quads = page.search_for(payload.text, quads=True)
-                if not quads:
-                    chunks = payload.text.split()
-                    for idx in range(0, len(chunks), 4):
-                        chunk = " ".join(chunks[idx:idx + 6])
-                        if chunk.strip():
-                            quads.extend(page.search_for(chunk, quads=True))
-                if not quads:
-                    continue
-
-                annot_id = payload.annot_id or f"AINote|{uuid.uuid4()}"
-                color = payload.color or (0.7, 0.4, 1.0)
-                annot = page.add_highlight_annot(quads)
-                annot.set_colors(stroke=color)
-                annot.set_info(info={"title": annot_id, "content": payload.note or "", "subject": payload.text})
-                annot.update()
-                self.bus.highlight_created.emit(
-                    DocumentEvent.HIGHLIGHT_CREATED,
-                    DocumentEventPayload(highlight_data={
-                        "id": annot_id,
-                        "subject": payload.text,
-                        "content": payload.note or "",
-                        "pdf_path": path,
-                        "page_num": page_num,
-                        "rect_coords": repr(list(annot.rect)),
-                        "color": self._rgb_to_hex(color),
-                    }),
-                )
-                self._reload_if_active(path, page_num)
-                return
-
-            self.bus.status_message_requested.emit("Could not locate the exact text bounds.", 5000)
-        except Exception as exc:
-            self.bus.status_message_requested.emit(f"Could not create highlight: {exc}", 8000)
+        self.bus.status_message_requested.emit(
+            "Selection notes require the verified project-note editor. Raw rendered offsets, text searches and unguarded locators cannot identify a safe source occurrence.", 6000)
 
     def _update_highlight_note(self, payload: DocumentPayload):
-        page, annot = self._find_annot(payload.path, payload.page_num, payload.annot_id)
-        if not annot:
-            return
-        info = dict(annot.info)
-        info["content"] = payload.note or ""
-        annot.set_info(info=info)
-        annot.update()
-        self.bus.highlight_updated.emit(
-            DocumentEvent.HIGHLIGHT_UPDATED,
-            DocumentEventPayload(
-                annot_id=payload.annot_id,
-                changes={"note": payload.note or "", "pdf_path": payload.path, "page_num": payload.page_num},
-            ),
-        )
-        self._reload_if_active(payload.path, payload.page_num)
+        self._reject_legacy_mutation()
 
     def _update_highlight_color(self, payload: DocumentPayload):
-        page, annot = self._find_annot(payload.path, payload.page_num, payload.annot_id)
-        if not annot:
-            return
-        annot.set_colors(stroke=payload.color)
-        annot.update()
-        self.bus.highlight_updated.emit(
-            DocumentEvent.HIGHLIGHT_UPDATED,
-            DocumentEventPayload(
-                annot_id=payload.annot_id,
-                changes={"color": self._rgb_to_hex(payload.color), "pdf_path": payload.path, "page_num": payload.page_num},
-            ),
-        )
-        self._reload_if_active(payload.path, payload.page_num)
+        self._reject_legacy_mutation()
 
     def _delete_highlight(self, payload: DocumentPayload):
-        page, annot = self._find_annot(payload.path, payload.page_num, payload.annot_id)
-        if not page or not annot:
-            return
-        page.delete_annot(annot)
-        self.bus.highlight_deleted.emit(DocumentEvent.HIGHLIGHT_DELETED, DocumentEventPayload(annot_id=payload.annot_id))
-        self._reload_if_active(payload.path, payload.page_num)
+        self._reject_legacy_mutation()
+
+    def _reject_legacy_mutation(self):
+        self.bus.status_message_requested.emit(
+            'Physical annotations are read only here. Adopt the annotation in Notes, then edit or delete its project copy using guarded note controls.', 7000)
 
     def _reload_if_active(self, path: str, page_num: int):
         if path == getattr(self.pm, "active_file", None):
             self.bus.document_action_requested.emit(DocumentIntent.RELOAD_PAGE, DocumentPayload(page_num=page_num))
-
-    def _path_for_doc_name(self, doc_name: str):
-        if not doc_name:
-            return None
-        return next((path for path in self.pm.pdfs if os.path.basename(path) == doc_name), None)
 
     def _rgb_to_hex(self, color):
         if isinstance(color, str):

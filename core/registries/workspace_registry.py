@@ -184,6 +184,11 @@ def build_default_workspace_node_type_registry() -> WorkspaceNodeTypeRegistry:
         action_ids=base_actions,
         display_factory=build_chart_node_display,
     ))
+    registry.register(WorkspaceNodeTypeDefinition(
+        id="workspace.node.language", label="Language", description="A source-backed language or dialect.",
+        base_type_id="workspace.node.quote", action_ids=[*base_actions, "node.jump", "node.copy_citation"],
+        display_factory=build_quote_node_display,
+    ))
     return registry
 
 

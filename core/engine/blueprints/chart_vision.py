@@ -53,6 +53,7 @@ def build_chart_analysis_blueprint() -> AIActionBlueprint:
             prompt_key="Chart Analysis System v1",
             system_prompt="{prompt:Chart Evidence Policy v1}\n\n{prompt:Vision JSON Repair v1}",
             required_prompt_keys=keys,
+            model_role="vision_model",
             required_model_capabilities=["vision"],
             output_schema=CHART_ANALYSIS_SCHEMA,
             llm_options={"temperature": 0.0, "num_predict": 4096},

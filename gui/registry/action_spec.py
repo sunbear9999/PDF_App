@@ -77,6 +77,11 @@ class ActionRegistry:
     def get(self, action_id: str) -> Optional[ActionSpec]:
         return self._specs.get(action_id)
 
+    def unregister(self, action_id: str, owner: Optional[ActionSpec] = None) -> None:
+        """Remove an action only if its registering component still owns it."""
+        if owner is None or self._specs.get(action_id) is owner:
+            self._specs.pop(action_id, None)
+
     def iter_mount(self, mount_point: str) -> Iterable[ActionSpec]:
         """
         Return all specs whose mounts list contains mount_point or a prefix of

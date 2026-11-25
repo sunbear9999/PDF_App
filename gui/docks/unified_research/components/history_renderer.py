@@ -13,6 +13,7 @@ class ChatHistoryRenderer:
         self.tab = tab
         self.theme = theme or {}
         self.app_context = app_context
+        self._last_ai_widget = None
 
     def render(self, history):
         for msg in history:
@@ -24,6 +25,7 @@ class ChatHistoryRenderer:
         is_user = role == "user"
         if is_user:
             self._render_text_message("You", msg.get("content", ""), is_user=True)
+            self._last_ai_widget = None
             return
 
         payloads = coerce_saved_payloads(msg.get("ui_payload"))
@@ -76,15 +78,29 @@ class ChatHistoryRenderer:
     def _is_chat_message(payloads):
         chat_types = {
             "replace_stream_text", "citation_cards", "prompt_trace_available",
-            "hide_status", "manifest_updated", "status", "stream_chunk",
+            "hide_status", "manifest_updated", "manifest_update_status", "status",
+            "stream_chunk", "error", "rag_context_view",
+            "rag_context_highlights",
         }
-        return any(payload.get("type") in {"replace_stream_text", "citation_cards", "stream_chunk", "manifest_updated"}
+        return any(payload.get("type") in {
+            "replace_stream_text", "citation_cards", "stream_chunk",
+            "manifest_updated", "manifest_update_status", "error",
+            "rag_context_view", "rag_context_highlights",
+        }
                    for payload in payloads) and all(payload.get("type") in chat_types for payload in payloads)
 
     def _render_chat_payloads(self, payloads):
         """Keep text, trace controls, notices, and note bubbles in one turn widget."""
-        widget = ChatMessageWidget("AI Agent", theme=self.theme, app_context=self.app_context)
-        self.tab.receive_ai_widget(widget)
+        attach = any(
+            payload.get("attach_to_previous") for payload in payloads
+        )
+        widget = self._last_ai_widget if attach else None
+        if widget is None:
+            widget = ChatMessageWidget(
+                "AI Agent", theme=self.theme, app_context=self.app_context
+            )
+            self.tab.receive_ai_widget(widget)
+            self._last_ai_widget = widget
         self.tab._active_stream_widget = widget
         for payload in payloads:
             self.tab.receive_ai_payload(dict(payload))
@@ -114,3 +130,5 @@ class ChatHistoryRenderer:
         if not is_user and hasattr(widget, "hide_status"):
             widget.hide_status()
         self.tab.receive_ai_widget(widget)
+        if not is_user:
+            self._last_ai_widget = widget

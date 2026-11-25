@@ -21,6 +21,7 @@ class EntityType(str, Enum):
     DATA_TABLE = "entity.data_table"
     CHART = "entity.chart"
     PERSON_ORG = "entity.person_org"
+    LANGUAGE = "entity.language"
 
 class RelationType(str, Enum):
     BASIC = "relation.basic"

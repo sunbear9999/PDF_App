@@ -26,6 +26,7 @@ class PromptManager:
             "Brainstorm Query", "Search Terms Query", "Advanced RAG Optimize Query",
             "Universal Citation Query", "Analyze Chunk Query",
             "Citation Coverage Query", "Manifest Update Query",
+            "Manifest Structured Update Query",
             "Plan Adaptive Research Query", "Build Typed Workspace Graph Query",
             "Graph Analysis Chunk Observations Query",
             "Graph Analysis Synthesis Query", "Graph Analysis Master Query",
@@ -46,12 +47,27 @@ class PromptManager:
             "Brainstorm System - Default"
         ],
         "System & Engine Enforcers": [
-            "Manifest Update Directive", "JSON Schema Enforcer", "JSON Mode Enforcer",
+            "Manifest Update Directive", "Manifest Structured Update Directive",
+            "JSON Schema Enforcer", "JSON Mode Enforcer",
             "Format Enforcer - Chat Widgets", "Format Enforcer - Data Table",
             "Format Enforcer - Card Grid", "Format Enforcer - Live Stream",
-            "Inline Citation Directive",
+            "Inline Citation Directive", "Reasoning Disclosure Directive",
+            "Context Budget Notice",
             "Graph Analysis Compact Output Contract",
-            "Graph Analysis Argument Chain Directive"
+            "Graph Analysis Argument Chain Directive",
+            "Graph Analysis Section Synthesis Stage Rules",
+            "LIBRA BBS Cloze Template", "LIBRA BBS Neutral Completion",
+        ],
+        "Widget Output Formats": [
+            "Format Enforcer - Live Stream",
+            "Format Enforcer - Chat Widgets",
+            "Format Enforcer - Data Table",
+            "Format Enforcer - Card Grid",
+            "Format Enforcer - Nested Outline",
+            "Format Enforcer - Search Terms",
+            "Format Enforcer - Bias Metrics",
+            "Inline Citation Directive",
+            "Widget - Citation Step",
         ],
         "Context Injectors": [
             "Context Inject - Manifest", "Context Inject - Workspace",
@@ -64,17 +80,277 @@ class PromptManager:
             "Chart Evidence Policy v1",
             "Chart Structured Output v1",
             "Vision JSON Repair v1",
-        ]
+        ],
+        "Intelligence Modes": [
+            "Intelligence QA System", "Intelligence QA Query",
+            "Intelligence Claim Tracking System", "Intelligence Claim Tracking Query",
+            "Intelligence Abstractive Summary System", "Intelligence Abstractive Summary Query",
+            "Intelligence Schema Extraction System", "Intelligence Schema Extraction Query",
+            "Intelligence Graph Enrichment System", "Intelligence Graph Enrichment Query",
+            "Intelligence Mode Graph System", "Intelligence Mode Graph Query",
+            "Intelligence Universal Graph System v2",
+            "Intelligence Universal Graph Query v2",
+            "Intelligence Mode Graph Output Enforcer",
+            "Intelligence Universal Graph System v3",
+            "Intelligence Universal Graph Query v3",
+            "Intelligence Universal Graph Repair Query v1",
+            "Intelligence Mode Graph Output Enforcer v2",
+            "Intelligence Universal Graph System v4",
+            "Intelligence Universal Graph Query v4",
+            "Intelligence Universal Graph Repair Query v2",
+            "Intelligence Mode Graph Output Enforcer v3",
+            "JSON Only Directive",
+        ],
     }
 
     DEFAULT_PROMPTS = {
+        # --- INTELLIGENCE MODES ---
+        "Intelligence QA System": (
+            "You are a precise research assistant. Answer ONLY from the provided CONTEXT, which "
+            "contains passages labelled [S1], [S2], … with their document, page and section. "
+            "Cite the label in square brackets after each claim you make, e.g. "
+            "[S1]. If the context does not contain the answer, say so plainly. Do not invent facts."
+        ),
+        "Intelligence QA Query": "Answer the user's question using only the CONTEXT passages below. Cite their labels, e.g. [S1].",
+        "Intelligence Claim Tracking System": (
+            "You are tracking a single claim across a corpus. From the provided CONTEXT segments "
+            "(each labelled [S1], [S2], … with its document), synthesize a concise narrative of where and how "
+            "the claim appears: who states it, supporting evidence, and any contradictions. Cite labels, e.g. [S1]. "
+            "Do not add claims not present in the context."
+        ),
+        "Intelligence Claim Tracking Query": "Trace the pinned claim through the CONTEXT segments below and summarize its occurrences with citations.",
+        "Intelligence Abstractive Summary System": (
+            "You are a careful summarizer. Produce a faithful abstractive summary grounded only in the "
+            "provided section text. Do not introduce facts that are not present. Output valid JSON only."
+        ),
+        "Intelligence Abstractive Summary Query": "Summarize the section content below. Return JSON matching the provided schema.",
+        "Intelligence Schema Extraction System": (
+            "You are a structured extraction engine. Fill ONLY the requested fields using the provided "
+            "CONTEXT. For any field not supported by the context, return null — never guess. Output valid JSON only."
+        ),
+        "Intelligence Schema Extraction Query": "Extract the requested fields from the CONTEXT below. Return JSON matching the schema.",
+        "Intelligence Graph Enrichment System": (
+            "You may name themes and propose relationships using only the supplied node, relation, "
+            "community, and evidence artifact IDs. Never invent quotations. Every proposed relation "
+            "must reference existing source_id, target_id, and one or more evidence_ids. Unsupported "
+            "ideas must be omitted. Return valid JSON only."
+        ),
+        "Intelligence Graph Enrichment Query": (
+            "Enrich this deterministic graph compactly. Return themes and proposed_relations; "
+            "refer only to IDs present in the graph."
+        ),
+        "Intelligence Mode Graph System": (
+            "Build one mode-specific analytical graph from the supplied SECTION EVIDENCE "
+            "PACKETS. Follow MODE GRAPH CONTRACT. The packets contain short quote aliases "
+            "q1, q2, etc.; use only those aliases in n[].q and x[].q. Never reproduce, "
+            "rewrite, or invent quotations—the app hydrates exact quote nodes locally. "
+            "Return 6-14 useful analytical nodes ordered root first, not a catalog of "
+            "people, places, citations, or keywords. Every node must use a role allowed "
+            "by the contract, a short label, a concise substantive statement, and one or "
+            "more supporting q aliases. Use short ids n1, n2, etc. Exactly one root has "
+            "empty p and e. Every other node sets p to an earlier node id and e to an "
+            "allowed child-to-parent relation. For an argument map, the root must answer "
+            "the focus with the source's overall claim or methodology; include distinct "
+            "reasoning branches, findings/evidence for those branches, and limitations or "
+            "counterclaims when supported. If the focus asks how to measure, track, "
+            "evaluate, or implement something, prefer the actual proposed framework or "
+            "methodology as the root. For claim tracking, use one tracked_claim root and "
+            "separate support, contradiction, qualification, and uncertainty. Use x only "
+            "for essential non-hierarchy links. Return only the compact JSON schema."
+        ),
+        "Intelligence Mode Graph Query": (
+            "Synthesize the most useful graph for this mode and focus. Use the section "
+            "summaries for long-document orientation and the segmented q aliases for "
+            "grounding. Answer the focus rather than listing extracted entities. Make "
+            "the hierarchy connected and semantically typed. Prefer several strong, "
+            "non-redundant branches over shallow coverage; omit irrelevant material."
+        ),
+        # Versioned keys prevent an older project-level prompt override from
+        # silently reintroducing the UUID-heavy pre-section-packet contract.
+        "Intelligence Universal Graph System v2": (
+            "Build one mode-specific analytical graph from the supplied SECTION EVIDENCE "
+            "PACKETS. Follow MODE GRAPH CONTRACT. The packets contain short quote aliases "
+            "q1, q2, etc.; use only those aliases in n[].q and x[].q. Never reproduce, "
+            "rewrite, or invent quotations—the app hydrates exact quote nodes locally. "
+            "Return 6-14 useful analytical nodes ordered root first, not a catalog of "
+            "people, places, citations, or keywords. Every node must use a role allowed "
+            "by the contract, a short label, a concise substantive statement, and one or "
+            "more supporting q aliases. Use short ids n1, n2, etc. Exactly one root has "
+            "empty p and e. Every other node sets p to an earlier node id and e to an "
+            "allowed child-to-parent relation. For an argument map, the root must answer "
+            "the focus with the source's overall claim or methodology; include distinct "
+            "reasoning branches, findings/evidence for those branches, and limitations or "
+            "counterclaims when supported. If the focus asks how to measure, track, "
+            "evaluate, or implement something, prefer the actual proposed framework or "
+            "methodology as the root. For claim tracking, use one tracked_claim root and "
+            "separate support, contradiction, qualification, and uncertainty. Use x only "
+            "for essential non-hierarchy links. Return only the compact JSON schema."
+        ),
+        "Intelligence Universal Graph Query v2": (
+            "Synthesize the most useful graph for this mode and focus. Use the section "
+            "summaries for long-document orientation and the segmented q aliases for "
+            "grounding. Answer the focus rather than listing extracted entities. Make "
+            "the hierarchy connected and semantically typed. Prefer several strong, "
+            "non-redundant branches over shallow coverage; omit irrelevant material."
+        ),
+        "Intelligence Mode Graph Output Enforcer": (
+            "Return ONLY one valid JSON object matching this schema. No markdown, commentary, "
+            "thoughts field, or final_output wrapper.\n"
+            "The schema values are FIELD DESCRIPTIONS, never content to copy. Replace every value "
+            "with specific content grounded in the SECTION EVIDENCE PACKETS:\n"
+            "- Never output a schema description or category word (e.g. 'concise analytical statement', "
+            "'short label', 'allowed node role', 'direct evidence', 'supporting evidence'). Each node's "
+            "statement (s) must name the actual claim, method, metric, number, or finding from the source.\n"
+            "- q lists must contain ONLY quote aliases (q1, q2, …) that appear in the packets; never invent "
+            "an alias and never write quote text (the app hydrates exact quotes). Every substantive node "
+            "cites at least one real alias.\n"
+            "- Produce a DETAILED graph: aim for 8-14 connected, non-redundant nodes when the source "
+            "supports it; do not stop at 3-5. Exactly one root; every other node links to an earlier node.\n"
+            "{schema_str}"
+        ),
+        "Intelligence Universal Graph System v3": (
+            "You improve a complete grounded scholarly argument graph by returning a "
+            "small patch. The application preserves every unmentioned baseline node and "
+            "all exact source quotes, then validates the complete graph locally. In u[], "
+            "copy i exactly from a deterministic baseline node ID and include only fields "
+            "that materially improve its role, label, or statement. Use only roles allowed "
+            "by MODE GRAPH CONTRACT. q is optional; if supplied, it may contain only aliases "
+            "from the section packets. Never write quotation text, create node IDs, change "
+            "the graph topology, or copy the baseline. Return only the compact JSON schema."
+        ),
+        "Intelligence Universal Graph Query v3": (
+            "Inspect the deterministic baseline and patch its most important weaknesses: "
+            "misclassified roles, vague or truncated labels, weak analytical statements, "
+            "or an unhelpful hierarchy. Prefer a few high-value corrections over copying "
+            "the graph. Every correction must remain faithful to the cited paper."
+        ),
+        "Intelligence Universal Graph Repair Query v1": (
+            "The first patch failed the deterministic quality gate. Return a corrected "
+            "small patch using exact baseline IDs and the same allowed q aliases. Address "
+            "the listed validation errors without copying the full graph or adding quotes."
+        ),
+        "Intelligence Mode Graph Output Enforcer v2": (
+            "Return ONLY one valid JSON object matching this schema. No markdown, prose, "
+            "thoughts field, or wrapper. u is a PATCH, not a replacement graph: each i "
+            "must exactly match a supplied deterministic baseline node ID. Include exactly "
+            "1-3 high-value updates, omit unchanged fields, and end immediately after the "
+            "u array. Never create nodes, relations, or cross-links, and never copy quote "
+            "text, or use generic labels/statements such as claim, reasoning, evidence, "
+            "direct evidence, method, or methodology. q values, when used, must be packet "
+            "aliases.\n{schema_str}"
+        ),
+        "Intelligence Universal Graph System v4": (
+            "You improve a complete grounded scholarly argument graph by returning a "
+            "tiny patch. The application preserves every unmentioned baseline node, "
+            "canonical relation, and exact source quote, then validates the complete "
+            "graph locally. In u[], copy i exactly from a supplied deterministic baseline "
+            "node ID and include only fields that materially improve its role, label, or "
+            "statement. Use only roles allowed by MODE GRAPH CONTRACT. Never write quotation text, "
+            "create IDs, change topology, or copy the baseline."
+        ),
+        "Intelligence Universal Graph Query v4": (
+            "Return at most three corrections for the baseline's most important weaknesses: "
+            "a claim/methodology role error, a vague label, or a weak analytical statement. "
+            "Keep every correction faithful to the cited paper and finish the JSON immediately."
+        ),
+        "Intelligence Universal Graph Repair Query v2": (
+            "The first tiny patch could not be applied. Return one to three corrected text "
+            "or claim/methodology-role updates using exact baseline IDs. "
+            "Do not add topology, relations, nodes, or quotations."
+        ),
+        "Intelligence Mode Graph Output Enforcer v3": (
+            "Return ONLY one valid JSON object matching this schema. No markdown, prose, "
+            "thoughts field, or wrapper. u is a PATCH, not a graph: every i must exactly "
+            "match a supplied deterministic baseline node ID. Include exactly 1-3 useful "
+            "updates, omit unchanged fields, and end immediately after the u array. Never "
+            "create nodes, relations, cross-links, or quote text. Never use generic content "
+            "such as claim, reasoning, evidence, direct evidence, method, or methodology. "
+            "Do not add fields outside the schema.\n{schema_str}"
+        ),
+        "Intelligence Universal Graph System v5": (
+            "Improve the supplied grounded analysis with a bounded patch. The baseline may "
+            "be partial or disconnected. Preserve all IDs, source quotations, reviewed edits "
+            "and existing relations. In u, copy i from an editable baseline node and change "
+            "only its short label l or grounded statement s. Never change artifact roles. "
+            "In x, propose a relation only when the supplied quotations justify that exact "
+            "meaning and direction. Copy a and b from baseline node IDs, r from the allowed "
+            "relation types, and q from the section packet aliases. Explain the specific "
+            "connection in why. A shared section, similar words, or a classifier label alone "
+            "cannot prove support or contradiction. Evidence flows toward the proposition it "
+            "supports or refutes. Never invent quotes, nodes, or evidence aliases. Relations "
+            "remain unreviewed suggestions. Leave either array empty when nothing is justified."
+        ),
+        "Intelligence Universal Graph Query v5": (
+            "Return at most three useful text corrections and twelve justified relation "
+            "proposals for this focus. Prefer accurate partial results to filling quotas. "
+            "Leave unrelated passages and unresolved connections out."
+        ),
+        "Intelligence Universal Graph Repair Query v3": (
+            "Correct the rejected patch using the validation diagnostics, supplied baseline "
+            "IDs and evidence aliases. Preserve unchanged source data and reviewed decisions. "
+            "Omit any correction or relation that cannot be justified."
+        ),
+        "Intelligence Mode Graph Output Enforcer v4": (
+            "Return ONLY JSON matching this schema. No markdown, thoughts field, prose, "
+            "or wrapper. u changes labels/statements; x proposes evidence-backed relations "
+            "over existing baseline IDs. Empty arrays are valid. Do not copy the baseline "
+            "or quotation text. Do not add fields outside the schema.\n{schema_str}"
+        ),
+        "Intelligence Universal Graph System v6": (
+            "Improve the supplied grounded analysis with a bounded patch. context_items contains "
+            "whole evidence groups: nodes with stable IDs and q references, and sections with "
+            "verbatim quotations under q aliases. Some groups may be omitted for context safety. "
+            "The complete baseline remains in Papyrus; it may be partial or disconnected. "
+            "In u, copy i from a supplied node marked editable and change only its short label l "
+            "or grounded statement s. Preserve IDs, roles, quotations and reviewed decisions. "
+            "In x, copy a and b from supplied node IDs, r from the allowed relation types and "
+            "q from supplied quotation aliases. Explain why the quotations justify that precise "
+            "meaning and direction. Evidence flows toward the proposition it supports or refutes. "
+            "Shared sections, similar words and classifier labels alone do not prove relations. "
+            "Never invent nodes, quotations or aliases, or use an omitted group. Proposed links "
+            "remain unreviewed suggestions. Leave either array empty when nothing is justified."
+        ),
+        "Intelligence Universal Graph Query v6": (
+            "Return at most three useful text corrections and twelve justified relation proposals "
+            "using only the supplied context_items. Prefer accurate partial results to filling "
+            "quotas. Leave unrelated passages and unresolved connections out."
+        ),
+        "Intelligence Universal Graph Repair Query v4": (
+            "Correct the rejected patch using the validation diagnostics and only the node IDs "
+            "and quotation aliases in this request's context_items. The supplied groups can differ "
+            "from the earlier request. Preserve unchanged source data and reviewed decisions. "
+            "Omit any correction or relation that cannot be justified."
+        ),
+        "JSON Only Directive": (
+            "Output only valid JSON matching the requested schema. Do not add markdown "
+            "fences, commentary, or explanatory prose."
+        ),
         # --- PERSONAS ---
         "General Assistant": "You are an intelligent AI assistant interacting with a user's workspace software. Follow their instructions exactly.",
+        "Reasoning Disclosure Directive": "Before the final answer, include a concise reasoning section inside <think>...</think>. Then provide the final answer after the closing tag.",
+        "Context Budget Notice": (
+            "Context safety notice: Papyrus shortened the user/context payload "
+            "to fit the selected model's {num_ctx}-token context budget. "
+            "Prefer artifact retrieval or narrower source filters if important evidence is missing."
+        ),
         "RAG Agent Mode": "You are an expert AI research agent.\nProvide comprehensive, highly detailed answers using ONLY the DOCUMENT CONTEXT provided in the user message.\nCRITICAL: Follow this exact structure to simulate your thought process. Do NOT deviate:\n\n<think>\n(Analyze the document context, plan your answer, and brainstorm VERBATIM quotes.)\n</think>",
         "RAG Assistant Mode": "You are an expert AI research assistant.\nProvide comprehensive answers using Markdown based ONLY on the DOCUMENT CONTEXT provided in the user message.",
         "Evidence Extractor": "You are an expert AI research assistant. Your task is to find concrete textual evidence to support the AI's final answer. Read the provided CONTEXT documents thoroughly. Extract highly relevant, VERBATIM quotes that strongly prove the claims made.",
         "Search Term Generator": "You are an expert academic librarian. Generate 3 to 5 highly specific advanced academic search queries using boolean operators (AND/OR).",
         "Document Analyzer": "You are an expert document analysis engine. Analyze ONLY the current section of text and extract insights strictly from the text provided.",
+        "Extract Claims System": (
+            "You are a philosophical claim extractor. Analyse the provided text and return a JSON object "
+            "with a 'claims' array. Each item must have:\n"
+            "  claim: string — the claim stated precisely and concisely (1-2 sentences)\n"
+            "  type: 'causal' | 'normative' | 'descriptive' | 'evaluative'\n"
+            "  confidence: 'high' | 'medium' | 'low'\n"
+            "  evidence: string — the verbatim phrase that most directly supports this claim\n"
+            "Extract every distinct claim, not just the main thesis. Return only valid JSON."
+        ),
+        "Extract Claims Query": "Extract all distinct claims from the following text:",
+        "Reword Text System": "You are an expert editor. Rewrite the following text to make it easier to understand and follow, while keeping all crucial information intact. Respond ONLY with the reworded text. Do not include introductory phrases.",
+        "Opposing Views System": "Analyze the Context to find strong opposing views, counter-arguments, or contradictions to the Original Text. Extract the exact verbatim text that opposes it, along with its doc_name and page. ONLY output valid JSON.",
+        "JSON Mode Instruction": "Respond with valid JSON only. No prose.",
         "Chart Analysis System v1": (
             "Read the attached chart and reconstruct its quantitative data. Preserve titles, category labels, axis titles, and series names exactly when legible. "
             "Omit unreadable points instead of inventing values."
@@ -225,6 +501,7 @@ the documented field names and types. Plugin steps work identically to core step
         "Graph Analysis Synthesis Query": "Numbered selected quotes:\n{master_input}\n\nWrite a concise argument map synthesis plan. Do NOT make quote-by-quote mini-arguments. Follow these steps:\n\nSTEP 1 — State the central thesis: one sentence capturing the document's overarching claim or conclusion.\n\nSTEP 2 — Identify 2–4 named support pillars: group the quotes into 2–4 distinct reasons that together support the thesis. Give each pillar a short, descriptive name. Assign every quote to exactly one pillar.\n\nSTEP 3 — Write the plan using this EXACT FORMAT:\n\n**Central Thesis**: [one-sentence overarching claim]\n\n1. **[Pillar Name]**: [one sentence describing what this pillar argues]. (Q1, Q3)\n2. **[Pillar Name]**: [one sentence]. (Q2, Q4, Q5)\n3. **[Pillar Name]**: [one sentence]. (Q6, Q7)\n\nCRITICAL FORMAT RULES:\n- Each pillar MUST be a numbered line starting with a bold name.\n- Quote IDs MUST appear in parentheses at the END of that same numbered line — never in sub-bullets, never after a separate 'Evidence:' label.\n- Pillar names must be meaningfully different from each other — never use generic names like 'Evidence', 'Support', or 'Reasons'.\n- Do not output JSON.",
         "Graph Analysis Master Query": "Convert the synthesis plan into one coherent connected graph following GRAPH_PLAN and the CONTRACT.\n\nSTRUCTURE REQUIREMENT: Build exactly 3 levels — (1) ONE root node with t=cla (or the root alias from GRAPH_PLAN) representing the central thesis; (2) 2–4 bridge nodes with t=rea (or the bridge alias), each a distinctly named support reason from the synthesis pillars; (3) several leaf nodes with t=quo (or the source alias), each an exact evidence quote attached beneath its relevant bridge. Distribute quotes across bridge nodes — do NOT funnel all quotes under one bridge.\n\nCRITICAL ALIAS RULE: Every node's 't' field must be an exact short alias code from CONTRACT (e.g. quo, rea, cla). Never write theme names, full type names like 'entity.reasoning', or any descriptive text in the 't' field. Check GRAPH_PLAN for the correct alias codes.\n\nOnly this final pass should create node types, edge types, and graph structure. Reuse only quote text present in CHUNKS. Use one central root unless SYNTHESIS explicitly requires two. Each bridge node must have a meaningfully different name describing its specific support pillar. Avoid isolated components, claim-to-claim ladders, and repeated wording across roles. Aim for 8–18 nodes total; source leaves should make up roughly half. Return compact JSON only.\n\nSYNTHESIS:\n{argument_synthesis}\n\nCHUNKS:\n{master_input}",
         "Graph Analysis Argument Chain Directive" : "Maintain a strict logical hierarchy using only edge directions allowed by the CONTRACT and preferred_chains in GRAPH_PLAN. Every node in 'n' must have at least one edge in 'e', but do not connect nodes merely because a relation is allowed. Prefer one connected tree over repeated mini-chains. Avoid circular dependencies, claim-to-claim ladders, and same-level daisy chains unless GRAPH_PLAN leaves no better option. If a node type requires source text, place the exact copied snippet in 'q' and put its concise interpretation in 'x'. Never use the same wording for a source node, bridge node, and root node. Use source-like nodes for short verbatim snippets; use bridge/root-like nodes only for synthesized ideas broader than one quote.",
+        "Graph Analysis Section Synthesis Stage Rules": "SECTION SYNTHESIS PASS:\nInput is compact evidence refs already selected for this section — short snippets plus quote_ids, not raw document text. Build only this section's local hierarchy using GRAPH_PLAN's source and bridge roles (up to two bridge-level nodes with quote/source leaf nodes beneath them) — do NOT create a document-level root/summary node; that represents the WHOLE document's synthesis, not one section, and is added automatically once after every section is merged. For every quote/source leaf node, set properties.source_quote_id to the quote_id from the evidence refs — do NOT copy or invent quote text into 'q' or 'x'. This section's subgraph will be merged with every other section's subgraph, then lightly connected in one final pass — keep it small, local, and non-redundant with other sections rather than trying to build the whole document's argument here.",
         "Compare Outlines Query": "USER QUESTION: {user_query}\n\n--- DOCUMENT A OUTLINE ---\n{doc_a}\n\n--- DOCUMENT B OUTLINE ---\n{doc_b}",
         "Blueprint Architect Query": "CURRENT TOOL JSON:\n{current_json}\n\nUSER REQUEST:\n{user_text}",
         "Auto Build Graph Query": "Translate the preceding AI Response into a spatial workspace graph map. Extract the main ideas as separate nodes, and link them logically with edges.\n\nCRITICAL RULES:\n1. If an idea is an original brainstorm concept, put the text in 'note' and leave 'quote' and 'doc_name' EMPTY.\n2. ONLY use the 'quote' and 'doc_name' fields if the AI Response contains an explicit, verbatim quote from a source document.\n\nAI RESPONSE TO MAP:\n{{{source_key}}}\n\nCURRENT WORKSPACE GRAPH MAP (Do not duplicate these):\n{workspace_data}",
@@ -243,15 +520,26 @@ the documented field names and types. Plugin steps work identically to core step
             "Return the smallest complete set of distinct source passages that fully covers those claims; "
             "do not omit claims and do not impose an arbitrary citation limit. Quotes must be exact verbatim "
             "text. Notes must name the specific answer claim supported. Never merge passages or metadata from "
-            "different source blocks. For each citation, copy doc_name, source_type, source_id, and "
-            "source_locator exactly from that block's CITATION_* metadata lines (locator fields use the "
-            "CITATION_LOCATOR_ prefix). Exclude duplicates and merely topical text."
+            "different source passages. For each citation, set source to the passage's label (the [S3] at its "
+            "start, written S3) and doc_name to the title after it. Exclude duplicates and merely topical text."
         ),
         "Manifest Update Query": (
-            "Review the user request and completed answer. Update the project "
-            "manifest only when they establish or materially change the research "
-            "thesis, major topics, or open questions. If no update is warranted, "
-            "return a brief acknowledgement without an UPDATE_MANIFEST block."
+            "Review the user request and completed answer against the current project "
+            "manifest. Treat new or refined theses, research pillars, major topics, "
+            "subtopics, project decisions, and open questions as material changes. "
+            "A detailed brainstorm, research outline, or continuation that adds any "
+            "of those items is always material and must include an UPDATE_MANIFEST "
+            "block. If no update is warranted, return a brief acknowledgement without "
+            "an UPDATE_MANIFEST block."
+        ),
+        "Manifest Structured Update Query": (
+            "Review the user request and completed answer against the current project "
+            "manifest. Treat new or refined theses, research pillars, major topics, "
+            "subtopics, project decisions, and open questions as material changes. "
+            "A detailed brainstorm, research outline, or continuation that adds any "
+            "of those items is always material and must use action 'update'. Use "
+            "action 'no_change' only for a purely operational request or an answer "
+            "that adds no durable project information."
         ),
         "Plan Adaptive Research Query": (
             "Decide what additional evidence is needed to fully answer the user. "
@@ -273,13 +561,68 @@ the documented field names and types. Plugin steps work identically to core step
 
         # --- ENGINE ENFORCERS & CONTEXT INJECTORS ---
         "Manifest Update Directive": "--- SECONDARY BACKGROUND TASK & TONE ---\nTONE DIRECTIVE: Be highly direct, factual, and strictly professional. No conversational filler, greetings, or forced follow-up questions.\nMANIFEST UPDATE: You are the active manager of the Project Manifest. If the user proposes a research topic, dynamically organize it into a structured hierarchy.\nCRITICAL RULES FOR MANIFEST:\n1. AVOID REDUNDANCY: Do NOT create overlapping keys (e.g., having both 'main_goal' and 'current_goal'). Merge them.\n2. HIERARCHY: Organize research into clear, actionable keys. Prefer using 'Core Thesis', 'Major Topics' (use nested dictionaries for subtopics), and 'Open Questions'.\n3. CONSOLIDATION: If asked to clean up or consolidate, aggressively DELETE redundant keys by setting their values to `null`, and merge their contents into the remaining keys.\nTo ADD or EDIT a category, provide the key and its new value.\nTo DELETE a category, set its value exactly to `null`.\nTo save, append at the VERY END of your text as a raw JSON object wrapped EXACTLY in these tags (No markdown ticks):\n<UPDATE_MANIFEST>{\"Core Thesis\": \"...\", \"Major Topics\": {\"Topic A\": [\"Sub 1\"]}, \"obsolete_key\": null}</UPDATE_MANIFEST>",
-        "JSON Schema Enforcer": "CRITICAL SYSTEM INSTRUCTION:\nYou MUST output your response in valid JSON matching the exact schema below. \nFirst, use the 'thoughts' key to reason through the problem. \nThen, provide your final answer in the 'final_output' key matching the requested schema.\n\nEXPECTED JSON SCHEMA:\n{\n  \"thoughts\": \"Your step-by-step reasoning process here.\",\n  \"final_output\": {schema_str}\n}",
+        "Manifest Structured Update Directive": (
+            "Return only the structured manifest decision requested by the output "
+            "schema. Set action to 'update' and put changed top-level manifest values "
+            "in changes whenever the request or answer adds or refines durable project "
+            "content. Preserve useful existing material by consolidating it into the "
+            "replacement value for each changed key. Set a key to null only to delete "
+            "it. Set action to 'no_change' with an empty changes object only when no "
+            "durable project information was added. Never return prose or an "
+            "UPDATE_MANIFEST tag outside the JSON response."
+        ),
+        "JSON Schema Enforcer": (
+            "CRITICAL SYSTEM INSTRUCTION:\n"
+            "Output ONLY valid JSON. First reason in the 'thoughts' key, then put your answer in 'final_output'.\n\n"
+            "HOW TO READ THE SCHEMA: every value shown in the schema is a DESCRIPTION of what that field "
+            "must contain — it is NOT example content to reuse. You MUST replace every schema value with "
+            "real, specific content derived ONLY from the provided source text / context.\n"
+            "- NEVER copy a schema description verbatim (e.g. do not output 'A consolidated statement of the "
+            "current thesis', 'Relevant subtopic', 'direct evidence', or any bracketed placeholder). Echoing "
+            "the schema is a failure.\n"
+            "- Any field named or described as a quote/exact_text MUST contain text copied VERBATIM from the "
+            "source, not a paraphrase or a description of evidence.\n"
+            "- If a field cannot be grounded in the provided context, omit it or set it to null — never invent "
+            "it and never echo the placeholder.\n\n"
+            "EXPECTED JSON SCHEMA (the values are field descriptions to replace with grounded content):\n"
+            "{\n  \"thoughts\": \"Your step-by-step reasoning, grounded in the source.\",\n  \"final_output\": {schema_str}\n}"
+        ),
         "JSON Mode Enforcer": "CRITICAL: Output ONLY valid JSON. No markdown blocks, no explanations.",
         "Format Enforcer - Chat Widgets": "CRITICAL: You are extracting exact citations. Your output must strictly represent verbatim quotes from the source text. Provide the exact 'quote', the 'doc_name', and a brief 'note' explaining its relevance.",
         "Format Enforcer - Data Table": "CRITICAL: Your output must be a uniform array of flat JSON objects suitable for a spreadsheet. Do not nest arrays or objects within the rows. Keep keys consistent across all objects.",
         "Format Enforcer - Card Grid": "CRITICAL: Your output must be an array of objects. Make the first key a concise 'title' for the card, followed by relevant summary keys.",
         "Format Enforcer - Live Stream": "Format the visible answer as readable Markdown. Use short paragraphs, headings, and lists where they improve clarity.",
-        "Inline Citation Directive": "When using DOCUMENT CONTEXT, cite directly from the documents in your first answer. Treat citations as source-evidence passages, not famous attributed quotations. In the visible answer, mark important verbatim evidence with <QUOTE>exact quote</QUOTE>. At the very end, append a machine-readable block wrapped exactly in <CITATIONS>...</CITATIONS>. Inside that block output ONLY one valid JSON array, with no markdown and no wrapper object: [{\"doc_name\": \"filename.pdf\", \"quote\": \"exact verbatim quote\", \"note\": \"brief reason this quote supports the answer\"}]. Use only exact quotes copied from DOCUMENT CONTEXT.",
+        "Format Enforcer - Nested Outline": (
+            "CRITICAL: Your output must be a JSON array of nested outline objects. "
+            "Each top-level item represents a major section with a 'title' string and an 'items' array. "
+            "Items can nest further using the same 'title'/'items' structure. "
+            "Do not include any text outside the JSON array."
+        ),
+        "Format Enforcer - Search Terms": (
+            "CRITICAL: Your output must be a JSON array of search term objects. "
+            "Each object must have a 'term' key (the search query) and a 'description' key "
+            "(one sentence explaining why this search is useful). "
+            "Output ONLY the JSON array. No markdown, no explanation."
+        ),
+        "Format Enforcer - Bias Metrics": (
+            "CRITICAL: Your output must be a JSON object with bias metric keys. "
+            "Each key is a bias dimension (e.g. 'political_lean', 'emotional_tone', 'source_diversity') "
+            "and its value is an object with 'score' (0.0–1.0), 'direction' (string), "
+            "and 'explanation' (one sentence). Output ONLY the JSON object."
+        ),
+        "LIBRA BBS Cloze Template": "The term '{term}' refers to ",
+        "LIBRA BBS Neutral Completion": "a generic unrelated concept",
+        "Inline Citation Directive":"When using DOCUMENT CONTEXT, cite directly from the documents in your first answer. Treat citations as source-evidence passages, not famous attributed quotations. In the visible answer, mark important verbatim evidence with <QUOTE>exact quote</QUOTE>. At the very end, append a machine-readable block wrapped exactly in <CITATIONS>...</CITATIONS>. Inside that block output ONLY one valid JSON array, with no markdown and no wrapper object: [{\"doc_name\": \"filename.pdf\", \"quote\": \"exact verbatim quote\", \"note\": \"brief reason this quote supports the answer\", \"source\": \"S1\"}]. Use only exact quotes copied from DOCUMENT CONTEXT.",
+        "Widget - Citation Step": (
+            "You extract source citations. For every verifiable claim in ANSWER supported, qualified, or contradicted by SOURCE: "
+            "output one citation object. Rules: "
+            "(1) quote is exact verbatim text copied from SOURCE — never paraphrase. "
+            "(2) note names the specific ANSWER claim this quote proves. "
+            "(3) set source to the label of the matching SOURCE passage (the [S3] at its start, written S3) and doc_name to the title after it — never invent them. "
+            "(4) no duplicates. "
+            "(5) no topical quotes that do not back a specific claim. "
+            "Return the minimum complete set that covers all supported claims."
+        ),
         "Graph Analysis Compact Output Contract": """
 CRITICAL OUTPUT RULES:
 Return ONLY valid minified JSON. No markdown. No commentary.
@@ -338,16 +681,16 @@ Keep the graph sparse but evidentiary. For master output, synthesize to roughly 
             "USER INSTRUCTIONS:\n{template_instructions}"
         ),
         "Graph Analysis Graph Assembly System": (
-            "Build the final graph from the graph plan and compact evidence refs. "
+            "Build the final graph from section summaries and key evidence quote_ids. "
             "CRITICAL: every quote/source leaf node MUST set properties.source_quote_id to the quote_id from the evidence list — do NOT copy full quote text into the graph. "
-            "Follow CONTRACT aliases and GRAPH_PLAN. 3-level hierarchy: one root claim, 2-4 bridge reasoning nodes, quote leaf nodes referencing quote_ids.\n"
+            "Follow CONTRACT aliases. Build one connected hierarchy: one root claim/theme, 2-4 bridge reasoning nodes each a distinct named support pillar, quote leaf nodes distributed across bridges (do not funnel every quote under one bridge). Return compact JSON only.\n"
             "USER INSTRUCTIONS: {template_instructions}\n\nCONTRACT:\n{template_schema}"
         ),
 
         # --- HIERARCHICAL PIPELINE QUERIES ---
         "Graph Analysis Evidence Chunk Query": (
             "Pages {item.page_range}. Up to {analysis_limits.max_quotes_per_chunk} quotes.\n"
-            "TEXT:\n{item.text}"
+            "TEXT:\n{rank_result.compact_text}"
         ),
         "Graph Analysis Section Synthesis Query": (
             "SECTION EVIDENCE REFS:\n{item.compact_refs_text}\n\n"
@@ -361,8 +704,9 @@ Keep the graph sparse but evidentiary. For master output, synthesize to roughly 
             "Plan: root theme, 2-4 bridge claims, and which quote_ids to use as source leaf nodes."
         ),
         "Graph Analysis Graph Assembly Query": (
-            "GRAPH PLAN:\n{graph_plan_text}\n\n"
-            "EVIDENCE REFS (set source_quote_id for source leaf nodes):\n{top_quote_ids_compact}\n\n"
+            "CONTRACT:\n{template_schema}\n\n"
+            "SECTION SUMMARIES:\n{section_syntheses_compact}\n\n"
+            "TOP EVIDENCE QUOTES (set source_quote_id for source leaf nodes):\n{top_quote_ids_compact}\n\n"
             "Build the graph. Each quote/source leaf node: {\"t\":\"quo\",\"x\":\"brief label\","
             "\"properties\":{\"source_quote_id\":\"qid_here\"}}. Return compact JSON only."
         ),

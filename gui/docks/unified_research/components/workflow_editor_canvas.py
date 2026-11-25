@@ -41,6 +41,7 @@ _LLM_STEP_TYPES = {"LLM_QUERY", "LLM_SCHEMA_QUERY"}
 _STEP_CATEGORIES = [
     ("LLM", ["LLM_QUERY", "LLM_SCHEMA_QUERY"]),
     ("Search", ["RAG_SEARCH"]),
+    ("Intelligence", ["BUILD_RETRIEVAL_PLAN", "ARTIFACT_RETRIEVE", "PACK_ARTIFACT_CONTEXT", "SOURCE_STAGE"]),
     ("Context", ["SOURCE_STATISTICS", "ONTOLOGY_CATALOG"]),
     ("Flow", ["BRANCH", "FOREACH", "USER_INPUT"]),
     ("Code / Data", ["PYTHON_SCRIPT", "DATABASE_WRITE"]),
@@ -57,6 +58,10 @@ _STEP_HINTS = {
     "LLM_QUERY": "Calls the LLM with an optional system prompt and context. Set Prompt Key to use a saved prompt template, or write the system prompt directly. Query/Input passes context from state. ui_format on the connected GUI node controls how output is rendered.",
     "LLM_SCHEMA_QUERY": "Same as LLM Query but forces JSON mode. Output must match the output_schema you define.",
     "RAG_SEARCH": "Searches indexed documents. 'queries' input = list of search strings (or key holding list). n_results = chunks per query (default 5). tag_filters = CSV of tags. tag_logic = AND or OR.",
+    "BUILD_RETRIEVAL_PLAN": "Creates an artifact-aware retrieval plan from a query.",
+    "ARTIFACT_RETRIEVE": "Retrieves annotations, entities, citations, transcript segments, blocks, and vector fallback results.",
+    "PACK_ARTIFACT_CONTEXT": "Packs artifact retrieval results into compact citation-ready context.",
+    "SOURCE_STAGE": "Requests a source intelligence stage through the background scheduler.",
     "SOURCE_STATISTICS": "Collects reusable source facts such as page count, indexed chunk count, and file size. Choose metrics in the inputs and reference the output from any later blueprint step.",
     "ONTOLOGY_CATALOG": "Loads registered entity and relation categories on demand. Feed its output into graph builders or any tool that must use exact ontology types.",
     "BRANCH": "Conditional router. Query = condition like `{confidence} > 0.8` or `{tag} == 'yes'`. Routes to true or false child branches.",
@@ -86,6 +91,10 @@ _STEP_TYPE_COLORS = {
     "LLM_QUERY": "#7c4dff",
     "LLM_SCHEMA_QUERY": "#5e35b1",
     "RAG_SEARCH": "#0288d1",
+    "BUILD_RETRIEVAL_PLAN": "#2e7d32",
+    "ARTIFACT_RETRIEVE": "#00796b",
+    "PACK_ARTIFACT_CONTEXT": "#558b2f",
+    "SOURCE_STAGE": "#5d4037",
     "SOURCE_STATISTICS": "#00838f",
     "ONTOLOGY_CATALOG": "#00695c",
     "BRANCH": "#e65100",
@@ -433,7 +442,19 @@ class VisualWorkflowEditor(QWidget):
 
         self.input_model = QLineEdit()
         self.input_model.setPlaceholderText("{selected_model}")
-        self.input_model.setToolTip("AI model to use. {selected_model} = whatever's chosen in the toolbar. Or type a model name like 'llama3'.")
+        self.input_model.setToolTip("AI model to use. {selected_model} = the main-answer model configured in AI Setup.")
+
+        self.combo_model_role = QComboBox()
+        self.combo_model_role.setToolTip("Optional model role from AI Setup. Leave automatic unless this step has a specific job.")
+        for label, value in [
+            ("Automatic", ""),
+            ("Main answer", "main_answer_model"),
+            ("Fast worker", "fast_worker_model"),
+            ("Vision", "vision_model"),
+            ("Extraction repair", "extraction_repair_model"),
+            ("Reranker", "reranker_model"),
+        ]:
+            self.combo_model_role.addItem(label, value)
 
         self.input_prompt_key = QLineEdit()
         self.input_prompt_key.setPlaceholderText("e.g. Citation Extractor")
@@ -493,6 +514,7 @@ class VisualWorkflowEditor(QWidget):
 
         for lbl, w in [
             ("Model", self.input_model),
+            ("Model Role", self.combo_model_role),
             ("Prompt Key", self._prompt_key_row_widget),
             ("System", self._system_wrap_widget),
             ("LLM Options", self.input_llm_options),
@@ -513,24 +535,23 @@ class VisualWorkflowEditor(QWidget):
         ui_form.setSpacing(4)
 
         self.combo_ui_format = QComboBox()
-        self.combo_ui_format.addItems([
-            "silent", "status", "live_stream", "search_terms", "chat_widgets",
-            "data_table", "card_grid", "workspace_graph", "nested_outline",
-            "results_dialog", "bias_metrics",
-        ])
-        self.combo_ui_format.setToolTip(
-            "How this node renders output:\n"
-            "  silent — no output shown\n"
-            "  status — show progress only, not the raw result\n"
-            "  live_stream — streaming text\n"
-            "  chat_widgets — citation bubbles\n"
-            "  search_terms — clickable search cards\n"
-            "  data_table — spreadsheet grid\n"
-            "  card_grid — browsable card grid\n"
-            "  workspace_graph — import nodes/edges\n"
-            "  results_dialog — popup browse dialog\n"
-            "  nested_outline — collapsible outline"
-        )
+        self._populate_ui_format_combo()
+        self.combo_ui_format.currentIndexChanged.connect(self._on_ui_format_changed)
+
+        # Description label + prompt-edit link shown below the format picker
+        self._format_desc_label = QLabel("")
+        self._format_desc_label.setWordWrap(True)
+        self._format_desc_label.setStyleSheet("font-size: 11px; color: #aaa;")
+        self._format_prompt_btn = QPushButton("✏️ Edit Widget Prompt")
+        self._format_prompt_btn.setFlat(True)
+        self._format_prompt_btn.setStyleSheet("font-size: 11px; color: #6ca8f0; border: none; text-align: left;")
+        self._format_prompt_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._format_prompt_btn.clicked.connect(self._open_format_prompt_editor)
+        self._format_prompt_btn.setVisible(False)
+        self._format_rag_hint = QLabel("⚡ Citation bubbles are auto-enabled when RAG context is present.")
+        self._format_rag_hint.setWordWrap(True)
+        self._format_rag_hint.setStyleSheet("font-size: 11px; color: #f0b96c;")
+        self._format_rag_hint.setVisible(False)
         self.input_ui_target = QLineEdit()
         self.input_ui_target.setPlaceholderText("floating / chat_tab / custom_tools_tab / ...")
         self.input_ui_target.setToolTip(
@@ -551,6 +572,9 @@ class VisualWorkflowEditor(QWidget):
 
         for lbl, w in [
             ("UI Format", self.combo_ui_format),
+            ("", self._format_desc_label),
+            ("", self._format_prompt_btn),
+            ("", self._format_rag_hint),
             ("UI Target", self.input_ui_target),
             ("UI Title", self.input_ui_title),
             ("Output Schema", self.input_ui_schema),
@@ -585,6 +609,101 @@ class VisualWorkflowEditor(QWidget):
         self.update_theme(self.theme)
 
     # ------------------------------------------------------------------
+    # Widget format picker helpers
+    # ------------------------------------------------------------------
+
+    def _populate_ui_format_combo(self) -> None:
+        """Populate combo_ui_format from AIWidgetRegistry grouped by category.
+
+        Items that have no registry entry (workspace_graph, results_dialog, status)
+        are added to a 'Special' group at the end so existing blueprints continue
+        to work.
+        """
+        from core.registries.ai_widget_registry import AIWidgetRegistry
+        registry = AIWidgetRegistry.get_instance()
+        by_cat = registry.by_category()
+
+        self.combo_ui_format.blockSignals(True)
+        self.combo_ui_format.clear()
+        for category, defns in by_cat.items():
+            # Add a non-selectable separator header (italic, disabled)
+            self.combo_ui_format.addItem(f"── {category} ──")
+            idx = self.combo_ui_format.count() - 1
+            self.combo_ui_format.model().item(idx).setEnabled(False)
+            for defn in defns:
+                label = f"{defn.icon}  {defn.label}"
+                self.combo_ui_format.addItem(label, defn.widget_id)
+
+        # Non-registry formats that the engine supports
+        self.combo_ui_format.addItem("── Special ──")
+        idx = self.combo_ui_format.count() - 1
+        self.combo_ui_format.model().item(idx).setEnabled(False)
+        for wid, lbl in [
+            ("workspace_graph", "🗺️  Workspace Graph Import"),
+            ("results_dialog", "🪟  Results Dialog (popup)"),
+            ("status", "ℹ️  Status Only"),
+        ]:
+            self.combo_ui_format.addItem(lbl, wid)
+        self.combo_ui_format.blockSignals(False)
+
+    def _set_ui_format_combo(self, widget_id: str) -> None:
+        """Select the combo item whose user-data matches widget_id."""
+        for i in range(self.combo_ui_format.count()):
+            if self.combo_ui_format.itemData(i) == widget_id:
+                self.combo_ui_format.setCurrentIndex(i)
+                return
+        # Fallback: text match (handles unknown IDs from old blueprints)
+        idx = self.combo_ui_format.findText(widget_id)
+        if idx >= 0:
+            self.combo_ui_format.setCurrentIndex(idx)
+
+    def _on_ui_format_changed(self, _index: int) -> None:
+        """Update description label and prompt-edit button when format changes."""
+        widget_id = self.combo_ui_format.currentData()
+        if not widget_id:
+            self._format_desc_label.setText("")
+            self._format_prompt_btn.setVisible(False)
+            self._format_rag_hint.setVisible(False)
+            return
+        from core.registries.ai_widget_registry import AIWidgetRegistry
+        defn = AIWidgetRegistry.get_instance().get(widget_id)
+        if defn:
+            self._format_desc_label.setText(defn.description)
+            has_prompt = bool(defn.prompt_key)
+            self._format_prompt_btn.setVisible(has_prompt)
+            self._format_rag_hint.setVisible(defn.auto_citations)
+        else:
+            self._format_desc_label.setText("")
+            self._format_prompt_btn.setVisible(False)
+            self._format_rag_hint.setVisible(False)
+
+    def _open_format_prompt_editor(self) -> None:
+        """Open the prompt editor dialog focused on the current widget's prompt key."""
+        widget_id = self.combo_ui_format.currentData()
+        from core.registries.ai_widget_registry import AIWidgetRegistry
+        defn = AIWidgetRegistry.get_instance().get(widget_id) if widget_id else None
+        if defn is None or not defn.prompt_key:
+            return
+        from gui.components.dialogs.prompt_editor_dialog import PromptEditorDialog
+        pm = getattr(self, "_prompt_manager", None)
+        if pm is None:
+            try:
+                from core.app_context import AppContext
+                ctx = AppContext.instance()
+                pm = getattr(ctx, "prompt_manager", None) if ctx else None
+            except Exception:
+                pm = None
+        if pm is None:
+            return
+        key = defn.prompt_key
+        dlg = PromptEditorDialog(pm, parent=self)
+        dlg.show()
+        dlg.raise_()
+        from PySide6.QtCore import Qt
+        items = dlg.tree.findItems(key, Qt.MatchFlag.MatchExactly | Qt.MatchFlag.MatchRecursive)
+        if items:
+            dlg.tree.setCurrentItem(items[0])
+
     # ------------------------------------------------------------------
     # Inspector helpers: prompt editor + vars panel
     # ------------------------------------------------------------------
@@ -615,7 +734,7 @@ class VisualWorkflowEditor(QWidget):
             ("{user_input}", "User's typed message when launching the blueprint"),
             ("{selected_text}", "Text highlighted in PDF viewer (source_viewer actions)"),
             ("{source_path}", "File path of the active/selected document"),
-            ("{selected_model}", "Model selected in the toolbar"),
+            ("{selected_model}", "Main-answer model configured in AI Setup"),
             ("{active_rag_docs}", "List of docs currently enabled for RAG"),
             ("{project_manifest}", "JSON summary of all project documents"),
             ("{workspace_data}", "JSON of the active workspace graph"),
@@ -927,7 +1046,7 @@ class VisualWorkflowEditor(QWidget):
 
         if is_ui:
             self._llm_group.setVisible(False)
-            self.combo_ui_format.setCurrentText(node.inputs.get("ui_format", "live_stream"))
+            self._set_ui_format_combo(node.inputs.get("ui_format", "live_stream"))
             self.input_ui_target.setText(node.inputs.get("ui_target", "floating"))
             self.input_ui_title.setText(node.inputs.get("ui_title", ""))
             schema = node.inputs.get("output_schema")
@@ -949,6 +1068,11 @@ class VisualWorkflowEditor(QWidget):
             self._llm_group.setVisible(is_llm)
             if is_llm:
                 self.input_model.setText(step.model or "")
+                role_idx = next(
+                    (i for i in range(self.combo_model_role.count()) if self.combo_model_role.itemData(i) == (step.model_role or "")),
+                    0,
+                )
+                self.combo_model_role.setCurrentIndex(role_idx)
                 self.input_prompt_key.setText(step.prompt_key or "")
                 self.input_system.setPlainText(step.system_prompt or "")
                 self.input_llm_options.setPlainText(json.dumps(step.llm_options, indent=2) if step.llm_options else "")
@@ -980,7 +1104,7 @@ class VisualWorkflowEditor(QWidget):
                     edge.target_node_id = new_id
 
         if self.graph_service.is_ui_node(node):
-            node.inputs["ui_format"] = self.combo_ui_format.currentText()
+            node.inputs["ui_format"] = self.combo_ui_format.currentData() or self.combo_ui_format.currentText()
             node.inputs["ui_target"] = self.input_ui_target.text().strip() or "floating"
             node.inputs["ui_title"] = self.input_ui_title.text().strip() or node.label
             node.inputs["output_schema"] = self._parse_json_or_none(self.input_ui_schema.toPlainText())
@@ -997,6 +1121,7 @@ class VisualWorkflowEditor(QWidget):
             # LLM properties (only applied when visible)
             if self._llm_group.isVisible():
                 step.model = self.input_model.text().strip() or "{selected_model}"
+                step.model_role = self.combo_model_role.currentData() or None
                 step.prompt_key = self.input_prompt_key.text().strip() or None
                 step.system_prompt = self.input_system.toPlainText().strip() or None
                 step.llm_options = self._parse_json_or_none(self.input_llm_options.toPlainText()) or {}

@@ -92,6 +92,9 @@ class BaseTab(QWidget):
             return
 
     def receive_ai_payload(self, payload: dict):
+        loader = getattr(self, '_history_loader', None)
+        if loader is not None and not getattr(self, '_replaying_history', False):
+            loader.cancel()
         payload_type = payload.get("type")
 
         if payload_type == "status":
@@ -110,10 +113,38 @@ class BaseTab(QWidget):
 
         if payload_type == "manifest_updated":
             widget = self._ensure_stream_widget()
+            if hasattr(widget, "hide_status"):
+                widget.hide_status()
             if hasattr(widget, "add_manifest_update"):
                 widget.add_manifest_update(
                     payload.get("changes", {}),
                     self._open_project_manifest,
+                )
+            return
+
+        if payload_type == "manifest_update_status":
+            status = payload.get("status", "failed")
+            if status == "attempted":
+                # The manifest now runs as a separate queued workflow. Do not
+                # manufacture an empty chat bubble just to show transient work.
+                widget = self._active_stream_widget
+                if widget is None:
+                    if hasattr(self, "status_lbl"):
+                        self.status_lbl.setText(
+                            payload.get("text", "Updating project manifest…")
+                        )
+                    return
+                if hasattr(widget, "update_status"):
+                    widget.update_status(payload.get("text", "Updating project manifest…"))
+                return
+            widget = self._ensure_stream_widget()
+            if hasattr(widget, "hide_status"):
+                widget.hide_status()
+            if hasattr(widget, "add_manifest_status"):
+                widget.add_manifest_status(
+                    status,
+                    payload.get("text", "Project manifest update finished"),
+                    payload.get("detail", ""),
                 )
             return
 
@@ -126,7 +157,8 @@ class BaseTab(QWidget):
         if payload_type == "hide_status":
             if self._active_stream_widget and hasattr(self._active_stream_widget, "hide_status"):
                 self._active_stream_widget.hide_status()
-            self._active_stream_widget = None
+            if not payload.get("keep_active", False):
+                self._active_stream_widget = None
             return
 
         if payload_type == "prompt_trace_available":
@@ -134,6 +166,20 @@ class BaseTab(QWidget):
             trace_id = payload.get("trace_id")
             if widget and trace_id and hasattr(widget, "set_prompt_trace"):
                 widget.set_prompt_trace(trace_id)
+            return
+
+        if payload_type == "rag_context_view":
+            widget = self._ensure_stream_widget()
+            if hasattr(widget, "set_rag_context"):
+                widget.set_rag_context(payload.get("audit") or {})
+            return
+
+        if payload_type == "rag_context_highlights":
+            widget = self._ensure_stream_widget()
+            if hasattr(widget, "apply_rag_context_highlights"):
+                widget.apply_rag_context_highlights(
+                    payload.get("audit") or {}
+                )
             return
 
         if payload_type == "citation_cards":
@@ -144,15 +190,12 @@ class BaseTab(QWidget):
                 self.receive_ai_widget(widget)
             if payload.get("trace_id") and hasattr(widget, "set_prompt_trace"):
                 widget.set_prompt_trace(payload.get("trace_id"))
-            for item in items:
-                if isinstance(item, dict):
-                    source_meta = self._source_meta_for_citation(item)
-                    widget.add_bubble(
-                        doc_name=item.get("doc_name", "Unknown Document"),
-                        quote=item.get("quote", item.get("text", "")),
-                        note=item.get("note", item.get("reason", "")),
-                        source_meta=source_meta,
-                    )
+            citations = [{'doc_name': item.get('doc_name', 'Unknown Document'),
+                          'quote': item.get('quote', item.get('text', '')),
+                          'note': item.get('note', item.get('reason', '')),
+                          'source_meta': self._source_meta_for_citation(item)}
+                         for item in items if isinstance(item, dict)]
+            widget.set_citations(citations)
             if hasattr(widget, "hide_status"):
                 widget.hide_status()
             return
@@ -211,15 +254,52 @@ class BaseTab(QWidget):
 
         if payload_type == "error":
             msg = payload.get("message", "")
-            if hasattr(self, "status_lbl"):
+            if hasattr(self, "chat_layout"):
+                widget = self._active_stream_widget
+                if widget is None:
+                    widget = ChatMessageWidget("AI Error", theme=self.theme, app_context=self.app_context)
+                    self.receive_ai_widget(widget)
+                if hasattr(widget, "set_error_text"):
+                    widget.set_error_text(msg)
+                else:
+                    widget.append_chunk(f"Error: {msg}")
+                if payload.get("trace_id") and hasattr(widget, "set_prompt_trace"):
+                    widget.set_prompt_trace(payload.get("trace_id"))
+                self._active_stream_widget = None
+                if self.project_manager and self.target_id and not getattr(self, "_replaying_history", False):
+                    try:
+                        self.project_manager.save_chat_message(
+                            self.target_id,
+                            "ai",
+                            f"Error: {msg}",
+                            "error",
+                            payload.get("trace_id"),
+                            json.dumps([{"type": "error", "message": msg}]),
+                        )
+                    except Exception:
+                        pass
+                QTimer.singleShot(50, self._scroll_to_bottom_if_alive)
+            elif hasattr(self, "status_lbl"):
                 self.status_lbl.setText(f"❌ Pipeline Failed: {msg}")
                 self.status_lbl.setStyleSheet("font-weight: bold; color: #ff4444;")
             else:
                 widget = self._ensure_stream_widget()
-                if hasattr(widget, "update_status"):
+                if hasattr(widget, "set_error_text"):
+                    widget.set_error_text(msg)
+                elif hasattr(widget, "update_status"):
                     widget.update_status(f"❌ Error: {msg}")
             if hasattr(self, "btn_generate"):
                 self.btn_generate.setEnabled(True)
+            return
+
+        # --- Plugin-registered renderer fallthrough ----------------------------
+        # Built-in types are all handled above with explicit returns.  Any
+        # remaining payload type may have a renderer registered by a plugin via
+        # api.widgets.register() → AIOutputWidgetFactory.
+        from gui.base.ai_output_factory import AIOutputWidgetFactory
+        plugin_widget = AIOutputWidgetFactory.create(payload_type, payload, parent=self)
+        if plugin_widget is not None:
+            self.receive_ai_widget(plugin_widget)
 
     def _ensure_stream_widget(self):
         if self._active_stream_widget is None:
@@ -269,6 +349,7 @@ class BaseTab(QWidget):
     def _source_meta_for_citation(self, item):
         quote = item.get("quote", item.get("text", ""))
         meta = {
+            **item,
             "source_type": item.get("source_type", "pdf"),
             "source_id": item.get("source_id", ""),
             "source_locator": item.get("source_locator", {}),
@@ -277,6 +358,8 @@ class BaseTab(QWidget):
             "start": item.get("start", 0),
             "end": item.get("end", 0),
         }
+        if meta.get("artifact_id") or meta.get("artifact_ref"):
+            return meta
         pm = self.project_manager
         doc_name = item.get("doc_name", "")
         if not pm or not hasattr(pm, "list_sources") or not doc_name:
@@ -304,8 +387,13 @@ class BaseTab(QWidget):
         # Prevent destructive wiping if widgets are already active
         if self.chat_layout.count() > 1: return
 
-        history = self.project_manager.get_chat_history(self.target_id)
-        self.render_chat_history(history)
+        self.load_paged_history()
+
+    def load_paged_history(self):
+        from gui.components.chat_history_loader import ChatHistoryLoader
+        if not hasattr(self, '_history_loader'):
+            self._history_loader = ChatHistoryLoader(self.app_context, self)
+        self._history_loader.pager.reset()
 
     def render_chat_history(self, history, *, clear_existing=False):
         """Render persisted turns through the same rich component path as live output."""
@@ -350,14 +438,9 @@ class BaseTab(QWidget):
                 if k not in initial_state:
                     initial_state[k] = v
 
-        # Selected model: prefer tab-local combo, fall back to AppContext
+        # Selected model: centralized in AI Setup default model roles.
         if "selected_model" not in initial_state:
-            if hasattr(self, "model_combo"):
-                initial_state["selected_model"] = self.model_combo.currentText()
-            elif hasattr(self, "combo_models"):
-                initial_state["selected_model"] = self.combo_models.currentText()
-            else:
-                initial_state["selected_model"] = self.app_context.get_active_ai_model()
+            initial_state["selected_model"] = self.app_context.get_active_ai_model()
 
         EventBus.get_instance().workflow_action_requested.emit(
             WorkflowIntent.RUN_BLUEPRINT,

@@ -8,7 +8,7 @@ from gui.docks.unified_research.components.dynamic_inputs import DynamicInputWid
 import json
 import os 
 from gui.docks.unified_research.tabs.base_tab import BaseTab
-from gui.utils.document_helpers import active_pdf_names, prune_doc_names
+from gui.utils.document_helpers import active_pdf_paths, prune_doc_names
 
 class ChatTab(BaseTab):
     def __init__(self, app_context, parent=None):
@@ -104,7 +104,7 @@ class ChatTab(BaseTab):
         pm = self.project_manager
         current_docs = prune_doc_names(
             pm,
-            self._metadata_json("active_rag_docs", active_pdf_names(pm)),
+            self._metadata_json("active_rag_docs", active_pdf_paths(pm)),
         )
         current_tags = self._metadata_json("active_rag_tags", [])
         current_logic = pm.get_metadata("active_rag_tag_logic", "OR")
@@ -143,6 +143,9 @@ class ChatTab(BaseTab):
             return
         self.input_field.clear()
 
+        dynamic_state = self.dynamic_inputs.get_values()
+        context_state = self._gather_context_state()  # history widget + plugin contributors
+
         pm = self.project_manager
         if pm:
             pm.save_chat_message(self.target_id, "user", text, "text")
@@ -150,9 +153,6 @@ class ChatTab(BaseTab):
         user_msg = ChatMessageWidget("You", theme=self.theme, is_user=True)
         user_msg.append_chunk(text)
         self.receive_ai_widget(user_msg)
-
-        dynamic_state = self.dynamic_inputs.get_values()
-        context_state = self._gather_context_state()  # history widget + plugin contributors
 
         initial_state = {
             "user_query": text,

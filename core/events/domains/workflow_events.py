@@ -17,6 +17,7 @@ class WorkflowEvent(Enum):
     FAILED = auto()
     USER_INPUT_REQUESTED = auto()
     STATE_SNAPSHOT = auto()
+    CANCELLED = auto()
 
 @dataclass
 class WorkflowPayload(BasePayload):

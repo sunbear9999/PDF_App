@@ -83,10 +83,27 @@ def _group_into_sections(
 ) -> List[List[Any]]:
     if not all_chunk_evidence:
         return []
+    # When every chunk carries a real section_id (SECTION_EXTRACT found actual
+    # heading structure), group by that instead of an arbitrary fixed-size
+    # slice — this makes "sections" reflect the document's real structure.
+    if all(isinstance(c, dict) and c.get("section_id") for c in all_chunk_evidence):
+        return _group_by_section_id(all_chunk_evidence)
     sections = []
     for i in range(0, len(all_chunk_evidence), chunks_per_section):
         sections.append(all_chunk_evidence[i : i + chunks_per_section])
     return sections
+
+
+def _group_by_section_id(all_chunk_evidence: List[Any]) -> List[List[Any]]:
+    groups: List[List[Any]] = []
+    index_by_id: Dict[Any, int] = {}
+    for chunk in all_chunk_evidence:
+        sid = chunk.get("section_id")
+        if sid not in index_by_id:
+            index_by_id[sid] = len(groups)
+            groups.append([])
+        groups[index_by_id[sid]].append(chunk)
+    return groups
 
 
 def _collect_refs(section_chunks: List[Any]) -> List[Dict[str, Any]]:

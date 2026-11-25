@@ -1,7 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from core.models.extraction_models import (
+        CitationIndex,
+        DocumentBlock,
+        ExtractedDate,
+        ExtractedEntity,
+        ExtractedTable,
+        RankedBlock,
+    )
 
 
 @dataclass
@@ -26,3 +36,27 @@ class EvidenceQuote:
     quote_role: str         # "supports" | "contradicts" | "context" | "data"
     tags_json: str          # JSON array of tags/topics/entities
     created_at: str         # ISO timestamp
+
+
+@dataclass
+class DeterministicPassInput:
+    """Input bundle passed to a DeterministicPassSpec.run_fn.
+
+    blocks is the scope the pass should rank/filter — callers narrow this to
+    a single chunk/section's blocks before invoking a pass, so a pass never
+    has to know about chunking on its own.
+    """
+
+    blocks: "List[DocumentBlock]"
+    doc_id: str
+    citation_index: "Optional[CitationIndex]" = None
+    entity_list: "Optional[List[ExtractedEntity]]" = None
+    date_list: "Optional[List[ExtractedDate]]" = None
+    table_list: "Optional[List[ExtractedTable]]" = None
+    params: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class DeterministicPassOutput:
+    ranked_blocks: "List[RankedBlock]"
+    stats: Dict[str, Any] = field(default_factory=dict)

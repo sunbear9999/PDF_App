@@ -1,6 +1,8 @@
 # gui/managers/dock_registry.py
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDockWidget, QTextEdit
+from PySide6.QtWidgets import (
+    QDockWidget, QTextEdit, QWidget, QVBoxLayout, QLabel, QPushButton,
+)
 from gui.managers.dock_manager import DockDefinition
 
 
@@ -24,6 +26,12 @@ def register_default_docks(dock_manager, window_ref):
         dock.setWidget(NotesTab(w.app_context))
         return dock
 
+    def make_intelligence(w):
+        dock = QDockWidget("🧠 Intelligence", w)
+        from gui.docks.intelligence_dock import IntelligenceDockWidget
+        dock.setWidget(IntelligenceDockWidget(w.app_context, dock))
+        return dock
+
     def make_dict(w):
         dock = QDockWidget("📖 Dictionary", w)
         from gui.docks.dictionary_dock import DictionaryTab
@@ -32,8 +40,13 @@ def register_default_docks(dock_manager, window_ref):
 
     def make_essay(w):
         dock = QDockWidget("📝 Essay Writer", w)
-        from gui.docks.essay_dock import EssayTab
-        dock.setWidget(EssayTab(w.project_manager))
+        def build():
+            from gui.docks.essay_dock import EssayTab
+            dock.setWidget(EssayTab(w.project_manager))
+        if getattr(getattr(w, "layout_manager", None), "_restoring_layout", False):
+            _defer_heavy_dock(dock, "Essay Writer", build)
+        else:
+            build()
         return dock
 
     def make_citations(w):
@@ -79,12 +92,28 @@ def register_default_docks(dock_manager, window_ref):
     dm.register(DockDefinition("data_dock", "SingleDataDock", "Data Dock", R, True, make_data_dock))
     dm.register(DockDefinition("workspaces", "WorkspaceDock", "Workspaces", R, False, make_workspace))
     dm.register(DockDefinition("notes", "NotesDock", "Notes List", R, True, make_notes))
+    dm.register(DockDefinition("intelligence", "IntelligenceDock", "Intelligence", R, True, make_intelligence))
     dm.register(DockDefinition("dicts", "SingleDictionaryDock", "Dictionary", R, True, make_dict))
     dm.register(DockDefinition("essays", "EssayDock", "Essay Writer", R, False, make_essay))
     dm.register(DockDefinition("citations", "SingleCitationDock", "Citations", R, True, make_citations))
     dm.register(DockDefinition("ocrs", "SingleOCRDock", "OCR Scanner", R, True, make_ocr))
     dm.register(DockDefinition("audios", "SingleAudioDock", "Audio (TTS)", R, True, make_audio))
     dm.register(DockDefinition("scratchpads", "ScratchDock", "Scratchpad", R, False, make_scratchpad))
+
+
+def _defer_heavy_dock(dock, label, build):
+    """Restore the dock shell now; initialize expensive native content on demand."""
+    placeholder = QWidget(dock)
+    layout = QVBoxLayout(placeholder)
+    layout.addStretch(1)
+    message = QLabel(f"{label} was restored without delaying project startup.", placeholder)
+    message.setWordWrap(True)
+    layout.addWidget(message)
+    button = QPushButton(f"Load {label}", placeholder)
+    button.clicked.connect(build)
+    layout.addWidget(button)
+    layout.addStretch(1)
+    dock.setWidget(placeholder)
 
 
 def register_plugin_docks(dock_manager, app_context) -> None:

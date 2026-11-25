@@ -79,8 +79,8 @@ class UniversalOutlineWidget(QWidget):
         self.content_frame.setStyleSheet(f"QFrame {{ border-left: 2px solid {theme.get('border', '#444')}; margin-left: 8px; padding-left: 8px; }}")
         cf_layout = QVBoxLayout(self.content_frame)
         cf_layout.setContentsMargins(0, 8, 0, 8)
-        self.content_frame.setVisible(is_expanded)
         self.layout.addWidget(self.content_frame)
+        self.content_frame.setVisible(is_expanded)
 
         # --- RENDER LOGIC ---
         if parsed_dict and isinstance(parsed_dict, dict):

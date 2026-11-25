@@ -34,6 +34,10 @@ class _ClickableCard(QFrame):
 
         top_row = QHBoxLayout()
         top_row.setSpacing(6)
+        # Installed on the card before any child is added: widgets added to a
+        # free-floating layout stay parentless, and a visible parentless widget
+        # is a top-level window that flashes on screen.
+        layout.addLayout(top_row)
 
         self._title = QLabel(display.get("title", ""))
         self._title.setWordWrap(True)
@@ -44,23 +48,23 @@ class _ClickableCard(QFrame):
 
         badge_text = display.get("badge", "")
         self._badge = QLabel(badge_text)
-        self._badge.setVisible(bool(badge_text))
         self._badge.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        # setVisible(True) must come after the widget has a parent: a visible
+        # parentless widget is a top-level window and flashes on screen.
         top_row.addWidget(self._badge)
-
-        layout.addLayout(top_row)
+        self._badge.setVisible(bool(badge_text))
 
         sub = display.get("subtitle", "")
         self._subtitle = QLabel(sub)
         self._subtitle.setWordWrap(True)
-        self._subtitle.setVisible(bool(sub))
         layout.addWidget(self._subtitle)
+        self._subtitle.setVisible(bool(sub))
 
         meta = display.get("meta", "")
         self._meta = QLabel(meta)
         self._meta.setWordWrap(True)
-        self._meta.setVisible(bool(meta))
         layout.addWidget(self._meta)
+        self._meta.setVisible(bool(meta))
 
         self._display = display
 

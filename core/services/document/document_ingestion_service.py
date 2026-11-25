@@ -13,6 +13,12 @@ from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal, Slot
 
 from core.events.domains.document_events import DocumentEvent, DocumentEventPayload
 from core.events.event_bus import EventBus
+from core.models.extraction_models import DocumentBlock, BibliographyEntry as CanonicalBibliographyEntry
+from core.services.extraction.bibliography_extraction_service import BibliographyExtractionService
+from core.services.extraction.citation_extraction_service import InTextCitationExtractor
+from core.services.extraction.citation_matcher import CitationMatcher
+from core.services.extraction.citation_text_adapter import bibliography_entries_from_text
+from core.services.extraction.language_feature_service import shared_language_service
 from core.models.ontology_model import (
     EntityIntent,
     EntityPayload,
@@ -65,29 +71,21 @@ class IngestionWorkerSignals(QObject):
     finished = Signal(object)
 
 
-_SPACY_NLP = None
-
-
 def _get_spacy_nlp():
-    global _SPACY_NLP
-    if _SPACY_NLP is not None:
-        return _SPACY_NLP
-    try:
-        import spacy
-        for model_name in ("en_core_web_lg", "en_core_web_md", "en_core_web_sm"):
-            try:
-                _SPACY_NLP = spacy.load(model_name, disable=["tagger", "parser", "lemmatizer"])
-                return _SPACY_NLP
-            except Exception:
-                continue
-    except Exception:
-        pass
-    _SPACY_NLP = False
-    return None
+    """The shared spaCy pipeline (a private copy here loaded spaCy a third time)."""
+    return shared_language_service().get_nlp()
 
 
 class DocumentIngestionTask(QRunnable):
-    def __init__(self, path, source_id, llm_manager, bus, signals: Optional[IngestionWorkerSignals] = None):
+    def __init__(
+        self,
+        path,
+        source_id,
+        llm_manager,
+        bus,
+        signals: Optional[IngestionWorkerSignals] = None,
+        document_extraction_service=None,
+    ):
         super().__init__()
         self.path = path
         self.source_id = source_id
@@ -99,6 +97,7 @@ class DocumentIngestionTask(QRunnable):
         self._batching = signals is not None
         self._page_offsets: List[int] = []
         self._metadata: Dict[str, str] = {}
+        self._des = document_extraction_service
 
     def _status(self, msg: str, ms: int = 4000) -> None:
         """Emit a status message, silently ignoring a deleted or unavailable bus signal."""
@@ -139,6 +138,28 @@ class DocumentIngestionTask(QRunnable):
             self._status(f"Failed to process '{self.doc_name}'.", 5000)
 
     def _load_pages(self) -> List[PageText]:
+        # Phase 1 adapter: use shared blocks when DocumentExtractionService is available
+        if self._des is not None:
+            try:
+                blocks = self._des.get_blocks(self.path)
+                if blocks:
+                    page_map: Dict[int, List[str]] = {}
+                    for block in blocks:
+                        page_map.setdefault(block.page_num, []).append(block.exact_text)
+                    # Still open the doc briefly to read metadata only
+                    try:
+                        _doc = fitz.open(self.path)
+                        self._metadata = dict(_doc.metadata or {})
+                        _doc.close()
+                    except Exception:
+                        pass
+                    return [
+                        PageText(page_num=p, text="\n".join(page_map[p]))
+                        for p in sorted(page_map)
+                    ]
+            except Exception:
+                pass
+        # Fallback: direct fitz extraction
         doc = fitz.open(self.path)
         try:
             self._metadata = dict(doc.metadata or {})
@@ -215,86 +236,20 @@ class DocumentIngestionTask(QRunnable):
         return entries
 
     def _split_bibliography_entries(self, bibliography_text: str) -> List[str]:
-        lines = [line.rstrip() for line in bibliography_text.splitlines()]
-        entries: List[str] = []
-        current: List[str] = []
-        start_pattern = re.compile(
-            r"^\s*(?:\[\d+\]|\d+\.|[A-Z][A-Za-z'`-]+,\s+(?:[A-Z]\.|[A-Z][A-Za-z'`-]+)|[A-Z][A-Za-z'`-]+\s+[A-Z][A-Za-z'`-]+.*\(\d{4}[a-z]?\))"
-        )
-        for line in lines:
-            stripped = line.strip()
-            if not stripped:
-                if current:
-                    entries.append(" ".join(current).strip())
-                    current = []
-                continue
-            if start_pattern.match(stripped) and current:
-                entries.append(" ".join(current).strip())
-                current = [stripped]
-            else:
-                current.append(stripped)
-        if current:
-            entries.append(" ".join(current).strip())
-        return [entry for entry in entries if len(entry) > 20 and not re.match(r"(?i)^(references|bibliography|works cited)$", entry)]
+        return [entry.raw_text for entry in bibliography_entries_from_text(bibliography_text)]
 
     def _parse_bibliography_entry(self, raw: str) -> Optional[BibliographyEntry]:
-        cleaned = re.sub(r"\s+", " ", raw).strip()
-        ref_number = None
-        number_match = re.match(r"^\s*(?:\[(\d+)\]|(\d+)\.)\s*(.+)$", cleaned)
-        if number_match:
-            ref_number = number_match.group(1) or number_match.group(2)
-            cleaned = number_match.group(3).strip()
-
-        doi_match = re.search(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+\b", cleaned, re.I)
-        doi = doi_match.group(0).lower() if doi_match else None
-        year_match = re.search(r"(?:\(|\b)((?:18|19|20)\d{2}[a-z]?)(?:\)|\b)", cleaned)
-        year = year_match.group(1) if year_match else None
-        authors = self._parse_reference_authors(cleaned, year_match.start() if year_match else None)
-        title = self._parse_reference_title(cleaned, year_match.end() if year_match else 0)
-        key = doi or self._citation_key(authors, year, title)
+        entry = BibliographyExtractionService().normalize_entry(raw, self.source_id or "legacy")
+        doi = entry.doi.lower().rstrip(".,;") if entry.doi else None
+        key = doi or self._citation_key(entry.authors, entry.year, entry.title or "")
         if not key:
             return None
         return BibliographyEntry(
-            raw=raw,
-            source_id=self._stable_id("source", key),
-            title=title or f"Cited Source {ref_number or year or key[:8]}",
-            authors=authors,
-            year=year,
-            key=key,
-            ref_number=ref_number,
-            doi=doi,
+            raw=raw, source_id=self._stable_id("source", key),
+            title=entry.title or f"Cited Source {entry.reference_number or entry.year or key[:8]}",
+            authors=entry.authors, year=entry.year, key=key,
+            ref_number=entry.reference_number, doi=doi,
         )
-
-    def _parse_reference_authors(self, text: str, year_start: Optional[int]) -> List[str]:
-        prefix = text[:year_start].strip(" .(") if year_start is not None else text[:140]
-        prefix = re.sub(r"^\s*(?:\[\d+\]|\d+\.)\s*", "", prefix)
-        prefix = re.split(r"\bet al\.?\b", prefix, flags=re.I)[0]
-        chunks = re.split(r"\s*(?:,?\s+&\s+|\s+and\s+|;\s*)\s*", prefix)
-        authors = []
-        for chunk in chunks:
-            chunk = chunk.strip(" ,.")
-            if not chunk:
-                continue
-            inverted = re.match(r"^([A-Z][A-Za-z'`-]+),\s+(?:[A-Z](?:\.|\b)|[A-Z][A-Za-z'`-]+)", chunk)
-            normal = re.match(r"^([A-Z][A-Za-z'`-]+(?:\s+[A-Z][A-Za-z'`-]+){0,2})$", chunk)
-            if inverted:
-                authors.append(inverted.group(1))
-            elif normal and not self._is_bad_person_name(normal.group(1)):
-                authors.append(normal.group(1).split()[-1])
-        return self._dedupe(authors)[:8]
-
-    def _parse_reference_title(self, text: str, start: int) -> str:
-        suffix = text[start:].strip(" .)")
-        if not suffix:
-            return ""
-        quoted = re.search(r"[\"“](.+?)[\"”]", suffix)
-        if quoted:
-            return quoted.group(1).strip()
-        parts = [part.strip() for part in re.split(r"\.\s+", suffix) if part.strip()]
-        for part in parts:
-            if not re.match(r"(?i)^(journal|retrieved|available|doi|http|vol\.|pp\.)", part):
-                return part[:180]
-        return parts[0][:180] if parts else ""
 
     def _parse_metadata_authors(self, value: str) -> List[str]:
         if not value:
@@ -423,67 +378,28 @@ class DocumentIngestionTask(QRunnable):
         return author_id
 
     def _extract_in_text_citations(self, text: str, bibliography: Dict[str, BibliographyEntry]) -> List[Tuple[Tuple[int, int], BibliographyEntry]]:
-        spans: List[Tuple[Tuple[int, int], BibliographyEntry]] = []
-        by_number = {entry.ref_number: entry for entry in bibliography.values() if entry.ref_number}
-        by_author_year = self._author_year_index(bibliography.values())
-
-        for match in re.finditer(r"\[(\d+(?:\s*[-,;]\s*\d+)*)\]", text):
-            for number in self._expand_numeric_refs(match.group(1)):
-                entry = by_number.get(number)
-                if entry:
-                    spans.append(((match.start(), match.end()), entry))
-                    self._emit_in_text_citation(match.group(0), match, text, entry)
-
-        author_year_pattern = re.compile(
-            rf"\(([^()]*?(?:{AUTHOR_TOKEN})(?:\s+et\s+al\.)?(?:\s*(?:&|and|,)\s*{AUTHOR_TOKEN})*[^()]*?(?:18|19|20)\d{{2}}[a-z]?[^()]*)\)"
-        )
-        for match in author_year_pattern.finditer(text):
-            for author, year in self._parse_parenthetical_author_year(match.group(1)):
-                entry = by_author_year.get((author.lower(), year.lower()))
-                if entry:
-                    spans.append(((match.start(), match.end()), entry))
-                    self._emit_in_text_citation(match.group(0), match, text, entry)
-
-        narrative_pattern = re.compile(rf"\b({AUTHOR_TOKEN})(?:\s+et\s+al\.)?\s*\(((?:18|19|20)\d{{2}}[a-z]?)\)")
-        for match in narrative_pattern.finditer(text):
-            entry = by_author_year.get((match.group(1).lower(), match.group(2).lower()))
-            if entry:
-                spans.append(((match.start(), match.end()), entry))
-                self._emit_in_text_citation(match.group(0), match, text, entry)
-
+        doc_id = self.source_id or "legacy"
+        body = self._mask_spans(text, self._bibliography_spans(text))
+        block = DocumentBlock("legacy_body", doc_id, 0, "paragraph", body, body.casefold())
+        citations = InTextCitationExtractor().extract([block], doc_id)
+        entries = [CanonicalBibliographyEntry(
+            entry_id=entry.source_id, doc_id=doc_id, raw_text=entry.raw,
+            authors=entry.authors, first_author_surname=entry.authors[0] if entry.authors else "",
+            year=entry.year, title=entry.title, doi=entry.doi, reference_number=entry.ref_number,
+        ) for entry in bibliography.values()]
+        by_id = {citation.citation_id: citation for citation in citations}
+        spans = []
+        for match in CitationMatcher().match_all(citations, entries):
+            if match.is_ambiguous:
+                continue
+            citation = by_id[match.in_text_citation_id]
+            entry = bibliography[match.bibliography_entry_id]
+            start, end = citation.location.char_start, citation.location.char_end
+            spans.append(((start, end), entry))
+            span_match = re.compile(re.escape(citation.raw_text)).match(text, start)
+            if span_match:
+                self._emit_in_text_citation(citation.raw_text, span_match, text, entry)
         return spans
-
-    def _author_year_index(self, entries: Iterable[BibliographyEntry]) -> Dict[Tuple[str, str], BibliographyEntry]:
-        index = {}
-        for entry in entries:
-            if not entry.year:
-                continue
-            for author in entry.authors:
-                index[(author.lower(), entry.year.lower())] = entry
-        return index
-
-    def _parse_parenthetical_author_year(self, text: str) -> List[Tuple[str, str]]:
-        pairs = []
-        for chunk in re.split(r";", text):
-            year_match = re.search(r"((?:18|19|20)\d{2}[a-z]?)", chunk)
-            if not year_match:
-                continue
-            year = year_match.group(1)
-            lead = chunk[:year_match.start()]
-            authors = re.findall(AUTHOR_TOKEN, re.sub(r"\bet\s+al\.?\b", "", lead))
-            if authors:
-                pairs.append((authors[0], year))
-        return pairs
-
-    def _expand_numeric_refs(self, value: str) -> List[str]:
-        refs = []
-        for part in re.split(r"\s*[,;]\s*", value):
-            if "-" in part:
-                start, end = [int(item) for item in re.split(r"\s*-\s*", part, maxsplit=1)]
-                refs.extend(str(num) for num in range(start, end + 1) if end - start <= 50)
-            elif part.strip().isdigit():
-                refs.append(part.strip())
-        return refs
 
     def _emit_in_text_citation(self, citation_text: str, match, full_text: str, entry: BibliographyEntry):
         context = self._context(match, full_text, radius=260)
@@ -781,7 +697,7 @@ class DocumentIngestionTask(QRunnable):
 
 
 class DocumentIngestionService(QObject):
-    def __init__(self, llm_manager, parent=None):
+    def __init__(self, llm_manager, source_format_registry=None, parent=None):
         super().__init__(parent)
         self.llm_manager = llm_manager
         self.bus = EventBus.get_instance()
@@ -789,10 +705,42 @@ class DocumentIngestionService(QObject):
         self._flush_timer = QTimer(self)
         self._flush_timer.setInterval(0)
         self._flush_timer.timeout.connect(self._flush_ingestion_events)
+        self._document_extraction_service = None
+        self._source_format_registry = source_format_registry
+        self._intelligence_scheduler = None
         self.bus.document_added.connect(self._on_document_added)
 
+    def set_document_extraction_service(self, svc) -> None:
+        """Inject the shared DocumentExtractionService (Phase 1 adapter)."""
+        self._document_extraction_service = svc
+
+    def set_source_format_registry(self, registry) -> None:
+        self._source_format_registry = registry
+
+    def set_intelligence_scheduler(self, scheduler) -> None:
+        self._intelligence_scheduler = scheduler
+
+    def _accepts_ingestion(self, source_type: Optional[str]) -> bool:
+        """
+        True for source_types whose ingestion path is this generic
+        text/entity extraction pipeline (backed by DocumentExtractionService's
+        per-format DocumentBlock parsers). video/audio have their own
+        transcription-based ingestion; data formats (csv/xlsx) have their own
+        loader-based path — neither goes through here.
+        """
+        if self._source_format_registry is None:
+            # No registry wired (e.g. a bare test construction) — preserve
+            # the historical PDF-only behavior.
+            return (source_type or "pdf") == "pdf"
+        spec = self._source_format_registry.get(source_type or "")
+        return spec is not None and spec.category in ("document", "image")
+
     def _on_document_added(self, event: DocumentEvent, payload: DocumentEventPayload):
-        if event == DocumentEvent.DOCUMENT_ADDED and (payload.source_type or "pdf") == "pdf":
+        # SourceIntelligenceService owns canonical ingestion when present. Keep
+        # this legacy worker only for standalone/back-compat constructions.
+        if self._intelligence_scheduler is not None:
+            return
+        if event == DocumentEvent.DOCUMENT_ADDED and self._accepts_ingestion(payload.source_type):
             signals = IngestionWorkerSignals()
             signals.finished.connect(self._queue_ingestion_result)
             task = DocumentIngestionTask(
@@ -801,6 +749,7 @@ class DocumentIngestionService(QObject):
                 llm_manager=self.llm_manager,
                 bus=self.bus,
                 signals=signals,
+                document_extraction_service=self._document_extraction_service,
             )
             task._signals_ref = signals
             QThreadPool.globalInstance().start(task)

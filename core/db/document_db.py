@@ -235,7 +235,7 @@ class DocumentDB(BaseDB):
                 "chunk_query_prompt_key": "Graph Analysis Chunk Observations Query",
                 "synthesis_query_prompt_key": "Graph Analysis Synthesis Query",
                 "master_query_prompt_key": "Graph Analysis Master Query",
-                "analysis_template_version": 12,
+                "analysis_template_version": 13,
                 "limits": {
                     "chunk_pages": 4,
                     "max_chunk_chars": 14000,
@@ -249,8 +249,16 @@ class DocumentDB(BaseDB):
                     "max_quotes_per_chunk": 5,
                     "quote_words": 10,
                     "max_quote_words": 18,
-                    "explanation_words": 10
+                    "explanation_words": 10,
+                    "max_sections": 7,
+                    "max_analysis_quotes": 16
                 },
+                # Deterministic passes guide the universal section-aware quote
+                # selector. The selected quote artifacts are reusable memory;
+                # only final graph synthesis uses the main model.
+                "deterministic_passes": [
+                    {"pass_id": "quote_candidate_rank", "top_n": 25, "params": {}},
+                ],
             }
         ]
 
@@ -267,7 +275,9 @@ class DocumentDB(BaseDB):
             else:
                 existing = by_id[default["id"]]
                 if int(existing.get("analysis_template_version", 0) or 0) < int(default.get("analysis_template_version", 0) or 0):
-                    for key in ["instructions", "schema", "node_types", "relation_types", "allow_text_nodes", "chunk_prompt_key", "synthesis_prompt_key", "master_prompt_key", "chunk_query_prompt_key", "synthesis_query_prompt_key", "master_query_prompt_key", "limits", "analysis_template_version"]:
+                    # Preserve the user's analysis goal while upgrading the
+                    # executable contract and limits around it.
+                    for key in ["schema", "node_types", "relation_types", "allow_text_nodes", "chunk_prompt_key", "synthesis_prompt_key", "master_prompt_key", "chunk_query_prompt_key", "synthesis_query_prompt_key", "master_query_prompt_key", "limits", "analysis_template_version"]:
                         existing[key] = default[key]
                     changed = True
                 for key, value in default.items():
@@ -345,21 +355,9 @@ class DocumentDB(BaseDB):
         self._execute_analysis_write("DELETE FROM document_analyses WHERE doc_path = ? AND template_id = ?", (doc_path, template_id))
 
     def _execute_analysis_write(self, sql, params):
-        try:
-            self._conn.execute(sql, params)
-            self._conn.commit()
-            return
-        except sqlite3.ProgrammingError as exc:
-            if "created in a thread" not in str(exc):
-                raise
-
-        db_path = getattr(self.manager, "project_filepath", None)
-        if not db_path:
-            raise
-        conn = sqlite3.connect(db_path, timeout=10.0)
-        try:
-            conn.execute("PRAGMA foreign_keys = ON")
-            conn.execute(sql, params)
-            conn.commit()
-        finally:
-            conn.close()
+        # The shared project connection is opened with
+        # check_same_thread=False and serialized by ThreadSafeConnection, so
+        # the old per-call fallback connection was both unreachable and a way
+        # to bypass that lock.
+        self._conn.execute(sql, params)
+        self._conn.commit()

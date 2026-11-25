@@ -182,6 +182,8 @@ class LocalLawManager:
         for file in os.listdir(self.download_dir):
             if not file.endswith(".parquet"):
                 continue
+            if file.endswith("_bulk.parquet"):
+                continue  # raw bulk archives are managed separately via get_bulk_archives()
             path = os.path.join(self.download_dir, file)
             size_mb = os.path.getsize(path) / (1024 * 1024)
             index_complete = os.path.exists(path + ".done")
@@ -882,54 +884,90 @@ class LocalLawManager:
         return " AND ".join(clauses) if clauses else ""
 
     # ------------------------------------------------------------------
-    # CourtListener bulk archive ingestion  (NEW — streaming, memory-safe)
+    # Bulk-archive helpers
     # ------------------------------------------------------------------
 
-    def stream_bulk_caselaw(
+    @staticmethod
+    def _format_size(size_bytes: int) -> str:
+        """Human-readable file size string."""
+        if size_bytes < 1024:
+            return f"{size_bytes} B"
+        if size_bytes < 1024 ** 2:
+            return f"{size_bytes / 1024:.1f} KB"
+        if size_bytes < 1024 ** 3:
+            return f"{size_bytes / (1024 ** 2):.1f} MB"
+        return f"{size_bytes / (1024 ** 3):.2f} GB"
+
+    def _bulk_parquet_path(self, court_id: str) -> str:
+        """Canonical path for a court's raw bulk archive."""
+        return os.path.join(
+            self.download_dir, f"caselaw_{court_id.strip().lower()}_bulk.parquet"
+        )
+
+    def get_bulk_archives(self) -> list[dict]:
+        """
+        Return metadata for every downloaded bulk court archive.
+        These are the raw data stores; they are NOT listed by get_installed_dbs().
+        """
+        archives = []
+        if not os.path.exists(self.download_dir):
+            return archives
+        for f in sorted(os.listdir(self.download_dir)):
+            if not (f.startswith("caselaw_") and f.endswith("_bulk.parquet")):
+                continue
+            path = os.path.join(self.download_dir, f)
+            court_id = f[len("caselaw_"):-len("_bulk.parquet")]
+            size_bytes = os.path.getsize(path)
+            archives.append({
+                "court_id": court_id,
+                "label": court_id.upper(),
+                "filename": f,
+                "size_bytes": size_bytes,
+                "size_display": self._format_size(size_bytes),
+            })
+        return archives
+
+    def remove_bulk_archive(self, court_id: str) -> None:
+        """Delete the raw bulk archive for *court_id* (targeted DBs are unaffected)."""
+        path = self._bulk_parquet_path(court_id)
+        if os.path.exists(path):
+            os.remove(path)
+
+    def _download_bulk_archive(
         self,
         court_id: str,
         api_key: str,
-        progress_callback=None,
-        cancel_check=None,
+        _progress,
+        cancel_check,
+        start_pct: float = 0.0,
+        end_pct: float = 0.50,
     ) -> dict:
         """
-        Stream-download the CourtListener bulk opinion archive for *court_id*,
-        parse JSON in _BULK_BATCH-record batches, flush incrementally to a
-        Parquet file via PyArrow, then embed into ChromaDB.
+        Stream-download the CourtListener bulk cluster + opinion archives for
+        *court_id* and write to a single ``caselaw_{court_id}_bulk.parquet``.
 
-        Memory ceiling: O(_BULK_BATCH * avg_record_size) — safe for the
-        multi-GB 9th-Circuit archive.
-
-        Bulk archive URLs:
-          clusters: https://storage.courtlistener.com/bulk-data/clusters/{court_id}.tar.gz
-          opinions: https://storage.courtlistener.com/bulk-data/opinions/{court_id}.tar.gz
+        Memory ceiling: O(_BULK_BATCH * avg_record_size) — safe for multi-GB archives.
+        Progress is reported between *start_pct* and *end_pct*.
+        Returns {"success": True, "bulk_path": path} or an error dict.
         """
         try:
             import tarfile
             import pyarrow as pa
             import pyarrow.parquet as pq
-        except ImportError as e:
-            return {"success": False, "error": f"Missing dependency: {e}. Run: pip install pyarrow"}
+        except ImportError as exc:
+            return {"success": False, "error": f"Missing dependency: {exc}. Run: pip install pyarrow"}
 
-        cancel_check = cancel_check or (lambda: False)
-        _progress = progress_callback or (lambda msg, pct: None)
-        court_id = court_id.strip().lower()
-
-        file_id = f"caselaw_{court_id}_bulk"
-        local_cache_file = os.path.join(self.download_dir, f"{file_id}.parquet")
-
-        if os.path.exists(local_cache_file):
-            _progress(f"Cached archive found. Loading {court_id.upper()} for embedding…", 0.05)
-            return self._index_parquet_to_chroma(
-                file_id, local_cache_file, _progress, cancel_check, start_pct=0.05
-            )
-
+        bulk_path = self._bulk_parquet_path(court_id)
+        partial_path = bulk_path + ".part"
         BASE = "https://storage.courtlistener.com/bulk-data"
+
         session = requests.Session()
         session.headers.update({"Authorization": f"Token {api_key}"})
 
-        # ── Step 1: stream clusters archive for case_name / date_filed metadata ──
-        _progress(f"Fetching cluster metadata for {court_id.upper()}…", 0.01)
+        # ── Step 1: cluster metadata (case_name / date_filed) ────────────────
+        cluster_start = start_pct
+        cluster_end = start_pct + (end_pct - start_pct) * 0.30
+        _progress(f"Fetching cluster metadata for {court_id.upper()}…", cluster_start)
         cluster_map: dict[str, dict] = {}
 
         try:
@@ -960,22 +998,23 @@ class LocalLawManager:
                                 }
                         except Exception:
                             pass
-                _progress(f"Loaded {len(cluster_map)} cluster metadata records.", 0.22)
+                _progress(f"Loaded {len(cluster_map):,} cluster records.", cluster_end)
             else:
                 _progress(
                     f"Cluster metadata unavailable (HTTP {resp.status_code}). "
                     f"Case names will be derived from opinion IDs.",
-                    0.10,
+                    cluster_end,
                 )
         except Exception as exc:
-            _progress(f"Cluster metadata skipped ({exc}). Continuing…", 0.10)
+            _progress(f"Cluster metadata skipped ({exc}). Continuing…", cluster_end)
 
         if cancel_check():
             session.close()
             return {"success": False, "error": "Cancelled."}
 
-        # ── Step 2: stream opinions archive → incremental Parquet write ──────────
-        _progress(f"Streaming opinion archive for {court_id.upper()}…", 0.23)
+        # ── Step 2: opinion archive → incremental Parquet write ───────────────
+        opinion_start = cluster_end
+        _progress(f"Streaming opinion archive for {court_id.upper()}…", opinion_start)
 
         parquet_schema = pa.schema([
             pa.field("type", pa.string()),
@@ -987,7 +1026,6 @@ class LocalLawManager:
             pa.field("cluster_id", pa.string()),
         ])
 
-        partial_file = local_cache_file + ".part"
         writer = None
         batch: list[dict] = []
         total_written = 0
@@ -996,13 +1034,18 @@ class LocalLawManager:
             resp = session.get(f"{BASE}/opinions/{court_id}.tar.gz", stream=True, timeout=60)
             if not resp.ok:
                 session.close()
-                return {
-                    "success": False,
-                    "error": f"HTTP {resp.status_code}: cannot download opinions for {court_id.upper()}",
-                }
+                msg = (
+                    f"HTTP {resp.status_code}: no bulk archive found for {court_id.upper()} "
+                    f"on CourtListener. Not every court has a hosted bulk archive — try a "
+                    f"circuit court (ca9, ca1, ca2 … ca11, cadc, cafc) or check "
+                    f"https://www.courtlistener.com/api/bulk-info/ for the full list."
+                    if resp.status_code == 404 else
+                    f"HTTP {resp.status_code}: cannot download opinions for {court_id.upper()}."
+                )
+                return {"success": False, "error": msg}
 
             resp.raw.decode_content = True
-            writer = pq.ParquetWriter(partial_file, parquet_schema, compression="snappy")
+            writer = pq.ParquetWriter(partial_path, parquet_schema, compression="snappy")
 
             with tarfile.open(fileobj=resp.raw, mode="r|gz") as tar:
                 for member in tar:
@@ -1013,20 +1056,16 @@ class LocalLawManager:
                     f = tar.extractfile(member)
                     if f is None:
                         continue
-
                     try:
                         obj = json.loads(f.read().decode("utf-8", errors="replace"))
                     except Exception:
                         continue
 
-                    # Derive cluster_id from the 'cluster' URL field
                     cluster_ref = str(obj.get("cluster") or "")
                     m = re.search(r"/clusters/(\d+)", cluster_ref)
                     cluster_id = m.group(1) if m else str(obj.get("id") or "")
 
                     meta = cluster_map.get(cluster_id, {})
-
-                    # Prefer richest available text representation
                     raw_text = (
                         obj.get("plain_text")
                         or obj.get("html_with_citations")
@@ -1048,15 +1087,13 @@ class LocalLawManager:
                     })
 
                     if len(batch) >= _BULK_BATCH:
-                        writer.write_table(
-                            pa.Table.from_pylist(batch, schema=parquet_schema)
-                        )
+                        writer.write_table(pa.Table.from_pylist(batch, schema=parquet_schema))
                         total_written += len(batch)
                         batch.clear()
-                        pct = 0.23 + min(total_written / 100_000, 1.0) * 0.25
-                        _progress(f"Extracted {total_written:,} opinions…", min(pct, 0.48))
+                        scale = (end_pct - opinion_start)
+                        pct = opinion_start + min(total_written / 100_000, 1.0) * scale
+                        _progress(f"Downloaded {total_written:,} opinions…", min(pct, end_pct - 0.01))
 
-            # Flush remainder
             if batch:
                 writer.write_table(pa.Table.from_pylist(batch, schema=parquet_schema))
                 total_written += len(batch)
@@ -1070,8 +1107,8 @@ class LocalLawManager:
                     writer.close()
                 except Exception:
                     pass
-            if os.path.exists(partial_file):
-                os.remove(partial_file)
+            if os.path.exists(partial_path):
+                os.remove(partial_path)
             session.close()
             return {"success": False, "error": "Cancelled."}
 
@@ -1081,9 +1118,9 @@ class LocalLawManager:
                     writer.close()
                 except Exception:
                     pass
-            if os.path.exists(partial_file):
+            if os.path.exists(partial_path):
                 try:
-                    os.remove(partial_file)
+                    os.remove(partial_path)
                 except Exception:
                     pass
             session.close()
@@ -1092,22 +1129,187 @@ class LocalLawManager:
         session.close()
 
         if total_written == 0:
-            if os.path.exists(partial_file):
-                os.remove(partial_file)
+            if os.path.exists(partial_path):
+                os.remove(partial_path)
             return {"success": False, "error": "No opinions found in bulk archive."}
 
-        os.replace(partial_file, local_cache_file)
-        _progress(
-            f"Extracted {total_written:,} opinions. Generating embeddings…",
-            0.50,
-        )
-        self.api.notify(
-            f"Stored {total_written:,} opinions for {court_id.upper()}. Now embedding…",
-            level="info",
-        )
+        os.replace(partial_path, bulk_path)
+        size = self._format_size(os.path.getsize(bulk_path))
+        _progress(f"Bulk archive ready — {total_written:,} opinions ({size}).", end_pct)
+        return {"success": True, "bulk_path": bulk_path, "total": total_written}
+
+    def build_targeted_from_bulk(
+        self,
+        court_id: str,
+        query: str,
+        max_results: int,
+        api_key: str,
+        date_from: str = "",
+        date_to: str = "",
+        progress_callback=None,
+        cancel_check=None,
+    ) -> dict:
+        """
+        Build a targeted, embedded case-law database for *court_id* by:
+
+          1. Downloading the full bulk archive if not already present locally.
+          2. Filtering it with DuckDB (boolean text search + date range) entirely
+             on-device — zero API calls for the filter step.
+          3. Writing the filtered subset to a targeted Parquet file.
+          4. Embedding that subset into ChromaDB for RAG.
+
+        If a targeted DB with the same parameters already exists, only the
+        embedding step is re-run (skipping already-indexed records).
+        """
+        import duckdb
+
+        cancel_check = cancel_check or (lambda: False)
+        _progress = progress_callback or (lambda msg, pct: None)
+        court_id = court_id.strip().lower()
+        query = (query or "").strip()
+        date_from = (date_from or "").strip()
+        date_to = (date_to or "").strip()
+
+        bulk_path = self._bulk_parquet_path(court_id)
+
+        # ── Step 1: ensure bulk archive exists ────────────────────────────────
+        if os.path.exists(bulk_path):
+            sz = self._format_size(os.path.getsize(bulk_path))
+            _progress(
+                f"Bulk archive for {court_id.upper()} found locally ({sz}). "
+                f"Filtering on-device…",
+                0.02,
+            )
+            filter_start_pct = 0.02
+        else:
+            _progress(
+                f"No local bulk archive for {court_id.upper()}. "
+                f"Downloading from CourtListener…",
+                0.01,
+            )
+            self.api.notify(
+                f"Downloading {court_id.upper()} bulk archive. This may take several minutes.",
+                level="info",
+            )
+            result = self._download_bulk_archive(
+                court_id, api_key, _progress, cancel_check,
+                start_pct=0.01, end_pct=0.45,
+            )
+            if not result.get("success"):
+                return result
+            filter_start_pct = 0.45
+
+        if cancel_check():
+            return {"success": False, "error": "Cancelled."}
+
+        # ── Step 2: derive file_id and targeted parquet path ─────────────────
+        date_slug = ""
+        if date_from:
+            date_slug += f"_from{date_from.replace('-', '')}"
+        if date_to:
+            date_slug += f"_to{date_to.replace('-', '')}"
+        query_slug = "".join(c if c.isalnum() else "_" for c in query)[:20] or "all"
+        file_id = f"caselaw_{court_id}_{query_slug}{date_slug}"
+        targeted_path = os.path.join(self.download_dir, f"{file_id}.parquet")
+
+        if os.path.exists(targeted_path):
+            try:
+                n = len(pd.read_parquet(targeted_path))
+                _progress(f"Targeted DB already exists ({n:,} cases). Re-indexing…", filter_start_pct + 0.02)
+                return self._index_parquet_to_chroma(file_id, targeted_path, _progress, cancel_check, filter_start_pct + 0.02)
+            except Exception:
+                os.remove(targeted_path)
+
+        # ── Step 3: DuckDB filter of bulk archive ─────────────────────────────
+        _progress(f"Filtering {court_id.upper()} bulk archive…", filter_start_pct)
+
+        try:
+            safe_bulk = bulk_path.replace("'", "''")
+            safe_targeted = targeted_path.replace("'", "''")
+            text_cols = ["case_name", "text"]
+            where_parts: list[str] = []
+
+            text_where = self._build_subject_sql(query, text_cols) if query else ""
+            if text_where:
+                where_parts.append(f"({text_where})")
+            if date_from:
+                where_parts.append(f"(date_filed >= '{date_from.replace(chr(39), '')}' OR date_filed = '')")
+            if date_to:
+                where_parts.append(f"(date_filed <= '{date_to.replace(chr(39), '')}')")
+
+            where_clause = " AND ".join(where_parts) if where_parts else "1=1"
+
+            with duckdb.connect() as con:
+                con.execute(
+                    f"COPY ("
+                    f"  SELECT * FROM read_parquet('{safe_bulk}')"
+                    f"  WHERE {where_clause}"
+                    f"  LIMIT {max_results}"
+                    f") TO '{safe_targeted}' (FORMAT PARQUET);"
+                )
+
+            if not os.path.exists(targeted_path) or os.path.getsize(targeted_path) < 100:
+                return {
+                    "success": False,
+                    "error": (
+                        "No cases matched your filter criteria in the local bulk archive."
+                        + (" Try broadening the query or date range." if query or date_from else "")
+                    ),
+                }
+
+            n_filtered = len(pd.read_parquet(targeted_path))
+            embed_start = filter_start_pct + (0.97 - filter_start_pct) * 0.08
+            _progress(f"Filtered {n_filtered:,} cases. Generating embeddings…", embed_start)
+            self.api.notify(f"Filtered {n_filtered:,} cases from {court_id.upper()} bulk. Now embedding…", level="info")
+
+            return self._index_parquet_to_chroma(file_id, targeted_path, _progress, cancel_check, embed_start)
+
+        except Exception as exc:
+            if os.path.exists(targeted_path):
+                try:
+                    os.remove(targeted_path)
+                except Exception:
+                    pass
+            return {"success": False, "error": str(exc)}
+
+    # ------------------------------------------------------------------
+    # CourtListener bulk archive ingestion  (full-court embed, advanced)
+    # ------------------------------------------------------------------
+
+    def stream_bulk_caselaw(
+        self,
+        court_id: str,
+        api_key: str,
+        progress_callback=None,
+        cancel_check=None,
+    ) -> dict:
+        """
+        Download the full CourtListener bulk archive for *court_id* and embed
+        every opinion into ChromaDB (advanced use — consider build_targeted_from_bulk
+        for query-filtered ingestion instead).
+
+        Delegates to _download_bulk_archive (streaming, memory-safe batching)
+        then _index_parquet_to_chroma.
+        """
+        cancel_check = cancel_check or (lambda: False)
+        _progress = progress_callback or (lambda msg, pct: None)
+        court_id = court_id.strip().lower()
+        bulk_path = self._bulk_parquet_path(court_id)
+        file_id = f"caselaw_{court_id}_bulk"
+
+        if not os.path.exists(bulk_path):
+            result = self._download_bulk_archive(
+                court_id, api_key, _progress, cancel_check,
+                start_pct=0.01, end_pct=0.50,
+            )
+            if not result.get("success"):
+                return result
+        else:
+            sz = self._format_size(os.path.getsize(bulk_path))
+            _progress(f"Bulk archive found locally ({sz}). Embedding…", 0.05)
 
         return self._index_parquet_to_chroma(
-            file_id, local_cache_file, _progress, cancel_check, start_pct=0.50
+            file_id, bulk_path, _progress, cancel_check, start_pct=0.50
         )
 
     # ------------------------------------------------------------------

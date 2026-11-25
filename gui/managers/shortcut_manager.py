@@ -54,11 +54,13 @@ class ShortcutManager:
                 kr.bind("pdf.zoom_out",   viewer.zoom_out,   w)
                 kr.bind("pdf.zoom_reset", viewer.zoom_reset, w)
                 kr.bind("pdf.toggle_viewer", w.toggle_source_viewer, w)
+                kr.bind("pdf.reading_mode", viewer.toggle_reading_mode, w)
             else:
                 self._raw_bind("Ctrl+=",  viewer.zoom_in)
                 self._raw_bind("Ctrl++",  viewer.zoom_in)
                 self._raw_bind("Ctrl+-",  viewer.zoom_out)
                 self._raw_bind("Ctrl+0",  viewer.zoom_reset)
+                self._raw_bind("Ctrl+Shift+R", viewer.toggle_reading_mode)
 
             if hasattr(viewer, "annot_manager") and kr:
                 kr.bind("pdf.search", viewer.annot_manager.toggle_search, w)
@@ -86,6 +88,12 @@ class ShortcutManager:
                     if hasattr(getattr(w, "top_toolbar", None), "_trigger_add_pdf") else None,
                     w)
             kr.bind("data_dock.open", lambda: w.dock_manager.spawn("data_dock"), w)
+            kr.bind(
+                "intelligence.open",
+                lambda: w.dock_manager.spawn("intelligence"),
+                w,
+            )
+            kr.bind("analysis.run", self._run_selected_analysis, w)
         else:
             self._raw_bind("Ctrl+S",  save_cb)
             self._raw_bind("F11",     w.toggle_full_screen)
@@ -133,6 +141,16 @@ class ShortcutManager:
     # ------------------------------------------------------------------
     # Internal helper
     # ------------------------------------------------------------------
+
+    def _run_selected_analysis(self):
+        dock = self._w.dock_manager.spawn("research")
+        tab = getattr(dock, "tab_analysis", None)
+        stack = getattr(dock, "stacked_widget", None)
+        if tab is None:
+            return
+        if stack is not None:
+            stack.setCurrentWidget(tab)
+        tab._run_intelligence_mode()
 
     def _help_f1_cb(self):
         from core.events.domains.help_events import HelpIntent, HelpPayload

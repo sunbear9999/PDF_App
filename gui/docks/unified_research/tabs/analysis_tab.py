@@ -1,10 +1,11 @@
 # gui/docks/anaylsis_tab.py
 import os
 import json
+import html
 import hashlib
 import re
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
-                             QComboBox, QFrame, QScrollArea, QTabWidget, QButtonGroup, QStackedWidget, QMessageBox, QInputDialog, QDialog, QTextEdit, QToolButton)
+                             QComboBox, QFrame, QScrollArea, QTabWidget, QButtonGroup, QStackedWidget, QMessageBox, QInputDialog, QDialog, QTextEdit, QToolButton, QCheckBox)
 from PySide6.QtCore import Qt, QTimer, Signal
 from gui.managers.dialog_manager import exec_as_modal, get_for_widget
 from PySide6.QtGui import QCursor
@@ -19,6 +20,7 @@ from gui.docks.unified_research.tabs.base_tab import BaseTab
 from gui.docks.unified_research.components.template_editor import TemplateEditorDialog
 from gui.docks.unified_research.components.note_bubble import NoteBubbleWidget
 from gui.utils.document_helpers import active_pdf_paths
+from gui.components.artifact_tasks import ArtifactTaskRunner
 from core.utils.analysis_helpers import MASTER_CHUNK_SENTINEL, PAGES_PER_CHUNK
 
 
@@ -45,24 +47,126 @@ class AnalysisResultCard(QFrame):
         title = QLabel(f"<b>{result.get('template_title', 'Analysis')}</b>")
         layout.addWidget(title)
         counts = QHBoxLayout()
-        for label, value in [
+        count_items = [
             ("Nodes", len(result.get("entities", []))),
             ("Links", len(result.get("relations", []))),
-            ("Chunks", len(result.get("chunks", []))),
-        ]:
+        ]
+        if result.get("cache_status"):
+            count_items.append(("Cache", str(result["cache_status"]).title()))
+        envelope = result.get("analysis_envelope") or {}
+        model_usage = envelope.get("model_usage") or {}
+        if model_usage.get("call_count") is not None:
+            count_items.append(("LLM calls", int(model_usage.get("call_count") or 0)))
+        if result.get("chunks"):
+            count_items.append(("Sections", len(result.get("chunks", []))))
+        if result.get("entities"):
+            evidence_count = sum(
+                1 for node in result.get("entities", [])
+                if (node.get("analysis_role") in {"evidence", "quote", "quotation"}
+                    or node.get("type") in {"entity.evidence", "entity.quote"})
+            )
+            if evidence_count:
+                count_items.append(("Quoted evidence", evidence_count))
+        if result.get("complete_base_node_count") is not None:
+            count_items.append(
+                ("Reusable base", result.get("complete_base_node_count"))
+            )
+        quality = result.get("quality") or {}
+        role_counts = quality.get("role_counts") or {}
+        if role_counts:
+            count_items.extend([
+                ("Claims", int(role_counts.get("claim", 0))
+                 + int(role_counts.get("methodology", 0))),
+                ("Reasoning", int(role_counts.get("reasoning", 0))),
+            ])
+        for label, key in (
+            ("Propositions", "proposition_count"),
+            ("Branches", "branch_count"),
+            ("Source sections", "section_count"),
+        ):
+            if quality.get(key) is not None:
+                count_items.append((label, quality.get(key)))
+        for label, value in count_items:
             badge = QLabel(f"{label}: <b>{value}</b>")
             badge.setStyleSheet(f"padding: 4px 8px; background: {theme.get('bg_input', '#333')}; border-radius: 4px;")
             counts.addWidget(badge)
         counts.addStretch()
         layout.addLayout(counts)
+        if quality:
+            status = (
+                "Partial analysis" if quality.get("limited_coverage")
+                else "Ready for review" if quality.get('model_overlay_valid')
+                else "Validated" if quality.get("valid") else "Validation failed"
+            )
+            origin = str(quality.get("origin") or "unknown").replace("_", " ")
+            quality_label = QLabel(
+                f"<b>{status}</b> · Origin: {html.escape(origin.title())}"
+            )
+            quality_label.setStyleSheet(
+                f"color: {theme.get('text_muted', '#aaa')}; font-size: 10px;"
+            )
+            layout.addWidget(quality_label)
+            if quality.get('semantic_relation_count') is not None:
+                relations_label = QLabel(
+                    f"Semantic links: {quality['semantic_relation_count']} · "
+                    f"Source/grouping links: {quality.get('structural_relation_count', 0)}. "
+                    "Source links identify quotations; they do not establish support.")
+                relations_label.setWordWrap(True)
+                layout.addWidget(relations_label)
 
         preview = []
         for entity in result.get("entities", [])[:8]:
-            label = entity.get("title") or entity.get("text") or entity.get("exact_text") or entity.get("type")
-            preview.append(f"{entity.get('type', 'entity')} - {str(label)[:120]}")
-        body = QLabel("<br>".join(preview) if preview else "<i>No graph artifacts extracted.</i>")
+            role = (
+                entity.get("analysis_role")
+                or str(entity.get("type", "entity")).split(".")[-1]
+            ).replace("_", " ").title()
+            is_evidence = str(entity.get("analysis_role") or "") == "evidence"
+            label = (
+                entity.get("exact_text") if is_evidence else entity.get("text")
+            ) or entity.get("title") or entity.get("type")
+            preview.append(f"{role} — {str(label)[:120]}")
+        content = result.get("content")
+        if isinstance(content, (dict, list)):
+            content = json.dumps(content, ensure_ascii=False, indent=2)
+        body_text = (
+            "<br/>".join(html.escape(item) for item in preview)
+            if preview else html.escape(str(content or ""))[:5000]
+        )
+        body = QLabel(body_text if body_text else "<i>No result content.</i>")
+        body.setTextFormat(Qt.TextFormat.RichText)
         body.setWordWrap(True)
         layout.addWidget(body)
+        diagnostics = result.get("diagnostics") or {}
+        packing = diagnostics.get('context_packing') or quality.get('context_packing') or {}
+        if packing:
+            coverage = QLabel(
+                f"Model context: {packing.get('selected_count', 0)} of "
+                f"{packing.get('total_count', 0)} evidence groups supplied. "
+                "The full source-backed baseline is retained. Context uses a conservative text estimate.")
+            coverage.setWordWrap(True)
+            layout.addWidget(coverage)
+        if diagnostics.get("focused_deterministic_fallback"):
+            warning = QLabel(
+                "The model proposal was not accepted. Showing the grounded baseline. "
+                "Missing analytical connections remain unresolved; shared sections and "
+                "source quotations alone do not prove support or contradiction."
+            )
+            warning.setWordWrap(True)
+            warning.setStyleSheet(
+                f"color: {theme.get('warning', '#ffaa00')}; font-size: 10px;"
+            )
+            layout.addWidget(warning)
+        if len(result.get("entities", [])) > len(preview):
+            preview_note = QLabel(
+                f"Preview shows {len(preview)} of {len(result.get('entities', []))} "
+                "selected graph nodes. Send to Workspace imports every selected node; "
+                "the complete reusable base remains saved in Intelligence."
+            )
+            preview_note.setWordWrap(True)
+            preview_note.setStyleSheet(
+                f"color: {theme.get('text_muted', '#aaa')}; font-size: 10px;"
+            )
+            layout.addWidget(preview_note)
 
         actions = QHBoxLayout()
         actions.addStretch()
@@ -70,9 +174,10 @@ class AnalysisResultCard(QFrame):
             btn_trace = QPushButton("View Prompt Trace")
             btn_trace.clicked.connect(self._show_prompt_trace)
             actions.addWidget(btn_trace)
-        btn_send = QPushButton("Send to Workspace")
-        btn_send.clicked.connect(lambda: on_send(result))
-        actions.addWidget(btn_send)
+        if result.get("entities"):
+            btn_send = QPushButton("Send to Workspace")
+            btn_send.clicked.connect(lambda: on_send(result))
+            actions.addWidget(btn_send)
         layout.addLayout(actions)
 
     def _show_prompt_trace(self):
@@ -95,7 +200,8 @@ class AnalysisResultCard(QFrame):
 
 
 class AnalysisChunkCard(QFrame):
-    def __init__(self, chunk_number: int, total_chunks: int, chunk: dict, theme: dict, doc_name: str = "", viewer=None, parent=None):
+    def __init__(self, chunk_number: int, total_chunks: int, chunk: dict, theme: dict, doc_name: str = "",
+                 viewer=None, parent=None, section_number: int = None, total_sections: int = None, *, app_context=None):
         super().__init__(parent)
         self.viewer = viewer
         self.setStyleSheet(f"""
@@ -115,7 +221,11 @@ class AnalysisChunkCard(QFrame):
         self.btn_toggle.setChecked(True)
         self.btn_toggle.clicked.connect(self._set_expanded)
         header.addWidget(self.btn_toggle)
-        title = QLabel(f"<b>Section {chunk_number}/{total_chunks}</b>")
+        if section_number is not None and total_sections:
+            title_text = f"Chunk {chunk_number}/{total_chunks} (Section {section_number}/{total_sections})"
+        else:
+            title_text = f"Section {chunk_number}/{total_chunks}"
+        title = QLabel(f"<b>{title_text}</b>")
         header.addWidget(title)
         header.addStretch()
         layout.addLayout(header)
@@ -140,13 +250,22 @@ class AnalysisChunkCard(QFrame):
         content_layout = QVBoxLayout(self.content)
         content_layout.setContentsMargins(0, 6, 0, 0)
         layout.addWidget(self.content)
-        for quote in quotes[:5]:
+        # Full summary (the header only shows a 180-char preview) — selectable.
+        if summary:
+            sum_lbl = QLabel(f"<b>Summary:</b> {summary}")
+            sum_lbl.setWordWrap(True)
+            sum_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            content_layout.addWidget(sum_lbl)
+        # Show all selected quotes (was capped at 5, which under-reported the
+        # count shown in the header); the card is collapsible so this is fine.
+        for quote in quotes[:60]:
             if not isinstance(quote, dict):
                 continue
             quote_text = str(quote.get("x") or "").strip()
             if not quote_text:
                 continue
-            bubble = NoteBubbleWidget(doc_name, quote_text, str(quote.get("n") or ""), theme, self)
+            bubble = NoteBubbleWidget(doc_name, quote_text, str(quote.get("n") or ""), theme, self,
+                                      source_meta=quote, app_context=app_context)
             if viewer:
                 bubble.jump_requested.connect(viewer.jump_to_source)
             bubble.btn_save.hide()
@@ -171,7 +290,8 @@ class AnalysisChunkCard(QFrame):
                 quote_text = str(quote.get("x") or "").strip()
                 if not quote_text:
                     continue
-                bubble = NoteBubbleWidget(doc_name, quote_text, str(quote.get("n") or claim_text), theme, self)
+                bubble = NoteBubbleWidget(doc_name, quote_text, str(quote.get("n") or claim_text), theme, self,
+                                          source_meta=quote, app_context=app_context)
                 if viewer:
                     bubble.jump_requested.connect(viewer.jump_to_source)
                 bubble.btn_save.hide()
@@ -212,7 +332,13 @@ class AnalysisTab(BaseTab):
         super().__init__(app_context, target_id="analysis_tab", parent=parent)
         self.pm = self.project_manager
         self._save_counter = 0  # Strict counter for DB saves
+        self._analysis_run_requested = False
         self.bus = app_context.bus
+        self._mode_runner = ArtifactTaskRunner(app_context, self, service_name='analysis_mode_service')
+        self._mode_runner.completed.connect(self._mode_dispatch_completed)
+        self._mode_runner.failed.connect(self._mode_dispatch_failed)
+        self._mode_runner.busy_changed.connect(self._mode_dispatch_busy)
+        self.destroyed.connect(self._mode_runner.shutdown)
         
         # 2. Connect the signals to safely hop back to the Main UI Thread
         self.ui_signal.connect(self._safe_analysis_event, Qt.ConnectionType.QueuedConnection)
@@ -226,6 +352,21 @@ class AnalysisTab(BaseTab):
         self.bus.project_loaded.connect(self._handle_project_event)
         
         self._build_ui()
+        self.combo_intel_modes.currentIndexChanged.connect(
+            self._load_saved_intelligence_result
+        )
+        self.combo_intel_modes.currentIndexChanged.connect(
+            self._save_analysis_preferences
+        )
+        self.combo_analysis_detail.currentIndexChanged.connect(
+            self._save_analysis_preferences
+        )
+        self.combo_analysis_scope.currentIndexChanged.connect(
+            self._save_analysis_preferences
+        )
+        self.check_analysis_repair.toggled.connect(
+            self._save_analysis_preferences
+        )
         QTimer.singleShot(100, self._refresh_selectors)
 
     def _handle_workflow_action(self, action: WorkflowIntent, payload: WorkflowPayload):
@@ -248,6 +389,15 @@ class AnalysisTab(BaseTab):
             QTimer.singleShot(0, self._load_existing_analysis)
 
     def _safe_analysis_event(self, event, payload):
+        result_payload = getattr(payload, "result", None) or {}
+        target_id = result_payload.get("target_id")
+        if target_id and target_id != self.target_id:
+            return
+        # Legacy/global extraction events must not populate Analysis.  This tab
+        # accepts only a run explicitly initiated here (or a blueprint whose
+        # initiating target is this tab).
+        if not target_id and not self._analysis_run_requested:
+            return
         if event == AnalysisEvent.RUN_STARTED:
             self.status_lbl.setText("Processing document graph analysis...")
             self.btn_run.setEnabled(False)
@@ -263,7 +413,9 @@ class AnalysisTab(BaseTab):
             summary = str(payload.result.get("summary", ""))[:120]
             self.status_lbl.setText(f"Section {n}/{total} synthesised. {summary}{'...' if len(summary) == 120 else ''}")
         elif event == AnalysisEvent.GRAPH_PLAN_READY:
-            self.status_lbl.setText("Graph plan ready. Assembling final graph...")
+            self.status_lbl.setText(
+                payload.result.get("message", "Merge complete. Connecting and polishing final graph...")
+            )
         elif event == AnalysisEvent.GRAPH_HYDRATED:
             n_nodes = payload.result.get("hydrated_entity_count", 0)
             missing = len(payload.result.get("missing_quote_ids") or [])
@@ -279,6 +431,8 @@ class AnalysisTab(BaseTab):
         elif event == AnalysisEvent.RUN_COMPLETED:
             self.status_lbl.setText("Analysis complete.")
             self.btn_run.setEnabled(True)
+            self.btn_run_mode.setEnabled(True)
+            self._analysis_run_requested = False
             self._load_existing_analysis()
         elif event == AnalysisEvent.SENT_TO_WORKSPACE:
             self.status_lbl.setText(f"Sent {payload.result.get('entity_count', 0)} nodes to workspace {payload.workspace_id}.")
@@ -318,19 +472,18 @@ class AnalysisTab(BaseTab):
         self.doc_selector.currentIndexChanged.connect(self._load_run_existing_analysis)
         opts_layout.addWidget(self.doc_selector, 1)
 
-        opts_layout.addWidget(QLabel("<b>Analysis Mode:</b>"))
+        opts_layout.addWidget(QLabel("<b>Graph Contract:</b>"))
         self.combo_templates = QComboBox()
-        self.combo_templates.setToolTip("Selects the node/relation contract and PromptManager keys passed into the Document Analysis blueprint.")
+        self.combo_templates.setToolTip(
+            "A built-in or user-created node/relation contract passed as data to the universal analysis blueprint"
+        )
         self.combo_templates.currentIndexChanged.connect(self._load_run_existing_analysis)
         opts_layout.addWidget(self.combo_templates, 1)
 
-        self.btn_edit = QPushButton("✏️ Edit Modes")
+        self.btn_edit = QPushButton("✏️ Edit Contracts")
         self.btn_edit.clicked.connect(self._open_template_editor)
         opts_layout.addWidget(self.btn_edit)
 
-        self.btn_run = QPushButton("▶ Run Analysis")
-        self.btn_run.clicked.connect(self._trigger_analysis)
-        opts_layout.addWidget(self.btn_run)
         run_layout.addLayout(opts_layout)
 
         from PySide6.QtWidgets import QTextEdit
@@ -344,6 +497,81 @@ class AnalysisTab(BaseTab):
         self._user_prompt_edit.setAcceptRichText(False)
         focus_layout.addWidget(self._user_prompt_edit, 1)
         run_layout.addLayout(focus_layout)
+
+        # Intelligence modes: run the upgraded artifact-aware pipeline (fused
+        # semantic + entity + keyword retrieval, segment-id citations). Each mode
+        # is a registered blueprint dispatched through AnalysisModeService.
+        intel_layout = QHBoxLayout()
+        intel_layout.addWidget(QLabel("<b>Analysis Mode:</b>"))
+        self.combo_intel_modes = QComboBox()
+        self.combo_intel_modes.setToolTip(
+            "All built-in and user/plugin modes run through the same universal master-runner blueprint"
+        )
+        intel_layout.addWidget(self.combo_intel_modes, 1)
+        intel_layout.addWidget(QLabel("<b>Detail:</b>"))
+        self.combo_analysis_detail = QComboBox()
+        self.combo_analysis_detail.addItem("Focused", "focused")
+        self.combo_analysis_detail.addItem("Standard", "standard")
+        self.combo_analysis_detail.addItem("Exhaustive", "exhaustive")
+        saved_detail = "standard"
+        try:
+            saved_detail = str(
+                self.pm.get_metadata("analysis_detail_profile", "standard")
+                or "standard"
+            )
+        except Exception:
+            pass
+        detail_index = self.combo_analysis_detail.findData(saved_detail)
+        self.combo_analysis_detail.setCurrentIndex(
+            detail_index if detail_index >= 0 else 1
+        )
+        self.combo_analysis_detail.setToolTip(
+            "Standard targets 20–40 proposition nodes plus grounded quote evidence."
+        )
+        intel_layout.addWidget(self.combo_analysis_detail)
+        intel_layout.addWidget(QLabel("<b>Scope:</b>"))
+        self.combo_analysis_scope = QComboBox()
+        self.combo_analysis_scope.addItem("Current source", "source")
+        self.combo_analysis_scope.addItem("Project", "project")
+        saved_scope = "source"
+        try:
+            saved_scope = str(
+                self.pm.get_metadata("analysis_source_scope", "source")
+                or "source"
+            )
+        except Exception:
+            pass
+        scope_index = self.combo_analysis_scope.findData(saved_scope)
+        self.combo_analysis_scope.setCurrentIndex(
+            scope_index if scope_index >= 0 else 0
+        )
+        intel_layout.addWidget(self.combo_analysis_scope)
+        self.check_analysis_repair = QCheckBox("Allow repair")
+        repair_enabled = True
+        try:
+            repair_enabled = str(
+                self.pm.get_metadata("analysis_allow_repair", "true")
+            ).lower() not in {"0", "false", "no"}
+        except Exception:
+            pass
+        self.check_analysis_repair.setChecked(repair_enabled)
+        self.check_analysis_repair.setToolTip(
+            "Permit one targeted model repair before deterministic fallback."
+        )
+        intel_layout.addWidget(self.check_analysis_repair)
+        self.btn_run_mode = QPushButton("▶ Run Analysis")
+        self.btn_run_mode.setToolTip(
+            "Run the selected mode and graph contract through the universal intelligence pipeline."
+        )
+        self.btn_run_mode.clicked.connect(self._run_intelligence_mode)
+        intel_layout.addWidget(self.btn_run_mode)
+        # Compatibility alias for existing event handlers and automation.
+        self.btn_run = self.btn_run_mode
+        run_layout.addLayout(intel_layout)
+        self.template_status_label = QLabel()
+        self.template_status_label.setWordWrap(True)
+        self.template_status_label.setVisible(False)
+        run_layout.addWidget(self.template_status_label)
 
         self.status_lbl = QLabel("")
         run_layout.addWidget(self.status_lbl)
@@ -494,12 +722,48 @@ class AnalysisTab(BaseTab):
             for cb in [self.doc_selector, self.cmp_doc, self.comp_doc1, self.comp_doc2]:
                 cb.addItem(name, pdf)
 
-        for t in self.pm.get_analysis_templates():
+        analysis_templates = self.pm.get_analysis_templates()
+        for t in analysis_templates:
             if isinstance(t, tuple) or not hasattr(t, 'get'): continue
             t_name = t.get('name', t.get('title', 'Unnamed Template'))
             t_id = t.get('id', 'unknown')
             self.combo_templates.addItem(t_name, t)
             self.cmp_template.addItem(t_name, t_id)
+
+        # Intelligence modes are pulled dynamically from the registry (rules §13.3).
+        combo_intel = getattr(self, "combo_intel_modes", None)
+        registry = getattr(self.app_context, "analysis_mode_registry", None)
+        if combo_intel is not None:
+            previous_mode = combo_intel.currentData()
+            if not previous_mode:
+                try:
+                    previous_mode = self.pm.get_metadata(
+                        "analysis_last_mode", "argument_map"
+                    )
+                except Exception:
+                    previous_mode = "argument_map"
+            combo_intel.blockSignals(True)
+            combo_intel.clear()
+            if registry is not None:
+                if hasattr(registry, "sync_saved_templates"):
+                    registry.sync_saved_templates(analysis_templates)
+                    errors = getattr(registry, 'template_errors', {})
+                    self.template_status_label.setText(
+                        'Unavailable saved modes — open Modes Builder to correct their vocabulary: '
+                        + '; '.join(f'{key}: {value}' for key, value in errors.items()))
+                    self.template_status_label.setVisible(bool(errors))
+                    combo_intel.setToolTip('Unavailable saved modes: ' + '; '.join(
+                        f'{key}: {value}' for key, value in errors.items()) if errors else
+                        'Built-in and saved modes use the shared analysis compiler.')
+                modes = registry.for_mount("analysis_mode") or registry.all()
+                for spec in modes:
+                    combo_intel.addItem(spec.label, spec.id)
+                default_index = combo_intel.findData(
+                    previous_mode or "argument_map"
+                )
+                if default_index >= 0:
+                    combo_intel.setCurrentIndex(default_index)
+            combo_intel.blockSignals(False)
 
         for cb, previous in previous_docs.items():
             idx = cb.findData(previous)
@@ -525,9 +789,10 @@ class AnalysisTab(BaseTab):
 
         self._load_existing_analysis()
         self._load_run_existing_analysis()
+        self._load_saved_intelligence_result()
 
     def _open_template_editor(self):
-        dlg = TemplateEditorDialog(self.pm, self.theme, self)
+        dlg = TemplateEditorDialog(self.app_context, self)
         dlg.accepted.connect(self._refresh_selectors)
         dm = get_for_widget(self)
         if dm:
@@ -536,41 +801,131 @@ class AnalysisTab(BaseTab):
             if exec_as_modal(dlg):
                 self._refresh_selectors()
 
-    def _trigger_analysis(self):
+    def _save_analysis_preferences(self, *_args):
+        if not self.pm or not hasattr(self.pm, "set_metadata"):
+            return
+        try:
+            self.pm.set_metadata(
+                "analysis_last_mode", self.combo_intel_modes.currentData()
+                or "argument_map"
+            )
+            self.pm.set_metadata(
+                "analysis_detail_profile",
+                self.combo_analysis_detail.currentData() or "standard",
+            )
+            self.pm.set_metadata(
+                "analysis_source_scope",
+                self.combo_analysis_scope.currentData() or "source",
+            )
+            self.pm.set_metadata(
+                "analysis_allow_repair",
+                "true" if self.check_analysis_repair.isChecked() else "false",
+            )
+        except Exception:
+            pass
+
+    def _run_intelligence_mode(self):
+        """Run a registered intelligence mode (blueprint) over the Research Focus.
+
+        Fully blueprint-driven: AnalysisModeService resolves the mode's blueprint
+        and dispatches WorkflowIntent.RUN_BLUEPRINT (no direct LLM call).
+        """
+        svc = getattr(self.app_context, "analysis_mode_service", None)
+        combo = getattr(self, "combo_intel_modes", None)
+        if not svc or combo is None or combo.count() == 0:
+            self.status_lbl.setText("Intelligence modes are unavailable.")
+            return
+        mode_id = combo.currentData()
+        if not mode_id:
+            return
+        focus = self._user_prompt_edit.toPlainText().strip()
+        if not focus and mode_id not in (
+            "intelligence_summaries", "summaries", "argument_map",
+            "argument_map_enriched", "timeline",
+        ):
+            self.status_lbl.setText("Enter a question/claim/field description in Research Focus first.")
+            return
         doc_path = self.doc_selector.currentData()
+        source_id = None
+        try:
+            rec = self.pm.get_source_record_by_path(doc_path) if doc_path else None
+            source_id = rec.get("id") if rec else None
+        except Exception:
+            source_id = None
+        params = {
+            "user_query": focus, "claim": focus, "extraction_query": focus,
+            "summary_focus": focus or "overview",
+            "doc_path": doc_path or "",
+            "source_id": source_id or doc_path or "",
+            "allowed_source_ids": [source_id] if source_id else [],
+            "selected_model": self.app_context.get_active_ai_model(),
+            "analysis_focus": focus,
+            "analysis_detail_profile": self.combo_analysis_detail.currentData() or "standard",
+            "analysis_allow_repair": self.check_analysis_repair.isChecked(),
+            "scope": self.combo_analysis_scope.currentData() or "source",
+        }
         template = self.combo_templates.currentData()
-        if not doc_path or not template: return
-        
-        self._clear_layout(self.results_layout)
-        self.status_lbl.setText("Running Document Analysis blueprint...")
-        self.btn_run.setEnabled(False)
-        template_id = self._get_safe_template_id(template)
-        run_id = self._analysis_run_id(doc_path, template_id)
-        self._save_counter = 0
-        blueprint = DefaultBlueprints.get_analysis_blueprint(self.prompt_manager)
-        self.bus.analysis_result_changed.emit(
-            AnalysisEvent.RUN_STARTED,
-            AnalysisPayload(doc_path=doc_path, template_id=template_id, template=template, run_id=run_id),
-        )
-        user_prompt = getattr(self, "_user_prompt_edit", None)
-        user_prompt = user_prompt.toPlainText().strip() if user_prompt else ""
-        self.bus.workflow_action_requested.emit(
-            WorkflowIntent.RUN_BLUEPRINT,
-            WorkflowPayload(
-                blueprint=blueprint,
-                initial_state={
-                    "selected_model": self.app_context.get_active_ai_model(),
-                    "analysis_doc_path": doc_path,
-                    "target_doc": doc_path,
-                    "analysis_template_id": template_id,
-                    "analysis_template": template,
-                    "analysis_run_id": run_id,
-                    "analysis_user_prompt": user_prompt,
-                },
-                job_name=blueprint.name,
-                target_id="analysis_tab",
-            ),
-        )
+        if str(mode_id).startswith("custom:"):
+            saved_id = str(mode_id).split(":", 1)[1]
+            template = next(
+                (
+                    item for item in self.pm.get_analysis_templates()
+                    if isinstance(item, dict) and str(item.get("id")) == saved_id
+                ),
+                template,
+            )
+        if isinstance(template, dict):
+            params["analysis_template"] = template
+            params["analysis_template_id"] = self._get_safe_template_id(template)
+        if mode_id == "claim_tracking" or params["scope"] == "project":
+            try:
+                params["allowed_source_ids"] = [
+                    str(item.get("id"))
+                    for item in self.pm.list_sources(include_removed=False)
+                    if item.get("id")
+                ]
+                params["scope"] = "project"
+            except Exception:
+                pass
+        if mode_id == "custom_graph":
+            params["custom_instructions"] = focus
+        if mode_id == "extraction":
+            params["extraction_schema"] = focus
+        self._analysis_run_requested = True
+        self.btn_run_mode.setEnabled(False)
+        self.status_lbl.setText('Checking the analysis contract and source readiness…')
+        self._mode_runner.start('run', mode_id=mode_id, params=params, target_id='analysis_tab')
+
+    def _mode_dispatch_failed(self, message):
+        self.status_lbl.setText(f'Mode error: {message}')
+        self._analysis_run_requested = False
+        self.btn_run_mode.setEnabled(True)
+
+    def _mode_dispatch_busy(self, busy):
+        if not busy and self._mode_runner.result is None:
+            self._analysis_run_requested = False
+            self.btn_run_mode.setEnabled(True)
+
+    def _mode_dispatch_completed(self, _operation):
+        result = self._mode_runner.result
+        if isinstance(result, dict) and result.get("error"):
+            self.status_lbl.setText(f"Mode error: {result['error']}")
+            self._analysis_run_requested = False
+            self.btn_run_mode.setEnabled(True)
+        elif isinstance(result, dict) and result.get('status') == 'not_ready':
+            self.status_lbl.setText(f"Not ready: {result.get('message', '')}")
+            self._analysis_run_requested = False
+            self.btn_run_mode.setEnabled(True)
+        elif isinstance(result, dict) and result.get('status') in {'cached', 'cancelled'}:
+            self.status_lbl.setText('Loaded cached analysis.' if result['status'] == 'cached' else 'Analysis cancelled.')
+            self._analysis_run_requested = False
+            self.btn_run_mode.setEnabled(True)
+        else:
+            label = self.combo_intel_modes.currentText()
+            self.status_lbl.setText(
+                f"Running '{label}' through the master runner. Local preparation "
+                "and summaries will be reused by later analyses."
+            )
 
     def _analysis_run_id(self, doc_path, template_id):
         raw = f"{doc_path}:{template_id}:{os.path.getmtime(doc_path) if doc_path and os.path.exists(doc_path) else ''}"
@@ -606,6 +961,54 @@ class AnalysisTab(BaseTab):
         card = AnalysisResultCard(result, self.theme, self._send_result_to_workspace, self)
         self.results_layout.insertWidget(self.results_layout.count() - 1, card)
 
+    def _load_saved_intelligence_result(self):
+        """Load the most recent canonical artifact for the selected mode."""
+        if not self.pm or not hasattr(self, "combo_intel_modes"):
+            return
+        mode_id = self.combo_intel_modes.currentData()
+        doc_path = self.doc_selector.currentData() if hasattr(self, "doc_selector") else ""
+        source = (
+            self.pm.get_source_record_by_path(doc_path)
+            if doc_path and hasattr(self.pm, "get_source_record_by_path") else None
+        )
+        source_id = source.get("id") if source else None
+        db = getattr(self.pm, "db_intelligence", None)
+        if not mode_id or not db:
+            return
+        candidates = db.list_artifacts(
+            source_id=source_id,
+            status="complete",
+            limit=5000,
+        )
+        artifact = next(
+            (
+                row for row in candidates
+                if (row.get("metadata") or {}).get("stage") == "analysis"
+                and (row.get("metadata") or {}).get("mode_id") == mode_id
+            ),
+            None,
+        )
+        if not artifact:
+            return
+        raw = artifact.get("exact_text") or ""
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            parsed = {"content": raw}
+        if not isinstance(parsed, dict):
+            parsed = {"content": parsed}
+        parsed.setdefault(
+            "template_title",
+            self.combo_intel_modes.currentText() or "Saved Analysis",
+        )
+        parsed.setdefault("analysis_artifact_id", artifact.get("artifact_id"))
+        parsed.setdefault("saved", True)
+        self._clear_layout(self.results_layout)
+        self._render_analysis_result(parsed)
+        self.status_lbl.setText(
+            f"Loaded saved {self.combo_intel_modes.currentText()} result."
+        )
+
     def _load_run_existing_analysis(self):
         if not self.pm or not hasattr(self, "results_layout"):
             return
@@ -636,6 +1039,7 @@ class AnalysisTab(BaseTab):
             doc_name,
             self.app_context.viewer,
             self,
+            app_context=self.app_context,
         )
         self.results_layout.insertWidget(self.results_layout.count() - 1, card)
 
@@ -645,7 +1049,7 @@ class AnalysisTab(BaseTab):
         doc_name = os.path.basename(result.get("doc_path") or self.doc_selector.currentData() or "")
         # Map compact_refs into the {x, n} quote format AnalysisChunkCard expects
         quotes = [
-            {"x": r.get("snippet", ""), "n": r.get("note", ""), "id": r.get("quote_id", "")}
+            {**r, "x": r.get("snippet", ""), "n": r.get("note", ""), "id": r.get("quote_id", "")}
             for r in refs
             if r.get("snippet")
         ]
@@ -663,6 +1067,9 @@ class AnalysisTab(BaseTab):
             doc_name,
             self.app_context.viewer,
             self,
+            section_number=result.get("section_number"),
+            total_sections=result.get("total_sections"),
+            app_context=self.app_context,
         )
         self.results_layout.insertWidget(self.results_layout.count() - 1, card)
 
@@ -681,14 +1088,15 @@ class AnalysisTab(BaseTab):
         if not ok:
             return
         workspace_id = ids[labels.index(label)]
-        blueprint = DefaultBlueprints.get_analysis_send_to_workspace_blueprint()
+        blueprint = DefaultBlueprints.get_analysis_send_to_workspace_blueprint(
+            result=result,
+            workspace_id=workspace_id,
+        )
         self.bus.workflow_action_requested.emit(
             WorkflowIntent.RUN_BLUEPRINT,
             WorkflowPayload(
                 blueprint=blueprint,
                 initial_state={
-                    "analysis_result": result,
-                    "analysis_workspace_id": workspace_id,
                     "selected_model": self.app_context.get_active_ai_model(),
                 },
                 job_name=blueprint.name,
@@ -758,6 +1166,7 @@ class AnalysisTab(BaseTab):
                         os.path.basename(doc_path),
                         self.app_context.viewer,
                         self,
+                        app_context=self.app_context,
                     )
                     vbox.addWidget(section_card)
                     self.saved_layout.insertWidget(self.saved_layout.count() - 1, container)

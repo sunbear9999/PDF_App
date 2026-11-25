@@ -62,8 +62,50 @@ class Plugin:
             agent_visible=False,
         ))
 
+        self._register_legal_analysis(api)
+
+        # Register court case extractor for the Discovery tab
+        from .court_case_extractor import run_court_case_extractor
+        from core.extraction.deterministic import ExtractorSpec
+        api.discovery_extractors.register(ExtractorSpec(
+            entity_type="law.court_case",
+            display_name="Court Cases & Precedent",
+            extractor=run_court_case_extractor,
+            plugin_id=self.plugin_id,
+        ))
+
+    def _register_legal_analysis(self, api) -> None:
+        """Intelligence for court opinions: cited authorities as LAW entities, and a Legal analysis
+        stage (opinion parts, questions, rules, applications, holdings, dispositions, treatment of
+        authority) shown in a Case analysis tab."""
+        from core.models.intelligence_models import ProcessingStage, StageSpec
+        from core.registries.intelligence_view_registry import IntelligenceViewSpec, TAG_FILTERS
+        from .legal_analysis.analysis import LABELS
+        from .legal_analysis.authorities import LegalAuthorityExtractor
+        from .legal_analysis.producer import ARTIFACT_TYPES, STAGE_ID, LegalAnalysisProducer
+        intelligence = api.intelligence
+        for kind, label in LABELS.items():
+            intelligence.register_artifact_type(f"locallaws.{kind}", {"label": label})
+        intelligence.register_entity_extractor(LegalAuthorityExtractor())
+        intelligence.register_stage(StageSpec(
+            id=STAGE_ID, dependencies=[ProcessingStage.SECTIONS.value], source_categories=["document"],
+            output_artifact_types=ARTIFACT_TYPES, handler_id=STAGE_ID, producer_version="1.0",
+            label="Legal analysis", cost_hint="Local · fast", default_presets=["balanced", "deep"],
+            description=("For court opinions: where the majority, concurrences and dissents begin, the questions "
+                         "presented, legal rules and standards, application to the facts, holdings, the "
+                         "disposition, and how cited authority is treated. Other documents are left alone."),
+        ), producer=LegalAnalysisProducer(intelligence))
+        intelligence.register_view(IntelligenceViewSpec(
+            "locallaws.case_analysis", "Case analysis", list(ARTIFACT_TYPES),
+            description=("A court opinion's structure and reasoning: opinion parts, questions presented, rules, "
+                         "applications, holdings, dispositions and treatment of cited authority. Cited cases and "
+                         "statutes are in People & Places as Law."),
+            empty_state="Run Legal analysis (Processing) on a court opinion.",
+            sorts=["recent", "alpha"], filters=["artifact_type", "review_state", *TAG_FILTERS]))
+
     def on_unload(self) -> None:
-        pass
+        if self._api:
+            self._api.discovery_extractors.remove_by_plugin(self.plugin_id)
 
     def _query_law_source(
         self, *, embedding_vector, n_results, allowed_docs=None,

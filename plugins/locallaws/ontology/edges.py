@@ -11,6 +11,7 @@ from core.ontology.registry import (
 LAW_NODES_ALL = [
     "law.issue", "law.holding", "law.doctrine", "law.fact",
     "law.party", "law.authority", "law.statute", "law.reasoning", "law.policy",
+    "law.court_case",
 ]
 
 
@@ -124,6 +125,20 @@ class FollowsEdge(BaseOntologyEdgePlugin):
     visual_style = VisualStyleDefinition("#43a047", "solid")
 
 
+class PrecedentEdge(BaseOntologyEdgePlugin):
+    type_key = "law.precedent"
+    display_name = "Relies on Precedent"
+    description = (
+        "Links an opinion (holding, reasoning, or court case) to the court case it "
+        "treats as binding or persuasive precedent.  Direction: opinion → precedent case."
+    )
+    traits: List[RelationTrait] = [RelationTrait.HIERARCHICAL, RelationTrait.CITATIONAL]
+    valid_source_types: List[str] = ["law.holding", "law.reasoning", "law.court_case"]
+    valid_target_types: List[str] = ["law.court_case", "law.authority"]
+    plugin_id: Optional[str] = None
+    visual_style = VisualStyleDefinition("#7e57c2", "solid")
+
+
 ALL_EDGE_TYPES = [
     SupportsEdge,
     ContradictsEdge,
@@ -135,4 +150,5 @@ ALL_EDGE_TYPES = [
     RebutsEdge,
     CitesEdge,
     FollowsEdge,
+    PrecedentEdge,
 ]
