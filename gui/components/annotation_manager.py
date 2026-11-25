@@ -355,8 +355,8 @@ class AnnotationManager(QObject):
 
         allowed_docs = []
         if self._ctx and self._ctx.project_manager:
-            from gui.utils.document_helpers import active_pdf_names
-            allowed_docs = active_pdf_names(self._ctx.project_manager)
+            from gui.utils.document_helpers import active_pdf_paths
+            allowed_docs = active_pdf_paths(self._ctx.project_manager)
 
         if action_type == "reword":
             blueprint = DefaultBlueprints.get_reword_blueprint(text)
@@ -406,57 +406,16 @@ class AnnotationManager(QObject):
             return
 
         extracted_text = " ".join(w[4] for w in self.selected_words)
-        # Capture selection state; clear_selection() is called via the dialog's
-        # finished signal so the visual indicator persists until the user responds.
-        selected_words = list(self.selected_words)
-        current_page = self.current_page_idx
-
-        def _commit(note_text: str) -> None:
-            pdf_path = getattr(self.viewer, "pdf_path", None)
-            self.bus.document_action_requested.emit(
-                DocumentIntent.CREATE_HIGHLIGHT,
-                DocumentPayload(
-                    path=pdf_path,
-                    page_num=current_page,
-                    rects=[list(w[:4]) for w in selected_words],
-                    text=extracted_text,
-                    note=note_text,
-                    color=color_tuple,
-                ),
-            )
-
-        from gui.managers.dialog_manager import get_for_widget
-        dm = get_for_widget(self.viewer)
-        if dm:
-            from PySide6.QtWidgets import (
-                QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout,
-            )
-            from gui.base import BaseDialog
-            dialog = BaseDialog("Add Note", parent=self.viewer)
-            layout = QVBoxLayout(dialog)
-            layout.addWidget(QLabel("Enter a note for this highlight (Optional):"))
-            text_field = QLineEdit()
-            layout.addWidget(text_field)
-            btn_row = QHBoxLayout()
-            ok_btn = QPushButton("OK")
-            cancel_btn = QPushButton("Cancel")
-            ok_btn.setDefault(True)
-            ok_btn.clicked.connect(dialog.accept)
-            cancel_btn.clicked.connect(dialog.reject)
-            btn_row.addWidget(cancel_btn)
-            btn_row.addWidget(ok_btn)
-            layout.addLayout(btn_row)
-
-            dialog.accepted.connect(lambda: _commit(text_field.text()))
-            dialog.finished.connect(lambda _: self.clear_selection())
-            dm.show_instance(dialog)
+        from gui.components.dialogs.reference_note_dialog import open_selection_note
+        selection = {"source_path": getattr(self.viewer, "pdf_path", None),
+                     "page_index": self.current_page_idx, "quote": extracted_text,
+                     "rects": [list(word[:4]) for word in self.selected_words],
+                     "color": QColor.fromRgbF(*color_tuple[:3]).name()}
+        dialog = open_selection_note(self._ctx, selection, parent=self.viewer)
+        if dialog:
+            dialog.finished.connect(lambda *_: self.clear_selection())
         else:
-            text, ok = QInputDialog.getText(
-                self.viewer, "Add Note", "Enter a note for this highlight (Optional):"
-            )
-            if ok:
-                _commit(text)
-            self.clear_selection()
+            self.bus.status_message_requested.emit("Open a project with linked-note support before saving a highlight.", 5000)
 
     def ask_ai_about_selection(self):
         if not self.selected_words: return

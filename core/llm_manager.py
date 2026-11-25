@@ -420,18 +420,44 @@ def fetch_openai_completion_logprobs(
     )
 
 
+OLLAMA_STATUS_TIMEOUT_S = 2
+DEFAULT_KEEP_ALIVE = "10m"
+
+
+def _model_key(name) -> str:
+    """Ollama reports "model:latest" for a request of "model"."""
+    name = str(name or "").strip()
+    return name if not name or ":" in name else f"{name}:latest"
+
+
 class OllamaProvider:
     """Talks to a local Ollama HTTP server."""
 
     EMBEDDING_MODEL = "nomic-embed-text"
+    # Shown only when the Ollama server cannot be reached to list real models;
+    # kept as a named default rather than inline literals (rules.md 2.13/16.3).
+    FALLBACK_MODEL_SUGGESTIONS = ["qwen2.5:7b", "llama3", "mistral"]
 
     def __init__(self, api_base: str = "http://localhost:11434/api"):
         self.api_base = api_base
         self._ollama_proc: Optional[subprocess.Popen] = None
         self._ai_enabled = False
         self._capability_cache: dict[tuple[str, str], bool] = {}
+        self._context_limit_cache: dict[str, int] = {}
         self._active_generation_model: str = ""
+        self._init_residency()
         self._start_server()
+
+    # Hooks set by the memory manager (MemoryManagerService.attach_llm).
+    keep_alive_source: Optional[Callable[[str], str]] = None
+    on_out_of_memory: Optional[Callable[[], None]] = None
+
+    def _init_residency(self) -> None:
+        """Residency bookkeeping read by the memory manager."""
+        self._last_used: dict[str, float] = {}
+        self._active: dict[str, int] = {}
+        self._model_sizes: dict[str, int] = {}
+        self.loaded_by_papyrus: set[str] = set()
 
     # -- LLMProvider protocol ------------------------------------------------
 
@@ -457,6 +483,7 @@ class OllamaProvider:
     ) -> str:
         keep_alive = self._generation_keep_alive()
         self._prepare_generation_model(model)
+        self._begin_use(model)
         payload: dict = {
             "model": model,
             "prompt": prompt,
@@ -512,11 +539,12 @@ class OllamaProvider:
         except Exception as exc:
             err = f"\n[Generation Error: {exc}]"
             if self._is_memory_error(str(exc)):
-                self.unload_all_models()
+                (self.on_out_of_memory or self.unload_all_models)()
             if stream_callback:
                 stream_callback(err)
             full_response += err
         finally:
+            self._end_use(model)
             if str(keep_alive).strip() in {"0", "0s"}:
                 self._active_generation_model = ""
 
@@ -541,6 +569,29 @@ class OllamaProvider:
             pass
         return False
 
+    def model_context_limit(self, model: str) -> Optional[int]:
+        """Read the installed model's native limit from Ollama metadata."""
+        if model in self._context_limit_cache:
+            return self._context_limit_cache[model]
+        try:
+            response = requests.post(
+                f"{self.api_base}/show", json={"model": model}, timeout=5
+            )
+            if response.status_code != 200:
+                return None
+            info = response.json().get("model_info") or {}
+            limits = [
+                int(value) for key, value in info.items()
+                if str(key).endswith(".context_length")
+                and isinstance(value, (int, float)) and value > 0
+            ]
+            if limits:
+                self._context_limit_cache[model] = min(limits)
+                return min(limits)
+        except Exception:
+            pass
+        return None
+
     def embed(self, text: str) -> List[float]:
         payload = {
             "model": self.EMBEDDING_MODEL,
@@ -548,6 +599,7 @@ class OllamaProvider:
             "keep_alive": self._embedding_keep_alive(),
             "options": {"num_ctx": 8192},
         }
+        self._begin_use(self.EMBEDDING_MODEL)
         try:
             response = requests.post(
                 f"{self.api_base}/embeddings", json=payload, timeout=(10, 300)
@@ -557,6 +609,8 @@ class OllamaProvider:
             raise RuntimeError(f"Server returned {response.status_code}: {response.text}")
         except Exception as exc:
             raise RuntimeError(f"Embedding failed: {exc}") from exc
+        finally:
+            self._end_use(self.EMBEDDING_MODEL)
 
     def embed_batch(self, texts: List[str]) -> List[List[float]]:
         payload = {
@@ -565,6 +619,7 @@ class OllamaProvider:
             "keep_alive": self._embedding_keep_alive(),
             "options": {"num_ctx": 8192},
         }
+        self._begin_use(self.EMBEDDING_MODEL)
         try:
             response = requests.post(
                 f"{self.api_base}/embed", json=payload, timeout=(15, 600)
@@ -573,6 +628,8 @@ class OllamaProvider:
                 return response.json().get("embeddings")
         except Exception as exc:
             print(f"[OllamaProvider] Batch embed failed, falling back to sequential: {exc}")
+        finally:
+            self._end_use(self.EMBEDDING_MODEL)
         return [self.embed(t) for t in texts]
 
     def available_models(self) -> List[str]:
@@ -588,7 +645,7 @@ class OllamaProvider:
                     return models
         except Exception as exc:
             print(f"[OllamaProvider] Error fetching models: {exc}")
-        return ["qwen2.5:7b", "llama3", "mistral"]
+        return list(self.FALLBACK_MODEL_SUGGESTIONS)
 
     def preload_model(self, model_name: str) -> None:
         if not model_name:
@@ -601,6 +658,8 @@ class OllamaProvider:
                 timeout=(15, 600),
             )
             if response.status_code == 200:
+                self.loaded_by_papyrus.add(_model_key(model_name))
+                self._last_used[_model_key(model_name)] = time.monotonic()
                 print(f"[OllamaProvider] Preloaded {model_name}.")
             else:
                 print(f"[OllamaProvider] Failed to preload model: {response.status_code}")
@@ -608,15 +667,58 @@ class OllamaProvider:
             print(f"[OllamaProvider] Failed to preload model: {exc}")
 
     def unload_all_models(self) -> None:
+        """Unload the models Papyrus loaded; other apps' models are left alone."""
+        for model in self.loaded_models():
+            if model["name"] in self.loaded_by_papyrus:
+                self.unload_model(model["name"])
+        self._active_generation_model = ""
+
+    def loaded_models(self) -> List[dict]:
+        """Models resident in the Ollama server: name, size and VRAM bytes."""
         try:
-            resp = requests.get(f"{self.api_base}/ps", timeout=3)
-            if resp.status_code == 200:
-                for m in resp.json().get("models", []):
-                    name = m.get("name")
-                    self._unload_model(name)
-                self._active_generation_model = ""
-        except Exception as exc:
-            print(f"[OllamaProvider] Warning during model unload: {exc}")
+            resp = requests.get(f"{self.api_base}/ps", timeout=OLLAMA_STATUS_TIMEOUT_S)
+            if resp.status_code != 200:
+                return []
+            return [{"name": _model_key(item.get("name")), "size": int(item.get("size") or 0),
+                     "size_vram": int(item.get("size_vram") or 0)}
+                    for item in resp.json().get("models", []) if item.get("name")]
+        except Exception:
+            return []
+
+    def model_size(self, model_name: str) -> int:
+        """Download size of an installed model (a lower bound on its loaded size)."""
+        key = _model_key(model_name)
+        if key not in self._model_sizes:
+            try:
+                resp = requests.get(f"{self.api_base}/tags", timeout=OLLAMA_STATUS_TIMEOUT_S)
+                for item in resp.json().get("models", []) if resp.status_code == 200 else []:
+                    self._model_sizes[_model_key(item.get("name"))] = int(item.get("size") or 0)
+            except Exception:
+                return 0
+        return self._model_sizes.get(key, 0)
+
+    def model_busy(self, model_name: str) -> bool:
+        return self._active.get(_model_key(model_name), 0) > 0
+
+    def model_idle_seconds(self, model_name: str) -> float:
+        used = self._last_used.get(_model_key(model_name))
+        return time.monotonic() - used if used else 0.0
+
+    def embedding_model_name(self) -> str:
+        return _model_key(self.EMBEDDING_MODEL)
+
+    def _begin_use(self, model_name: str) -> None:
+        if "_active" not in self.__dict__:
+            self._init_residency()
+        key = _model_key(model_name)
+        self._active[key] = self._active.get(key, 0) + 1
+        self._last_used[key] = time.monotonic()
+        self.loaded_by_papyrus.add(key)
+
+    def _end_use(self, model_name: str) -> None:
+        key = _model_key(model_name)
+        self._active[key] = max(0, self._active.get(key, 0) - 1)
+        self._last_used[key] = time.monotonic()
 
     def _prepare_generation_model(self, model_name: str) -> None:
         model_name = str(model_name or "").strip()
@@ -627,7 +729,7 @@ class OllamaProvider:
             self._unload_model(previous)
         self._active_generation_model = model_name
 
-    def _unload_model(self, model_name: str) -> None:
+    def unload_model(self, model_name: str, timeout: float = 5) -> None:
         model_name = str(model_name or "").strip()
         if not model_name:
             return
@@ -635,18 +737,32 @@ class OllamaProvider:
             requests.post(
                 f"{self.api_base}/generate",
                 json={"model": model_name, "keep_alive": 0},
-                timeout=5,
+                timeout=timeout,
             )
         except Exception:
-            pass
+            pass   # a short exit timeout still delivers the request
+        if "loaded_by_papyrus" not in self.__dict__:
+            self._init_residency()
+        self.loaded_by_papyrus.discard(_model_key(model_name))
+        if _model_key(self._active_generation_model) == _model_key(model_name):
+            self._active_generation_model = ""
 
-    @staticmethod
-    def _generation_keep_alive() -> str:
-        return os.environ.get("PAPYRUS_OLLAMA_KEEP_ALIVE", "60m").strip() or "60m"
+    _unload_model = unload_model
 
-    @staticmethod
-    def _embedding_keep_alive() -> str:
-        return os.environ.get("PAPYRUS_OLLAMA_EMBED_KEEP_ALIVE", "60m").strip() or "60m"
+    def _generation_keep_alive(self) -> str:
+        return self._keep_alive("PAPYRUS_OLLAMA_KEEP_ALIVE", "chat")
+
+    def _embedding_keep_alive(self) -> str:
+        return self._keep_alive("PAPYRUS_OLLAMA_EMBED_KEEP_ALIVE", "embed")
+
+    def _keep_alive(self, env_name: str, role: str) -> str:
+        """The environment wins; otherwise the memory manager's idle limit."""
+        explicit = os.environ.get(env_name, "").strip()
+        if explicit:
+            return explicit
+        if self.keep_alive_source:
+            return self.keep_alive_source(role)
+        return DEFAULT_KEEP_ALIVE
 
     @staticmethod
     def _is_memory_error(message: str) -> bool:
@@ -1005,6 +1121,17 @@ class LocalLLMManager:
         self._rag_sources: dict[str, Callable] = {}
         self._document_extraction_service = None
         self._model_role_service = None
+        # Optional PromptManager.get_prompt hook (set by PapyrusCore) so
+        # provider-level instructions like "JSON Mode Instruction" honour
+        # user edits instead of the shipped defaults.
+        self.prompt_resolver: Optional[Callable[[str], str]] = None
+        # MemoryManagerService (set by PapyrusCore): owns preload, unload and
+        # making room for the embedding model.
+        self.memory_manager = None
+
+    @property
+    def provider(self):
+        return self._provider
 
     # -- Lifecycle -----------------------------------------------------------
 
@@ -1018,6 +1145,17 @@ class LocalLLMManager:
     def set_audit_logger(self, logger_func: Callable) -> None:
         self.audit_logger = logger_func
 
+    def _resolve_prompt(self, key: str, fallback: str = "") -> str:
+        """Resolve a PromptManager key via the injected resolver, if any."""
+        if self.prompt_resolver:
+            try:
+                text = self.prompt_resolver(key)
+                if text:
+                    return text
+            except Exception:
+                pass
+        return fallback
+
     def set_document_extraction_service(self, svc) -> None:
         """Inject the shared DocumentExtractionService for enriched RAG indexing."""
         self._document_extraction_service = svc
@@ -1025,6 +1163,10 @@ class LocalLLMManager:
     def set_model_role_service(self, svc) -> None:
         """Inject model-role lookup for embedding metadata and future providers."""
         self._model_role_service = svc
+
+    def model_context_limit(self, model: str) -> Optional[int]:
+        resolver = getattr(self._provider, "model_context_limit", None)
+        return resolver(model) if callable(resolver) else None
 
     def shutdown(self) -> None:
         if hasattr(self._provider, "shutdown"):
@@ -1050,6 +1192,10 @@ class LocalLLMManager:
         return ""
 
     def preload_model(self, model_name: str = "") -> None:
+        """Warm a model unless the memory manager says it will not fit."""
+        if self.memory_manager is not None:
+            self.memory_manager.request_preload(model_name)
+            return
         self._provider.preload_model(model_name)
 
     def unload_all_models(self) -> None:
@@ -1086,6 +1232,8 @@ class LocalLLMManager:
             except Exception:
                 pass
         self._provider = provider
+        if self.memory_manager is not None:
+            self.memory_manager.attach_llm()
         from core.events.event_bus import EventBus
         EventBus.get_instance().ai_availability_changed.emit(provider.ai_enabled)
 
@@ -1150,6 +1298,11 @@ class LocalLLMManager:
                 return err
 
         system = custom_system_prompt or ""
+
+        if json_mode and hasattr(self._provider, "json_mode_instruction"):
+            self._provider.json_mode_instruction = self._resolve_prompt(
+                "JSON Mode Instruction", self._provider.json_mode_instruction
+            )
 
         result = self._provider.generate(
             prompt=question,
@@ -1249,31 +1402,21 @@ class LocalLLMManager:
         allowed_docs=None,
         tag_filters=None,
         tag_logic: str = "AND",
+        allowed_source_ids=None, has_citation=None, has_table=None, block_types=None,
     ):
+        from core.models.intelligence_models import RetrievalPlan, SourceScope
+        from core.services.intelligence.vector_filters import vector_where, filter_vector_payload
+        plan = RetrievalPlan(
+            query="", allowed_source_ids=list(allowed_source_ids or []),
+            source_scope=SourceScope(display_names=[os.path.basename(value) for value in allowed_docs or []]),
+            tag_filters=list(tag_filters or []), tag_logic=tag_logic,
+            has_citation=has_citation, has_table=has_table, block_types=list(block_types or []),
+        )
         results = None
 
         # 1. Query the main project workspace (if active)
         if self.collection:
-            conditions = []
-            tag_filters_list = [str(t).strip() for t in (tag_filters or []) if str(t).strip()]
-
-            if allowed_docs:
-                base_names = [os.path.basename(d) for d in allowed_docs]
-                conditions.append({"doc_name": base_names[0] if len(base_names) == 1 else {"$in": base_names}})
-
-            if tag_filters_list:
-                tag_conditions = [{f"tag_{t}": True} for t in tag_filters_list]
-                if str(tag_logic).upper() == "OR" and len(tag_conditions) > 1:
-                    conditions.append({"$or": tag_conditions})
-                else:
-                    conditions.extend(tag_conditions)
-
-            if not conditions:
-                where_clause = None
-            elif len(conditions) == 1:
-                where_clause = conditions[0]
-            else:
-                where_clause = {"$and": conditions}
+            where_clause = vector_where(plan)
 
             try:
                 if self.collection.count() > 0:
@@ -1298,6 +1441,7 @@ class LocalLLMManager:
                     tag_filters=tag_filters,
                     tag_logic=tag_logic,
                 )
+                source_results = filter_vector_payload(source_results, plan)
                 results = self._merge_rag_results(results, source_results, n_results)
             except Exception as exc:
                 print(f"[LocalLLMManager] RAG source '{source_id}' failed: {exc}")
@@ -1316,7 +1460,7 @@ class LocalLLMManager:
             except Exception as exc:
                 print(f"[LocalLLMManager] Plugin interceptor failed: {exc}")
 
-        return results
+        return filter_vector_payload(results, plan)
 
     def has_rag_sources(self) -> bool:
         """Return whether core or a plugin can service a RAG retrieval."""
@@ -1380,8 +1524,8 @@ class LocalLLMManager:
             raise RuntimeError("Vector database not initialized. Please save the project first.")
 
         if progress_callback:
-            progress_callback("Clearing VRAM to prioritize embedding engine...")
-        self.unload_all_models()
+            progress_callback("Making room for the embedding model...")
+        self._make_room_for_embedding()
         self.check_and_pull_embedding_model(progress_callback)
 
         existing_ids = set(self.collection.get(include=["metadatas"]).get("ids", []))
@@ -1496,9 +1640,7 @@ class LocalLLMManager:
                 ids=ids[i : i + batch_size],
             )
 
-        if progress_callback:
-            progress_callback("Releasing embedding model from memory...")
-        self.unload_all_models()
+        self._release_after_embedding(progress_callback)
 
     def index_video_transcript(
         self,
@@ -1514,7 +1656,7 @@ class LocalLLMManager:
         if progress_callback:
             progress_callback(f"Indexing transcript for {os.path.basename(video_path)}...")
         if self.ai_enabled:
-            self.unload_all_models()
+            self._make_room_for_embedding()
             self.check_and_pull_embedding_model(progress_callback)
 
         self.remove_source_from_index(source_id, fallback_path=video_path)
@@ -1576,6 +1718,22 @@ class LocalLLMManager:
             )
         if progress_callback:
             progress_callback("Video transcript index updated.")
+
+    def _make_room_for_embedding(self) -> None:
+        if self.memory_manager is None:
+            self.unload_all_models()
+            return
+        name = getattr(self._provider, "embedding_model_name", lambda: "")()
+        size = getattr(self._provider, "model_size", lambda _name: 0)(name) if name else 0
+        self.memory_manager.reserve(size, "embedding model", protect=[f"llm:{name}"])
+
+    def _release_after_embedding(self, progress_callback=None) -> None:
+        # With a memory manager the idle limit unloads it; reloading for every
+        # batch of sources would cost more than it saves.
+        if self.memory_manager is None:
+            if progress_callback:
+                progress_callback("Releasing embedding model from memory...")
+            self.unload_all_models()
 
     def _embedding_model_name(self) -> str:
         svc = self._model_role_service

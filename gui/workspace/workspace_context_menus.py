@@ -141,7 +141,7 @@ def populate_tag_filter_combo(tag_filter_combo, tags, checked_data):
 def build_selected_nodes_context_menu(view, parent_widget, selected_nodes):
     menu = QMenu(parent_widget)
     remove_action = menu.addAction("🗑️ Remove Selected from Workspace")
-    delete_action = menu.addAction("🔥 Delete Selected Highlights Permanently")
+    delete_action = menu.addAction("Manage selected project notes…")
     color_action = menu.addAction("🎨 Change Color for Selected Nodes")
     manage_tags_action = menu.addAction("🏷️ Manage Tags for Selected Nodes")
     declutter_action = menu.addAction("🧹 Declutter Selected Nodes")
@@ -187,7 +187,7 @@ def build_node_context_menu(view, parent_widget, node, selected_nodes, connect_s
         menu.addSeparator()
 
     remove_action = menu.addAction("🗑️ Remove Selected from Workspace")
-    delete_highlight_action = menu.addAction("🔥 Delete Highlight Permanently") if node.highlight_id else None
+    delete_highlight_action = menu.addAction("Manage source note / refresh workspace copy…") if node.highlight_id else None
     declutter_action = menu.addAction("🧹 Declutter Selected Node")
 
     remove_action.triggered.connect(view.delete_selected_nodes)

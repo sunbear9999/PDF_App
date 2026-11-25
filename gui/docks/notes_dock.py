@@ -6,30 +6,68 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QPushButton, QScrollArea, QFrame, QComboBox,
                              QMenu, QTabWidget, QTextEdit, QSizePolicy,
                              QInputDialog)
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 
 from gui.components.dialogs.tag_manager_dialog import TagAssignmentDialog
 from gui.managers.dialog_manager import exec_as_modal, get_for_widget
+from gui.utils.layout_helpers import make_shrinkable
 from core.events.event_bus import EventBus
 from core.events.domains.document_events import AnnotationIntent, AnnotationPayload, DocumentEvent, DocumentEventPayload, DocumentIntent, DocumentPayload
 from core.events.domains.metadata_events import NotesEvent, NotesEventPayload, NotesIntent, NotesPayload
 from core.events.domains.discovery_events import DiscoveryEvent, DiscoveryEventPayload, DiscoveryIntent, DiscoveryPayload
 from core.events.domains.workspace_events import WorkspaceIntent, WorkspacePayload
-from core.extraction.deterministic import ExtractedMention
+from core.extraction.deterministic import ExtractedMention, ExtractedEntityGroup
 from core.models.ontology_model import EntityIntent, EntityPayload
 from core.ontology.registry import OntologyRegistry
 from gui.components.dialogs.entity_editor_dialog import EntityEditorDialog
 
+_ENTITY_TYPE_LABELS = {
+    "PERSON": "People",
+    "ORG": "Organizations",
+    "LOCATION": "Places",
+    "GPE": "Places",
+    "LOC": "Places",
+    "FAC": "Places",
+    "NORP": "Groups & nationalities",
+    "EVENT": "Events",
+    "WORK": "Creative works",
+    "WORK_OF_ART": "Creative works",
+    "METHOD": "Methods",
+    "DATASET": "Datasets",
+    "CONCEPT": "Concepts",
+    "LAW": "Laws",
+    "PRODUCT": "Products",
+    "METRIC": "Metrics",
+    "MONEY": "Money",
+    "QUANTITY": "Quantities",
+    "DATE": "Dates",
+    "entity.source": "Citations",
+}
+# Grace period for a discovery load worker to notice requestInterruption()
+# before its owning widget is destroyed.
+_WORKER_SHUTDOWN_MS = 3000
+NOTE_PREVIEW_CHARS = 3000
+
+
+def _friendly_entity_type(entity_type: str) -> str:
+    return _ENTITY_TYPE_LABELS.get(entity_type, entity_type.replace("_", " ").title())
+
+
 class NoteBubble(QFrame):
-    # [KEEP EXISTING NoteBubble EXACTLY AS IS]
     def __init__(self, tab, data_dict):
-        super().__init__()
+        super().__init__(tab if isinstance(tab, QWidget) else None)
         self.tab = tab
         self.pdf_path = data_dict["pdf_path"]
         self.page_num = data_dict["page_num"]
         self.annot_id = data_dict["annot_id"]
         self.is_ai = data_dict["is_ai"]
         self.source_type = data_dict.get("source_type", "pdf")
+        self._legacy_selection = data_dict.get('legacy_selection')
+        self._legacy_body = data_dict.get('content') or ''
+        self.linked_actions = None
+        if data_dict.get("project_note"):
+            from gui.components.linked_note_actions import LinkedNoteActions
+            self.linked_actions = LinkedNoteActions(getattr(tab, "_ctx", None), data_dict, self)
         color = data_dict["color"]
 
         layout = QVBoxLayout(self)
@@ -40,8 +78,10 @@ class NoteBubble(QFrame):
         if self.source_type in ("video", "audio"):
             icon = "🎬" if self.source_type == "video" else "🎧"
             self.lbl_page = QLabel(f"{icon} {doc_name} - {self._fmt_time(self.page_num)}")
-        else:
+        elif self.source_type == 'pdf':
             self.lbl_page = QLabel(f"📄 {doc_name} - Pg {self.page_num + 1}")
+        else:
+            self.lbl_page = QLabel(f"📄 {doc_name} — recorded source selection")
         header_layout.addWidget(self.lbl_page)
 
         # Render Tag Dots from passed data
@@ -76,44 +116,85 @@ class NoteBubble(QFrame):
             border = "2px solid white" if is_close(c_val, color_val) else "none"
             btn_c.setStyleSheet(f"background-color: rgb({int(c_val[0]*255)}, {int(c_val[1]*255)}, {int(c_val[2]*255)}); border-radius: 8px; border: {border};")
             btn_c.setToolTip(f"Change to {c_name}")
-            btn_c.clicked.connect(lambda checked, c=c_val: self.tab.bus.notes_action_requested.emit(
+            btn_c.setAccessibleName(f"Change project note color to {c_name}")
+            btn_c.clicked.connect(lambda checked, c=c_val: self.linked_actions.set_color(c) if self.linked_actions else self.tab.bus.notes_action_requested.emit(
                 NotesIntent.CHANGE_COLOR,
                 NotesPayload(pdf_path=self.pdf_path, page_num=self.page_num, annot_id=self.annot_id, color=c),
             ))
+            if not self.linked_actions:
+                btn_c.setEnabled(False)
+                btn_c.setToolTip('Adopt or reselect this legacy observation to edit a project copy.')
             header_layout.addWidget(btn_c)
 
         header_layout.addSpacing(10)
 
         self.btn_del = QPushButton("✖")
         self.btn_del.setFixedSize(24, 24)
-        self.btn_del.clicked.connect(lambda: self.tab.bus.notes_action_requested.emit(
+        self.btn_del.setAccessibleName("Delete project note")
+        self.btn_del.clicked.connect(lambda: self.linked_actions.delete() if self.linked_actions else self.tab.bus.notes_action_requested.emit(
             NotesIntent.DELETE,
             NotesPayload(pdf_path=self.pdf_path, page_num=self.page_num, annot_id=self.annot_id),
         ))
+        if not self.linked_actions:
+            self.btn_del.setEnabled(False)
+            self.btn_del.setToolTip('The physical original is read only. Adopt or reselect to manage a project copy.')
         header_layout.addWidget(self.btn_del)
         layout.addLayout(header_layout)
 
-        self.lbl_subj = QLabel(f'"{data_dict["subject"]}"')
+        self.lbl_subj = QLabel(f'"{data_dict["subject"][:NOTE_PREVIEW_CHARS]}"')
+        self.lbl_subj.setToolTip('Source quotation preview. Inspect the recorded reference to read the complete passage.')
+        self.lbl_subj.setTextFormat(Qt.TextFormat.PlainText)
         self.lbl_subj.setWordWrap(True)
         self.lbl_subj.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
         layout.addWidget(self.lbl_subj)
 
         if data_dict["content"]:
-            self.lbl_content = QLabel(data_dict["content"])
+            self.lbl_content = QLabel(data_dict['content'][:NOTE_PREVIEW_CHARS])
+            self.lbl_content.setToolTip('Commentary preview. Edit/Inspect opens the complete saved note.')
+            self.lbl_content.setTextFormat(Qt.TextFormat.PlainText)
             self.lbl_content.setWordWrap(True)
             self.lbl_content.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
             layout.addWidget(self.lbl_content)
 
         ctx = getattr(self.tab, '_ctx', None)
+        if self.linked_actions:
+            layout.addWidget(self.linked_actions.edit_button)
+            layout.addWidget(self.linked_actions.status)
+        if self._legacy_selection:
+            from gui.components.artifact_actions import bind_artifact_action
+            label = QLabel('Physical annotation · original authorship unrecorded', self)
+            label.setWordWrap(True)
+            layout.addWidget(label)
+            adopt = QPushButton('Adopt as project note…', self)
+            adopt.setToolTip('Preview a guarded copy. The physical annotation is retained; existing project notes are not overwritten.')
+            adopt.clicked.connect(self.adopt_legacy)
+            layout.addWidget(adopt)
+            bind_artifact_action(ctx, self, 'intelligence.note.adopt', 'Adopt Physical Annotation',
+                                 self.adopt_legacy, mount='toolbar:notes')
+        self.reference_widget = None
+        if ctx is not None:
+            from gui.components.artifact_reference import ArtifactReferenceWidget
+            self.reference_widget = ArtifactReferenceWidget(ctx, data_dict.get("artifact_ref") or {}, self)
+            layout.addWidget(self.reference_widget)
         tm = getattr(ctx, 'theme_manager', None) if ctx else None
         if tm:
             self.apply_theme(tm.get_theme())
+
+    def adopt_legacy(self):
+        if self._legacy_selection:
+            from gui.components.dialogs.reference_note_dialog import open_selection_note
+            open_selection_note(getattr(self.tab, '_ctx', None), self._legacy_selection,
+                                self._legacy_body, parent=self)
 
     def apply_theme(self, theme):
         pass
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            if self.reference_widget is not None and self.reference_widget.reference.artifact_id:
+                self.reference_widget.jump()
+                super().mousePressEvent(event)
+                return
             if self.source_type in ("video", "audio"):
                 ctx = getattr(self.tab, "_ctx", None)
                 viewer = getattr(ctx, "viewer", None) if ctx else None
@@ -319,14 +400,17 @@ class MentionRow(QFrame):
         super().__init__()
         self._tab = tab
         self._mention = mention
-        self._source_path = source_path
+        self._source_path = getattr(mention, "source_path", "") or source_path
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(6, 4, 6, 4)
         layout.setSpacing(6)
 
-        page_lbl = QLabel(f"p.{mention.page_num + 1}")
-        page_lbl.setFixedWidth(30)
+        doc_prefix = ""
+        if getattr(mention, "show_source_name", False) and self._source_path:
+            doc_prefix = f"{os.path.basename(self._source_path)} · "
+        page_lbl = QLabel(f"{doc_prefix}p.{mention.page_num + 1}")
+        page_lbl.setMinimumWidth(30)
         page_lbl.setStyleSheet("color: #888; font-size: 10px;")
         layout.addWidget(page_lbl)
 
@@ -363,7 +447,14 @@ class MentionRow(QFrame):
         # Jump to the page directly — more reliable than text search for
         # short citation strings like "[1]" that appear many times in a document.
         page = self._mention.page_num
-        if hasattr(viewer, "jump_to_page"):
+        if self._source_path:
+            self._tab.bus.document_action_requested.emit(
+                DocumentIntent.OPEN,
+                DocumentPayload(path=self._source_path, source_type="pdf"),
+            )
+            if hasattr(viewer, "jump_to_page"):
+                QTimer.singleShot(120, lambda p=page: viewer.jump_to_page(p))
+        elif hasattr(viewer, "jump_to_page"):
             viewer.jump_to_page(page)
         elif self._source_path and hasattr(viewer, "jump_to_source"):
             viewer.jump_to_source(os.path.basename(self._source_path), self._mention.context[:60])
@@ -473,14 +564,26 @@ class EntityGroupCard(QFrame):
         # Header
         header = QHBoxLayout()
         count = len(self._group.mentions)
+        type_label = _friendly_entity_type(self._group.entity_type)
+        self._lbl_type = QLabel(type_label)
+        self._lbl_type.setToolTip(
+            "Entity category used by the shared intelligence extractor."
+        )
+        self._lbl_type.setStyleSheet("color: #888; font-size: 10px;")
+        header.addWidget(self._lbl_type)
         self._lbl_name = QLabel(f"<b>{html.escape(self._group.canonical_text)}</b>")
         self._lbl_name.setTextFormat(Qt.TextFormat.RichText)
         self._lbl_name.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         header.addWidget(self._lbl_name)
 
         self._lbl_count = QLabel(f"{count}×")
+        source_count = int(self._group.extra_properties.get("source_count") or 0)
+        if source_count > 1:
+            self._lbl_count.setText(f"{count}× · {source_count} sources")
+            self._lbl_count.setMinimumWidth(105)
+        else:
+            self._lbl_count.setFixedWidth(30)
         self._lbl_count.setStyleSheet("color: #888; font-size: 11px;")
-        self._lbl_count.setFixedWidth(30)
         header.addWidget(self._lbl_count)
 
         self._btn_expand = QPushButton("▶")
@@ -623,6 +726,9 @@ class EntityGroupCard(QFrame):
             f"border: none; padding: 2px 8px; border-radius: 4px; font-weight: bold; }}"
         )
         self._lbl_name.setStyleSheet(f"color: {theme['text_main']};")
+        self._lbl_type.setStyleSheet(
+            f"color: {theme.get('text_muted', '#888')}; font-size: 10px;"
+        )
         if hasattr(self, "_desc_edit"):
             self._desc_edit.setStyleSheet(
                 f"QTextEdit {{ background-color: {theme['bg_input']}; color: {theme['text_main']}; "
@@ -658,14 +764,14 @@ class CitationGroupCard(QFrame):
         props = self._group.extra_properties
         authors = props.get("authors") or []
         year = props.get("year", "")
-        title = self._group.canonical_text
-        journal = props.get("journal", "")
+        title = str(self._group.canonical_text or "Bibliography entry")
+        journal = str(props.get("journal") or props.get("source_title") or "")
 
         author_str = ", ".join(str(a) for a in authors[:3])
         if len(authors) > 3:
             author_str += " et al."
         header_text = f"<b>{html.escape(title)}</b>"
-        meta_text = f"{html.escape(author_str)} ({html.escape(year)})"
+        meta_text = f"{html.escape(author_str)} ({html.escape(str(year or 'n.d.'))})"
         if journal:
             meta_text += f" — <i>{html.escape(journal[:60])}</i>"
 
@@ -732,17 +838,17 @@ class CitationGroupCard(QFrame):
         body_layout.setSpacing(2)
 
         props = self._group.extra_properties
+        bibliography_mentions = list(props.get("bibliography_mentions") or [])
         bib_page = props.get("bib_page_num", -1)
         bib_raw = props.get("bibliography_raw", "")
+        if not bibliography_mentions and bib_page >= 0 and bib_raw:
+            bibliography_mentions = [ExtractedMention(
+                text="Bibliography entry", context=bib_raw, page_num=bib_page
+            )]
 
         # Always show the bibliography entry itself as the first row so users
         # can jump to it the same way they jump to any in-text mention.
-        if bib_page >= 0 and bib_raw:
-            bib_mention = ExtractedMention(
-                text="📖 Bibliography entry",
-                context=bib_raw,
-                page_num=bib_page,
-            )
+        for bib_mention in bibliography_mentions:
             bib_row = MentionRow(self._tab, bib_mention, "", self._source_path, self._theme)
             body_layout.addWidget(bib_row)
 
@@ -750,13 +856,15 @@ class CitationGroupCard(QFrame):
             for mention in self._group.mentions:
                 row = MentionRow(self._tab, mention, mention.text, self._source_path, self._theme)
                 body_layout.addWidget(row)
-        elif bib_page < 0:
+        elif not bibliography_mentions:
             lbl_no_cite = QLabel("No in-text citations found — bibliography entry only.")
             lbl_no_cite.setStyleSheet("color: #888; font-size: 11px; padding: 4px;")
             body_layout.addWidget(lbl_no_cite)
 
-        self._body.setVisible(self._expanded)
+        # Reparent before showing: a visible parentless widget is a top-level
+        # window, which flashes an empty frame on screen for every card.
         self._outer.addWidget(self._body)
+        self._body.setVisible(self._expanded)
 
         # Inline references panel
         self._refs_panel = QWidget()
@@ -880,6 +988,38 @@ class CitationGroupCard(QFrame):
                     w.apply_theme(theme)
 
 
+class _DiscoveryLoadWorker(QThread):
+    loaded = Signal(object, str)
+    failed = Signal(str)
+
+    def __init__(
+        self, service, source_id, source_path,
+        selected_type, project_scope, sort_mode, parent=None,
+    ):
+        super().__init__(parent)
+        self.service = service
+        self.source_id = source_id
+        self.source_path = source_path
+        self.selected_type = selected_type
+        self.project_scope = project_scope
+        self.sort_mode = sort_mode
+
+    def run(self):
+        try:
+            groups = self.service.get_discovery_groups(
+                self.source_id,
+                selected_type=self.selected_type,
+                project_scope=self.project_scope,
+                sort_mode=self.sort_mode,
+                cancel_check=self.isInterruptionRequested,
+            )
+            if self.isInterruptionRequested():
+                return
+            self.loaded.emit(groups, self.source_path)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class DiscoveryTabWidget(QWidget):
     """Main discovery tab: deterministic extraction with collapsible entity cards."""
     def __init__(self, app_context=None, parent=None):
@@ -890,9 +1030,15 @@ class DiscoveryTabWidget(QWidget):
         self._is_destroyed = False
         self._current_source_path: str = ""
         self._runner = None
+        self._load_worker = None
+        self._reload_pending = False
         self._pending_refs_card = None  # card waiting for REFERENCES_FOUND response
         self._build_ui()
         self._try_register_shortcuts()
+        self._type_combo.currentIndexChanged.connect(self._load_canonical_entities)
+        self._scope_combo.currentIndexChanged.connect(self._load_canonical_entities)
+        self._sort_combo.currentIndexChanged.connect(self._load_canonical_entities)
+        QTimer.singleShot(0, self._load_canonical_entities)
 
         self.bus.discovery_state_changed.connect(self._on_discovery_state)
         self.destroyed.connect(self._on_destroyed)
@@ -922,22 +1068,28 @@ class DiscoveryTabWidget(QWidget):
                     description="Save all currently extracted entities to the workspace graph",
                     default_key="Ctrl+Shift+S",
                 ),
-                KeySpec(
-                    action_id="discovery.analyze_ai",
-                    label="Analyze with AI",
-                    scope="research",
-                    description="Run LLM graph analysis on the last extracted entities",
-                    default_key="",
-                ),
             ])
             registry.bind("discovery.extract", self._run_extraction, self)
             registry.bind("discovery.save_all", self._save_all, self)
-            registry.bind("discovery.analyze_ai", self._run_llm_analysis, self)
         except Exception:
             pass
 
+    def closeEvent(self, event):
+        # Stop the loader here, not only on destroyed(): by the time destroyed()
+        # fires, Qt is already tearing the widget down and is about to delete its
+        # QThread child, which aborts the process if the thread is still running.
+        self._stop_load_worker()
+        super().closeEvent(event)
+
+    def _stop_load_worker(self):
+        worker = self._load_worker
+        if worker is not None and worker.isRunning():
+            worker.requestInterruption()
+            worker.wait(_WORKER_SHUTDOWN_MS)
+
     def _on_destroyed(self, *_):
         self._is_destroyed = True
+        self._stop_load_worker()
         try:
             self.bus.discovery_state_changed.disconnect(self._on_discovery_state)
         except (RuntimeError, TypeError):
@@ -948,32 +1100,57 @@ class DiscoveryTabWidget(QWidget):
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
 
-        # Top toolbar
-        toolbar = QHBoxLayout()
+        # Top toolbar — filters and actions on separate rows so the dock can be
+        # dragged narrow; one combined row pinned it to ~760px.
+        filters_row = QHBoxLayout()
+        layout.addLayout(filters_row)
+        actions_row = QHBoxLayout()
+        layout.addLayout(actions_row)
 
         self._type_combo = QComboBox()
         self._populate_type_combo()
-        toolbar.addWidget(self._type_combo)
+        filters_row.addWidget(self._type_combo)
 
-        self._btn_extract = QPushButton("🔍 Extract")
+        self._scope_combo = QComboBox()
+        self._scope_combo.addItem("This PDF", "source")
+        self._scope_combo.addItem("Whole project", "project")
+        self._scope_combo.setToolTip("Show occurrences in this PDF or shared entities across the project")
+        filters_row.addWidget(self._scope_combo)
+
+        self._sort_combo = QComboBox()
+        self._sort_combo.addItem("Most mentions", "mentions")
+        self._sort_combo.addItem("Most unique sources", "sources")
+        self._sort_combo.setToolTip(
+            "Unique sources prioritizes entities repeated across different project documents"
+        )
+        filters_row.addWidget(self._sort_combo)
+
+        self._btn_extract = QPushButton("🔍 Run/Rebuild intelligence")
         self._btn_extract.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn_extract.setToolTip("Run deterministic extraction on the active document")
+        self._btn_extract.setToolTip(
+            "Run canonical entity extraction and/or citation matching for the active source"
+        )
         self._btn_extract.clicked.connect(self._run_extraction)
-        toolbar.addWidget(self._btn_extract)
+        actions_row.addWidget(self._btn_extract)
 
         self._btn_save_all = QPushButton("💾 Save All")
         self._btn_save_all.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_save_all.setToolTip("Save all discovered entities to the workspace graph")
         self._btn_save_all.clicked.connect(self._save_all)
-        toolbar.addWidget(self._btn_save_all)
+        actions_row.addWidget(self._btn_save_all)
 
-        self._btn_llm = QPushButton("🤖 Analyze with AI")
-        self._btn_llm.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn_llm.setToolTip("Use AI to build a knowledge graph from extracted entities")
-        self._btn_llm.clicked.connect(self._run_llm_analysis)
-        toolbar.addWidget(self._btn_llm)
+        self._btn_citation_map = QPushButton("🗺 Citation Map")
+        self._btn_citation_map.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_citation_map.setToolTip(
+            "Import this PDF, its bibliography entries, and every matched in-text citation into the workspace"
+        )
+        self._btn_citation_map.clicked.connect(self._import_citation_map)
+        actions_row.addWidget(self._btn_citation_map)
 
-        layout.addLayout(toolbar)
+        make_shrinkable(
+            self._type_combo, self._scope_combo, self._sort_combo,
+            self._btn_extract, self._btn_save_all, self._btn_citation_map,
+        )
 
         # Status label
         self._lbl_status = QLabel("Select a type and click Extract.")
@@ -992,12 +1169,19 @@ class DiscoveryTabWidget(QWidget):
 
     def _populate_type_combo(self):
         self._type_combo.clear()
-        try:
-            from core.extraction.deterministic import DeterministicExtractorRegistry
-            for spec in DeterministicExtractorRegistry.all_specs():
-                self._type_combo.addItem(spec.display_name, spec.entity_type)
-        except Exception:
-            pass
+        self._type_combo.addItem("All entity types", "")
+        for label, value in (
+            ("People", "PERSON"),
+            ("Organizations", "ORG"),
+            ("Places", "LOCATION"),
+            ("Events", "EVENT"),
+            ("Creative works", "WORK"),
+            ("Methods", "METHOD"),
+            ("Datasets", "DATASET"),
+            ("Concepts", "CONCEPT"),
+            ("Citations & bibliography", "CITATION"),
+        ):
+            self._type_combo.addItem(label, value)
 
     def _get_active_source_path(self) -> str:
         ctx = self._ctx
@@ -1013,17 +1197,32 @@ class DiscoveryTabWidget(QWidget):
         if not source_path:
             self._lbl_status.setText("No document open.")
             return
-        entity_type = self._type_combo.currentData() or ""
-        if not entity_type:
-            self._lbl_status.setText("Select an extraction type first.")
-            return
         self._current_source_path = source_path
-        self._lbl_status.setText("Extracting…")
-        self._btn_extract.setEnabled(False)
-        self.bus.discovery_action_requested.emit(
-            DiscoveryIntent.RUN_EXTRACTION,
-            DiscoveryPayload(source_path=source_path, entity_type=entity_type),
+        selected_type = self._type_combo.currentData() or ""
+        stages = (
+            ["citations"] if selected_type == "CITATION"
+            else ["entities"] if selected_type
+            else ["entities", "citations"]
         )
+        self._lbl_status.setText(
+            f"Queueing shared intelligence: {', '.join(stages)}…"
+        )
+        self._btn_extract.setEnabled(False)
+        source = None
+        pm = getattr(self._ctx, "project_manager", None) if self._ctx else None
+        if pm and hasattr(pm, "get_source_record_by_path"):
+            source = pm.get_source_record_by_path(source_path)
+        service = getattr(self._ctx, "source_intelligence_service", None) if self._ctx else None
+        if not source or not service:
+            self._lbl_status.setText("Source intelligence service is unavailable.")
+            self._btn_extract.setEnabled(True)
+            return
+        for stage in stages:
+            service.run_stage(source.get("id"), stage)
+        # The scheduler is asynchronous. Refreshing is idempotent and preserves
+        # the current canonical artifacts while replacement output is pending.
+        QTimer.singleShot(250, self._load_canonical_entities)
+        QTimer.singleShot(1200, self._load_canonical_entities)
 
     def _save_all(self):
         self.bus.discovery_action_requested.emit(
@@ -1032,59 +1231,82 @@ class DiscoveryTabWidget(QWidget):
         )
         self._lbl_status.setText("Saved all entities.")
 
-    def _run_llm_analysis(self):
-        instructions, ok = QInputDialog.getText(
+    def _import_citation_map(self):
+        source_path = self._get_active_source_path()
+        pm = getattr(self._ctx, "project_manager", None) if self._ctx else None
+        source = pm.get_source_record_by_path(source_path) if pm and source_path else None
+        service = getattr(self._ctx, "source_intelligence_service", None) if self._ctx else None
+        if not source or not service:
+            self._lbl_status.setText("Citation intelligence is unavailable.")
+            return
+        graph = service.build_citation_map(source.get("id"))
+        if not graph.get("entities"):
+            self._lbl_status.setText(
+                "No citation artifacts yet. Run/Rebuild citations from source controls first."
+            )
+            return
+        self.bus.workspace_action_requested.emit(
+            WorkspaceIntent.IMPORT_GRAPH,
+            WorkspacePayload(extra={"graph": graph, "source": "citation_map"}),
+        )
+        diagnostics = graph.get("diagnostics") or {}
+        self._lbl_status.setText(
+            f"Imported citation map: {diagnostics.get('bibliography_entries', 0)} "
+            f"sources and {diagnostics.get('in_text_citations', 0)} in-text citations."
+        )
+
+    def _load_canonical_entities(self):
+        """Render canonical intelligence entities; never re-extract in this tab."""
+        if not self._can_use():
+            return
+        if self._load_worker and self._load_worker.isRunning():
+            self._reload_pending = True
+            return
+        source_path = self._get_active_source_path()
+        pm = getattr(self._ctx, "project_manager", None) if self._ctx else None
+        source = pm.get_source_record_by_path(source_path) if pm and source_path else None
+        service = getattr(
+            self._ctx, "source_intelligence_service", None
+        ) if self._ctx else None
+        if not source or not service:
+            self._btn_extract.setEnabled(True)
+            return
+        self._lbl_status.setText("Loading canonical intelligence…")
+        self._load_worker = _DiscoveryLoadWorker(
+            service,
+            str(source.get("id") or ""),
+            source_path,
+            self._type_combo.currentData() or "",
+            self._scope_combo.currentData() == "project",
+            self._sort_combo.currentData() or "mentions",
             self,
-            "AI Analysis Instructions",
-            "Optional instructions (e.g. 'connect people to dates they appear with'):",
         )
-        if not ok:
+        self._load_worker.loaded.connect(self._on_discovery_loaded)
+        self._load_worker.failed.connect(self._on_discovery_load_failed)
+        self._load_worker.finished.connect(self._on_discovery_loader_finished)
+        self._load_worker.start()
+
+    def _on_discovery_loaded(self, groups, source_path):
+        if not self._can_use():
             return
+        self._current_source_path = source_path
+        self._populate_cards(groups or [], source_path)
+        self._btn_extract.setEnabled(True)
 
-        ctx = self._ctx
-        if not ctx:
+    def _on_discovery_load_failed(self, error):
+        if not self._can_use():
             return
+        self._lbl_status.setText(f"Could not load intelligence: {error}")
+        self._btn_extract.setEnabled(True)
 
-        extractor_svc = getattr(ctx, "deterministic_extractor_service", None)
-        if not extractor_svc:
-            self._lbl_status.setText("Extractor service not available.")
-            return
-
-        discovery_context = extractor_svc.get_last_results_as_context()
-
-        from core.engine.blueprints.discovery_analysis import (
-            build_discovery_blueprint, build_ontology_schema_text,
-        )
-        from core.engine.master_runner import MasterActionRunner
-
-        ontology_registry = getattr(ctx, "ontology_registry", None)
-        blueprint = build_discovery_blueprint()
-        initial_state = {
-            "user_instructions": instructions or "Build a comprehensive knowledge graph connecting all entities.",
-            "discovery_context": discovery_context,
-            "ontology_schema": build_ontology_schema_text(ontology_registry),
-            "selected_model": ctx.get_active_ai_model() if hasattr(ctx, "get_active_ai_model") else "",
-            "active_workspace_id": 1,
-        }
-        process_registry = getattr(ctx, "process_registry", None)
-        self._runner = MasterActionRunner(
-            blueprint,
-            initial_state,
-            llm_manager=ctx.llm_manager,
-            prompt_manager=ctx.prompt_manager,
-            project_manager=ctx.project_manager,
-            ontology_registry=getattr(ctx, "ontology_registry", None),
-            process_registry=process_registry,
-        )
-        self._runner.error.connect(lambda msg: self._lbl_status.setText(f"AI error: {msg}"))
-        self._runner.action_complete.connect(lambda _: self._lbl_status.setText("AI graph sent to workspace."))
-        self._runner.finished.connect(lambda: self._btn_llm.setEnabled(True))
-        self._lbl_status.setText("Running AI analysis…")
-        self._btn_llm.setEnabled(False)
-        if process_registry and hasattr(process_registry, "enqueue_runner"):
-            process_registry.enqueue_runner(self._runner, "Discovery AI Analysis", is_express=False)
-        else:
-            self._runner.start()
+    def _on_discovery_loader_finished(self):
+        worker = self._load_worker
+        self._load_worker = None
+        if worker:
+            worker.deleteLater()
+        if self._reload_pending and self._can_use():
+            self._reload_pending = False
+            QTimer.singleShot(0, self._load_canonical_entities)
 
     def _on_discovery_state(self, event: DiscoveryEvent, payload: DiscoveryEventPayload):
         if not self._can_use():
@@ -1096,7 +1318,9 @@ class DiscoveryTabWidget(QWidget):
             if payload.error:
                 self._lbl_status.setText(f"Error: {payload.error}")
                 return
-            self._populate_cards(payload.entity_groups or [], payload.source_path or self._current_source_path)
+            # Compatibility events from the retired extractor never become a
+            # second source of truth in Discovery.
+            self._load_canonical_entities()
         elif event == DiscoveryEvent.SAVE_COMPLETE:
             self._lbl_status.setText(f"Saved {len(payload.saved_ids)} entities.")
         elif event == DiscoveryEvent.REFERENCES_FOUND:
@@ -1134,7 +1358,12 @@ class DiscoveryTabWidget(QWidget):
                 card = EntityGroupCard(self, group, source_path, self.theme)
             self._cards_layout.addWidget(card)
 
-        self._lbl_status.setText(f"Found {len(groups)} entities in {os.path.basename(source_path)}.")
+        scope_label = (
+            "the whole project"
+            if self._scope_combo.currentData() == "project"
+            else os.path.basename(source_path)
+        )
+        self._lbl_status.setText(f"Found {len(groups)} intelligence items in {scope_label}.")
 
     def update_theme(self, theme):
         if not self._can_use():
@@ -1142,16 +1371,18 @@ class DiscoveryTabWidget(QWidget):
         self.theme = theme
         self._scroll.setStyleSheet("background: transparent; border: none;")
         self._scroll_content.setStyleSheet(f"background-color: {theme['bg_main']};")
-        self._type_combo.setStyleSheet(
+        combo_style = (
             f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: 1px solid {theme['border']};"
         )
+        for combo in (self._type_combo, self._scope_combo, self._sort_combo):
+            combo.setStyleSheet(combo_style)
         btn_style = (
             f"QPushButton {{ background-color: {theme['bg_panel']}; color: {theme['text_main']}; "
             f"border: 1px solid {theme['border']}; padding: 4px 10px; border-radius: 4px; }}"
             f"QPushButton:hover {{ background-color: {theme['bg_input']}; }}"
             f"QPushButton:disabled {{ color: {theme['border']}; }}"
         )
-        for btn in (self._btn_extract, self._btn_save_all, self._btn_llm):
+        for btn in (self._btn_extract, self._btn_save_all, self._btn_citation_map):
             btn.setStyleSheet(btn_style)
         self._lbl_status.setStyleSheet(f"color: {theme['text_muted'] if 'text_muted' in theme else '#888'}; font-size: 11px;")
         # Re-theme all cards
@@ -1188,6 +1419,7 @@ class NotesTab(QWidget):
         self._ctx = app_context
         self.bus = EventBus.get_instance()
         self._is_destroyed = False
+        self._notes_dirty = True
 
         self._build_ui()
 
@@ -1197,6 +1429,8 @@ class NotesTab(QWidget):
         self.bus.highlight_updated.connect(self._handle_document_event)
         self.bus.highlight_deleted.connect(self._handle_document_event)
         self.bus.pdf_switched.connect(self._handle_document_event)
+        self.bus.source_switched.connect(self._source_changed)
+        self.bus.intelligence_state_changed.connect(self._handle_intelligence_event)
         self.destroyed.connect(self._on_destroyed)
         QTimer.singleShot(0, self._safe_refresh_notes)
 
@@ -1216,6 +1450,8 @@ class NotesTab(QWidget):
             (self.bus.highlight_updated, self._handle_document_event),
             (self.bus.highlight_deleted, self._handle_document_event),
             (self.bus.pdf_switched, self._handle_document_event),
+            (self.bus.source_switched, self._source_changed),
+            (self.bus.intelligence_state_changed, self._handle_intelligence_event),
         ):
             try:
                 signal.disconnect(slot)
@@ -1224,7 +1460,15 @@ class NotesTab(QWidget):
 
     def _handle_notes_event(self, event: NotesEvent, payload: NotesEventPayload):
         if event == NotesEvent.DATA_READY:
-            self._render_notes(payload.notes)
+            self.refresh_notes()
+
+    def _source_changed(self, *_):
+        self.refresh_notes()
+
+    def _handle_intelligence_event(self, event, payload):
+        from core.events.domains.intelligence_events import IntelligenceEvent
+        if event in {IntelligenceEvent.LINKED_NOTE_CHANGED, IntelligenceEvent.ARTIFACT_REVIEWED}:
+            self._safe_refresh_notes()
 
     def _handle_document_event(self, event: DocumentEvent, payload: DocumentEventPayload):
         if event in {
@@ -1247,7 +1491,7 @@ class NotesTab(QWidget):
         annot_layout.setContentsMargins(5, 5, 5, 5)
 
         ctrl_layout = QHBoxLayout()
-        self.lbl = QLabel("Highlights & Notes")
+        self.lbl = QLabel("Notes")
         ctrl_layout.addWidget(self.lbl)
 
         self.scope_combo = QComboBox()
@@ -1256,18 +1500,44 @@ class NotesTab(QWidget):
         ctrl_layout.addWidget(self.scope_combo)
 
         self.tag_combo = QComboBox()
+        self.tag_combo.setEditable(True)
+        self.tag_combo.setToolTip("Choose a suggested tag or type an exact tag name.")
         self.tag_combo.addItem("All Tags", None)
         self.tag_combo.currentIndexChanged.connect(self.refresh_notes)
+        self.tag_combo.textActivated.connect(self.refresh_notes)
+        self.tag_combo.lineEdit().editingFinished.connect(self.refresh_notes)
+        self.tag_combo.setAccessibleName('Filter notes by tag; type an exact tag name and press Enter')
         ctrl_layout.addWidget(self.tag_combo)
+        refresh = QPushButton('Refresh notes', self)
+        refresh.clicked.connect(self.refresh_notes)
+        ctrl_layout.addWidget(refresh)
+        from gui.components.artifact_actions import bind_artifact_action
+        bind_artifact_action(self._ctx, self, 'intelligence.notes.refresh', 'Refresh Notes', self.refresh_notes, 'toolbar:notes')
         annot_layout.addLayout(ctrl_layout)
+        make_shrinkable(self.lbl, self.scope_combo, self.tag_combo)
 
-        self.scroll_area = QScrollArea()
+        from gui.components.paged_collection import PagedCollection
+        from gui.components.artifact_tasks import ArtifactTaskRunner
+        self.collection = PagedCollection(self._ctx, self)
+        self.collection.pager.register_actions('intelligence.notes', 'toolbar:notes')
+        self.collection.pager.requested.connect(self._load_page)
+        self.collection.selected.connect(self._select_note)
+        annot_layout.addWidget(self.collection, 1)
+        self.scroll_area = QScrollArea(self)
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_content = QWidget()
+        self.scroll_content = QWidget(self.scroll_area)
         self.scroll_layout = QVBoxLayout(self.scroll_content)
-        self.scroll_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.scroll_area.setWidget(self.scroll_content)
-        annot_layout.addWidget(self.scroll_area)
+        self.collection.set_detail(self.scroll_area, persistent=True)
+        self.collection.splitter.setStretchFactor(0, 1)
+        self.collection.splitter.setStretchFactor(1, 1)
+        self.collection.splitter.setSizes([350, 300])
+        self.runner = ArtifactTaskRunner(self._ctx, self, service_name='reference_note_service')
+        self.runner.completed.connect(self._notes_page)
+        self.runner.failed.connect(self._notes_failed)
+        self.destroyed.connect(self.runner.shutdown)
+        if getattr(self._ctx, 'bus', None):
+            self._ctx.bus.project_clearing_started.connect(self._clear_notes)
 
         self.tab_widget.addTab(self.annotations_widget, "📝 Notes")
 
@@ -1279,6 +1549,8 @@ class NotesTab(QWidget):
         main_layout.addWidget(self.tab_widget)
 
     def _on_tab_changed(self, index):
+        if index == 0 and self._notes_dirty:
+            self.refresh_notes()
         if index == 1 and hasattr(self, "extracted_widget"):
             try:
                 self.extracted_widget._populate_type_combo()
@@ -1292,39 +1564,70 @@ class NotesTab(QWidget):
         index = self.tag_combo.findData(tag_name)
         if index >= 0:
             self.tag_combo.setCurrentIndex(index)
+        else:
+            self.tag_combo.setEditText(tag_name or 'All Tags')
+        self.refresh_notes()
 
     def refresh_tag_list(self):
-        current_tag = self.tag_combo.currentData()
-        self.tag_combo.blockSignals(True)
-        self.tag_combo.clear()
-        self.tag_combo.addItem("All Tags", None)
-
-        pm = getattr(self._ctx, "project_manager", None) if self._ctx else None
-        if pm:
-            tags = pm.get_all_tags()
-            for t in tags:
-                self.tag_combo.addItem(t["name"], t["name"])
-
-        index = self.tag_combo.findData(current_tag)
-        if index >= 0:
-            self.tag_combo.setCurrentIndex(index)
-        self.tag_combo.blockSignals(False)
+        """Compatibility callers use the same bounded, asynchronous snapshot."""
+        self.refresh_notes()
 
     def refresh_notes(self):
-        self.refresh_tag_list()
-        viewer = getattr(self._ctx, "viewer", None) if self._ctx else None
-        active_source = (
-            getattr(viewer, "current_source_path", None)
-            or getattr(viewer, "pdf_path", None)
-        )
-        self.bus.notes_action_requested.emit(
-            NotesIntent.FETCH,
-            NotesPayload(
-                scope=self.scope_combo.currentText(),
-                tag=self.tag_combo.currentData(),
-                active_pdf=active_source,
-            ),
-        )
+        if not self._can_use_notes_layout():
+            return
+        if not self.isVisible() or not self.annotations_widget.isVisible():
+            self._notes_dirty = True
+            return
+        self._notes_dirty = False
+        if getattr(self._ctx, 'reference_note_service', None) is None:
+            self._clear_notes()
+            return
+        self.collection.pager.reset()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._notes_dirty:
+            QTimer.singleShot(0, self._safe_refresh_notes)
+
+    def _load_page(self):
+        viewer = getattr(self._ctx, 'viewer', None)
+        path = getattr(viewer, 'current_source_path', None) or getattr(viewer, 'pdf_path', None)
+        if self.scope_combo.currentIndex() == 0 and not path:
+            self.collection.apply({'items': []})
+            return
+        self.collection.status.setText('Loading notes…')
+        self.collection.setEnabled(False)
+        self.runner.start('query_notes', source_path=path if self.scope_combo.currentIndex() == 0 else '',
+                          tag=self.tag_combo.currentData() or (self.tag_combo.currentText() if self.tag_combo.currentText() != 'All Tags' else ''), cursor=self.collection.pager.cursor)
+
+    def _notes_page(self, operation):
+        if operation != 'query_notes':
+            return
+        snapshot, self.runner.result = self.runner.result or {}, None
+        self.collection.setEnabled(True)
+        selected_tag = self.tag_combo.currentText()
+        self.tag_combo.blockSignals(True)
+        self.tag_combo.clear()
+        self.tag_combo.addItem('All Tags', None)
+        for tag in snapshot.get('tags') or []:
+            self.tag_combo.addItem(tag['name'], tag['name'])
+        self.tag_combo.setCurrentText(selected_tag)
+        self.tag_combo.blockSignals(False)
+        self.collection.apply(snapshot)
+
+    def _notes_failed(self, message):
+        self.collection.setEnabled(True)
+        self.collection.status.setText(message + ' Change scope or refresh to restart.')
+
+    def _clear_notes(self, *_):
+        if hasattr(self, 'runner'):
+            self.runner.cancel()
+        if hasattr(self, 'collection'):
+            self.collection.apply({'items': []})
+        self._render_notes([])
+
+    def _select_note(self, index):
+        self._render_notes([self.collection.model.items[index]] if index >= 0 else [])
 
     def _render_notes(self, notes_data_list):
         if not self._can_use_notes_layout():

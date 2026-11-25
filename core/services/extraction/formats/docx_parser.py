@@ -17,7 +17,7 @@ from core.services.extraction.formats._shared import (
 )
 
 _EXTRACTOR_NAME = "docx_parser"
-_EXTRACTOR_VERSION = "1.0"
+_EXTRACTOR_VERSION = "1.1"
 _PARSER_PROVIDER = "docx_parser"
 
 _HEADING_STYLE_RE = re.compile(r"heading\s*(\d+)", re.I)
@@ -44,8 +44,28 @@ class DocxParser:
         blocks: List[DocumentBlock] = []
         idx = 0
 
-        for para in document.paragraphs:
-            text = (para.text or "").strip()
+        # Paragraphs and tables must remain interleaved: moving a table to
+        # the end can put its content in the references or notes region.
+        from docx.table import Table
+        from docx.text.paragraph import Paragraph
+        for child in document.element.body.iterchildren():
+            if child.tag.endswith("}tbl"):
+                table = Table(child, document)
+                row_lines = [" | ".join((cell.text or "").strip() for cell in row.cells)
+                             for row in table.rows]
+                text = "\n".join(line for line in row_lines if line.strip())
+                if text and is_long_enough(text):
+                    blocks.append(DocumentBlock(
+                        block_id=f"{doc_id}_b{idx}", doc_id=doc_id, page_num=None,
+                        block_type="table", exact_text=text,
+                        normalized_text=normalize_text(text), provenance=provenance,
+                    ))
+                    idx += 1
+                continue
+            if not child.tag.endswith("}p"):
+                continue
+            para = Paragraph(child, document)
+            text, superscripts = _paragraph_content(para)
             if not text or not is_long_enough(text):
                 continue
             style_name = (para.style.name if para.style else "") or ""
@@ -67,26 +87,35 @@ class DocxParser:
                 normalized_text=normalize_text(text),
                 heading_level=heading_level,
                 provenance=provenance,
-            ))
-            idx += 1
-
-        for table in document.tables:
-            row_lines = [
-                " | ".join((cell.text or "").strip() for cell in row.cells)
-                for row in table.rows
-            ]
-            text = "\n".join(line for line in row_lines if line.strip())
-            if not text or not is_long_enough(text):
-                continue
-            blocks.append(DocumentBlock(
-                block_id=f"{doc_id}_b{idx}",
-                doc_id=doc_id,
-                page_num=None,
-                block_type="table",
-                exact_text=text,
-                normalized_text=normalize_text(text),
-                provenance=provenance,
+                has_superscript=bool(superscripts),
+                structure={"superscript_spans": superscripts},
             ))
             idx += 1
 
         return blocks
+
+
+def _paragraph_content(paragraph):
+    """Preserve run typography, including runs inside a hyperlink."""
+    from docx.text.run import Run
+    parts, spans, offset = [], [], 0
+    for element in paragraph._p.xpath("./w:r | ./w:hyperlink/w:r"):
+        run = Run(element, paragraph)
+        text = run.text or ""
+        superscript = run.font.superscript
+        style = run.style
+        seen = set()
+        while superscript is None and style is not None and style.style_id not in seen:
+            seen.add(style.style_id)
+            superscript = style.font.superscript
+            style = style.base_style
+        if superscript and text:
+            spans.append([offset, offset + len(text)])
+        parts.append(text)
+        offset += len(text)
+    raw = "".join(parts)
+    left = len(raw) - len(raw.lstrip())
+    text = raw.strip()
+    spans = [[max(0, a-left), min(len(text), b-left)] for a, b in spans
+             if b > left and a < left+len(text)]
+    return text, spans

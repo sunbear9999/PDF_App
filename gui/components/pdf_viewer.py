@@ -66,7 +66,8 @@ class PageHUD(QFrame):
 
 
 from queue import Queue
-from core.render_worker import RenderWorker
+from core.render_worker import RenderWorker, render_page_image
+from gui.components.viewer_memory import register_viewer_pages
 
 class PDFViewer(QGraphicsView):
     def viewportEvent(self, event):
@@ -93,11 +94,21 @@ class PDFViewer(QGraphicsView):
 
         self.doc = None
         self.base_zoom = 1.5
-        self.dark_mode_enabled = False
+        settings_service = getattr(app_context, "source_viewer_settings_service", None)
+        settings = settings_service.get_settings() if settings_service else None
+        self.dark_mode_enabled = getattr(settings, "dark_mode_enabled", False)
+        self.theme_mode_enabled = getattr(settings, "theme_mode_enabled", False)
         self.page_placeholders = []  # QGraphicsRectItem for each page
         self.page_pixmaps = [None] * 0  # QGraphicsPixmapItem for each page, or None
         self.worker = None
         self.annot_manager = AnnotationManager(self, app_context)
+        register_viewer_pages(self, app_context)
+        from gui.components.project_highlight_layer import ProjectHighlightLayer
+        self.project_highlights = ProjectHighlightLayer(app_context, self)
+        from gui.components.document_link_layer import DocumentLinkLayer
+        from gui.components.link_hover_controller import LinkHoverController
+        self.document_links = DocumentLinkLayer(app_context, self)
+        self.link_hover = LinkHoverController(app_context, self, self.document_links)
         self._data_select_active = False
         self._data_select_start = None
         self._data_select_rect_item = None
@@ -248,6 +259,8 @@ class PDFViewer(QGraphicsView):
 
     def _clear_viewer(self):
         """Wipes the viewer cleanly when a new project loads."""
+        self.project_highlights.clear()
+        self.document_links.clear()
         self.annot_manager.clear_selection()
         self.clear_search_highlights()
         if hasattr(self, 'scene') and self.scene:
@@ -542,6 +555,8 @@ class PDFViewer(QGraphicsView):
     def load_document(self, doc):
         if doc is None:
             return
+        self.project_highlights.clear()
+        self.document_links.clear()
         if self.worker and self.worker.isRunning():
             self.worker.stop()
             self.worker.wait()
@@ -665,6 +680,7 @@ class PDFViewer(QGraphicsView):
             if getattr(self, 'dark_mode_enabled', False):
                 qimage.invertPixels(QImage.InvertMode.InvertRgb)
             pixmap = QPixmap.fromImage(qimage)
+            self._page_bytes = qimage.sizeInBytes()   # read by the memory manager
             self.page_pixmaps[page_num].setPixmap(pixmap)
             self.page_pixmaps[page_num].setVisible(True)
             self.page_pixmaps[page_num].setZValue(1)
@@ -778,25 +794,31 @@ class PDFViewer(QGraphicsView):
 
     def reload_page(self, page_num):
         if not self._doc_valid() or page_num < 0 or page_num >= len(self.page_pixmaps): return
-        page = self.doc.load_page(page_num)
-        dpi_scale = self._get_dpi_scale()
-        mat = fitz.Matrix(self.base_zoom * dpi_scale, self.base_zoom * dpi_scale)
-        pix = page.get_pixmap(matrix=mat)
-        # --- NEW: Sync Fallback Tinting ---
-        if getattr(self, 'theme_mode_enabled', False):
-            theme = ThemeManager().get_theme()
-            try:
-                bg_hex = int(theme.get('bg_main', '#ffffff').lstrip('#'), 16)
-                text_hex = int(theme.get('text_main', '#000000').lstrip('#'), 16)
-                pix.tint_with(text_hex, bg_hex)
-            except Exception:
-                pass
-        # ----------------------------------
-        img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888).copy()
-        if self.dark_mode_enabled:
+        self.page_pixmaps[page_num].setPixmap(QPixmap.fromImage(self._page_image(page_num)))
+        # Registered so viewport eviction can release it again.
+        if hasattr(self, 'rendered_pages'):
+            self.rendered_pages.add(page_num)
+
+    def release_rendered_pages(self):
+        """Memory manager trim: drop all page pixmaps, re-render the visible ones."""
+        for index in list(getattr(self, 'rendered_pages', ()) or ()):
+            if index < len(self.page_pixmaps):
+                self.page_pixmaps[index].setPixmap(QPixmap())
+                self.page_pixmaps[index].setVisible(False)
+                self.page_placeholders[index].setVisible(True)
+        if hasattr(self, 'rendered_pages'):
+            self.rendered_pages.clear()
+        if self._doc_valid():
+            self._on_scroll()
+
+    def _page_image(self, page_num):
+        """Render one page on this thread under the shared pixel cap."""
+        theme = ThemeManager().get_theme() if getattr(self, 'theme_mode_enabled', False) else None
+        img = render_page_image(self.doc.load_page(page_num), self.base_zoom, self._get_dpi_scale(), theme)
+        if getattr(self, 'dark_mode_enabled', False):
             img.invertPixels(QImage.InvertMode.InvertRgb)
-        img.setDevicePixelRatio(dpi_scale)
-        self.page_pixmaps[page_num].setPixmap(QPixmap.fromImage(img))
+        self._page_bytes = img.sizeInBytes()   # read by the memory manager
+        return img
     def toggle_theme_mode(self):
         """Apply theme mode (use app theme colors)."""
         self.dark_mode_enabled = False
@@ -828,9 +850,11 @@ class PDFViewer(QGraphicsView):
         if event == GuiEvent.SOURCE_VIEWER_SETTINGS_CHANGED:
             settings = getattr(payload, 'settings', None)
             if settings:
+                previous = (self.dark_mode_enabled, self.theme_mode_enabled)
                 self.dark_mode_enabled = getattr(settings, 'dark_mode_enabled', False)
                 self.theme_mode_enabled = getattr(settings, 'theme_mode_enabled', False)
-                self._force_full_rerender()
+                if previous != (self.dark_mode_enabled, self.theme_mode_enabled):
+                    self._force_full_rerender()
     def _get_placeholder_brush(self):
         from PySide6.QtGui import QBrush, QColor
         if getattr(self, 'theme_mode_enabled', False):
@@ -1106,6 +1130,9 @@ class PDFViewer(QGraphicsView):
         # Handle PDF links before selection/annotation behavior.
         if is_left and self._doc_valid():
             scene_pos = self._event_scene_pos(event)
+            if self.link_hover.click(scene_pos):
+                event.accept()
+                return
             link = self._get_link_at_scene_pos(scene_pos)
             if link:
                 if self._open_link_target(link):
@@ -1170,8 +1197,12 @@ class PDFViewer(QGraphicsView):
             super().mouseMoveEvent(event)
             if self._doc_valid():
                 scene_pos = self._event_scene_pos(event)
+                self.link_hover.move(scene_pos)
                 link = self._get_link_at_scene_pos(scene_pos)
-                if link:
+                if self.document_links.hit_at(scene_pos):
+                    self.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
+                    self.viewport().setToolTip("")
+                elif link:
                     self.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
                     link_tip = self._get_link_tooltip(link)
                     self.viewport().setToolTip(link_tip if link_tip else "Link")
@@ -1264,31 +1295,7 @@ class PDFViewer(QGraphicsView):
             return
 
         try:
-            import fitz
-            from PySide6.QtGui import QImage, QPixmap
-
-            page = self.doc.load_page(page_num)
-            dpi_scale = getattr(self, '_get_dpi_scale', lambda: 1.0)()
-            mat = fitz.Matrix(self.base_zoom * dpi_scale, self.base_zoom * dpi_scale)
-            pix = page.get_pixmap(matrix=mat)
-            # --- NEW: Sync Fallback Tinting ---
-            if getattr(self, 'theme_mode_enabled', False):
-                theme = ThemeManager().get_theme()
-                try:
-                    bg_hex = int(theme.get('bg_main', '#ffffff').lstrip('#'), 16)
-                    text_hex = int(theme.get('text_main', '#000000').lstrip('#'), 16)
-                    pix.tint_with(text_hex, bg_hex)
-                except Exception:
-                    pass
-            # ----------------------------------
-            img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888).copy()
-
-            if getattr(self, 'dark_mode_enabled', False):
-                img.invertPixels(QImage.InvertMode.InvertRgb)
-
-            img.setDevicePixelRatio(dpi_scale)
-
-            pixmap = QPixmap.fromImage(img)
+            pixmap = QPixmap.fromImage(self._page_image(page_num))
             self.page_pixmaps[page_num].setPixmap(pixmap)
             self.page_pixmaps[page_num].setVisible(True)
             self.page_pixmaps[page_num].setZValue(1)
@@ -1345,6 +1352,8 @@ class PDFViewer(QGraphicsView):
                         self.pdf_highlight_items[page_num].append(h_item)
         except Exception as e:
             print(f"Failed to draw standard highlights: {e}")
+        self.project_highlights.draw(page_num, page_item)
+        self.document_links.draw(page_num, page_item)
     def _execute_jump(self, page_num, annot_id):
         if 0 <= page_num < len(self.page_placeholders) and self.doc:
             if page_num not in getattr(self, 'rendered_pages', set()):

@@ -14,6 +14,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Pattern
+from core.models.extraction_patterns import REGION_PATTERNS
+from core.models.extraction_patterns import CUES
 
 
 @dataclass
@@ -91,6 +93,40 @@ class PatternDetectorRegistry:
     def seed_builtin_packs(self) -> None:
         """Seed the registry with all built-in pattern packs."""
 
+        from core.models.extraction_patterns import GENRE_CUES, NARRATIVE_ROLES
+        for prefix, patterns in (("genre_", GENRE_CUES), ("narrative_", NARRATIVE_ROLES)):
+            for name, pattern in patterns.items():
+                self.register(PatternPack(prefix + name, name.title() + " cues", [pattern], [prefix + name]))
+        from core.models.extraction_patterns import CROSS_REF_LABEL, HONORIFICS, LANGUAGE_STOPWORDS, NOMINAL_HEADS, USAGE_CUES
+        self.register(PatternPack("nominal_heads", "Definite-description head nouns",
+                                  [r"^(?:" + "|".join(NOMINAL_HEADS.split()) + r")$"], ["nominal_heads"]))
+        for cue, pattern in USAGE_CUES.items():
+            self.register(PatternPack("entity_usage_" + cue, cue.replace("_", " "), [pattern], ["entity_usage_" + cue]))
+        for iso, words in LANGUAGE_STOPWORDS.items():
+            self.register(PatternPack("language_stopwords_" + iso, iso + " function words",
+                                      [r"(?i)^(?:" + "|".join(words.split()) + r")$"], ["language_stopwords_" + iso]))
+        self.register(PatternPack("person_honorific", "Person titles", [HONORIFICS], ["person_honorific"]))
+        self.register(PatternPack("cross_ref_label", "Document labels and citation short forms",
+                                  [CROSS_REF_LABEL], ["cross_ref_label"]))
+        from core.models.extraction_patterns import ROLE_MODIFIER, ROLE_TITLE
+        self.register(PatternPack("role_title", "Titles and roles (Justice, Governor, batab)", [ROLE_TITLE], ["role_title"]))
+        self.register(PatternPack("role_modifier", "Words that qualify a title (Chief, Associate, Deputy)",
+                                  [ROLE_MODIFIER], ["role_modifier"]))
+        from core.models.extraction_patterns import ABBREVIATION_KEY_INTRO, ABBREVIATION_TYPE_CUES
+        self.register(PatternPack("abbreviation_key_intro", "Abbreviation key headings and introductions",
+                                  [ABBREVIATION_KEY_INTRO], ["abbreviation_key_intro"]))
+        for kind, pattern in ABBREVIATION_TYPE_CUES.items():
+            self.register(PatternPack("abbreviation_type_" + kind, kind + " cues in abbreviation full names",
+                                      [pattern], ["abbreviation_type_" + kind]))
+        from core.services.extraction.cross_references import DEFAULT_PATTERN as CROSS_REF_MENTION
+        self.register(PatternPack("cross_ref_mention", "Cross-references in running text (Table 7.2, note 12)",
+                                  [CROSS_REF_MENTION], ["cross_ref_mention"]))
+        for cue, pattern in CUES.items():
+            self.register(PatternPack("entity_cue_" + cue, cue, [pattern], ["entity_cue_" + cue]))
+        for kind, pattern in REGION_PATTERNS.items():
+            self.register(PatternPack("region_" + kind, kind.title() + " headings",
+                                      [pattern], ["region_" + kind]))
+
         # ---- Date patterns (7 tiers, priority order) ----
         self.register(PatternPack(
             pack_id="date_patterns",
@@ -146,10 +182,13 @@ class PatternDetectorRegistry:
         self.register(PatternPack(
             pack_id="bibliography_headings",
             pack_name="Bibliography Heading Patterns",
-            entity_types=["bibliography"],
+            # Its own entity type: the "bibliography" type also carries content
+            # packs (DOI/URL/arXiv), and matching those against a heading made
+            # any line with an arXiv id start the reference section.
+            entity_types=["bibliography_heading"],
             raw_patterns=[
                 r"^(?:references?|works?\s+cited|bibliography|bibliograph[yi]|"
-                r"sources?|literature\s+cited|notes?|endnotes?|footnotes?|"
+                r"sources?|literature\s+cited|"
                 r"further\s+reading)\s*$",
             ],
         ))

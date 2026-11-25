@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 
 _MAX_CACHED_DOCS = 20
+_ESTIMATED_ITEM_BYTES = 2048   # a cached block/sentence dict with its text
 
 
 class ExtractionResultStore:
@@ -28,16 +29,20 @@ class ExtractionResultStore:
     # Blocks
     # ------------------------------------------------------------------
 
-    def get_blocks(self, doc_id: str) -> Optional[List[Dict[str, Any]]]:
+    def get_blocks(
+        self, doc_id: str, extractor_version: Optional[str] = None
+    ) -> Optional[List[Dict[str, Any]]]:
         db = getattr(self._pm, "db_extraction", None)
         if db is None:
             return None
-        rows = db.get_blocks(doc_id)
+        rows = db.get_blocks(doc_id, extractor_version)
         return rows if rows else None
 
-    def blocks_exist(self, doc_id: str) -> bool:
+    def blocks_exist(
+        self, doc_id: str, extractor_version: Optional[str] = None
+    ) -> bool:
         db = getattr(self._pm, "db_extraction", None)
-        return db.blocks_exist(doc_id) if db else False
+        return db.blocks_exist(doc_id, extractor_version) if db else False
 
     def save_blocks(self, doc_id: str, blocks: List[Dict[str, Any]]) -> None:
         db = getattr(self._pm, "db_extraction", None)
@@ -49,12 +54,13 @@ class ExtractionResultStore:
     # ------------------------------------------------------------------
 
     def get(
-        self, doc_id: str, extractor_name: str, result_type: str
+        self, doc_id: str, extractor_name: str, result_type: str,
+        extractor_version: Optional[str] = None,
     ) -> Optional[Any]:
         db = getattr(self._pm, "db_extraction", None)
         if db is None:
             return None
-        return db.get_result(doc_id, extractor_name, result_type)
+        return db.get_result(doc_id, extractor_name, result_type, extractor_version)
 
     def put(
         self,
@@ -130,36 +136,46 @@ class ExtractionCache:
     # Block cache
     # ------------------------------------------------------------------
 
-    def get_blocks(self, doc_id: str) -> Optional[List[Dict[str, Any]]]:
-        if doc_id in self._mem and "blocks" in self._mem[doc_id]:
+    def get_blocks(
+        self, doc_id: str, extractor_version: Optional[str] = None
+    ) -> Optional[List[Dict[str, Any]]]:
+        mem_key = self._mem_key("blocks", "blocks", extractor_version)
+        if doc_id in self._mem and mem_key in self._mem[doc_id]:
             self._mem.move_to_end(doc_id)
-            return self._mem[doc_id]["blocks"]
-        blocks = self._store.get_blocks(doc_id)
+            return self._mem[doc_id][mem_key]
+        blocks = self._store.get_blocks(doc_id, extractor_version)
         if blocks is not None:
-            self._set_mem(doc_id, "blocks", blocks)
+            self._set_mem(doc_id, mem_key, blocks)
         return blocks
 
-    def set_blocks(self, doc_id: str, blocks: List[Dict[str, Any]]) -> None:
+    def set_blocks(
+        self, doc_id: str, blocks: List[Dict[str, Any]],
+        extractor_version: Optional[str] = None,
+    ) -> None:
         self._store.save_blocks(doc_id, blocks)
-        self._set_mem(doc_id, "blocks", blocks)
+        self._set_mem(doc_id, self._mem_key("blocks", "blocks", extractor_version), blocks)
 
-    def blocks_exist(self, doc_id: str) -> bool:
-        if doc_id in self._mem and "blocks" in self._mem[doc_id]:
+    def blocks_exist(
+        self, doc_id: str, extractor_version: Optional[str] = None
+    ) -> bool:
+        mem_key = self._mem_key("blocks", "blocks", extractor_version)
+        if doc_id in self._mem and mem_key in self._mem[doc_id]:
             return True
-        return self._store.blocks_exist(doc_id)
+        return self._store.blocks_exist(doc_id, extractor_version)
 
     # ------------------------------------------------------------------
     # Generic result cache
     # ------------------------------------------------------------------
 
     def get(
-        self, doc_id: str, extractor_name: str, result_type: str
+        self, doc_id: str, extractor_name: str, result_type: str,
+        extractor_version: Optional[str] = None,
     ) -> Optional[Any]:
-        mem_key = f"{extractor_name}:{result_type}"
+        mem_key = self._mem_key(extractor_name, result_type, extractor_version)
         if doc_id in self._mem and mem_key in self._mem[doc_id]:
             self._mem.move_to_end(doc_id)
             return self._mem[doc_id][mem_key]
-        result = self._store.get(doc_id, extractor_name, result_type)
+        result = self._store.get(doc_id, extractor_name, result_type, extractor_version)
         if result is not None:
             self._set_mem(doc_id, mem_key, result)
         return result
@@ -177,7 +193,11 @@ class ExtractionCache:
             doc_id, extractor_name, extractor_version,
             result_type, result_data, cache_key,
         )
-        self._set_mem(doc_id, f"{extractor_name}:{result_type}", result_data)
+        self._set_mem(
+            doc_id,
+            self._mem_key(extractor_name, result_type, extractor_version),
+            result_data,
+        )
 
     # ------------------------------------------------------------------
     # Invalidation
@@ -190,16 +210,36 @@ class ExtractionCache:
     def invalidate_extractor(
         self, doc_id: str, extractor_name: str, result_type: str
     ) -> None:
+        prefix = f"{extractor_name}:{result_type}"
         if doc_id in self._mem:
-            self._mem[doc_id].pop(f"{extractor_name}:{result_type}", None)
+            for key in [k for k in self._mem[doc_id] if k.startswith(prefix)]:
+                self._mem[doc_id].pop(key, None)
         self._store.invalidate_extractor(doc_id, extractor_name, result_type)
 
-    def clear_memory(self) -> None:
+    def clear_memory(self, _level=None) -> int:
+        freed = self.memory_estimate()
         self._mem.clear()
+        return freed
+
+    def memory_estimate(self) -> int:
+        """Cheap estimate for the memory manager: cached items × typical size."""
+        items = 0
+        for entries in list(self._mem.values()):
+            for value in list(entries.values()):
+                items += len(value) if isinstance(value, (list, tuple, dict)) else 1
+        return items * _ESTIMATED_ITEM_BYTES
 
     # ------------------------------------------------------------------
     # Internal LRU helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _mem_key(
+        extractor_name: str, result_type: str, extractor_version: Optional[str]
+    ) -> str:
+        """Version is part of the key so a bump cannot hit a stale memory entry."""
+        suffix = f":{extractor_version}" if extractor_version else ""
+        return f"{extractor_name}:{result_type}{suffix}"
 
     def _set_mem(self, doc_id: str, key: str, value: Any) -> None:
         if doc_id not in self._mem:

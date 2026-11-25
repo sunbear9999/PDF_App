@@ -13,6 +13,9 @@ from __future__ import annotations
 
 from core.engine.action_model import AIActionBlueprint, ActionStep
 
+# Low temperature: claim extraction is a precision task, not a creative one.
+CLAIM_EXTRACTION_TEMPERATURE = 0.1
+
 
 def get_extract_claims_blueprint(model: str = "{selected_model}") -> AIActionBlueprint:
     return AIActionBlueprint(
@@ -26,21 +29,13 @@ def get_extract_claims_blueprint(model: str = "{selected_model}") -> AIActionBlu
             ActionStep(
                 step_id="extract_claims",
                 step_type="LLM_SCHEMA_QUERY",
-                inputs={"query": "Extract all distinct claims from the following text:\n\n{selected_text}"},
-                system_prompt=(
-                    "You are a philosophical claim extractor. Analyse the provided text and return a JSON object "
-                    "with a 'claims' array. Each item must have:\n"
-                    "  claim: string — the claim stated precisely and concisely (1-2 sentences)\n"
-                    "  type: 'causal' | 'normative' | 'descriptive' | 'evaluative'\n"
-                    "  confidence: 'high' | 'medium' | 'low'\n"
-                    "  evidence: string — the verbatim phrase that most directly supports this claim\n"
-                    "Extract every distinct claim, not just the main thesis. Return only valid JSON."
-                ),
+                inputs={"query": "{prompt:Extract Claims Query}\n\n{selected_text}"},
+                system_prompt="{prompt:Extract Claims System}",
                 output_schema={"claims": [{"claim": "", "type": "", "confidence": "", "evidence": ""}]},
                 output_key="raw_claims",
                 model=model,
                 ui_format="silent",
-                llm_options={"temperature": 0.1},
+                llm_options={"temperature": CLAIM_EXTRACTION_TEMPERATURE},
             ),
             ActionStep(
                 step_id="parse_claims",

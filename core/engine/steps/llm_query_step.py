@@ -14,6 +14,10 @@ from core.models.prompt_models import PromptTraceCall, collect_step_prompt_usage
 from core.plugins.plugin_step_protocol import StepContext
 from core.utils.json_utils import TaggedBlockStreamFilter, extract_and_heal_json
 from core.utils.state_resolver import StateResolver
+from core.engine.llm_request_context import fit_query_to_context, prepare_request_context
+from core.services.intelligence.retrieval_audit import (
+    apply_selected_quotes, audit_for_prompt,
+)
 
 
 class LLMQueryStep(BaseStep):
@@ -26,6 +30,7 @@ class LLMQueryStep(BaseStep):
         "system_prompt": {"type": "string", "label": "System Prompt Override"},
         "model": {"type": "string", "label": "Model"},
         "images": {"type": "array", "label": "Image Inputs"},
+        "context_items_key": {"type": "string", "label": "Atomic context items (state key)"},
     }
 
     def execute(self, context: StepContext, inputs: dict):
@@ -57,10 +62,21 @@ class LLMQueryStep(BaseStep):
 
         if pm:
             req_context = getattr(step, "required_context", [])
-            if "manifest" in req_context:
+            if "manifest" in req_context and context.state.get("include_manifest", True):
                 if (getattr(step, "allow_manifest_updates", False)
                         and context.state.get("allow_manifest_updates", False)):
-                    system_prompt += "\n\n" + (pm.get_prompt("Manifest Update Directive") or "")
+                    protocol = getattr(step, "manifest_update_protocol", "tagged")
+                    directive_key = (
+                        "Manifest Structured Update Directive"
+                        if protocol == "structured"
+                        else "Manifest Update Directive"
+                    )
+                    directive = pm.get_prompt(directive_key)
+                    if not directive:
+                        raise KeyError(
+                            f"Required Prompt Manager key is unavailable: {directive_key}"
+                        )
+                    system_prompt += "\n\n" + directive
                 system_prompt += "\n\n" + (pm.get_prompt("Context Inject - Manifest") or "")
             if "workspace" in req_context:
                 system_prompt += "\n\n" + (pm.get_prompt("Context Inject - Workspace") or "")
@@ -116,31 +132,44 @@ class LLMQueryStep(BaseStep):
             options["json_mode"] = True
             schema_str = json.dumps(output_schema, indent=2)
             if pm:
-                enforcer = pm.get_prompt("JSON Schema Enforcer")
+                enforcer_key = (
+                    getattr(step, "output_schema_prompt_key", None)
+                    or "JSON Schema Enforcer"
+                )
+                enforcer = pm.get_prompt(enforcer_key)
                 if not enforcer:
-                    raise KeyError("Required Prompt Manager key is unavailable: JSON Schema Enforcer")
+                    raise KeyError(
+                        "Required Prompt Manager key is unavailable: "
+                        f"{enforcer_key}"
+                    )
                 system_prompt += "\n\n" + enforcer.replace("{schema_str}", schema_str)
         elif options.get("json_mode") and "JSON" not in system_prompt:
-            system_prompt += "\n\nCRITICAL: Output ONLY valid JSON. No markdown blocks, no explanations."
+            if not pm:
+                raise RuntimeError("Prompt Manager is required for JSON-mode instructions.")
+            directive = pm.get_prompt("JSON Only Directive")
+            if not directive:
+                raise KeyError("Required Prompt Manager key is unavailable: JSON Only Directive")
+            system_prompt += "\n\n" + directive
 
         if getattr(step, "show_reasoning", False) and not options.get("json_mode"):
-            directive = ""
-            if pm:
-                directive = pm.get_prompt("Reasoning Disclosure Directive") or ""
+            if not pm:
+                raise RuntimeError("Prompt Manager is required for reasoning instructions.")
+            directive = pm.get_prompt("Reasoning Disclosure Directive") or ""
             if not directive:
-                directive = (
-                    "Before the final answer, include a concise reasoning section inside "
-                    "<think>...</think>. Then provide the final answer after the closing tag."
+                raise KeyError(
+                    "Required Prompt Manager key is unavailable: "
+                    "Reasoning Disclosure Directive"
                 )
             system_prompt += "\n\n" + directive
 
-        query_text = str(inputs.get("query", "") or "")
-        query_text, context_notice = self._fit_query_to_context(query_text, system_prompt, options)
+        query_text, context_notice, context_updates, trace_context = prepare_request_context(
+            inputs, context, step, system_prompt, options)
         if context_notice:
             system_prompt += "\n\n" + context_notice
 
         trace_inputs = dict(inputs)
         trace_inputs["query"] = query_text
+        trace_inputs.update(trace_context)
 
         # ------- Prompt trace -------
         trace_event = self._build_trace_event(step, trace_inputs, resolved_model, system_prompt, options, context)
@@ -168,26 +197,43 @@ class LLMQueryStep(BaseStep):
             if context.api and visible_chunk:
                 context.api.emit_event("stream_chunk", {"chunk": visible_chunk})
 
-        raw_result = lm.query(
-            question=query_text,
-            selected_model=resolved_model,
-            custom_system_prompt=system_prompt,
-            abort_event=abort_event,
-            callback=_stream_cb,
-            rag_enabled=False,
-            json_mode=options.get("json_mode"),
-            temperature=options.get("temperature"),
-            num_predict=options.get("num_predict"),
-            num_ctx=options.get("num_ctx") or 16384,
-            stop=options.get("stop_sequences"),
-            images=inputs.get("images") or [],
-            required_capabilities=getattr(step, "required_model_capabilities", []) or inputs.get("required_model_capabilities") or [],
-        )
+        query_kwargs = {
+            "question": query_text,
+            "selected_model": resolved_model,
+            "custom_system_prompt": system_prompt,
+            "abort_event": abort_event,
+            "callback": _stream_cb,
+            "rag_enabled": False,
+            "json_mode": options.get("json_mode"),
+            "temperature": options.get("temperature"),
+            "num_predict": options.get("num_predict"),
+            "num_ctx": options.get("num_ctx") or 16384,
+            "stop": options.get("stop_sequences"),
+            "images": inputs.get("images") or [],
+            "required_capabilities": (
+                getattr(step, "required_model_capabilities", [])
+                or inputs.get("required_model_capabilities")
+                or []
+            ),
+        }
+        retry_attempts = max(0, int(getattr(step, "llm_retry_attempts", 0) or 0))
+        try:
+            raw_result = self._query_with_transport_retries(
+                lm,
+                query_kwargs,
+                retry_attempts,
+                abort_event,
+            )
+        except (ConnectionError, OSError) as exc:
+            if not getattr(step, "allow_manifest_updates", False):
+                raise
+            raw_result = f"[Generation Error: {exc}]"
         trailing_visible = manifest_filter.flush()
         if context.api and trailing_visible:
             context.api.emit_event("stream_chunk", {"chunk": trailing_visible})
 
-        if str(raw_result).strip().startswith("[Generation Error"):
+        generation_failed = "[Generation Error" in str(raw_result)
+        if generation_failed and not getattr(step, "allow_manifest_updates", False):
             raise ConnectionError(f"Engine Failed: {raw_result.strip()}")
 
         if output_schema:
@@ -199,8 +245,9 @@ class LLMQueryStep(BaseStep):
                     raw_result = json.dumps(parsed)
                 source_key = getattr(step, "citation_source_key", None)
                 if source_key and context.state.get(source_key):
+                    from core.services.intelligence.context_sources import STATE_KEY
                     raw_result = self._restore_citation_metadata(
-                        raw_result, str(context.state[source_key])
+                        raw_result, str(context.state[source_key]), context.state.get(STATE_KEY)
                     )
 
         # ------- Build UI payloads -------
@@ -221,19 +268,85 @@ class LLMQueryStep(BaseStep):
                     WorkspaceEventPayload(result_text=raw_result),
                 )
             )
-            return self.build_result(raw_result, system_events=system_events)
+            return self.build_result(raw_result, system_events=system_events, state_updates=context_updates)
 
         payloads = build_ui_payloads(ui_format, raw_result, step=step, trace_id=trace_id, title=ui_title)
+        audit = audit_for_prompt(
+            context.state.get("retrieval_context_audit"), query_text
+        )
+        response_citations = []
+        for payload in payloads:
+            if payload.get("type") != "citation_cards":
+                continue
+            items = payload.get("items") or []
+            if isinstance(items, dict):
+                items = items.get("citations") or [items]
+            response_citations.extend(
+                item for item in items if isinstance(item, dict)
+            )
+        if response_citations:
+            audit = apply_selected_quotes(audit, response_citations)
+        if audit.get("candidates") and ui_format != "silent":
+            rag_payload = {
+                "type": "rag_context_view",
+                "audit": audit,
+                "attach_to_response": True,
+            }
+            hide_index = next(
+                (
+                    index for index, payload in enumerate(payloads)
+                    if payload.get("type") == "hide_status"
+                ),
+                len(payloads),
+            )
+            payloads.insert(hide_index, rag_payload)
+            if hide_index < len(payloads) - 1:
+                payloads[-1]["keep_active"] = True
 
         return self.build_result(
             raw_result,
             ui_payloads=payloads,
             system_events=system_events,
+            state_updates=context_updates,
         )
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    @classmethod
+    def _query_with_transport_retries(cls, lm, query_kwargs, retry_attempts, abort_event):
+        for attempt in range(retry_attempts + 1):
+            try:
+                result = lm.query(**query_kwargs)
+            except (ConnectionError, OSError):
+                if attempt >= retry_attempts or (abort_event and abort_event.is_set()):
+                    raise
+                continue
+            if not cls._is_retryable_generation_error(result):
+                return result
+            if attempt >= retry_attempts or (abort_event and abort_event.is_set()):
+                return result
+        return result
+
+    @staticmethod
+    def _is_retryable_generation_error(result) -> bool:
+        text = str(result or "").strip().lower()
+        if "[generation error" not in text:
+            return False
+        retryable_markers = (
+            "connection aborted",
+            "connection reset",
+            "remote disconnected",
+            "remotedisconnected",
+            "server disconnected",
+            "temporarily unavailable",
+            "bad gateway",
+            "status 502",
+            "status 503",
+            "status 504",
+        )
+        return any(marker in text for marker in retryable_markers)
 
     def _has_citation_source(self, step, state: dict) -> bool:
         source_key = getattr(step, "citation_source_key", None)
@@ -246,8 +359,10 @@ class LLMQueryStep(BaseStep):
         return bool(text and text not in {"[]", "{}", "No relevant documents found.", "RAG is offline or collection is empty."})
 
     @staticmethod
-    def _restore_citation_metadata(raw_result: str, source_context: str) -> str:
-        """Match exact citation quotes back to RAG blocks and restore routing data."""
+    def _restore_citation_metadata(raw_result: str, source_context: str, sources=None) -> str:
+        """Point each model citation at its passage (by label, else exact quote) and fill in the
+        routing data the app kept for that passage; the model never copies ids."""
+        from core.services.intelligence import context_sources
         try:
             payload = json.loads(raw_result)
         except Exception:
@@ -255,58 +370,48 @@ class LLMQueryStep(BaseStep):
         citations = payload.get("citations") if isinstance(payload, dict) else payload
         if not isinstance(citations, list):
             return raw_result
-
-        blocks = []
-        for raw_block in source_context.split("--- DOCUMENT:")[1:]:
-            block = "--- DOCUMENT:" + raw_block
-            metadata = {}
-            locator = {}
-            for line in block.splitlines():
-                if line.startswith("CITATION_LOCATOR_") and ":" in line:
-                    key, value = line.split(":", 1)
-                    locator[key.removeprefix("CITATION_LOCATOR_")] = value.strip()
-                elif line.startswith("CITATION_") and ":" in line:
-                    key, value = line.split(":", 1)
-                    metadata[key.removeprefix("CITATION_").lower()] = value.strip()
-            metadata["source_locator"] = locator
-            metadata["_normalized_block"] = " ".join(block.lower().split())
-            blocks.append(metadata)
-
+        candidates = context_sources.blocks(source_context, sources)
         for citation in citations:
             if not isinstance(citation, dict):
                 continue
-            quote = " ".join(str(citation.get("quote", "")).lower().split())
-            doc_name = str(citation.get("doc_name", "")).strip().lower()
-
-            def score(block):
-                value = 0
-                if quote and quote in block["_normalized_block"]:
-                    value += 100
-                if doc_name and doc_name == block.get("doc_name", "").lower():
-                    value += 20
-                return value
-
-            match = max(blocks, key=score, default=None)
-            if not match or score(match) == 0:
+            found = context_sources.match(citation, candidates)
+            if not found:
                 continue
-            for key in ("doc_name", "source_type", "source_id", "page", "start", "end"):
-                if key in match:
-                    value = match[key]
-                    if key in {"page", "start", "end"}:
-                        try:
-                            value = float(value) if "." in value else int(value)
-                        except (TypeError, ValueError):
-                            pass
-                    citation[key] = value
-            citation["source_locator"] = match.get("source_locator", {})
+            for key in ("doc_name", "source_type", "source_id", "artifact_id", "page"):
+                if found.get(key) not in (None, ""):
+                    citation[key] = found[key]
+            citation["source"] = found["label"]
+            citation["source_locator"] = dict(found.get("source_locator") or {})
         return json.dumps(payload)
 
     def _build_trace_event(self, step, inputs: dict, model: str, system_prompt: str, options: dict, context: StepContext):
         try:
+            import hashlib
             usage = collect_step_prompt_usage(step) if step else None
             trace_options = dict(options or {})
             trace_options["image_count"] = len(inputs.get("images") or [])
             trace_options["required_model_capabilities"] = list(getattr(step, "required_model_capabilities", []) or [])
+            trace_options["retry_attempts"] = int(getattr(step, "llm_retry_attempts", 0) or 0)
+            if '_context_packing' in inputs:
+                trace_options['context_packing'] = inputs['_context_packing']
+            prompt_versions = {}
+            manager = getattr(context, "prompt_manager", None)
+            for key in getattr(usage, "explicit", []) if usage else []:
+                try:
+                    content = manager.get_prompt(key) if manager else ""
+                    prompt_versions[key] = hashlib.sha256(
+                        str(content or "").encode("utf-8", "replace")
+                    ).hexdigest()[:12]
+                except Exception:
+                    prompt_versions[key] = "unavailable"
+            state = context.state if isinstance(context.state, dict) else {}
+            artifact_inputs = list(dict.fromkeys(
+                str(value) for value in (
+                    (state.get("analysis_evidence_aliases") or {}).values()
+                ) if value
+            ))
+            if '_artifact_input_ids' in inputs:
+                artifact_inputs = inputs['_artifact_input_ids']
             call_dict = {
                 "step_id": getattr(step, "step_id", ""),
                 "step_type": self.step_type,
@@ -317,6 +422,9 @@ class LLMQueryStep(BaseStep):
                 "prompt_key": getattr(step, "prompt_key", None),
                 "explicit_prompt_keys": getattr(usage, "explicit", []) if usage else [],
                 "implicit_prompt_keys": getattr(usage, "implicit", []) if usage else [],
+                "prompt_versions": prompt_versions,
+                "artifact_input_ids": artifact_inputs,
+                "call_budget": dict(state.get("analysis_model_call_budget") or {}),
                 "llm_options": trace_options,
             }
             return SystemEvent(event_type="prompt_trace", payload=call_dict)
@@ -336,25 +444,14 @@ class LLMQueryStep(BaseStep):
             except Exception:
                 pass
         requested_ctx = int(options.get("num_ctx") or max_ctx)
-        options["num_ctx"] = max(2048, min(requested_ctx, max_ctx))
+        options["num_ctx"] = max(256, min(requested_ctx, max_ctx))
         requested_predict = int(options.get("num_predict") or 1024)
-        options["num_predict"] = max(128, min(requested_predict, max(256, options["num_ctx"] // 3)))
+        options["num_predict"] = max(64, min(requested_predict, max(64, options["num_ctx"] // 3)))
         options["context_clamped"] = requested_ctx != options["num_ctx"] or requested_predict != options["num_predict"]
         options["model_context_ceiling"] = max_ctx
         return options
 
-    def _fit_query_to_context(self, query: str, system_prompt: str, options: dict) -> tuple[str, str]:
-        num_ctx = int(options.get("num_ctx") or 8192)
-        reserve_tokens = int(options.get("num_predict") or 1024) + 512
-        budget_tokens = max(512, num_ctx - reserve_tokens)
-        system_chars = len(system_prompt or "")
-        max_query_chars = max(1000, int(budget_tokens * 3.4) - system_chars)
-        if len(query) <= max_query_chars:
-            return query, ""
-        clipped = query[:max_query_chars].rstrip()
-        notice = (
-            "Context safety notice: Papyrus shortened the user/context payload "
-            f"to fit the selected model's {num_ctx}-token context budget. "
-            "Prefer artifact retrieval or narrower source filters if important evidence is missing."
-        )
-        return clipped, notice
+    def _fit_query_to_context(
+        self, query: str, system_prompt: str, options: dict, prompt_manager=None
+    ) -> tuple[str, str]:
+        return fit_query_to_context(query, system_prompt, options, prompt_manager)

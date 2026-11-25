@@ -28,6 +28,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -40,6 +41,12 @@ from core.models.pack_models import (
     PackItem,
     PackManifest,
     PPACK_VERSION,
+)
+from core.services.packs.archive_safety import (
+    UnsafeArchiveError,
+    extract_member,
+    open_validated_archive,
+    publish_staged_directories,
 )
 from core.services.packs.category_handler import PackCategoryHandler
 
@@ -295,7 +302,7 @@ class PackService(QObject):
         importing anything.  Returns (None, {}) on failure.
         """
         try:
-            with zipfile.ZipFile(file_path, "r") as zf:
+            with open_validated_archive(file_path) as zf:
                 manifest_data = json.loads(zf.read("manifest.json"))
                 manifest = PackManifest.from_dict(manifest_data)
                 categories: Dict[str, List[PackItem]] = {}
@@ -330,7 +337,7 @@ class PackService(QObject):
         summary: Dict[str, int] = {}
         effective_renames = renames or {}
         try:
-            with zipfile.ZipFile(file_path, "r") as zf:
+            with open_validated_archive(file_path) as zf:
                 for cat, item_ids in selection.items():
                     count = self._apply_category(zf, cat, item_ids, effective_renames)
                     if count:
@@ -994,7 +1001,7 @@ class PackService(QObject):
     def _apply_plugins(self, zf, ids, renames=None):
         plugins_dir = _plugins_dir()
         os.makedirs(plugins_dir, exist_ok=True)
-        installed: Dict[str, List[str]] = {}
+        installed: Dict[str, List[zipfile.ZipInfo]] = {}
         for info in zf.infolist():
             if not info.filename.startswith("plugins/"):
                 continue
@@ -1006,22 +1013,36 @@ class PackService(QObject):
                 continue
             if ids and plugin_dir_name not in ids:
                 continue
-            installed.setdefault(plugin_dir_name, []).append(info.filename)
+            installed.setdefault(plugin_dir_name, []).append(info)
 
-        count = 0
-        for plugin_dir_name, file_list in installed.items():
-            dest = os.path.join(plugins_dir, plugin_dir_name)
-            os.makedirs(dest, exist_ok=True)
-            for arc_path in file_list:
-                rel_within_plugin = "/".join(arc_path.split("/")[2:])
-                if not rel_within_plugin:
-                    continue
-                target = os.path.join(dest, rel_within_plugin)
-                os.makedirs(os.path.dirname(target), exist_ok=True)
-                with zf.open(arc_path) as src, open(target, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
-            count += 1
-        return count
+        if not installed:
+            return 0
+
+        staging_root = tempfile.mkdtemp(prefix=".ppack-import-", dir=plugins_dir)
+        publication_started = False
+        publication_completed = False
+        try:
+            for plugin_dir_name, members in installed.items():
+                plugin_root = os.path.join(staging_root, plugin_dir_name)
+                os.makedirs(plugin_root, exist_ok=False)
+                for member in members:
+                    if member.is_dir():
+                        continue
+                    relative_name = "/".join(member.filename.split("/")[2:])
+                    if relative_name:
+                        extract_member(zf, member, plugin_root, relative_name)
+                if not os.path.isfile(os.path.join(plugin_root, "plugin.py")):
+                    raise UnsafeArchiveError(
+                        f"Plugin {plugin_dir_name!r} does not contain plugin.py."
+                    )
+            plugin_names = sorted(installed)
+            publication_started = True
+            publish_staged_directories(staging_root, plugins_dir, plugin_names)
+            publication_completed = True
+            return len(plugin_names)
+        finally:
+            if not publication_started or publication_completed:
+                shutil.rmtree(staging_root, ignore_errors=True)
 
     def _apply_plugin_configs(self, zf, ids, renames=None):
         configs_dir = _plugin_configs_dir()

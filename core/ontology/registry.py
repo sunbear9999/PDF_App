@@ -252,8 +252,16 @@ class SupportsEdgePlugin(BaseOntologyEdgePlugin):
     display_name = "Supports"
     description = "Positive evidentiary support."
     traits = [RelationTrait.EVIDENTIARY]
-    valid_source_types = [EntityType.QUOTE.value, EntityType.EVIDENCE.value, EntityType.FINDING.value, EntityType.REASONING.value]
-    valid_target_types = [EntityType.CLAIM.value, EntityType.FINDING.value, EntityType.REASONING.value]
+    valid_source_types = [
+        EntityType.QUOTE.value, EntityType.EVIDENCE.value,
+        EntityType.FINDING.value, EntityType.REASONING.value,
+        EntityType.CLAIM.value, EntityType.COUNTERARGUMENT.value,
+    ]
+    valid_target_types = [
+        EntityType.CLAIM.value, EntityType.FINDING.value,
+        EntityType.REASONING.value, EntityType.METHOD.value,
+        EntityType.COUNTERARGUMENT.value,
+    ]
     default_properties = {"strength": 1.0, "confidence": 1.0}
     visual_style = VisualStyleDefinition("#00aa66", "solid", "+", 3)
     fields = [
@@ -265,6 +273,9 @@ class RefutesEdgePlugin(SupportsEdgePlugin):
     type_key = RelationType.REFUTES.value
     display_name = "Refutes"
     description = "Negative evidentiary support against a claim."
+    valid_source_types = SupportsEdgePlugin.valid_source_types + [
+        EntityType.CLAIM.value, EntityType.COUNTERARGUMENT.value,
+    ]
     visual_style = VisualStyleDefinition("#d94848", "dash", "-", 3)
 
 class ContradictsEdgePlugin(RefutesEdgePlugin):
@@ -691,6 +702,8 @@ class OntologyRegistry:
             
         entity(EntityType.FINDING.value, "Finding", "Synthesized knowledge.", {"confidence": 0.0})
         entity(EntityType.CONCEPT.value, "Concept", "Topical grouping.", {"category": ""})
+        entity(EntityType.LANGUAGE.value, "Language", "A language or dialect mentioned in a source.", {},
+               hints={"extractors": ["ner"]}, requires_source=True)
         entity(EntityType.COUNTERARGUMENT.value, "Counterargument", "An objection or opposing argument.", {"target_claim_id": "", "severity": "medium"})
         
         entity(EntityType.TIMELINE_EVENT.value, "Timeline Event", "An event with a date.", {"date": "", "certainty": "unknown"}, 
@@ -784,13 +797,22 @@ class OntologyRegistry:
             FieldDefinition("confidence", "Confidence", "float", 1.0, minimum=0.0, maximum=1.0),
         ]
         relation(RelationType.BASIC.value, "Connection", props={"label": "Connection"}, style=VisualStyleDefinition("#888888", "solid", "", 2))
-        evidence_sources = [EntityType.QUOTE.value, EntityType.EVIDENCE.value, EntityType.FINDING.value, EntityType.REASONING.value, EntityType.DATA_TABLE.value, EntityType.CHART.value]
-        argumentative_targets = [EntityType.CLAIM.value, EntityType.FINDING.value, EntityType.REASONING.value]
+        evidence_sources = [
+            EntityType.QUOTE.value, EntityType.EVIDENCE.value,
+            EntityType.FINDING.value, EntityType.REASONING.value,
+            EntityType.CLAIM.value, EntityType.COUNTERARGUMENT.value,
+            EntityType.DATA_TABLE.value, EntityType.CHART.value,
+        ]
+        argumentative_targets = [
+            EntityType.CLAIM.value, EntityType.FINDING.value,
+            EntityType.REASONING.value, EntityType.METHOD.value,
+            EntityType.COUNTERARGUMENT.value,
+        ]
         relation(RelationType.SUPPORTS.value, "Supports", [RelationTrait.EVIDENTIARY], evidence_sources, argumentative_targets, {"strength": 1.0, "confidence": 1.0}, confidence_fields, VisualStyleDefinition("#00aa66", "solid", "+", 3))
         relation(RelationType.REFUTES.value, "Refutes", [RelationTrait.EVIDENTIARY], evidence_sources, argumentative_targets, {"strength": 1.0, "confidence": 1.0}, confidence_fields, VisualStyleDefinition("#d94848", "dash", "-", 3))
         relation(RelationType.CONTRADICTS.value, "Contradicts", [RelationTrait.EVIDENTIARY], evidence_sources, argumentative_targets, {"strength": 1.0, "confidence": 1.0}, confidence_fields, VisualStyleDefinition("#e03131", "dashdot", "!", 3))
         relation(RelationType.IMPLIES.value, "Implies", [RelationTrait.HIERARCHICAL, RelationTrait.SEMANTIC], [EntityType.CLAIM.value, EntityType.FINDING.value, EntityType.REASONING.value], [EntityType.CLAIM.value, EntityType.FINDING.value], {"confidence": 0.75, "reasoning_note": ""}, [FieldDefinition("confidence", "Confidence", "float", 0.75, minimum=0.0, maximum=1.0), FieldDefinition("reasoning_note", "Reasoning Note", "string", "")], VisualStyleDefinition("#4c6ef5", "solid", "→", 2))
-        relation(RelationType.REASONS.value, "Reasons For", [RelationTrait.HIERARCHICAL, RelationTrait.EVIDENTIARY], [EntityType.REASONING.value], [EntityType.CLAIM.value, EntityType.FINDING.value, EntityType.REASONING.value], {"confidence": 0.75, "reasoning_note": ""}, [FieldDefinition("confidence", "Confidence", "float", 0.75, minimum=0.0, maximum=1.0), FieldDefinition("reasoning_note", "Reasoning Note", "string", "")], VisualStyleDefinition("#1971c2", "solid", "∴", 2))
+        relation(RelationType.REASONS.value, "Reasons For", [RelationTrait.HIERARCHICAL, RelationTrait.EVIDENTIARY], [EntityType.REASONING.value], argumentative_targets, {"confidence": 0.75, "reasoning_note": ""}, [FieldDefinition("confidence", "Confidence", "float", 0.75, minimum=0.0, maximum=1.0), FieldDefinition("reasoning_note", "Reasoning Note", "string", "")], VisualStyleDefinition("#1971c2", "solid", "∴", 2))
         relation(RelationType.ANSWERS.value, "Answers", [RelationTrait.HIERARCHICAL], [EntityType.CLAIM.value, EntityType.FINDING.value, EntityType.QUOTE.value, EntityType.EVIDENCE.value], [EntityType.QUESTION.value], {"completeness": 1.0}, [FieldDefinition("completeness", "Completeness", "float", 1.0, minimum=0.0, maximum=1.0)], VisualStyleDefinition("#099268", "solid", "✓", 2))
         relation(RelationType.FOLLOW_UP.value, "Follow-up", [RelationTrait.HIERARCHICAL], [EntityType.QUESTION.value], [EntityType.QUESTION.value], {"priority": "normal", "dependency": ""}, [FieldDefinition("priority", "Priority", "string", "normal", choices=["low", "normal", "high"]), FieldDefinition("dependency", "Dependency", "string", "")], VisualStyleDefinition("#fab005", "dash", "?", 2))
         relation(RelationType.DERIVED_FROM.value, "Derived From", [RelationTrait.HIERARCHICAL, RelationTrait.EVIDENTIARY], [EntityType.CLAIM.value, EntityType.FINDING.value, EntityType.REASONING.value, EntityType.COUNTERARGUMENT.value, EntityType.TIMELINE_EVENT.value, EntityType.METHOD.value, EntityType.DATA_TABLE.value], [EntityType.QUOTE.value, EntityType.EVIDENCE.value, EntityType.SOURCE.value, EntityType.DATA_TABLE.value], {"reasoning_note": ""}, [FieldDefinition("reasoning_note", "Reasoning Note", "string", "")], VisualStyleDefinition("#0b7285", "dot", "↩", 2))

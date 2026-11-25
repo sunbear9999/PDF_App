@@ -79,7 +79,13 @@ def collect_step_prompt_usage(step: Any) -> BlueprintPromptUsage:
 
         req_context = getattr(step, "required_context", [])
         if "manifest" in req_context:
-            implicit.add("Manifest Update Directive")
+            if getattr(step, "allow_manifest_updates", False):
+                protocol = getattr(step, "manifest_update_protocol", "tagged")
+                implicit.add(
+                    "Manifest Structured Update Directive"
+                    if protocol == "structured"
+                    else "Manifest Update Directive"
+                )
             implicit.add("Context Inject - Manifest")
         if "workspace" in req_context:
             implicit.add("Context Inject - Workspace")
@@ -107,6 +113,9 @@ class PromptTraceCall:
     prompt_key: Optional[str] = None
     explicit_prompt_keys: List[str] = field(default_factory=list)
     implicit_prompt_keys: List[str] = field(default_factory=list)
+    prompt_versions: Dict[str, str] = field(default_factory=dict)
+    artifact_input_ids: List[str] = field(default_factory=list)
+    call_budget: Dict[str, Any] = field(default_factory=dict)
     llm_options: Dict[str, Any] = field(default_factory=dict)
     timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat(timespec="seconds") + "Z")
 
@@ -121,6 +130,9 @@ class PromptTraceCall:
             "prompt_key": self.prompt_key,
             "explicit_prompt_keys": list(self.explicit_prompt_keys),
             "implicit_prompt_keys": list(self.implicit_prompt_keys),
+            "prompt_versions": dict(self.prompt_versions),
+            "artifact_input_ids": list(self.artifact_input_ids),
+            "call_budget": dict(self.call_budget),
             "llm_options": dict(self.llm_options),
             "timestamp": self.timestamp,
         }
@@ -137,6 +149,9 @@ class PromptTraceCall:
             prompt_key=data.get("prompt_key"),
             explicit_prompt_keys=list(data.get("explicit_prompt_keys") or []),
             implicit_prompt_keys=list(data.get("implicit_prompt_keys") or []),
+            prompt_versions=dict(data.get("prompt_versions") or {}),
+            artifact_input_ids=list(data.get("artifact_input_ids") or []),
+            call_budget=dict(data.get("call_budget") or {}),
             llm_options=dict(data.get("llm_options") or {}),
             timestamp=data.get("timestamp") or datetime.utcnow().isoformat(timespec="seconds") + "Z",
         )

@@ -3,7 +3,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QBrush
 from PySide6.QtWidgets import (
     QCheckBox, QColorDialog, QDialog, QDialogButtonBox,
-    QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QComboBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMessageBox, QPushButton, QScrollArea,
     QVBoxLayout, QWidget
 )
@@ -91,12 +91,26 @@ class TagManagerDialog(QDialog):
         self.docs_label = QLabel("Documents with selected tag")
         self.docs_label.setWordWrap(True)
         self.doc_list = QListWidget()
+        parent_row = QHBoxLayout()
+        parent_row.addWidget(QLabel("Nested under"))
+        self.parent_combo = QComboBox()
+        self.parent_combo.setEnabled(False)
+        self.btn_set_parent = QPushButton("Set Parent")
+        self.btn_set_parent.setEnabled(False)
+        self.btn_set_parent.clicked.connect(self.set_tag_parent)
+        parent_row.addWidget(self.parent_combo, 1)
+        parent_row.addWidget(self.btn_set_parent)
         assign_layout = QHBoxLayout()
         self.btn_mass_assign = QPushButton("🏷️ Mass Assign / Remove Docs...")
         self.btn_mass_assign.clicked.connect(self.open_mass_assign_dialog)
         self.btn_mass_assign.setEnabled(False)
+        self.btn_auto_tag = QPushButton("⚙️ Auto-tag Sources…")
+        self.btn_auto_tag.clicked.connect(self.open_auto_tag_dialog)
+        self.btn_auto_tag.setEnabled(False)
         assign_layout.addWidget(self.btn_mass_assign)
+        assign_layout.addWidget(self.btn_auto_tag)
         details_layout.addWidget(self.docs_label)
+        details_layout.addLayout(parent_row)
         details_layout.addWidget(self.doc_list, 1)
         details_layout.addLayout(assign_layout)
         middle_row.addLayout(details_layout, 1)
@@ -120,9 +134,14 @@ class TagManagerDialog(QDialog):
     def _handle_tag_data(self, event: TagEvent, payload: TagEventPayload):
         """Synchronous receiver for tag bus events."""
         if event == TagEvent.ALL_TAGS:
+            selected_id = self._selected_tag_id()
+            self._tags_snapshot = list(payload["tags"])
             self.tag_list.clear()
             self.doc_list.clear()
             self.btn_mass_assign.setEnabled(False)
+            self.btn_auto_tag.setEnabled(False)
+            self.parent_combo.setEnabled(False)
+            self.btn_set_parent.setEnabled(False)
             for tag in payload["tags"]:
                 item = QListWidgetItem(tag.get("name", ""))
                 item.setData(Qt.ItemDataRole.UserRole, tag.get("id"))
@@ -131,7 +150,8 @@ class TagManagerDialog(QDialog):
                     item.setBackground(QBrush(color))
                     item.setForeground(QBrush(Qt.GlobalColor.white))
                 self.tag_list.addItem(item)
-            if self.tag_list.count() > 0: self.tag_list.setCurrentRow(0)
+            restored = self._find_tag_row(selected_id)
+            if self.tag_list.count() > 0: self.tag_list.setCurrentRow(max(restored, 0))
             else: self.doc_list.addItem("No tags created yet.")
 
         elif event == TagEvent.TAG_DETAILS:
@@ -145,6 +165,9 @@ class TagManagerDialog(QDialog):
                 entry.setData(Qt.ItemDataRole.UserRole, doc.get("doc_id") or "")
                 self.doc_list.addItem(entry)
             self._cached_assigned_docs = docs # Cache for mass assign dialog
+
+        elif event == TagEvent.PARENT_UPDATED and payload.get("error"):
+            QMessageBox.warning(self, "Cannot Nest Tag", payload["error"])
 
     def _update_color_button_style(self):
         self.color_button.setStyleSheet(f"background-color: {self.selected_color}; color: white; border: 1px solid #666; padding: 6px 10px; border-radius: 4px;")
@@ -164,7 +187,43 @@ class TagManagerDialog(QDialog):
         tag_id = item.data(Qt.ItemDataRole.UserRole)
         self.docs_label.setText(f"Documents with '{item.text().strip()}'")
         self.btn_mass_assign.setEnabled(True)
+        self.btn_auto_tag.setEnabled(True)
+        self._populate_parent_choices(tag_id)
         self.bus.tag_action_requested.emit(TagIntent.FETCH_DETAILS, TagPayload(tag_id=tag_id))
+
+    def _populate_parent_choices(self, tag_id):
+        current = next(
+            (tag for tag in getattr(self, "_tags_snapshot", []) if tag.get("id") == tag_id),
+            {},
+        )
+        self.parent_combo.clear()
+        self.parent_combo.addItem("No parent (top level)", None)
+        for tag in getattr(self, "_tags_snapshot", []):
+            if tag.get("id") != tag_id:
+                self.parent_combo.addItem(tag.get("name", ""), tag.get("id"))
+        index = self.parent_combo.findData(current.get("parent_tag_id"))
+        self.parent_combo.setCurrentIndex(max(index, 0))
+        self.parent_combo.setEnabled(True)
+        self.btn_set_parent.setEnabled(True)
+
+    def set_tag_parent(self):
+        tag_id = self._selected_tag_id()
+        if tag_id is None:
+            return
+        self.bus.tag_action_requested.emit(
+            TagIntent.SET_PARENT,
+            TagPayload(tag_id=tag_id, parent_tag_id=self.parent_combo.currentData()),
+        )
+
+    def _selected_tag_id(self):
+        item = self.tag_list.currentItem()
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+    def _find_tag_row(self, tag_id):
+        for row in range(self.tag_list.count()):
+            if self.tag_list.item(row).data(Qt.ItemDataRole.UserRole) == tag_id:
+                return row
+        return -1
 
     def open_mass_assign_dialog(self):
         item = self.tag_list.currentItem()
@@ -178,6 +237,23 @@ class TagManagerDialog(QDialog):
             if exec_as_modal(dialog):
                 self.update_tag_details()
 
+    def open_auto_tag_dialog(self):
+        item = self.tag_list.currentItem()
+        if not item:
+            return
+        from gui.components.dialogs.auto_tag_dialog import AutoTagDialog
+        dialog = AutoTagDialog(
+            getattr(self, "_tags_snapshot", []),
+            item.data(Qt.ItemDataRole.UserRole),
+            self,
+        )
+        dialog.finished.connect(self.update_tag_details)
+        manager = get_for_widget(self)
+        if manager:
+            manager.show_instance(dialog)
+        else:
+            exec_as_modal(dialog)
+
     def add_tag(self):
         name = self.tag_name_input.text().strip()
         if not name: return QMessageBox.warning(self, "Missing Tag Name", "Please enter a tag name.")
@@ -188,6 +264,13 @@ class TagManagerDialog(QDialog):
         item = self.tag_list.currentItem()
         if not item: return QMessageBox.information(self, "No Selection", "Please select a tag to delete.")
         self.bus.tag_action_requested.emit(TagIntent.DELETE, TagPayload(tag_id=item.data(Qt.ItemDataRole.UserRole)))
+
+    def closeEvent(self, event):
+        try:
+            self.bus.tag_data_updated.disconnect(self._handle_tag_data)
+        except (RuntimeError, TypeError):
+            pass
+        super().closeEvent(event)
 
 
 class TagAssignmentDialog(QDialog):

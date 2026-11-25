@@ -10,6 +10,7 @@ from core.events.domains.workflow_events import WorkflowIntent, WorkflowPayload
 from core.models.prompt_models import PromptTraceCall, PromptTraceRecord, collect_step_prompt_usage
 from core.utils.state_resolver import StateResolver
 from core.utils.json_utils import extract_and_heal_json
+from core.engine.workflow_context import WorkflowContextResolver
 
 
 class MasterActionRunner(QThread):
@@ -282,6 +283,7 @@ class MasterActionRunner(QThread):
 
     def run(self):
         try:
+            self._hydrate_workflow_context()
             self._execute_step_list(self.blueprint.steps)
             if not self.job or not self.job.abort_event.is_set():
                 self.action_complete.emit(self.state)
@@ -293,7 +295,23 @@ class MasterActionRunner(QThread):
             self.error.emit(err_msg)
         finally:
             if self.registry and self.job:
-                self.registry.complete_job(self.job.id)
+                complete_threadsafe = getattr(
+                    self.registry,
+                    "complete_job_threadsafe",
+                    None,
+                )
+                if callable(complete_threadsafe):
+                    complete_threadsafe(self.job.id)
+                else:
+                    self.registry.complete_job(self.job.id)
+
+    def _hydrate_workflow_context(self) -> None:
+        """Resolve project filter context once, inside the worker thread."""
+        if not self.project_manager:
+            return
+        self.state = WorkflowContextResolver(self.project_manager).resolve(
+            self.blueprint, self.state
+        )
 
     def _execute_step_list(self, steps: list, path_prefix: str = ""):
         for step in steps:
@@ -369,6 +387,8 @@ class MasterActionRunner(QThread):
             self.step_complete.emit(step.step_id, str(exec_result.raw_value), self.state.copy())
 
     def _resolve_step_model(self, step: ActionStep, resolved_model):
+        if not getattr(self.blueprint, "requires_model_setup", True):
+            return None, None
         role_svc = self.model_role_service
         placeholder = resolved_model in ("{selected_model}", "", None, "None")
         if not placeholder:
@@ -451,14 +471,17 @@ class MasterActionRunner(QThread):
         logic = inputs.get("logic", "False")
         try:
             passed = eval(logic, {}, {"state": self.state})
-            branch_steps = step.if_true if passed else step.if_false
-            if branch_steps:
-                branch_name = "if_true" if passed else "if_false"
-                self._execute_step_list(branch_steps, f"{self.current_step_path or step.step_id}.{branch_name}")
-            return passed
         except Exception as e:
             self.error.emit(f"Branch Logic Error: {e}")
             return False
+        branch_steps = step.if_true if passed else step.if_false
+        if branch_steps:
+            branch_name = "if_true" if passed else "if_false"
+            self._execute_step_list(
+                branch_steps,
+                f"{self.current_step_path or step.step_id}.{branch_name}",
+            )
+        return passed
 
     def _run_foreach(self, step, inputs):
         target_list_raw = inputs.get("list", [])

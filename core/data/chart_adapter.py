@@ -14,7 +14,9 @@ class ChartDataAdapter:
     def adapt(self, state: DataGridState, config: ChartConfig) -> dict[str, Any]:
         headers = list(state.headers)
         selected = {tuple(cell) for cell in (config.source_selection or {}).get("cells", []) if len(cell) == 2}
-        row_indexes = sorted({row for row, _ in selected}) or list(range(len(state.rows)))
+        requested = sorted({row for row, _ in selected}) or list(range(len(state.rows)))
+        # A stored selection can outlive the rows it referenced (re-extraction, dataset switch).
+        row_indexes = [row for row in requested if 0 <= row < len(state.rows)]
         x_field = (config.encodings or {}).get("x") or config.x_field
         x_index = headers.index(x_field) if x_field in headers else 0
         specs = list(config.series or [])

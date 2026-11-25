@@ -31,28 +31,12 @@ class CitationManager:
 
     def extract_metadata(self, doc_path):
         """Extracts metadata locally, falls back to CrossRef if online."""
-        doc = self.pm.get_doc(doc_path)
-        if not doc: return {"doc_id": doc_path}
-
-        meta = doc.metadata or {}
-        result = {
-            "doc_id": doc_path,
-            "title": meta.get("title", ""),
-            "authors": meta.get("author", ""),
-            "year": meta.get("creationDate", "")[2:6] if meta.get("creationDate") else "",
-            "journal": "",
-            "vol_issue": "",
-            "publisher": "",
-            "doi": ""
-        }
-
-        # Fast DOI regex scan (first 3 pages)
-        doi = None
-        for i in range(min(3, len(doc))):
-            match = re.search(r'(10\.\d{4,9}/[-._;()/:A-Z0-9]+)', doc.load_page(i).get_text(), re.IGNORECASE)
-            if match:
-                doi = match.group(1)
-                break
+        import fitz
+        try:
+            with fitz.open(doc_path) as doc:
+                result, doi = self._local_metadata(doc, doc_path)
+        except (OSError, fitz.FileDataError, fitz.FileNotFoundError):
+            return {'doc_id': doc_path}
 
         if doi:
             result["doi"] = doi
@@ -82,3 +66,26 @@ class CitationManager:
                 pass # Completely silent fail for offline use
 
         return result
+
+    def _local_metadata(self, doc, doc_path):
+        meta = doc.metadata or {}
+        result = {
+            "doc_id": doc_path,
+            "title": meta.get("title", ""),
+            "authors": meta.get("author", ""),
+            "year": meta.get("creationDate", "")[2:6] if meta.get("creationDate") else "",
+            "journal": "",
+            "vol_issue": "",
+            "publisher": "",
+            "doi": ""
+        }
+
+        # Fast DOI regex scan (first 3 pages)
+        doi = None
+        for i in range(min(3, len(doc))):
+            match = re.search(r'(10\.\d{4,9}/[-._;()/:A-Z0-9]+)', doc.load_page(i).get_text(), re.IGNORECASE)
+            if match:
+                doi = match.group(1)
+                break
+
+        return result, doi

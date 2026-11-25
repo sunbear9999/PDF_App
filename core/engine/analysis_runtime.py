@@ -366,8 +366,6 @@ class AnalysisRuntime:
         all_relations = self._ensure_argument_chains(all_entities, all_relations, {r["type"] for r in contract.get("allowed_relation_types", [])})
         all_entities, all_relations = self._dedupe_cross_type_repetitions(all_entities, all_relations, contract)
         all_relations = self._drop_confused_duplicate_relations(all_entities, all_relations, contract)
-        all_entities, all_relations = self._ensure_graph_plan_roots(all_entities, all_relations, normalized_chunks, contract)
-        all_relations = self._ensure_connected_master_graph(all_entities, all_relations, contract)
         all_entities = self._ensure_master_argument_node(all_entities, all_relations, normalized_chunks, contract)
         all_entities, all_relations = self._repair_graph_density(
             all_entities,
@@ -464,6 +462,9 @@ class AnalysisRuntime:
         return " ".join(words[:max_words]).strip()
 
     def _synthesis_graph_from_chunks(self, chunks: list, synthesis: str, contract: dict) -> tuple[list, list]:
+        # Legacy synthesis text is not evidence-addressable. Artifact analysis
+        # never turns it into asserted nodes or edges.
+        return [], []
         plan = contract.get("graph_plan") or {}
         chains = plan.get("preferred_chains") or []
         if not chunks or not synthesis.strip() or not chains:
@@ -900,6 +901,8 @@ class AnalysisRuntime:
         return any(word in haystack for word in ("refute", "contradict", "critique", "criticize", "against", "negative"))
 
     def _ensure_connected_master_graph(self, entities: list, relations: list, contract: dict) -> list:
+        # Disconnected components are meaningful and must remain disconnected.
+        return relations
         if len(entities) < 2:
             return relations
         allowed = {item["type"] for item in contract.get("allowed_relation_types", [])}
@@ -1642,30 +1645,12 @@ class AnalysisRuntime:
     def _repair_graph_density(self, entities: list, relations: list, prefix: str, contract: dict, allowed: set[str]) -> tuple[list, list]:
         if not entities:
             return entities, []
-        limits = contract.get("limits") or {}
-        chunk_max = max(1, int(limits.get("max_entities_per_chunk") or 6))
-        if prefix == "master":
-            max_entities = min(24, max(12, chunk_max * 2))
-            max_relations = min(30, max(max_entities - 1, int(limits.get("max_relations_per_chunk") or 10) * 2))
-        else:
-            max_entities = chunk_max
-            max_relations = max(max_entities - 1, int(limits.get("max_relations_per_chunk") or 10))
-
-        if len(entities) > max_entities:
-            entities = self._prioritize_entities_for_graph(entities, relations)[:max_entities]
-        keep = {entity["temp_id"] for entity in entities}
-        relations = [r for r in relations if r.get("source") in keep and r.get("target") in keep]
-
-        existing = {(r.get("source"), r.get("target"), r.get("type")) for r in relations}
-        for rel in self._synthesize_relations(entities, allowed):
-            if len(relations) >= max_relations:
-                break
-            key = (rel.get("source"), rel.get("target"), rel.get("type"))
-            pair = (rel.get("source"), rel.get("target"))
-            if key not in existing and pair not in {(r.get("source"), r.get("target")) for r in relations}:
-                relations.append(rel)
-                existing.add(key)
-        return entities, relations[:max_relations]
+        # Storage is lossless. Rendering controls level-of-detail separately.
+        keep = {entity.get("temp_id") for entity in entities}
+        return entities, [
+            relation for relation in relations
+            if relation.get("source") in keep and relation.get("target") in keep
+        ]
 
     def _prioritize_entities_for_graph(self, entities: list, relations: list) -> list:
         linked = {r.get("source") for r in relations} | {r.get("target") for r in relations}
@@ -1682,6 +1667,8 @@ class AnalysisRuntime:
         return entities
 
     def _ensure_graph_plan_roots(self, entities: list, relations: list, chunks: list, contract: dict) -> tuple[list, list]:
+        # Never infer a root or fabricate evidence-free bridge relations.
+        return entities, relations
         plan = contract.get("graph_plan") or {}
         root_aliases = set(plan.get("roots") or [])
         if not root_aliases or any(self._alias_for_entity(e.get("type"), contract) in root_aliases for e in entities):

@@ -16,6 +16,20 @@ from core.events.domains.document_events import (
     VideoEventPayload,
 )
 from core.events.event_bus import EventBus
+from core.models.memory_models import ConsumerKind, MemoryConsumer
+from core.services.document.transcript_export import export_transcript
+
+# Resident memory of a loaded faster-whisper model (int8/float16 on CPU).
+WHISPER_MODEL_BYTES = {
+    "tiny": 150 * 1024 ** 2, "base": 250 * 1024 ** 2, "small": 700 * 1024 ** 2,
+    "medium": 1800 * 1024 ** 2, "large": 3500 * 1024 ** 2,
+}
+DEFAULT_WHISPER_BYTES = 1024 ** 3
+
+
+def whisper_model_bytes(model_name: str) -> int:
+    name = str(model_name or "").lower()
+    return next((size for key, size in WHISPER_MODEL_BYTES.items() if key in name), DEFAULT_WHISPER_BYTES)
 
 
 class _VideoTranscriptionSignals(QObject):
@@ -25,11 +39,12 @@ class _VideoTranscriptionSignals(QObject):
 
 
 class _VideoTranscriptionTask(QRunnable):
-    def __init__(self, source_id: str, path: str, model_name: str = "small"):
+    def __init__(self, source_id: str, path: str, model_name: str = "small", memory_manager=None):
         super().__init__()
         self.source_id = source_id
         self.path = path
         self.model_name = model_name
+        self.memory_manager = memory_manager
         self.signals = _VideoTranscriptionSignals()
 
     @Slot()
@@ -39,6 +54,9 @@ class _VideoTranscriptionTask(QRunnable):
             os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
             from faster_whisper import WhisperModel
 
+            if self.memory_manager is not None:
+                # Frees idle models first so Whisper does not push the machine into swap.
+                self.memory_manager.reserve(whisper_model_bytes(self.model_name), "speech-to-text")
             try:
                 model = WhisperModel(
                     self.model_name,
@@ -107,10 +125,22 @@ class _VideoTranscriptionTask(QRunnable):
 
 
 class VideoTranscriptionService(QObject):
-    def __init__(self, project_manager, llm_manager=None, parent=None):
+    def __init__(self, project_manager, llm_manager=None, parent=None, memory_manager=None):
         super().__init__(parent)
         self.pm = project_manager
         self.llm = llm_manager
+        self.memory_manager = memory_manager
+        # One transcription at a time: each loads its own Whisper model.
+        self._pool = QThreadPool(self)
+        self._pool.setMaxThreadCount(1)
+        self._running = 0
+        if memory_manager is not None:
+            memory_manager.register_consumer(MemoryConsumer(
+                id="whisper", label="Speech-to-text (Whisper)", kind=ConsumerKind.WORKER.value,
+                usage=lambda: whisper_model_bytes(self.model_name) if self._running else 0,
+                release=lambda _level: 0, busy=lambda: self._running > 0,
+                priority=-1,   # finishes on its own; never released mid-task
+            ))
         self.model_name = os.environ.get("PAPYRUS_WHISPER_MODEL", "small")
         self.processing_policy_service = None
         self.bus = EventBus.get_instance()
@@ -123,19 +153,51 @@ class VideoTranscriptionService(QObject):
     def set_processing_policy_service(self, service) -> None:
         self.processing_policy_service = service
 
+    def export_transcript(self, path, segments, destination, format_id, *, cancel_check=lambda: False):
+        """Export the viewer's transcript snapshot off-thread without rerunning Whisper."""
+        return export_transcript(path, segments, destination, format_id,
+                                 cancel_check=cancel_check, memory_manager=self.memory_manager)
+
+    def export_source_transcript(self, source_id, path, destination, format_id, *, cancel_check=lambda: False):
+        """Read the selected source's saved transcript and export it from a worker."""
+        with self.pm.db_lock:
+            if cancel_check():
+                raise RuntimeError("Export cancelled.")
+            current_path = self.pm.get_source_path(source_id)
+            if not current_path or os.path.realpath(current_path) != os.path.realpath(path):
+                raise ValueError("This source changed or was removed. Select it again before exporting.")
+            transcript = self.pm.get_video_transcript(source_id)
+        return self.export_transcript(path, transcript.get("segments") or [], destination,
+                                      format_id, cancel_check=cancel_check)
+
     def _on_source_added(self, event: SourceEvent, payload: DocumentEventPayload):
         # Audio uses the exact same Whisper transcription pipeline as video —
         # it's "video without a picture."
         if event == SourceEvent.ADDED and payload.source_type in ("video", "audio"):
+            selection = (getattr(payload, "context", None) or {}).get(
+                "processing_selection"
+            )
+            selected_policy = (
+                selection.get("transcription_policy")
+                if isinstance(selection, dict)
+                else getattr(selection, "transcription_policy", None)
+            )
             if self.processing_policy_service is not None:
                 source = {"id": payload.source_id, "path": payload.path, "source_type": payload.source_type}
-                if not self.processing_policy_service.should_auto_transcribe(source):
+                enabled = (
+                    str(selected_policy).lower() in {"always", "auto"}
+                    if selected_policy else
+                    self.processing_policy_service.should_auto_transcribe(source)
+                )
+                if not enabled:
                     return
             self.start_transcription(payload.source_id, payload.path)
 
     def _on_source_removed(self, event: SourceEvent, payload: DocumentEventPayload):
-        if event == SourceEvent.REMOVED and payload.source_type in ("video", "audio") and self.llm:
-            self.llm.remove_source_from_index(payload.source_id, fallback_path=payload.path)
+        # SourceIntelligenceService owns source-wide vector/intelligence purge.
+        # Doing the same Chroma deletion here ran synchronously on the Qt thread
+        # and duplicated the lifecycle cleanup for audio/video sources.
+        return
 
     def _on_source_renamed(self, event: SourceEvent, payload: DocumentEventPayload):
         if event != SourceEvent.RENAMED or payload.source_type not in ("video", "audio") or not self.llm:
@@ -166,12 +228,18 @@ class VideoTranscriptionService(QObject):
             VideoEvent.TRANSCRIPTION_STARTED,
             VideoEventPayload(path=path, source_id=source_id, status="running", model=self.model_name),
         )
-        task = _VideoTranscriptionTask(source_id, path, self.model_name)
+        task = _VideoTranscriptionTask(source_id, path, self.model_name, self.memory_manager)
         self._signals.append(task.signals)
         task.signals.progress.connect(self._on_progress)
         task.signals.completed.connect(self._on_completed)
         task.signals.failed.connect(self._on_failed)
-        QThreadPool.globalInstance().start(task)
+        self._running += 1
+        self._pool.start(task)
+
+    def _task_done(self, signals) -> None:
+        self._running = max(0, self._running - 1)
+        if signals in self._signals:
+            self._signals.remove(signals)
 
     def _on_progress(self, result: dict):
         self.bus.video_status_updated.emit(
@@ -186,6 +254,7 @@ class VideoTranscriptionService(QObject):
         )
 
     def _on_completed(self, result: dict):
+        self._task_done(self.sender())
         source_id = result.get("source_id")
         path = result.get("path")
         segments = result.get("segments") or []
@@ -218,6 +287,7 @@ class VideoTranscriptionService(QObject):
         self.bus.status_message_requested.emit(f"Finished transcribing '{os.path.basename(path)}'.", 5000)
 
     def _on_failed(self, result: dict):
+        self._task_done(self.sender())
         source_id = result.get("source_id")
         path = result.get("path")
         error = result.get("error") or "Unknown transcription error"

@@ -19,6 +19,8 @@ from core.models.extraction_models import (
     CitationMatch,
     InTextCitation,
 )
+from core.services.extraction.legal_citation_patterns import authority_key
+from core.services.extraction.author_year_citations import normalized_name
 
 # Try to use rapidfuzz for faster/better fuzzy matching; fall back to difflib.
 try:
@@ -27,7 +29,7 @@ try:
 except ImportError:
     _HAS_RAPIDFUZZ = False
 
-_EXTRACTOR_VERSION = "1.0"
+_EXTRACTOR_VERSION = "1.1"
 
 # ---- Scoring weights -------------------------------------------------------
 # Weights sum to roughly 1.0 for an exact match on every applicable signal.
@@ -38,17 +40,17 @@ MATCH_WEIGHTS: Dict[str, float] = {
     "author_year_combined":    0.80,  # surname + year both match
     "doi":                     1.00,  # DOI is globally unique
     "url":                     0.90,  # URL is usually unique
-    "footnote_endnote_id":     0.90,  # footnote number match
     "legal_reporter":          0.85,  # legal reporter match
     "author_surname":          0.40,  # surname-only match
-    "year":                    0.30,  # year-only match
+    "year":                    0.20,  # year alone stays under the threshold
     "title_phrase":            0.50,  # partial title phrase match
     "fuzzy_surname":           0.25,  # fuzzy surname (difflib/rapidfuzz)
     "numbering_compatible":    0.35,  # numeric key in plausible range
 }
 _AMBIGUITY_PENALTY = 0.30
 _AMBIGUITY_DELTA = 0.10     # two entries within this → ambiguous
-_MIN_MATCH_THRESHOLD = 0.30 # below this → unmatched
+MIN_MATCH_CONFIDENCE = 0.30  # below this → unmatched
+_MIN_MATCH_THRESHOLD = MIN_MATCH_CONFIDENCE
 
 
 def _fuzzy_ratio(a: str, b: str) -> float:
@@ -58,9 +60,23 @@ def _fuzzy_ratio(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
 
 
+_FUZZY_SURNAME_THRESHOLD = 0.88
+# Keys that identify exactly one entry; a tie elsewhere does not make them
+# ambiguous, so the ambiguity penalty must not erode them.
+_DECISIVE_SIGNALS = ("exact_reference_number", "doi", "url", "legal_reporter")
+
+
 def _clean(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").lower().strip())
 
+
+def _tokens(s: str) -> set:
+    """Word tokens of *s*, so "li" never matches inside "williams"."""
+    return set(re.findall(r"[\w']+", s or ""))
+
+
+# Citation types that name a legal authority rather than a reference-list entry.
+AUTHORITY_CITATION_TYPES = frozenset({"legal", "statute"})
 
 class CitationMatcher:
     """
@@ -92,16 +108,7 @@ class CitationMatcher:
         scored.sort(key=lambda t: t[0], reverse=True)
         best_score, best_breakdown, best_entry = scored[0]
 
-        # Ambiguity: second candidate within delta
-        is_ambiguous = False
-        alternates: List[str] = []
-        if len(scored) > 1:
-            second_score = scored[1][0]
-            if best_score >= _MIN_MATCH_THRESHOLD and (best_score - second_score) <= _AMBIGUITY_DELTA:
-                is_ambiguous = True
-                best_score -= _AMBIGUITY_PENALTY
-                best_breakdown["ambiguity_penalty"] = -_AMBIGUITY_PENALTY
-                alternates = [scored[1][2].entry_id]
+        best_score, is_ambiguous, alternates = _ambiguity(scored, best_score, best_breakdown)
 
         confidence = max(0.0, min(1.0, best_score))
         if confidence < _MIN_MATCH_THRESHOLD:
@@ -110,7 +117,10 @@ class CitationMatcher:
         reason = _make_reason(best_breakdown)
 
         return CitationMatch(
-            match_id=str(uuid.uuid4()),
+            match_id=str(uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"{citation.citation_id}|{best_entry.entry_id}",
+            )),
             in_text_citation_id=citation.citation_id,
             bibliography_entry_id=best_entry.entry_id,
             confidence=confidence,
@@ -125,106 +135,125 @@ class CitationMatcher:
         citations: List[InTextCitation],
         entries: List[BibliographyEntry],
     ) -> List[CitationMatch]:
-        """Match a list of in-text citations against all bibliography entries."""
-        return [m for c in citations if (m := self.match(c, entries)) is not None]
+        """Match occurrences to every referenced entry, including grouped styles.
+
+        Only matches that clear ``MIN_MATCH_CONFIDENCE`` are returned. A
+        below-threshold match still names the highest-scoring entry, so keeping
+        it would silently attach an unmatched citation to an arbitrary
+        reference; the caller records those citations as unmatched instead.
+        """
+        matches: List[CitationMatch] = []
+        for citation in citations:
+            if len(citation.numeric_keys) > 1:
+                seen_entries = set()
+                for key in citation.numeric_keys:
+                    split_citation = InTextCitation(
+                        citation_id=citation.citation_id,
+                        doc_id=citation.doc_id,
+                        raw_text=citation.raw_text,
+                        citation_type=citation.citation_type,
+                        numeric_keys=[key],
+                        author_keys=list(citation.author_keys),
+                        year=citation.year,
+                        location=citation.location,
+                        context_text=citation.context_text,
+                        provenance=citation.provenance,
+                    )
+                    match = self.match(split_citation, entries)
+                    if (
+                        match and match.confidence > 0
+                        and match.bibliography_entry_id not in seen_entries
+                    ):
+                        seen_entries.add(match.bibliography_entry_id)
+                        matches.append(match)
+                continue
+            match = self.match(citation, entries)
+            if match is not None and match.confidence > 0:
+                matches.append(match)
+        return matches
 
     # ------------------------------------------------------------------
 
-    def _score(
-        self,
-        citation: InTextCitation,
-        entry: BibliographyEntry,
-    ) -> Tuple[float, Dict[str, float]]:
-        breakdown: Dict[str, float] = {}
-        total = 0.0
+    def _score(self, citation, entry) -> Tuple[float, Dict[str, float]]:
+        if citation.numeric_keys:
+            return self._score_number(citation, entry)
+        if citation.citation_type in AUTHORITY_CITATION_TYPES | {"legal_short"}:
+            reporter = citation.resolved_authority_key or authority_key(citation.raw_text)
+            if reporter and reporter == authority_key(entry.raw_text):
+                weight = MATCH_WEIGHTS["legal_reporter"]
+                return weight, {"legal_reporter": weight}
+            return 0.0, {}
+        if citation.year and entry.year and _conflicting_year(citation.year, entry.year) \
+                and not _entry_mentions_year(entry, citation.year):
+            return 0.0, {"year_conflict": -1.0}
+        breakdown = self._score_authors(citation, entry)
+        breakdown.update(self._score_identifiers(citation, entry))
+        breakdown.update(self._score_title(citation, entry))
+        return round(sum(breakdown.values()), 4), breakdown
 
-        # ── Numeric key match ─────────────────────────────────────────
-        if citation.citation_type in ("numeric", "superscript") and citation.numeric_keys:
-            ref = entry.reference_number
-            if ref and ref in citation.numeric_keys:
-                w = MATCH_WEIGHTS["exact_reference_number"]
-                breakdown["exact_reference_number"] = w
-                total += w
-            elif ref:
-                # Compatible numbering: ref is plausibly in range of citations
-                try:
-                    n = int(ref)
-                    if any(self._numeric_range_includes(nk, n) for nk in citation.numeric_keys):
-                        w = MATCH_WEIGHTS["numbering_compatible"]
-                        breakdown["numbering_compatible"] = w
-                        total += w
-                except ValueError:
-                    pass
+    @staticmethod
+    def _score_identifiers(citation, entry):
+        breakdown = {}
+        blob = _clean(f"{citation.raw_text} {citation.context_text}").rstrip("/.,;")
+        if entry.doi and _clean(entry.doi) in blob:
+            breakdown["doi"] = MATCH_WEIGHTS["doi"]
+        if entry.url and citation.author_keys and _clean(entry.url).rstrip("/.,;") in blob:
+            breakdown["url"] = MATCH_WEIGHTS["url"]
+        return breakdown
 
-        # ── DOI match ─────────────────────────────────────────────────
-        if citation.author_keys and entry.doi:
-            pass  # DOI rarely appears in-text; handled via bib side
-        # If the in-text citation somehow contains a DOI segment and matches
-        if entry.doi:
-            doi_clean = _clean(entry.doi)
-            if any(doi_clean in _clean(ak) for ak in citation.author_keys):
-                w = MATCH_WEIGHTS["doi"]
-                breakdown["doi"] = w
-                total += w
-
-        # ── Author-year combined ───────────────────────────────────────
-        surname = _clean(entry.first_author_surname)
-        year = (entry.year or "").strip()
-
-        author_matched = False
-        year_matched = citation.year and year and citation.year == year
-
-        if surname:
-            for ak in citation.author_keys:
-                ak_clean = _clean(ak)
-                if surname and surname in ak_clean:
-                    author_matched = True
-                    break
-                ratio = _fuzzy_ratio(surname, ak_clean)
-                if ratio >= 0.88:
-                    author_matched = True
-                    break
-
-        if author_matched and year_matched:
-            w = MATCH_WEIGHTS["author_year_combined"]
-            breakdown["author_year_combined"] = w
-            total += w
+    @staticmethod
+    def _score_authors(citation, entry):
+        breakdown = {}
+        surname = normalized_name(entry.first_author_surname)
+        authors = [normalized_name(author) for author in citation.author_keys]
+        exact = bool(surname) and any(_tokens(surname) <= _tokens(author) for author in authors)
+        fuzzy = bool(surname) and any(_fuzzy_ratio(surname, author) >= _FUZZY_SURNAME_THRESHOLD for author in authors)
+        year_matches = bool(citation.year and entry.year) and (
+            citation.year[:4] == entry.year[:4] or _entry_mentions_year(entry, citation.year))
+        if (exact or fuzzy) and year_matches:
+            breakdown["author_year_combined"] = MATCH_WEIGHTS["author_year_combined"]
         else:
-            if author_matched:
-                w = MATCH_WEIGHTS["author_surname"]
-                breakdown["author_surname"] = w
-                total += w
-                # Fuzzy bonus if it was fuzzy
-                if not any(surname in _clean(ak) for ak in citation.author_keys):
+            if exact or fuzzy:
+                breakdown["author_surname"] = MATCH_WEIGHTS["author_surname"]
+                if not exact:
                     breakdown["fuzzy_surname"] = MATCH_WEIGHTS["fuzzy_surname"]
-                    total += MATCH_WEIGHTS["fuzzy_surname"]
-            if year_matched:
-                w = MATCH_WEIGHTS["year"]
-                breakdown["year"] = w
-                total += w
+            if year_matches:
+                breakdown["year"] = MATCH_WEIGHTS["year"]
+        key = entry.normalized_keys.get("surname_year")
+        if key and any(_clean(key) in _tokens(_clean(author)) for author in citation.author_keys):
+            if "author_year_combined" not in breakdown:
+                breakdown["normalized_key_match"] = MATCH_WEIGHTS["author_year_combined"] * 0.9
+        return breakdown
 
-        # ── Normalized key lookup ──────────────────────────────────────
-        for key_type, key_val in entry.normalized_keys.items():
-            if key_type == "surname_year" and citation.author_keys:
-                for ak in citation.author_keys:
-                    if _clean(key_val) in _clean(ak):
-                        if "author_year_combined" not in breakdown:
-                            w = MATCH_WEIGHTS["author_year_combined"] * 0.9
-                            breakdown["normalized_key_match"] = w
-                            total += w
-                        break
+    @staticmethod
+    def _score_title(citation, entry):
+        if not entry.title or not citation.context_text or not citation.author_keys:
+            return {}
+        title_words = set(_clean(entry.title).split())
+        overlap = title_words & set(_clean(citation.context_text).split())
+        if len(overlap) < 3:
+            return {}
+        weight = MATCH_WEIGHTS["title_phrase"] * len(overlap) / len(title_words)
+        return {"title_phrase": round(weight, 3)} if weight > 0.1 else {}
 
-        # ── Title phrase match ─────────────────────────────────────────
-        if entry.title and citation.context_text:
-            title_words = set(_clean(entry.title).split())
-            context_words = set(_clean(citation.context_text).split())
-            overlap = title_words & context_words
-            if len(overlap) >= 3 and len(title_words) > 0:
-                coverage = len(overlap) / len(title_words)
-                w = MATCH_WEIGHTS["title_phrase"] * min(coverage, 1.0)
-                if w > 0.1:
-                    breakdown["title_phrase"] = round(w, 3)
+    def _score_number(self, citation, entry):
+        breakdown = {}
+        total = 0.0
+        ref = entry.reference_number
+        if ref and ref in citation.numeric_keys:
+            w = MATCH_WEIGHTS["exact_reference_number"]
+            breakdown["exact_reference_number"] = w
+            total += w
+        elif ref:
+            # Compatible numbering: ref is plausibly in range of citations
+            try:
+                n = int(ref)
+                if any(self._numeric_range_includes(nk, n) for nk in citation.numeric_keys):
+                    w = MATCH_WEIGHTS["numbering_compatible"]
+                    breakdown["numbering_compatible"] = w
                     total += w
+            except ValueError:
+                pass
 
         return round(total, 4), breakdown
 
@@ -243,6 +272,18 @@ class CitationMatcher:
         return any(p.strip().isdigit() and int(p.strip()) == ref_num for p in parts)
 
 
+def _ambiguity(scored, best_score, breakdown):
+    decisive = any(signal in breakdown for signal in _DECISIVE_SIGNALS) and (
+        len(scored) == 1 or best_score - scored[1][0] > _AMBIGUITY_DELTA)
+    candidates = [row[2].entry_id for row in scored[1:]
+                  if best_score - row[0] <= _AMBIGUITY_DELTA]
+    ambiguous = bool(candidates and not decisive and best_score >= _MIN_MATCH_THRESHOLD)
+    if ambiguous:
+        breakdown["ambiguity_penalty"] = -_AMBIGUITY_PENALTY
+        best_score -= _AMBIGUITY_PENALTY
+    return best_score, ambiguous, candidates if ambiguous else []
+
+
 def _make_reason(breakdown: Dict[str, float]) -> str:
     """Produce a human-readable reason string from the score breakdown."""
     parts: List[str] = []
@@ -250,6 +291,10 @@ def _make_reason(breakdown: Dict[str, float]) -> str:
         parts.append("reference number matched")
     if "doi" in breakdown:
         parts.append("DOI matched")
+    if "legal_reporter" in breakdown:
+        parts.append("legal authority matched")
+    if "url" in breakdown:
+        parts.append("URL matched")
     if "author_year_combined" in breakdown:
         parts.append("author+year matched")
     elif "normalized_key_match" in breakdown:
@@ -266,3 +311,22 @@ def _make_reason(breakdown: Dict[str, float]) -> str:
     if "ambiguity_penalty" in breakdown:
         parts.append("ambiguous (penalty applied)")
     return "; ".join(parts) if parts else "no clear signal"
+
+
+_ENTRY_YEAR_RE = re.compile(r"\b(1[5-9]\d{2}|20\d{2})[a-z]?\b")
+
+
+def _entry_mentions_year(entry, year: str) -> bool:
+    """MLA/Chicago entries carry several years ("Sugar Production in Hawaii,
+    1946-1960 … vol. 30, 1983"); the parsed ``entry.year`` may be the title's.
+    An exact suffix still has to agree."""
+    if len(year) > 4:
+        return False
+    return year[:4] in set(_ENTRY_YEAR_RE.findall(entry.raw_text or ""))
+
+
+def _conflicting_year(left: str, right: str) -> bool:
+    """Suffixes distinguish same-author/year works; an omitted suffix is weak."""
+    return left[:4] != right[:4] or (
+        len(left) > 4 and len(right) > 4 and left[4:] != right[4:]
+    )

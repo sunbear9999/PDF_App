@@ -18,9 +18,13 @@ from typing import Any, Dict, List, Tuple
 from core.engine.steps.base_step import BaseStep
 from core.plugins.plugin_step_protocol import StepContext
 
-DEFAULT_BASE_NUM_PREDICT = 800
-PER_BLOCK_TOKENS = 60
-MAX_BONUS_TOKENS = 1200
+# Budget headroom so the evidence JSON completes instead of truncating
+# mid-array (which produced "11 quotes claimed but only 4 parsed"). Higher
+# ceiling costs nothing when the model emits fewer quotes — num_predict is a
+# cap, not a target — and the evidence prompt still caps the quote count.
+DEFAULT_BASE_NUM_PREDICT = 1400
+PER_BLOCK_TOKENS = 90
+MAX_BONUS_TOKENS = 3000
 MIN_CANDIDATES = 3
 
 

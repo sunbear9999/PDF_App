@@ -94,9 +94,25 @@ class BlueprintRegistry:
 
 
 def build_default_blueprint_registry() -> BlueprintRegistry:
+    from core.engine.blueprints.process_source import get_source_processing_blueprint
     registry = BlueprintRegistry()
     defaults = [
+        BlueprintDefinition("intelligence_process_source", "Process source intelligence", "Run a local source-processing plan without generative calls.", get_source_processing_blueprint,
+                            ["intelligence_processing"], side_effects=["intelligence_artifacts"], produced_outputs=["source_processing_result"], agent_visible=False),
         BlueprintDefinition("Chat - Universal Agent", "Chat - Universal Agent", "Universal document chat workflow.", lambda pm=None, **_: DefaultBlueprints.get_universal_chat_blueprint(pm), ["chat_dock", "notes_dock", "data_dock"], capabilities=["answer_with_rag", "summarize_documents", "extract_inline_citations"], produced_outputs=["answer", "citation_cards"]),
+        BlueprintDefinition(
+            "project_manifest_update",
+            "Project Manifest Update",
+            "Review a completed answer and persist durable project context without delaying the answer workflow.",
+            lambda pm=None, ui_target="chat_dock", **_: DefaultBlueprints.get_project_manifest_update_blueprint(
+                pm, ui_target=ui_target
+            ),
+            [],
+            capabilities=["update_project_manifest"],
+            produced_outputs=["manifest_update_status"],
+            side_effects=["project_manifest_update"],
+            agent_visible=False,
+        ),
         BlueprintDefinition("Search Terms", "Search Terms", "Generate reusable search terms.", lambda pm=None, model="{selected_model}", **_: DefaultBlueprints.get_search_terms_blueprint(pm, model=model), ["search_tab", "notes_dock", "data_dock"], capabilities=["generate_search_queries", "source_discovery"], required_inputs=[{"key": "goal", "type": "text", "label": "Research goal"}], produced_outputs=["search_terms"]),
         BlueprintDefinition("Organize Workspace", "Organize Workspace", "Organize selected workspace nodes.", DefaultBlueprints.get_workspace_organize_blueprint, ["workspace"], capabilities=["organize_workspace"], side_effects=["workspace_update"]),
         BlueprintDefinition("Group Selected Nodes", "Group Selected Nodes", "Create group nodes for selected evidence.", DefaultBlueprints.get_workspace_group_blueprint, ["workspace"], capabilities=["group_evidence"], side_effects=["workspace_update"]),
@@ -108,6 +124,8 @@ def build_default_blueprint_registry() -> BlueprintRegistry:
         BlueprintDefinition("Brainstorming", "Brainstorming", "Strategy and brainstorming workflow.", lambda pm=None, prompt_key="Brainstorm System - Default", **_: DefaultBlueprints.get_brainstorm_blueprint(pm, prompt_key), ["brainstorm_dock", "notes_dock", "essay_dock"], capabilities=["brainstorm_topics", "refine_research_direction"], required_inputs=[{"key": "query", "type": "text", "label": "Prompt"}], produced_outputs=["ideas"]),
         BlueprintDefinition("Document Analysis", "Document Analysis", "Analyze document chunks with a template.", lambda pm=None, chunks=None, **_: DefaultBlueprints.get_analysis_blueprint(pm, chunks or []), ["analysis_tab", "data_dock"], capabilities=["analyze_documents"], required_inputs=[{"key": "chunks", "type": "list", "label": "Document chunks"}], produced_outputs=["document_analysis"]),
         BlueprintDefinition("Compare Outlines", "Compare Outlines", "Compare two document outlines.", DefaultBlueprints.get_compare_outlines_blueprint, ["analysis_tab", "essay_dock"], capabilities=["compare_sources", "compare_outlines"], produced_outputs=["comparison"]),
+        # Intelligence analysis modes (ids match AnalysisModeRegistry blueprint_ids)
+        BlueprintDefinition("intelligence_analysis_mode", "Universal Analysis Mode", "Run any built-in, user-created, or plugin analysis mode through one artifact-aware master-runner blueprint.", lambda pm=None, analysis_spec=None, **_: DefaultBlueprints.get_intelligence_analysis_mode_blueprint(pm, analysis_spec=analysis_spec), ["analysis_mode", "document_analysis", "research_tab"], capabilities=["answer_with_rag", "argument_mapping", "claim_tracking", "schema_extraction", "timeline", "summarization"], required_inputs=[{"key": "analysis_mode_id", "type": "text", "label": "Registered analysis mode"}], produced_outputs=["analysis_result"]),
         BlueprintDefinition("Master Project Outline", "Master Project Outline", "Generate a master outline for a document/project.", lambda pm=None, doc_name="Project", **_: DefaultBlueprints.get_master_outline_blueprint(pm, doc_name), ["analysis_tab", "essay_dock", "notes_dock"], capabilities=["synthesize_outline", "project_outline"], produced_outputs=["outline"]),
         BlueprintDefinition("Blueprint Architect", "Blueprint Architect", "AI helper for building workflow blueprints.", DefaultBlueprints.get_blueprint_architect, ["custom_tools_tab"], capabilities=["build_workflow_blueprint"], produced_outputs=["blueprint_json"], agent_visible=False),
         BlueprintDefinition("Research Agent Planner", "Research Agent Planner", "Plan the next human-in-the-loop research agent action.", lambda pm=None, **_: DefaultBlueprints.get_research_agent_planner_blueprint(pm), ["research_agent"], capabilities=["plan_research_agent_next_action"], produced_outputs=["agent_plan"], agent_visible=False),

@@ -21,15 +21,8 @@ class AnalysisSendToWorkspaceStep(BaseStep):
     }
 
     def execute(self, context: StepContext, inputs: dict):
-        from core.engine.analysis_runtime import AnalysisRuntime
+        from core.engine.execution_result import SystemEvent
         from core.events.domains.analysis_events import AnalysisEvent, AnalysisPayload
-        from core.events.domains.workspace_events import WorkspaceEvent, WorkspaceEventPayload
-
-        runtime = AnalysisRuntime(
-            context.project_manager,
-            context.prompt_manager,
-            context.ontology_registry,
-        )
 
         result = inputs.get("result") or context.state.get("analysis_result") or {}
         workspace_id = int(
@@ -37,8 +30,19 @@ class AnalysisSendToWorkspaceStep(BaseStep):
             or context.state.get("analysis_workspace_id")
             or 1
         )
-
-        summary = runtime.send_to_workspace(result, workspace_id)
+        graph = {
+            "entities": list(result.get("entities") or []),
+            "relations": list(result.get("relations") or []),
+            "template_title": result.get("template_title") or result.get("title"),
+            "mode_id": result.get("mode_id"),
+            "focus": result.get("focus"),
+        }
+        summary = {
+            "entity_count": len(graph["entities"]),
+            "relation_count": len(graph["relations"]),
+            "workspace_id": workspace_id,
+            "queued_incrementally": True,
+        }
 
         system_events = [
             self.bus_emit_event(
@@ -48,17 +52,18 @@ class AnalysisSendToWorkspaceStep(BaseStep):
                     doc_path=result.get("doc_path"),
                     template_id=result.get("template_id"),
                     run_id=result.get("run_id"),
+                    workspace_id=workspace_id,
                     template={},
                     result=summary if isinstance(summary, dict) else {"value": summary},
                 ),
             ),
-            self.bus_emit_event(
-                "workspace_changed",
-                WorkspaceEvent.CHANGED,
-                WorkspaceEventPayload(
-                    workspace_id=workspace_id,
-                    summary={"analysis_sent_to_workspace": True, **(summary or {})},
-                ),
+            SystemEvent(
+                event_type="bus_emit",
+                payload={
+                    "signal": "workspace_action_requested",
+                    "intent": "IMPORT_GRAPH",
+                    "data": {"graph": graph, "workspace_id": workspace_id},
+                },
             ),
         ]
 

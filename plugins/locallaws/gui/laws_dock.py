@@ -205,6 +205,7 @@ class LocalLawsDock(QWidget):
         self.active_db_label = ""
         self.is_caselaw = False
         self._current_db_data = None   # data from the combo box
+        self._pending_citation: Optional[dict] = None
 
         # Search worker + debounce
         self._search_revision: int = 0
@@ -796,6 +797,10 @@ class LocalLawsDock(QWidget):
 
         self._records = records
         self._render_law_list(records)
+        if self._pending_citation is not None:
+            citation = self._pending_citation
+            self._pending_citation = None
+            self._locate_citation(citation)
 
     def _render_law_list(self, records: list) -> None:
         """
@@ -927,16 +932,41 @@ class LocalLawsDock(QWidget):
     def open_citation(self, citation: dict) -> bool:
         locator = citation.get("source_locator") or {}
         jurisdiction_id = locator.get("jurisdiction_id") or citation.get("source_id", "")
+        target_index = None
         for index in range(self.db_selector.count()):
             data = self.db_selector.itemData(index)
             if isinstance(data, dict) and data.get("file_id") == jurisdiction_id:
-                self.db_selector.setCurrentIndex(index)
+                target_index = index
                 break
 
+        if jurisdiction_id and target_index is None:
+            self.api.notify(
+                "The cited law database is not installed.", level="warning"
+            )
+            return False
+
+        needs_search = bool(self.search_input.text()) or not self._records
+        if target_index is not None:
+            needs_search = needs_search or target_index != self.db_selector.currentIndex()
+        if needs_search:
+            self.search_input.blockSignals(True)
+            self.search_input.clear()
+            self.search_input.blockSignals(False)
+            self._search_debounce.stop()
+            self._pending_citation = dict(citation)
+            if target_index is not None and target_index != self.db_selector.currentIndex():
+                self.db_selector.setCurrentIndex(target_index)
+            else:
+                self._execute_search()
+            return True
+
+        return self._locate_citation(citation)
+
+    def _locate_citation(self, citation: dict) -> bool:
         quote = str(citation.get("quote", "") or "").strip()
         normalized_quote = " ".join(quote.lower().split())
 
-        def score(record):
+        def score(record: dict) -> int:
             v = 0
             normalized_text = " ".join(str(record["text"]).lower().split())
             if normalized_quote and normalized_quote in normalized_text:
@@ -952,7 +982,6 @@ class LocalLawsDock(QWidget):
             )
             return False
 
-        self.search_input.clear()
         for index in range(self.law_list.count()):
             item = self.law_list.item(index)
             if item.data(Qt.ItemDataRole.UserRole) == best:

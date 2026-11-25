@@ -8,8 +8,7 @@ class to inherit from (composition over inheritance per rules.md 2.7).
 
 OCR word blocks (DocumentBlock.bbox, produced by ImageOcrParser) are drawn
 as an invisible clickable layer: clicking a word's bbox creates a highlight
-via the same DocumentIntent.CREATE_HIGHLIGHT_FROM_TEXT path reflowable-text
-highlights use (locator.bbox populated instead of char_start/char_end).
+via the shared verified project-note editor, pinning the OCR block and image.
 """
 from __future__ import annotations
 
@@ -20,9 +19,9 @@ from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QVBoxLayout, QWidget,
 )
 
-from core.events.domains.document_events import DocumentIntent, DocumentPayload, SourceEvent
+from core.events.domains.document_events import SourceEvent
 from core.events.event_bus import EventBus
-from core.models.extraction_models import SourceLocation
+from gui.components.selection_source_loader import SelectionSourceLoader
 
 _BASE_ZOOM = 1.0
 _MIN_ZOOM = 0.1
@@ -64,6 +63,8 @@ class ImageViewer(QWidget):
         self.current_source_path = None
         self._blocks = []
         self._zoom = _BASE_ZOOM
+        self.snapshot = {}
+        self._pending_anchor = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -81,11 +82,20 @@ class ImageViewer(QWidget):
         layout.addWidget(self.view)
 
         self._pixmap_item = None
+        from gui.components.artifact_tasks import ArtifactTaskRunner
+        self.image_runner = ArtifactTaskRunner(app_context, self, service_name='reference_note_service')
+        self.image_runner.completed.connect(self._image_ready)
+        self.image_runner.failed.connect(self._image_failed)
+        self.destroyed.connect(self.image_runner.shutdown)
+        self._image_hash = ''
+        self.loader = SelectionSourceLoader(app_context, self, self._snapshot_ready,
+                                             self._load_failed, self._clear_source)
         self.bus.source_opened.connect(self._on_source_opened)
 
     def _on_source_opened(self, event, payload):
         if event != SourceEvent.OPENED or payload.source_type != "image":
             return
+        self._pending_anchor = (payload.context or {}).get('source_anchor')
         self._load(payload.path)
 
     def _load(self, path: str) -> None:
@@ -94,36 +104,80 @@ class ImageViewer(QWidget):
         self.scene.clear()
         self._pixmap_item = None
         self._blocks = []
+        self.snapshot = {}
 
-        pixmap = QPixmap(path) if path else QPixmap()
-        if pixmap.isNull():
-            self.scene.addText("Could not load image.")
-            return
+        self.image_runner.start('decode_image', path=path)
+
+    def _image_ready(self, operation):
+        result, self.image_runner.result = self.image_runner.result or {}, None
+        self._image_hash = result['source_hash']
+        pixmap = QPixmap.fromImage(result['image'])
         self._pixmap_item = QGraphicsPixmapItem(pixmap)
+        self._pixmap_item.setScale(result['width'] / pixmap.width())
         self.scene.addItem(self._pixmap_item)
-        self.scene.setSceneRect(QRectF(pixmap.rect()))
-
-        des = getattr(self._ctx, "document_extraction_service", None)
-        self._blocks = des.get_blocks(path) if des and path else []
-        for block in self._blocks:
-            if not block.bbox or len(block.bbox) < 4:
-                continue
-            x0, y0, x1, y1 = block.bbox
-            rect_item = _WordBoxItem(QRectF(x0, y0, x1 - x0, y1 - y0), block, self)
-            self.scene.addItem(rect_item)
-
+        self.scene.setSceneRect(QRectF(0, 0, result['width'], result['height']))
+        block_ids = [span['block_id'] for span in (self._pending_anchor or {}).get('spans') or [] if span.get('block_id')]
+        self.loader.load(self.current_source_path, block_ids or None)
         self._zoom = _BASE_ZOOM
         self.view.resetTransform()
 
-    def _on_word_clicked(self, block) -> None:
-        path = self.current_source_path
-        if not path:
+    def _snapshot_ready(self, snapshot):
+        if snapshot['source_hash'] != self._image_hash:
+            self._load_failed('The image changed after it was decoded. Reopen the source.')
             return
-        locator = SourceLocation(doc_id=path, bbox=list(block.bbox) if block.bbox else None)
-        self.bus.document_action_requested.emit(
-            DocumentIntent.CREATE_HIGHLIGHT_FROM_TEXT,
-            DocumentPayload(path=path, text=block.exact_text, locator=locator),
-        )
+        self.snapshot, self._blocks = snapshot, snapshot['blocks']
+        for block in self._blocks:
+            if block.bbox and len(block.bbox) == 4:
+                x0, y0, x1, y1 = block.bbox
+                self.scene.addItem(_WordBoxItem(QRectF(x0, y0, x1-x0, y1-y0), block, self))
+        if self._pending_anchor:
+            anchor, self._pending_anchor = self._pending_anchor, None
+            if not self._show_spans(anchor.get('spans') or []):
+                self._load_failed('The saved image region no longer matches its OCR block.')
+
+    def _load_failed(self, error):
+        self.snapshot, self._blocks, self._pending_anchor = {}, [], None
+        self._title_label.setText(error + ' Run source extraction in Intelligence → Processing.')
+
+    def _image_failed(self, error):
+        self._clear_source()
+        self._title_label.setText('Could not display the image: ' + error)
+
+    def _clear_source(self):
+        self.image_runner.cancel()
+        self.current_source_path, self.snapshot, self._blocks = None, {}, []
+        self._pending_anchor, self._pixmap_item = None, None
+        self.scene.clear()
+
+    def _on_word_clicked(self, block) -> None:
+        if not self.snapshot or block not in self._blocks:
+            return
+        from gui.components.dialogs.reference_note_dialog import open_selection_note
+        selection = {key: self.snapshot[key] for key in ('source_id', 'source_path', 'source_hash', 'blocks_hash')}
+        selection.update(quote=block.exact_text, block_spans=[{'block_id': block.block_id,
+                         'char_start': 0, 'char_end': len(block.exact_text)}])
+        open_selection_note(self._ctx, selection, parent=self)
+
+    def show_anchor(self, path, anchor):
+        if path == self.current_source_path and self.snapshot:
+            return self._show_spans(anchor.get('spans') or [])
+        self._pending_anchor = anchor
+        self._load(path)
+        return True
+
+    def _show_spans(self, spans):
+        blocks = {block.block_id: block for block in self._blocks}
+        matches = []
+        for span in spans:
+            block = blocks.get(span.get('block_id'))
+            if not block or block.exact_text[span.get('char_start', 0):span.get('char_end')] != span.get('quote'):
+                return False
+            if not block.bbox or list(span.get('rects') or []) != [list(block.bbox)]:
+                return False
+            matches.append(block)
+        for block in matches:
+            self._flash_block(block)
+        return bool(matches)
 
     # ------------------------------------------------------------ zoom
     def zoom_in(self):
@@ -168,4 +222,6 @@ class ImageViewer(QWidget):
         flash.setOpacity(0.4)
         self.scene.addItem(flash)
         from PySide6.QtCore import QTimer
-        QTimer.singleShot(900, lambda: self.scene.removeItem(flash) if flash.scene() else None)
+        import shiboken6
+        QTimer.singleShot(900, self, lambda: self.scene.removeItem(flash)
+                          if shiboken6.isValid(flash) and flash.scene() else None)

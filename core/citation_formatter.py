@@ -67,6 +67,8 @@ class CitationFormatter:
     def format_entry(self, record: Dict[str, Any]) -> str:
         if not record:
             return ""
+        if self._is_archive_record(record):
+            return self._format_archive_entry(record)
         authors = self.parse_authors(record.get("authors") or record.get("creators"))
         year = record.get("year") or self._year_from_date(record.get("date")) or "n.d."
         title = record.get("title") or "Untitled Document"
@@ -114,6 +116,40 @@ class CitationFormatter:
         if doi_url:
             citation += str(doi_url)
         return re.sub(r"\s+", " ", citation).strip()
+
+    def _is_archive_record(self, record: Dict[str, Any]) -> bool:
+        item_type = str(record.get("item_type") or "").lower()
+        return item_type in {"newspaperarticle", "newspaper", "archive", "manuscript"} or any(
+            record.get(key) for key in ("archive", "edition", "page", "accessed")
+        )
+
+    def _format_archive_entry(self, record: Dict[str, Any]) -> str:
+        authors = self.parse_authors(record.get("authors") or record.get("creators"))
+        author = self._format_authors_for_bibliography(authors) if authors else ""
+        title = record.get("title") or "Untitled archival source"
+        publication = record.get("journal") or record.get("publicationTitle") or ""
+        date = record.get("date") or record.get("year") or "n.d."
+        edition = record.get("edition") or ""
+        page = record.get("page") or ""
+        archive = record.get("archive") or record.get("publisher") or ""
+        url = record.get("url") or ""
+        accessed = record.get("accessed") or record.get("access_date") or ""
+        details = ", ".join(filter(None, [
+            f"ed. {edition}" if edition else "",
+            f"p. {page}" if page else "",
+        ]))
+        if self.style == "MLA":
+            lead = f'{author}. "{title}."' if author else f'"{title}."'
+            parts = [lead, publication, date, details, archive, url]
+            if accessed:
+                parts.append(f"Accessed {accessed}")
+        elif self.style == "Chicago":
+            lead = f'{author}. "{title}."' if author else f'"{title}."'
+            parts = [lead, publication, date, details, archive, url]
+        else:
+            lead = f"{author}." if author else ""
+            parts = [lead, f"({date}).", f"{title}.", publication, details, archive, url]
+        return re.sub(r"\s+", " ", ". ".join(str(p).strip(" .") for p in parts if p)).strip() + "."
 
     def format_entries(self, records: Iterable[Dict[str, Any]]) -> List[str]:
         return sorted(c for c in (self.format_entry(record) for record in records) if c)

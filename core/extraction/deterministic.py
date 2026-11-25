@@ -21,6 +21,11 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
+
+from core.models.extraction_models import DocumentBlock
+from core.services.extraction.date_extraction_service import DateExtractionService
+from core.services.extraction.citation_text_adapter import citation_index_from_pages, bibliography_entries_from_text
+from core.services.extraction.semantic_block_service import BIBLIOGRAPHY_HEADING_RE
 from typing import Any, Callable, ClassVar, Dict, List, Optional, Tuple
 
 
@@ -252,593 +257,175 @@ def _extract_persons(full_text: str, page_texts: List[Tuple[int, str]],
     return sorted(result, key=lambda g: -len(g.mentions))
 
 
+# Lazily-shared spaCy wrapper so Discovery person/org extraction uses trained
+# NER (which distinguishes PERSON vs ORG and rejects non-entities) instead of a
+# capitalization rule. Falls back to the regex extractor when spaCy is absent.
+def _get_lang_service():
+    # The shared pipeline: a private copy here loaded spaCy a second time.
+    try:
+        from core.services.extraction.language_feature_service import shared_language_service
+        return shared_language_service()
+    except Exception:
+        return None
+
+
+def _extract_persons_ner(full_text: str, page_texts: List[Tuple[int, str]],
+                         author_exclusions: frozenset) -> List[ExtractedEntityGroup]:
+    """spaCy-NER person/org extraction — same output shape as _extract_persons.
+
+    Uses a trained classifier to separate PERSON/ORG and reject non-entities,
+    fixing the case-heuristic conflation while preserving the Discovery save path.
+    """
+    lang = _get_lang_service()
+    if not lang or not lang.is_available():
+        return _extract_persons(full_text, page_texts, author_exclusions)
+    _, page_offsets = _build_full_text(page_texts)
+    entities = lang.filter_person_org_entities(lang.get_entities(full_text))
+
+    groups: Dict[str, List[Tuple[str, str, int, int]]] = {}
+    for surface, label, start, end in entities:
+        name = (surface or "").strip()
+        if len(name) < 3 or any(w in _NOISE_WORDS for w in name.split()):
+            continue
+        norm = re.sub(r"[^\w\s]", "", name.lower()).strip()
+        if not norm or any(_similar(norm, ex) > 0.85 for ex in author_exclusions):
+            continue
+        merged = False
+        for key in list(groups.keys()):
+            if _similar(norm, key) > 0.88:
+                groups[key].append((name, label, start, end))
+                merged = True
+                break
+        if not merged:
+            groups[norm] = [(name, label, start, end)]
+
+    result = []
+    for hits in groups.values():
+        counts: Dict[str, int] = {}
+        labels: Dict[str, int] = {}
+        for name, label, _, _ in hits:
+            counts[name] = counts.get(name, 0) + 1
+            labels[label] = labels.get(label, 0) + 1
+        canonical = max(counts, key=counts.__getitem__)
+        dominant_label = max(labels, key=labels.__getitem__)
+        mentions = []
+        seen_ctx: set = set()
+        for name, _label, start, end in hits:
+            ctx = _sentence_for_span(full_text, start, end)
+            if ctx in seen_ctx:
+                continue
+            seen_ctx.add(ctx)
+            mentions.append(ExtractedMention(
+                text=name, context=ctx, page_num=_page_for_offset(start, page_offsets)))
+        if mentions:
+            auto_desc = " ".join(dict.fromkeys(m.context[:200] for m in mentions[:2]))[:400]
+            result.append(ExtractedEntityGroup(
+                canonical_text=canonical,
+                entity_type="entity.person_org",
+                mentions=mentions,
+                extra_properties={"role": dominant_label, "description": auto_desc},
+            ))
+    return sorted(result, key=lambda g: -len(g.mentions))
+
+
 def _run_person_org_extractor(
     full_text: str, page_texts: List[Tuple[int, str]]
 ) -> List[ExtractedEntityGroup]:
     # Pre-collect bibliography author names for exclusion
     bib_authors = _collect_bibliography_authors(full_text)
-    return _extract_persons(full_text, page_texts, bib_authors)
+    # Prefer trained NER; the capitalization heuristic remains as a fallback.
+    return _extract_persons_ner(full_text, page_texts, bib_authors)
 
 
 # ---------------------------------------------------------------------------
 # DateEventExtractor
 # ---------------------------------------------------------------------------
 
-_DATE_PATTERNS = [
-    # Full date: January 15, 2020 / 15 January 2020  (case-insensitive for "july 1, 1880" etc.)
-    (re.compile(
-        r"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)"
-        r"\s+\d{1,2},?\s+\d{4}\b",
-        re.IGNORECASE,
-    ), lambda m: _normalize_month_day_year(m.group()),
-       lambda m: _title_date(m.group().strip())),
-    (re.compile(
-        r"\b\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)"
-        r"\s+\d{4}\b",
-        re.IGNORECASE,
-    ), lambda m: _normalize_day_month_year(m.group()),
-       lambda m: _title_date(m.group().strip())),
-    # ISO: 2020-01-15
-    (re.compile(r"\b(1[89]\d{2}|20\d{2})[-/](0?[1-9]|1[0-2])[-/](0?[1-9]|[12]\d|3[01])\b"),
-     lambda m: f"{m.group(1)}-{m.group(2).zfill(2)}-{m.group(3).zfill(2)}"),
-    # Numeric: 01/15/2020 or 15/01/2020 (ambiguous — store as-is)
-    (re.compile(r"\b(0?[1-9]|1[0-2])/(0?[1-9]|[12]\d|3[01])/(1[89]\d{2}|20\d{2})\b"),
-     lambda m: f"{m.group(3)}-{m.group(1).zfill(2)}-{m.group(2).zfill(2)}"),
-    # Year-month: January 2020 (case-insensitive)
-    (re.compile(
-        r"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)"
-        r"\s+(1[89]\d{2}|20\d{2})\b",
-        re.IGNORECASE,
-    ), lambda m: _normalize_month_year(m.group()),
-       lambda m: _title_date(m.group().strip())),
-    # Bare year with preposition: in 1995 / of 2020 / circa 1880 — surface shows only the year
-    (re.compile(r"\b(?:in|of|by|since|until|before|after|around|circa|c\.)\s+(1[7-9]\d{2}|20\d{2})\b"),
-     lambda m: m.group(1),
-     lambda m: m.group(1)),
-    # Decade: the 1990s / early 2000s
-    (re.compile(r"\b(?:the\s+)?(?:early|mid|late\s+)?(1[89]\d|20\d)0s\b"),
-     lambda m: m.group(0).strip()),
-    # Standalone 4-digit year (last resort — no context keyword required).
-    # Handles bare "1880" in short documents and years in parenthetical citations like "(1954)".
-    # Must come last so more specific patterns (with month names or prepositions) take precedence.
-    # Deduplication in _run_date_extractor prevents double-counting with the preposition pattern.
-    (re.compile(r"(?<!\d)(1[7-9]\d{2}|20\d{2})(?!\d)"),
-     lambda m: m.group(1),
-     lambda m: m.group(1)),
-]
-
-_MONTHS = {"january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
-           "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12}
-
-_MONTH_TITLE_RE = re.compile(
-    r"\b(january|february|march|april|may|june|july|august|september|october|november|december)\b",
-    re.IGNORECASE,
-)
-
-
-def _title_date(s: str) -> str:
-    """Title-case the month name in a date string so display is "July 1, 1880" not "july 1, 1880"."""
-    return _MONTH_TITLE_RE.sub(lambda x: x.group().capitalize(), s)
-
-
-def _normalize_month_day_year(s: str) -> str:
-    parts = re.split(r"[\s,]+", s.strip())
-    if len(parts) >= 3:
-        m = _MONTHS.get(parts[0].lower(), 0)
-        return f"{parts[-1]}-{m:02d}-{int(parts[1].rstrip(',').rstrip('.')):02d}"
-    return s
-
-
-def _normalize_day_month_year(s: str) -> str:
-    parts = re.split(r"[\s,]+", s.strip())
-    if len(parts) >= 3:
-        m = _MONTHS.get(parts[1].lower(), 0)
-        return f"{parts[2]}-{m:02d}-{int(parts[0]):02d}"
-    return s
-
-
-def _normalize_month_year(s: str) -> str:
-    parts = re.split(r"\s+", s.strip())
-    if len(parts) >= 2:
-        m = _MONTHS.get(parts[0].lower(), 0)
-        return f"{parts[1]}-{m:02d}"
-    return s
-
-
 def _run_date_extractor(
     full_text: str, page_texts: List[Tuple[int, str]]
 ) -> List[ExtractedEntityGroup]:
-    _, page_offsets = _build_full_text(page_texts)
-
-    groups: Dict[str, List[Tuple[str, int, int]]] = {}  # norm_key → [(surface, start, end)]
-
-    # Track char-level spans already claimed by higher-priority patterns.
-    # The standalone year pattern (last entry) uses this to avoid re-matching
-    # "1880" from within an already-matched "July 1, 1880" or "in 1880".
-    claimed: List[Tuple[int, int]] = []
-
-    for idx, pattern_spec in enumerate(_DATE_PATTERNS):
-        pattern, normaliser = pattern_spec[0], pattern_spec[1]
-        surface_fn = pattern_spec[2] if len(pattern_spec) > 2 else None
-        is_fallback = (idx == len(_DATE_PATTERNS) - 1)
-        for m in pattern.finditer(full_text):
-            s, e = m.start(), m.end()
-            # Skip standalone year hits already covered by a more specific pattern
-            if is_fallback and any(cs <= s and e <= ce for cs, ce in claimed):
-                continue
-            surface = surface_fn(m) if surface_fn else m.group().strip()
-            try:
-                norm = normaliser(m)
-            except Exception:
-                norm = surface
-            groups.setdefault(norm, []).append((surface, s, e))
-            claimed.append((s, e))
-
-    result = []
-    for norm_key, hits in groups.items():
-        canonical = hits[0][0]  # first occurrence surface form
-        mentions = []
-        seen_ctx: set = set()
-        for surface, start, end in hits:
-            ctx = _sentence_for_span(full_text, start, end)
-            if ctx in seen_ctx:
-                continue
-            seen_ctx.add(ctx)
-            page_num = _page_for_offset(start, page_offsets)
-            mentions.append(ExtractedMention(text=surface, context=ctx, page_num=page_num))
-        if mentions:
-            auto_desc = " ".join(dict.fromkeys(m.context[:200] for m in mentions[:2]))[:400]
-            result.append(ExtractedEntityGroup(
-                canonical_text=canonical,
-                entity_type="entity.timeline_event",
-                mentions=mentions,
-                extra_properties={"date": norm_key, "certainty": "confirmed", "description": auto_desc},
-            ))
-
-    return sorted(result, key=lambda g: g.extra_properties.get("date", ""))
+    """Legacy result shape over the canonical contextual date producer."""
+    blocks = [DocumentBlock(f"legacy_p{page}_{index}", "legacy", page,
+                            "paragraph", text, text)
+              for index, (page, text) in enumerate(page_texts)]
+    groups = {}
+    for item in DateExtractionService().extract_dates(blocks, "legacy"):
+        if not item.metadata.get("timeline_eligible"):
+            continue
+        surface = item.exact_text
+        group = groups.setdefault(item.normalized_date, ExtractedEntityGroup(
+            canonical_text=surface, entity_type="entity.timeline_event",
+            mentions=[], extra_properties={
+                "date": item.normalized_date, "certainty": item.certainty,
+                **item.metadata,
+            },
+        ))
+        group.mentions.append(ExtractedMention(
+            text=surface, context=item.context_text, page_num=item.location.page_num,
+        ))
+    for group in groups.values():
+        group.extra_properties["description"] = " ".join(
+            dict.fromkeys(m.context[:200] for m in group.mentions[:2]))[:400]
+    return sorted(groups.values(), key=lambda g: g.extra_properties["date"])
 
 
 # ---------------------------------------------------------------------------
 # CitationExtractor
 # ---------------------------------------------------------------------------
 
-_BIB_HEADERS = re.compile(
-    r"(?im)^[ \t]*"
-    r"(?:(?:list\s+of\s+)?references?(?:\s+cited|\s+and\s+notes?|\s+and\s+bibliography)?|"
-    r"bibliography(?:\s+and\s+further\s+reading)?|"
-    r"works?\s+cited|"
-    r"literature\s+cited|"
-    r"(?:list\s+of\s+)?sources?(?:\s+cited)?|"
-    r"footnotes?|"
-    r"endnotes?|"
-    r"(?:list\s+of\s+)?citations?)"
-    r"[\s.:]*$"
-)
-_YEAR_RE = re.compile(r"\b(1[5-9]\d{2}|20\d{2})\b")
-_NUMERIC_ENTRY = re.compile(r"^\s*[\[\(]?(\d+)[\]\)\.]\s+")
-
-# Parenthetical: (Smith, 2020), (Smith et al., 2020), (Smith & Jones, 2020),
-#                (Smith 2020), (Smith, Jones & Brown, 2020, p. 45)
-_AUTHOR_YEAR_INTEXT = re.compile(
-    r"\("
-    r"([A-Z][a-záéíóúñüÀ-Ö\-]+"                      # first author surname
-    r"(?:(?:\s*[,&]\s*|\s+and\s+)"                     # author separator
-    r"[A-Z][a-záéíóúñüÀ-Ö\-]+)*"                      # additional authors
-    r"(?:,?\s+et\s+al\.?)?"                             # optional et al.
-    r")"
-    r"[\s,;]+"                                           # separator(s) before year
-    r"(1[5-9]\d{2}|20\d{2}[a-z]?)"                    # year
-    r"(?:[,;][^)]{0,30})?"                              # optional page/chapter ref
-    r"\)",
-    re.UNICODE,
-)
-
-# Inline: Smith (2020), Smith et al. (2020), Smith and Jones (2020)
-_AUTHOR_YEAR_INLINE = re.compile(
-    r"([A-Z][a-záéíóúñüÀ-Ö\-]+"
-    r"(?:(?:\s+(?:and|&)\s+[A-Z][a-záéíóúñüÀ-Ö\-]+)*)"
-    r"(?:,?\s+et\s+al\.?)?"
-    r")"
-    r"\s+\((1[5-9]\d{2}|20\d{2}[a-z]?)\)",
-    re.UNICODE,
-)
-
-_NUMERIC_INTEXT = re.compile(r"\[(\d+(?:[,;\s\-–]+\d+)*)\]")
-
-# Unicode superscript citation markers — e.g. ¹²  ³ ⁴⁵ etc.
-# These are injected by _extract_pages_fitz via HTML <sup> detection, so they
-# represent actual PDF superscripts rather than arbitrary digits.
-_SUPERSCRIPT_INTEXT = re.compile(r"([⁰¹²³⁴⁵⁶⁷⁸⁹]+(?:[,\s\-–]*[⁰¹²³⁴⁵⁶⁷⁸⁹]+)*)")
-
-
-@dataclass
-class _CitationEntry:
-    key: str
-    authors: List[str]
-    year: str
-    title: str
-    journal: str
-    raw_text: str
-    is_numeric: bool = False
-    bib_page_num: int = -1   # 0-based page in the source PDF where the bib entry lives
-
-
 def _collect_bibliography_authors(full_text: str) -> frozenset:
-    """Extract author names from bibliography for PersonOrg exclusion."""
-    # Use LAST match so ToC "References" on page 2 doesn't shadow the real section
-    bib_matches = list(_BIB_HEADERS.finditer(full_text))
-    if not bib_matches:
+    """Reuse bibliography authors for PersonOrg exclusion, after the final heading."""
+    lines = full_text.splitlines()
+    headings = [i for i, line in enumerate(lines) if BIBLIOGRAPHY_HEADING_RE.fullmatch(line)]
+    if not headings:
         return frozenset()
-    bib_text = full_text[bib_matches[-1].start():]
-    authors = set()
-    for line in bib_text.splitlines():
-        # Author names precede the year in most citation styles
-        year_m = _YEAR_RE.search(line)
-        if year_m:
-            author_part = line[:year_m.start()].strip().strip("[]()0123456789. ")
-            # Split by comma / semicolon / "&" / "and"
-            for raw in re.split(r"[,;]|\band\b|&", author_part):
-                name = raw.strip().strip(".")
-                if 2 <= len(name) <= 50:
-                    authors.add(name.lower())
-    return frozenset(authors)
-
-
-_BIB_ENTRY_NUMERIC = re.compile(r"^\s*[\[\(]?(\d{1,3})[\]\)\.]\s+")
-_BIB_ENTRY_AUTHOR_START = re.compile(r"^[A-ZÀ-Ö][a-záéíóúñü\-]+(?:,\s+[A-ZÀ-Ö]|\s+[A-ZÀ-Ö])")
-_FOOTNOTE_SUPER = re.compile(r"^\s*(\d{1,3})\s+[A-Z]")  # "1 Smith..." footnote style
-_SUPERSCRIPT_CHARS = "⁰¹²³⁴⁵⁶⁷⁸⁹"
-_SUPERSCRIPT_MAP = str.maketrans(_SUPERSCRIPT_CHARS, "0123456789")
-# Bib entry that starts with a Unicode superscript number (e.g. "¹Smith, J...")
-_BIB_ENTRY_SUPERSCRIPT = re.compile(r"^\s*([⁰¹²³⁴⁵⁶⁷⁸⁹]+)\s*")
-
-
-def _parse_entry(raw: str) -> Optional["_CitationEntry"]:
-    """Parse one raw bibliography/footnote entry string into a _CitationEntry."""
-    raw = raw.strip()
-    if len(raw) < 10:
-        return None
-
-    # Strip numeric prefix [1], (1), 1., 1)
-    num_m = _BIB_ENTRY_NUMERIC.match(raw)
-    entry_num: Optional[str] = None
-    clean = raw
-    if num_m:
-        entry_num = num_m.group(1)
-        clean = raw[num_m.end():]
-    else:
-        # Try footnote-style: "1 Smith..." (digit-space-Uppercase)
-        fn_m = _FOOTNOTE_SUPER.match(raw)
-        if fn_m:
-            entry_num = fn_m.group(1)
-            clean = raw[fn_m.end() - len(fn_m.group(0).lstrip().split()[1]):]  # after digit+space
-        else:
-            # Try Unicode superscript prefix: "¹Smith..." or "¹ Smith..."
-            sup_m = _BIB_ENTRY_SUPERSCRIPT.match(raw)
-            if sup_m:
-                entry_num = sup_m.group(1).translate(_SUPERSCRIPT_MAP)
-                clean = raw[sup_m.end():]
-
-    clean = clean.strip()
-
-    # Find the year (handles APA parenthetical, Chicago inline, or bare year)
-    year_m = _YEAR_RE.search(clean)
-    year = year_m.group(1) if year_m else ""
-
-    if year_m:
-        author_raw = clean[:year_m.start()].strip().strip("().,; ")
-        after_year = clean[year_m.end():].strip().strip(".,)( ")
-    else:
-        # No year found — treat all as author_raw, extract title heuristically
-        author_raw = ""
-        after_year = clean
-
-    # Author parsing: handles "Last, F.", "First Last", semicolon-separated lists
-    def _split_authors(text: str) -> List[str]:
-        parts = re.split(r"\s*;\s*|\s+and\s+|\s*&\s*", text)
-        out = []
-        for p in parts:
-            p = p.strip().strip(".,")
-            # Each part might be "Last, First" or "First Last" or abbreviation
-            if not p or len(p) < 2:
-                continue
-            # Strip trailing initials artefacts like "J." alone
-            if re.fullmatch(r"[A-ZÀ-Ö]\.?", p):
-                continue
-            out.append(p)
-        return out or ([text.strip()] if text.strip() else [])
-
-    # If author_raw contains commas heavily, split on "LastName, F." sub-patterns
-    if "," in author_raw:
-        # Try APA-style: "Smith, J., Jones, M., & Doe, A."
-        # Better: split on ", " when followed by an uppercase initial (author separator)
-        apa_parts = re.split(r",\s+(?=[A-ZÀ-Ö]\.?\s|(?:and|&)\s)", author_raw)
-        authors_list = [p.strip().strip(".,&").strip() for p in apa_parts if p.strip()]
-        # Remove pure-initial entries that slipped through
-        authors_list = [a for a in authors_list if len(a) > 2 and not re.fullmatch(r"[A-ZÀ-Ö]\.?", a)]
-        if not authors_list:
-            authors_list = _split_authors(author_raw)
-    else:
-        authors_list = _split_authors(author_raw)
-
-    if not authors_list and author_raw:
-        authors_list = [author_raw]
-
-    first_author = authors_list[0] if authors_list else ""
-    # Derive last name: "Smith, J." → "Smith"; "John Smith" → "Smith"
-    if "," in first_author:
-        first_author_last = first_author.split(",")[0].strip()
-    else:
-        parts = first_author.split()
-        first_author_last = parts[-1] if parts else first_author
-
-    # Title: first sentence-ending clause after year, or first 120 chars
-    title = ""
-    journal = ""
-    if after_year:
-        dot_pos = after_year.find(". ", 2)
-        title = after_year[:dot_pos].strip() if dot_pos > 0 else after_year[:120].strip()
-        journal = after_year[dot_pos + 2:].strip() if dot_pos > 0 else ""
-        # Remove surrounding quotes from title (e.g. MLA style)
-        title = title.strip('"\'""''')
-
-    key = f"[{entry_num}]" if entry_num else f"{first_author_last}{year}"
-
-    return _CitationEntry(
-        key=key,
-        authors=authors_list,
-        year=year,
-        title=title,
-        journal=journal[:120],
-        raw_text=raw,
-        is_numeric=bool(entry_num),
-    )
-
-
-def _parse_bibliography(full_text: str) -> Tuple[List[_CitationEntry], bool, int]:
-    """
-    Locate bibliography / footnote sections in full_text and parse all entries.
-
-    Returns (entries, numeric_style, bib_char_offset).
-    bib_char_offset is -1 when no bibliography section was found.
-
-    Handles: numbered [N]/(N)/N., author-year, footnote-style, entries that
-    span page breaks (i.e. are split across lines in the PDF extraction).
-    """
-    # Collect all bibliography section start offsets.
-    # Use the LAST match — "References" in a Table of Contents appears early;
-    # the actual bibliography is always near the end of the document.
-    bib_starts = [(m.start(), m.end()) for m in _BIB_HEADERS.finditer(full_text)]
-    if not bib_starts:
-        return [], False, -1
-
-    bib_offset = bib_starts[-1][0]  # last occurrence = actual bibliography
-    bib_text = full_text[bib_offset:][:40_000]
-
-    lines = bib_text.splitlines()
-    if not lines:
-        return [], False
-
-    # Detect style from first non-header, non-blank line
-    numeric_style = False
-    for line in lines[1:6]:
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if (_BIB_ENTRY_NUMERIC.match(stripped) or _FOOTNOTE_SUPER.match(stripped)
-                or _BIB_ENTRY_SUPERSCRIPT.match(stripped)):
-            numeric_style = True
-        break
-
-    # Segment into raw entry blocks.
-    # A new entry starts when:
-    #   - A blank line is encountered (flush current, start fresh)
-    #   - A numeric marker appears [N]/(N)/N. (numeric style, any position)
-    #   - A line starts with an author-name pattern AND contains a year
-    #     (author-year style, with or without preceding blank line)
-    raw_entries: List[str] = []
-    current: List[str] = []
-    prev_blank = False
-
-    for line in lines[1:]:
-        stripped = line.strip()
-        normalised = stripped.translate(_SUPERSCRIPT_MAP)
-
-        if not stripped:
-            prev_blank = True
-            if current:
-                raw_entries.append(" ".join(current))
-                current = []
-            continue
-
-        is_new_numbered = bool(_BIB_ENTRY_NUMERIC.match(normalised) or _FOOTNOTE_SUPER.match(normalised))
-        # Author-year: split when line starts with "Last, I" or "Last First" AND has a year.
-        # The year requirement avoids splitting on continuation lines that happen to start
-        # with a capitalised proper noun.
-        is_new_author = (
-            bool(_BIB_ENTRY_AUTHOR_START.match(normalised))
-            and bool(_YEAR_RE.search(normalised))
-        )
-
-        starts_new_entry = (
-            (numeric_style and is_new_numbered)
-            or (not numeric_style and is_new_author and current)
-        )
-
-        if starts_new_entry:
-            raw_entries.append(" ".join(current))
-            current = [stripped]
-        else:
-            current.append(stripped)
-
-        prev_blank = False
-
-    if current:
-        raw_entries.append(" ".join(current))
-
-    # Fallback: if still only 1 block, try splitting on numeric markers inline
-    if len(raw_entries) <= 1 and len(bib_text) > 200:
-        combined = " ".join(line.strip() for line in lines[1:])
-        splits = re.split(r"(?<=\s)[\[\(]?\d{1,3}[\]\)\.]\s+(?=[A-Z])", combined)
-        if len(splits) > 2:
-            raw_entries = [s.strip() for s in splits if s.strip()]
-
-    entries: List[_CitationEntry] = []
-    seen_keys: set = set()
-    for raw in raw_entries:
-        entry = _parse_entry(raw)
-        if entry and entry.key not in seen_keys:
-            seen_keys.add(entry.key)
-            entries.append(entry)
-
-    return entries, numeric_style, bib_offset
+    entries = bibliography_entries_from_text("\n".join(lines[headings[-1] + 1:]))
+    return frozenset(author.casefold() for entry in entries for author in entry.authors)
 
 
 def _run_citation_extractor(
     full_text: str, page_texts: List[Tuple[int, str]]
 ) -> List[ExtractedEntityGroup]:
-    _, page_offsets = _build_full_text(page_texts)
-
-    # Phase 1: parse bibliography
-    entries, numeric_style, bib_char_offset = _parse_bibliography(full_text)
-
-    # Page number where the bibliography section begins (0-based)
-    bib_page_num = _page_for_offset(bib_char_offset, page_offsets) if bib_char_offset >= 0 else -1
-
-    # Restrict in-text scanning to body text (before the LAST bibliography header).
-    # Using the last match avoids false positives from ToC entries like "References...58".
-    bib_matches = list(_BIB_HEADERS.finditer(full_text))
-    bib_start = bib_matches[-1].start() if bib_matches else len(full_text)
-    body_text = full_text[:bib_start]
-
-    # Phase 2: build lookup tables for matching in-text → bib entry
-    key_map: Dict[str, _CitationEntry] = {e.key: e for e in entries}
-    author_year_map: Dict[str, _CitationEntry] = {}
-    for e in entries:
-        if not e.is_numeric and e.year:
-            # Index ALL authors so "Jones (2020)" matches a "Smith & Jones (2020)" entry
-            for author in e.authors:
-                author = author.strip()
-                if not author:
-                    continue
-                if "," in author:
-                    last_name = author.split(",")[0].strip()
-                else:
-                    parts = author.split()
-                    last_name = parts[-1] if parts else author
-                if len(last_name) > 1:
-                    ak = f"{last_name.lower()}{e.year}"
-                    author_year_map.setdefault(ak, e)  # first-author wins ties
-
-    # Phase 3: collect in-text hits from body text only
-    hits: Dict[str, List[Tuple[str, int, int]]] = {}
-
-    if numeric_style or not entries:
-        # 1. Standard bracketed: [1], [2, 3], [4-6]
-        for m in _NUMERIC_INTEXT.finditer(body_text):
-            inner = m.group(1)
-            # Find all standalone numbers and ranges
-            tokens = re.findall(r'\d+(?:\s*[\-–]\s*\d+)?', inner)
-            for token in tokens:
-                token = token.strip()
-                if '-' in token or '–' in token:
-                    # Expand ranges (e.g. "4-6" becomes 4, 5, 6)
-                    parts = re.split(r'[\-–]', token)
-                    start, end = int(parts[0].strip()), int(parts[-1].strip())
-                    if 1 <= start < end <= 200: # Sanity bound
-                        for n in range(start, end + 1):
-                            hits.setdefault(f"[{n}]", []).append((m.group(), m.start(), m.end()))
-                elif token.isdigit():
-                    hits.setdefault(f"[{token}]", []).append((m.group(), m.start(), m.end()))
-
-        # 2. Unicode superscript chars: ¹², ³⁻⁵ etc.
-        for m in _SUPERSCRIPT_INTEXT.finditer(body_text):
-            nums_str = m.group(1).translate(_SUPERSCRIPT_MAP)
-            tokens = re.findall(r'\d+(?:\s*[\-–]\s*\d+)?', nums_str)
-            for token in tokens:
-                token = token.strip()
-                if '-' in token or '–' in token:
-                    parts = re.split(r'[\-–]', token)
-                    start, end = int(parts[0].strip()), int(parts[-1].strip())
-                    if 1 <= start < end <= 200:
-                        for n in range(start, end + 1):
-                            hits.setdefault(f"[{n}]", []).append((m.group(1), m.start(), m.end()))
-                elif token.isdigit():
-                    # Treat contiguous digits as a single number to prevent false splits
-                    hits.setdefault(f"[{token}]", []).append((m.group(1), m.start(), m.end()))
-    # Author-year patterns — skip if numeric style (would create false orphan groups)
-    if not numeric_style:
-        # Parenthetical: (Smith, 2020) or (Smith et al., 2020)
-        for m in _AUTHOR_YEAR_INTEXT.finditer(body_text):
-            last = m.group(1).split()[0].rstrip(",.;:")
-            year = m.group(2)
-            ak = f"{last.lower()}{year[:4]}"
-            entry = author_year_map.get(ak)
-            k = entry.key if entry else f"{last}{year[:4]}"
-            hits.setdefault(k, []).append((m.group(), m.start(), m.end()))
-
-        # Inline: Smith (2020) found that... — only add when matched to a known bib entry
-        # (too noisy as orphan detector; avoids false "Jones2020" from "Smith and Jones (2020)")
-        for m in _AUTHOR_YEAR_INLINE.finditer(body_text):
-            last = m.group(1).split()[0].rstrip(",.;:")
-            year = m.group(2)
-            ak = f"{last.lower()}{year[:4]}"
-            entry = author_year_map.get(ak)
-            if entry:  # only record when we can tie it to a known bibliography entry
-                hits.setdefault(entry.key, []).append((m.group(), m.start(), m.end()))
-
-    # Phase 4: build one group per bibliography entry, attaching all citing sentences
-    def _make_mentions(hit_list: List[Tuple[str, int, int]]) -> List[ExtractedMention]:
-        seen_ctx: set = set()
-        result_mentions = []
-        for surface, start, end in hit_list:
-            ctx = _sentence_for_span(full_text, start, end)
-            if ctx in seen_ctx:
-                continue
-            seen_ctx.add(ctx)
-            result_mentions.append(ExtractedMention(
-                text=surface,
-                context=ctx,
-                page_num=_page_for_offset(start, page_offsets),
+    """Discovery representation of the shared citation index; no second parser."""
+    index = citation_index_from_pages(page_texts)
+    by_id = {citation.citation_id: citation for citation in index.in_text_citations}
+    grouped = {}
+    for match in index.citation_matches:
+        if not match.is_ambiguous:
+            grouped.setdefault(match.bibliography_entry_id, []).append(by_id[match.in_text_citation_id])
+    result = [_legacy_citation_group(entry, grouped.get(entry.entry_id, []))
+              for entry in index.bibliography_entries]
+    for citation in index.in_text_citations:
+        if citation.citation_id in index.unmatched_in_text_ids or any(
+                match.in_text_citation_id == citation.citation_id and match.is_ambiguous
+                for match in index.citation_matches):
+            result.append(ExtractedEntityGroup(
+                canonical_text=citation.raw_text, entity_type="entity.source",
+                mentions=[_legacy_citation_mention(citation)],
+                extra_properties={"citation_key": citation.raw_text,
+                                  "unresolved": True, "bibliography_raw": ""},
             ))
-        return result_mentions
+    return sorted(result, key=lambda group: -len(group.mentions))
 
-    def _make_group(entry: _CitationEntry, mentions: List[ExtractedMention]) -> ExtractedEntityGroup:
-        return ExtractedEntityGroup(
-            canonical_text=entry.title or entry.key,
-            entity_type="entity.source",
-            mentions=mentions,
-            extra_properties={
-                "citation_key": entry.key,
-                "authors": entry.authors,
-                "year": entry.year,
-                "title": entry.title,
-                "journal": entry.journal,
-                "bibliography_raw": entry.raw_text,
-                "bib_page_num": bib_page_num,
-            },
-        )
 
-    result: List[ExtractedEntityGroup] = []
-    matched_keys: set = set()
+def _legacy_citation_mention(citation):
+    return ExtractedMention(text=citation.raw_text, context=citation.context_text,
+                            page_num=citation.location.page_num if citation.location else -1)
 
-    # Entries with bibliography — one card each, body = citing sentences
-    for entry in entries:
-        matched_keys.add(entry.key)
-        mentions = _make_mentions(hits.get(entry.key, []))
-        result.append(_make_group(entry, mentions))
 
-    # In-text citations with no matching bib entry (orphans) — still show them
-    for k, hit_list in hits.items():
-        if k in matched_keys:
-            continue
-        orphan = _CitationEntry(key=k, authors=[], year="", title=k, journal="", raw_text=k)
-        mentions = _make_mentions(hit_list)
-        if mentions:
-            result.append(_make_group(orphan, mentions))
-
-    # Sort: entries with in-text matches first, then bib-only, sorted by mention count desc
-    return sorted(result, key=lambda g: -len(g.mentions))
+def _legacy_citation_group(entry, citations):
+    key = f"[{entry.reference_number}]" if entry.reference_number else (
+        f"{entry.first_author_surname}{entry.year or ''}" if entry.first_author_surname
+        else entry.normalized_keys.get("authority") or entry.raw_text)
+    return ExtractedEntityGroup(
+        canonical_text=entry.title or entry.raw_text or key,
+        entity_type="entity.source",
+        mentions=[_legacy_citation_mention(citation) for citation in citations],
+        extra_properties={"citation_key": key, "authors": entry.authors,
+                          "year": entry.year or "", "title": entry.title or "",
+                          "journal": entry.source_title or "", "bibliography_raw": entry.raw_text,
+                          "bib_page_num": entry.location.page_num if entry.location else -1},
+    )
 
 
 # ---------------------------------------------------------------------------

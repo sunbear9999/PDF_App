@@ -1,0 +1,182 @@
+[
+    {
+        "id": "default_argument_map",
+        "title": "Argument Map",
+        "instructions": "Build a clear 3-level argument map: (1) one central thesis as the root claim, (2) 2\u20134 distinctly named support reasons as bridge nodes \u2014 each describing a different pillar of the argument, (3) specific evidence quotes as leaf nodes attached beneath their relevant support reason. In each chunk, select short verbatim quotes that reveal the author\u2019s concrete positions, causal evidence, or key data points. During synthesis, assign each quote to exactly one named support pillar and list its quote IDs inline on that pillar\u2019s numbered line. The final graph must show a clear, navigable hierarchy: thesis \u2192 named reasons \u2192 evidence.",
+        "schema": "{\n  \"graph_artifacts\": \"claims, reasoning nodes, exact quote evidence, and typed relations\",\n  \"workspace_goal\": \"quote -> reasoning -> claim chains that can be sent to a board\"\n}",
+        "node_types": [
+            "entity.claim",
+            "entity.reasoning",
+            "entity.quote"
+        ],
+        "relation_types": [
+            "relation.supports",
+            "relation.reasons",
+            "relation.refutes",
+            "relation.contradicts"
+        ],
+        "allow_text_nodes": false,
+        "chunk_prompt_key": "Graph Analysis Chunk Observations System",
+        "master_prompt_key": "Graph Analysis Master System",
+        "limits": {
+            "chunk_pages": 4,
+            "max_chunk_chars": 14000,
+            "max_master_chars": 36000,
+            "num_ctx": 24576,
+            "chunk_num_predict": 1400,
+            "synthesis_num_predict": 3500,
+            "master_num_predict": 4000,
+            "max_entities_per_chunk": 12,
+            "max_relations_per_chunk": 16,
+            "max_quotes_per_chunk": 5,
+            "quote_words": 10,
+            "max_quote_words": 18,
+            "explanation_words": 10,
+            "max_sections": 7,
+            "max_analysis_quotes": 16
+        },
+        "analysis_template_version": 13,
+        "chunk_query_prompt_key": "Graph Analysis Chunk Observations Query",
+        "master_query_prompt_key": "Graph Analysis Master Query",
+        "synthesis_prompt_key": "Graph Analysis Synthesis System",
+        "synthesis_query_prompt_key": "Graph Analysis Synthesis Query",
+        "deterministic_passes": [
+            {
+                "pass_id": "quote_candidate_rank",
+                "top_n": 25,
+                "params": {}
+            }
+        ]
+    },
+    {
+        "id": "methodology_tracker",
+        "title": "Methodology Tracker",
+        "instructions": "Build a structured map of how the document's methodology works. Identify the overarching method or approach as a finding node (the 'what'), then 2\u20134 method steps as bridge nodes ordered by phase (design \u2192 collection \u2192 processing \u2192 analysis \u2192 validation). Attach specific evidence quotes beneath each step to prove that step was actually used or described. Show how steps produce findings using 'produces' relations. Each step must be distinctly named with its actual role \u2014 never use generic names like 'Step 1' or 'Method'.",
+        "schema": "{\n  \"graph_artifacts\": \"method nodes, ordered method_step nodes, quote evidence, finding outputs, and typed relations\",\n  \"workspace_goal\": \"quote \u2192 method_step \u2192 method \u2192 finding chains showing the research process\"\n}",
+        "node_types": [
+            "entity.method",
+            "entity.method_step",
+            "entity.quote",
+            "entity.finding"
+        ],
+        "relation_types": [
+            "relation.supports",
+            "relation.part_of",
+            "relation.next_step",
+            "relation.produces",
+            "relation.derived_from",
+            "relation.critiques",
+            "relation.informs"
+        ],
+        "allow_text_nodes": false,
+        "chunk_prompt_key": "Graph Analysis Chunk Observations System",
+        "master_prompt_key": "Graph Analysis Master System",
+        "limits": {
+            "chunk_pages": 4,
+            "max_chunk_chars": 14000,
+            "max_master_chars": 36000,
+            "num_ctx": 24576,
+            "chunk_num_predict": 1400,
+            "synthesis_num_predict": 3500,
+            "master_num_predict": 4000,
+            "max_entities_per_chunk": 12,
+            "max_relations_per_chunk": 16,
+            "max_quotes_per_chunk": 5,
+            "quote_words": 10,
+            "max_quote_words": 18,
+            "explanation_words": 10
+        },
+        "analysis_template_version": 1,
+        "chunk_query_prompt_key": "Graph Analysis Chunk Observations Query",
+        "master_query_prompt_key": "Graph Analysis Master Query",
+        "synthesis_prompt_key": "Graph Analysis Synthesis System",
+        "synthesis_query_prompt_key": "Graph Analysis Synthesis Query"
+    },
+    {
+        "id": "relationship_network",
+        "title": "Relationship / Network Tracker",
+        "instructions": "Build a map of how people and organizations in the document connect, collaborate, affiliate with, or oppose each other. Identify key person_org nodes as bridges, backed by quote evidence proving their connections. Produce a central finding node summarizing the overall network dynamic or power structure. Each person_org must have a meaningful name (never 'Author' or 'Researcher'). Every relationship edge must be backed by at least one quote. Capture affiliations, collaborations, and oppositions using their specific relation types.",
+        "schema": "{\n  \"graph_artifacts\": \"person_org nodes, finding summary, quote evidence, and typed relationship edges\",\n  \"workspace_goal\": \"quote \u2192 person_org \u2192 finding chains revealing the relational structure\"\n}",
+        "node_types": [
+            "entity.quote",
+            "entity.person_org",
+            "entity.finding"
+        ],
+        "relation_types": [
+            "relation.supports",
+            "relation.collaborated_with",
+            "relation.affiliated_with",
+            "relation.opposed_to",
+            "relation.authored_by",
+            "relation.derived_from",
+            "relation.informs"
+        ],
+        "allow_text_nodes": false,
+        "chunk_prompt_key": "Graph Analysis Chunk Observations System",
+        "master_prompt_key": "Graph Analysis Master System",
+        "limits": {
+            "chunk_pages": 4,
+            "max_chunk_chars": 14000,
+            "max_master_chars": 36000,
+            "num_ctx": 24576,
+            "chunk_num_predict": 1400,
+            "synthesis_num_predict": 3500,
+            "master_num_predict": 4000,
+            "max_entities_per_chunk": 12,
+            "max_relations_per_chunk": 16,
+            "max_quotes_per_chunk": 5,
+            "quote_words": 10,
+            "max_quote_words": 18,
+            "explanation_words": 10
+        },
+        "analysis_template_version": 1,
+        "chunk_query_prompt_key": "Graph Analysis Chunk Observations Query",
+        "master_query_prompt_key": "Graph Analysis Master Query",
+        "synthesis_prompt_key": "Graph Analysis Synthesis System",
+        "synthesis_query_prompt_key": "Graph Analysis Synthesis Query"
+    },
+    {
+        "id": "timeline_tracker",
+        "title": "Timeline Tracker",
+        "instructions": "Build a chronological map of key events described in the document. Identify 2\u20134 named time periods as top-level containers, then place specific timeline_event nodes within each period showing what happened. Attach quote evidence to each event proving it occurred. Show causal chains using 'led_to' relations where one event triggered another. Produce a central finding node summarizing the overall trajectory or arc. Event names must be specific and descriptive \u2014 never 'Event 1' or 'Occurrence'. Time period names must reflect their actual era or phase.",
+        "schema": "{\n  \"graph_artifacts\": \"timeline_event nodes, time_period containers, finding summary, quote evidence, and temporal relations\",\n  \"workspace_goal\": \"quote \u2192 timeline_event \u2192 time_period \u2192 finding chains revealing the temporal arc\"\n}",
+        "node_types": [
+            "entity.quote",
+            "entity.timeline_event",
+            "entity.time_period",
+            "entity.finding"
+        ],
+        "relation_types": [
+            "relation.supports",
+            "relation.before_after",
+            "relation.within_period",
+            "relation.led_to",
+            "relation.causes",
+            "relation.derived_from",
+            "relation.informs"
+        ],
+        "allow_text_nodes": false,
+        "chunk_prompt_key": "Graph Analysis Chunk Observations System",
+        "master_prompt_key": "Graph Analysis Master System",
+        "limits": {
+            "chunk_pages": 4,
+            "max_chunk_chars": 14000,
+            "max_master_chars": 36000,
+            "num_ctx": 24576,
+            "chunk_num_predict": 1400,
+            "synthesis_num_predict": 3500,
+            "master_num_predict": 4000,
+            "max_entities_per_chunk": 12,
+            "max_relations_per_chunk": 16,
+            "max_quotes_per_chunk": 5,
+            "quote_words": 10,
+            "max_quote_words": 18,
+            "explanation_words": 10
+        },
+        "analysis_template_version": 1,
+        "chunk_query_prompt_key": "Graph Analysis Chunk Observations Query",
+        "master_query_prompt_key": "Graph Analysis Master Query",
+        "synthesis_prompt_key": "Graph Analysis Synthesis System",
+        "synthesis_query_prompt_key": "Graph Analysis Synthesis Query"
+    }
+]

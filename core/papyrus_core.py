@@ -1,4 +1,5 @@
 # core/papyrus_core.py
+import json
 import os
 import sys
 from core.events.event_bus import EventBus
@@ -17,9 +18,15 @@ from core.ontology.registry import OntologyRegistry
 
 from core.services.project.embedding_service import EmbeddingService
 from core.services.project.project_app_service import ProjectAppService
+from core.services.project.network_access_service import NetworkAccessService
 from core.services.document.document_app_service import DocumentAppService
+from core.services.document.source_import_service import SourceImportService
 from core.services.document.document_ingestion_service import DocumentIngestionService
 from core.services.document.ocr_app_service import OCRAppService
+from core.registries.memory_consumer_registry import MemoryConsumerRegistry
+from core.services.system.memory_manager_service import MemoryManagerService
+from core.services.system.memory_consumers import register_core_consumers
+from core.services.extraction.language_feature_service import set_shared_language_service
 from core.services.content.notes_app_service import NotesAppService
 from core.services.content.tag_app_service import TagAppService
 from core.services.content.essay_app_service import EssayAppService
@@ -60,6 +67,7 @@ from core.services.extraction.pdf_layout_parser import PDFLayoutParser, Document
 from core.services.extraction.semantic_block_service import SemanticBlockService
 from core.services.extraction.section_structure_extractor import SectionStructureExtractor
 from core.services.extraction.language_feature_service import LanguageFeatureService
+from core.services.extraction.sentence_segmentation_service import SentenceSegmentationService
 from core.services.extraction.entity_extraction_service import EntityExtractionService
 from core.services.extraction.date_extraction_service import DateExtractionService
 from core.services.extraction.bibliography_extraction_service import BibliographyExtractionService
@@ -69,6 +77,11 @@ from core.services.extraction.table_extraction_service import TableExtractionSer
 from core.services.extraction.ranking_feature_service import RankingFeatureService
 from core.registries.deterministic_pass_registry import DeterministicPassRegistry
 from core.services.intelligence.artifact_service import ArtifactService
+from core.services.intelligence.pdf_anchor_geometry import PdfAnchorGeometry
+from core.services.intelligence.source_anchor_resolver import SourceAnchorResolver
+from core.registries.intelligence_producer_registry import IntelligenceProducerRegistry
+from core.services.intelligence.producers.builtin import register_builtin_producers
+from core.services.intelligence.processing_plan_service import ProcessingPlanService
 from core.services.intelligence.context_packing_service import ContextPackingService
 from core.services.intelligence.hybrid_retrieval_service import HybridRetrievalService
 from core.services.intelligence.intelligence_scheduler import IntelligenceScheduler
@@ -88,6 +101,7 @@ class PapyrusCore:
         self.user_data_dir = user_data_dir
         self.bus = EventBus.get_instance()
         self.process_registry = ProcessRegistry()
+        self.network_access_service = NetworkAccessService(user_data_dir)
         
         # 1. Base Managers
         # Source format dispatch — instantiated before ProjectManager so
@@ -122,6 +136,16 @@ class PapyrusCore:
         
         self.llm_manager = LocalLLMManager()
         self.llm_manager.set_audit_logger(self.project_manager.log_ai_interaction_threadsafe)
+        # Provider-level instructions (e.g. "JSON Mode Instruction") honour user
+        # edits made in the Prompt Editor instead of shipped defaults.
+        self.llm_manager.prompt_resolver = self.prompt_manager.get_prompt
+        # One owner for memory: model preload/unload, reserves, caches (rules §1.3).
+        self.memory_consumer_registry = MemoryConsumerRegistry()
+        self.memory_manager_service = MemoryManagerService(
+            user_data_dir=user_data_dir, bus=self.bus, llm_manager=self.llm_manager,
+            registry=self.memory_consumer_registry,
+        )
+        self.memory_manager_service.start()
         # Phase 7: will be set after document_extraction_service is created
 
         # Load any prompt files shipped with the app under assets/prompts/
@@ -299,6 +323,12 @@ class PapyrusCore:
         self.document_extraction_service.set_date_extraction_service(
             self.date_extraction_service
         )
+        self.sentence_segmentation_service = SentenceSegmentationService(
+            language_feature_service=self.language_feature_service,
+        )
+        self.document_extraction_service.set_sentence_segmentation_service(
+            self.sentence_segmentation_service
+        )
 
         # Phase 3: citation services
         _bib_svc = BibliographyExtractionService(self.pattern_detector_registry)
@@ -327,8 +357,15 @@ class PapyrusCore:
         self.embedding_service = EmbeddingService(self.llm_manager, self.project_manager)
         self.project_app_service = ProjectAppService(self.project_manager, self.llm_manager)
         self.document_app_service = DocumentAppService(self.project_manager)
+        self.source_import_service = SourceImportService(
+            self.project_manager,
+            self.document_extraction_service,
+            self.bus,
+        )
         self.tts_app_service = TTSAppService()
-        self.ocr_app_service = OCRAppService(self.project_manager)
+        self.ocr_app_service = OCRAppService(
+            self.project_manager, memory_manager=self.memory_manager_service,
+            process_registry=self.process_registry)
         self.dictionary_app_service = DictionaryAppService(self.dictionary_manager)
         self.citation_app_service = CitationAppService(self.project_manager, self.citation_manager)
         self.notes_app_service = NotesAppService(self.project_manager)
@@ -351,6 +388,8 @@ class PapyrusCore:
         self.workspace_layout_service = WorkspaceLayoutService(self.project_manager, self.llm_manager, self.bus)
         self.ontology_service = OntologyService(self.project_manager, self.bus, self.ontology_registry)
         self.data_dock_service = DataDockService(self.project_manager, self.data_provider_registry, self.bus)
+        from core.services.data.structured_query_service import StructuredQueryService
+        self.structured_query_service = StructuredQueryService(self.data_dock_service)
         from core.services.data.pdf_grid_extraction_service import PdfGridExtractionService
         self.pdf_grid_extraction_service = PdfGridExtractionService(self.data_provider_registry)
 
@@ -358,7 +397,6 @@ class PapyrusCore:
         self.table_extraction_service = TableExtractionService(
             project_manager=self.project_manager,
             extraction_cache=self.extraction_cache,
-            pdf_grid_extraction_service=self.pdf_grid_extraction_service,
             data_dock_service=self.data_dock_service,
         )
         self.document_extraction_service.set_table_extraction_service(
@@ -381,20 +419,151 @@ class PapyrusCore:
             bus=self.bus,
         )
         self.llm_manager.set_model_role_service(self.model_role_service)
+        from core.services.intelligence.model_dependency_service import ModelDependencyService
+        self.model_dependency_service = ModelDependencyService(
+            models_root=os.path.join(user_data_dir, "models")
+        )
+        from core.registries.intelligence_stage_registry import (
+            IntelligenceStageRegistry,
+            builtin_stage_specs,
+        )
+        self.intelligence_stage_registry = IntelligenceStageRegistry()
+        for _stage_spec in builtin_stage_specs():
+            self.intelligence_stage_registry.register(_stage_spec)
         self.processing_policy_service = ProcessingPolicyService(
             project_manager=self.project_manager,
             source_format_registry=self.source_format_registry,
+            stage_registry=self.intelligence_stage_registry,
         )
         self.artifact_service = ArtifactService(
             project_manager=self.project_manager,
             document_extraction_service=self.document_extraction_service,
         )
+        # Shared "jump to source" resolution: artifact -> typed anchor with an
+        # explicit precision, used by every navigation surface and plugins.
+        self.source_anchor_resolver = SourceAnchorResolver(
+            project_manager=self.project_manager,
+            artifact_service=self.artifact_service,
+            document_extraction_service=self.document_extraction_service,
+            pdf_geometry=PdfAnchorGeometry(),
+        )
+        from core.services.intelligence.reference_note_service import ReferenceNoteService
+        self.reference_note_service = ReferenceNoteService(self.project_manager, self.artifact_service, self.source_anchor_resolver)
+        from core.services.intelligence.cross_encoder_reranker import CrossEncoderReranker
+        self.cross_encoder_reranker = CrossEncoderReranker(
+            model_dir=self.model_dependency_service.model_dir("cross_encoder")
+        )
+        self.model_dependency_service.register_reload_callback(
+            "cross_encoder", self.cross_encoder_reranker.reload
+        )
         self.hybrid_retrieval_service = HybridRetrievalService(
             project_manager=self.project_manager,
             llm_manager=self.llm_manager,
             artifact_service=self.artifact_service,
+            cross_encoder=self.cross_encoder_reranker,
+            language_feature_service=self.language_feature_service,
+            structured_query_service=self.structured_query_service,
         )
         self.context_packing_service = ContextPackingService()
+
+        # Layered, pluggable entity extraction (replaces case-heuristic logic).
+        from core.services.intelligence.entity_extractor import (
+            EntityExtractorRegistry, GeneralNERExtractor, DomainPatternExtractor,
+        )
+        from core.services.intelligence.entity_extraction_pipeline import EntityExtractionPipeline
+        self.entity_extractor_registry = EntityExtractorRegistry()
+        self.entity_extractor_registry.register(
+            GeneralNERExtractor(language_feature_service=self.language_feature_service)
+        )
+        self.entity_extractor_registry.register(DomainPatternExtractor())
+        from core.services.intelligence.document_links import DocumentLinkService
+        self.document_link_service = DocumentLinkService(
+            self.project_manager, self.artifact_service, self.document_extraction_service, self.memory_manager_service)
+        for edge_type in ("refers_to_note", "links_to"):
+            self.artifact_service.register_edge_type(edge_type, {"structural": True})
+        from core.services.intelligence.entities.project_lexicon import LexiconDigest
+        self.artifact_service.register_edge_type("same_as_candidate", {"structural": False})
+        self.artifact_service.register_edge_type("refers_to", {"structural": True})
+        self.intelligence_stage_registry.register_project_input("entity_lexicon", LexiconDigest())
+        from core.services.intelligence.entities.evidence_setup import compose_entity_evidence
+        compose_entity_evidence(self)   # optional AI Setup resources: gazetteer, GLiNER, language model
+        self.entity_extraction_pipeline = EntityExtractionPipeline(
+            pattern_registry=self.pattern_detector_registry,
+            project_manager=self.project_manager,
+            artifact_service=self.artifact_service,
+            extractor_registry=self.entity_extractor_registry,
+            document_extraction_service=self.document_extraction_service,
+            evidence_registry=self.entity_evidence_registry,
+            language_model=self.language_id_runtime,
+        )
+
+        # Deterministic CLAIMS + SUMMARIES stage engines (no LLM at ingestion).
+        from core.services.intelligence.sentence_classifier_service import SentenceClassifierService
+        from core.services.intelligence.extractive_summarizer import ExtractiveSummarizer
+        from core.services.intelligence.nli_relation_scorer import NliRelationScorer
+        from core.services.intelligence.zero_shot_role_enhancer import (
+            DEFAULT_HYPOTHESES, ZeroShotRoleEnhancer,
+        )
+        _enhancer_dir = self.model_dependency_service.model_dir("sentence_role_enhancer")
+        self._role_enhancer_scorer = NliRelationScorer(_enhancer_dir)
+        self.sentence_classifier_service = SentenceClassifierService(
+            model_dir=self.model_dependency_service.model_dir(
+                "sentence_classifier"
+            ),
+            enhancer=ZeroShotRoleEnhancer(self._role_enhancer_scorer, _enhancer_dir),
+        )
+        self.model_dependency_service.register_reload_callback(
+            "sentence_classifier", self.sentence_classifier_service.reload
+        )
+        self.model_dependency_service.register_reload_callback(
+            "sentence_role_enhancer", self._role_enhancer_scorer.reload
+        )
+        self.model_dependency_service.register_extra_file_provider(
+            "sentence_role_hypotheses",
+            lambda: json.dumps(DEFAULT_HYPOTHESES, indent=2, ensure_ascii=False),
+        )
+        self.nli_relation_scorer = NliRelationScorer(
+            self.model_dependency_service.model_dir("nli_relation")
+        )
+        self.model_dependency_service.register_reload_callback(
+            "nli_relation", self.nli_relation_scorer.reload
+        )
+        self.extractive_summarizer = ExtractiveSummarizer()
+
+        # Fine-grained artifact embeddings (fuses semantic search with artifacts).
+        from core.services.intelligence.artifact_embedding_service import ArtifactEmbeddingService
+        self.artifact_embedding_service = ArtifactEmbeddingService(
+            project_manager=self.project_manager,
+            llm_manager=self.llm_manager,
+            model_role_service=self.model_role_service,
+        )
+        from core.services.intelligence.deterministic_graph_analysis_service import (
+            DeterministicGraphAnalysisService,
+        )
+        self.deterministic_graph_analysis_service = DeterministicGraphAnalysisService(
+            project_manager=self.project_manager,
+            artifact_service=self.artifact_service,
+            stage_registry=self.intelligence_stage_registry,
+            ontology_registry=self.ontology_registry,
+        )
+        from core.registries.intelligence_view_registry import (
+            IntelligenceViewRegistry, builtin_intelligence_views,
+        )
+        self.intelligence_review_registry = self.artifact_service.review_registry
+        self.intelligence_view_registry = IntelligenceViewRegistry()
+        for _view_spec in builtin_intelligence_views():
+            self.intelligence_view_registry.register(_view_spec)
+
+        # Analysis modes: pluggable registry of blueprint-backed modes. Modes are
+        # discovered at runtime and run via WorkflowRunnerService (never direct
+        # LLM calls). Plugins add modes via api.intelligence.register_analysis_mode.
+        from core.registries.analysis_mode_registry import AnalysisModeRegistry, builtin_analysis_modes
+        from core.services.intelligence.analysis_contract_compiler import AnalysisContractCompiler
+        self.analysis_mode_registry = AnalysisModeRegistry(
+            compiler=AnalysisContractCompiler(self.ontology_registry, self.workspace_node_type_registry),
+            stage_registry=self.intelligence_stage_registry)
+        for _spec in builtin_analysis_modes():
+            self.analysis_mode_registry.register(_spec)
 
         self.media_asset_service = MediaAssetService(self.project_manager)
         self.pdf_data_selection_service = PdfDataSelectionService(
@@ -427,10 +596,33 @@ class PapyrusCore:
         self.source_evaluation_service = SourceEvaluationService(
             self.project_manager, _metrics_db, self.citation_manager
         )
-        self.video_transcription_service = VideoTranscriptionService(self.project_manager, self.llm_manager)
+        self.video_transcription_service = VideoTranscriptionService(
+            self.project_manager, self.llm_manager, memory_manager=self.memory_manager_service)
         self.video_transcription_service.set_processing_policy_service(self.processing_policy_service)
 
+        # Executable stage producers (built-in + plugin), looked up by the
+        # StageSpec handler_id; binding verifies every enabled stage can run.
+        self.intelligence_producer_registry = IntelligenceProducerRegistry()
+        register_builtin_producers(
+            self.intelligence_producer_registry,
+            project_manager=self.project_manager,
+            artifact_service=self.artifact_service,
+            document_extraction_service=self.document_extraction_service,
+            date_extraction_service=self.date_extraction_service,
+            entity_extraction_pipeline=self.entity_extraction_pipeline,
+            sentence_classifier=self.sentence_classifier_service,
+            extractive_summarizer=self.extractive_summarizer,
+            artifact_embedding_service=self.artifact_embedding_service,
+            llm_manager=self.llm_manager,
+            model_role_service=self.model_role_service,
+            nli_relation_scorer=self.nli_relation_scorer,
+            source_format_registry=self.source_format_registry,
+            data_provider_registry=self.data_provider_registry,
+            pattern_registry=self.pattern_detector_registry,
+        )
+        self.intelligence_stage_registry.bind_producers(self.intelligence_producer_registry)
         self.intelligence_scheduler = IntelligenceScheduler(
+            producer_registry=self.intelligence_producer_registry,
             process_registry=self.process_registry,
             project_manager=self.project_manager,
             artifact_service=self.artifact_service,
@@ -439,6 +631,22 @@ class PapyrusCore:
             document_extraction_service=self.document_extraction_service,
             llm_manager=self.llm_manager,
             bus=self.bus,
+            entity_extraction_pipeline=self.entity_extraction_pipeline,
+            sentence_classifier=self.sentence_classifier_service,
+            extractive_summarizer=self.extractive_summarizer,
+            artifact_embedding_service=self.artifact_embedding_service,
+            stage_registry=self.intelligence_stage_registry,
+            date_extraction_service=self.date_extraction_service,
+            nli_relation_scorer=self.nli_relation_scorer,
+            memory_manager=self.memory_manager_service,
+        )
+        self.processing_plan_service = ProcessingPlanService(
+            policy_service=self.processing_policy_service,
+            stage_registry=self.intelligence_stage_registry,
+            scheduler=self.intelligence_scheduler,
+            project_manager=self.project_manager,
+            model_dependency_service=self.model_dependency_service,
+            model_role_service=self.model_role_service,
         )
         self.source_intelligence_service = SourceIntelligenceService(
             project_manager=self.project_manager,
@@ -447,6 +655,26 @@ class PapyrusCore:
             policy_service=self.processing_policy_service,
             hybrid_retrieval_service=self.hybrid_retrieval_service,
             bus=self.bus,
+            processing_plan_service=self.processing_plan_service,
+            llm_manager=self.llm_manager,
+        )
+        # Analysis readiness depends on the fully constructed source-processing facade.
+        from core.services.intelligence.analysis_mode_service import AnalysisModeService
+        self.analysis_mode_service = AnalysisModeService(
+            mode_registry=self.analysis_mode_registry,
+            blueprint_registry=self.blueprint_registry,
+            project_manager=self.project_manager,
+            bus=self.bus,
+            artifact_service=self.artifact_service,
+            prompt_manager=self.prompt_manager,
+            source_intelligence_service=self.source_intelligence_service,
+        )
+
+        self.document_ingestion_service.set_intelligence_scheduler(
+            self.intelligence_scheduler
+        )
+        self.index_app_service.set_source_intelligence_service(
+            self.source_intelligence_service
         )
 
         # 4. Workflow Services (ui_router and model_provider injected later by GUI layer)
@@ -505,6 +733,12 @@ class PapyrusCore:
             processing_policy_service=self.processing_policy_service,
         )
 
+        # Model readiness needs the configured AI setup service, not a placeholder.
+        from core.services.intelligence.model_readiness_service import ModelReadinessService
+        self.model_readiness_service = ModelReadinessService(self.project_manager, self.model_dependency_service,
+            self.sentence_classifier_service, self.processing_policy_service, backends=self.llm_backend_registry,
+            setup=self.ai_setup_service, roles=self.model_role_service, user_data_dir=self.user_data_dir)
+
         # 5. Plugin extension registry (GUI extension points for plugins)
         self.plugin_extension_registry = PluginExtensionRegistry()
         self._register_builtin_dock_actions()
@@ -525,6 +759,15 @@ class PapyrusCore:
         )
 
         # Discover and register external plugins
+        # Everything that holds memory is visible to (and releasable by) one owner.
+        set_shared_language_service(self.language_feature_service)
+        register_core_consumers(self.memory_manager_service, self)
+        self.process_registry.admission = self.memory_manager_service.admit_job
+        self.process_registry.express_limit = self.memory_manager_service.express_limit
+        # Bound QObject slot → queued onto the registry's thread.
+        self.bus.memory_state_changed.connect(self.process_registry.on_memory_state)
+        # The in-memory extraction LRU belongs to the project being closed.
+        self.bus.project_clearing_started.connect(lambda *_: self.extraction_cache.clear_memory())
         load_plugins(self)
 
     def _register_builtin_dock_actions(self) -> None:

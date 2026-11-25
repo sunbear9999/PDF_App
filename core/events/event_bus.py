@@ -147,6 +147,10 @@ class EventBus(QObject):
     intelligence_action_requested = Signal(object, object)
     intelligence_state_changed = Signal(object, object)
 
+    # --- Memory Manager ---
+    memory_action_requested = Signal(object, object)  # MemoryIntent, MemoryPayload
+    memory_state_changed = Signal(object, object)     # MemoryEvent, MemoryPayload
+
     # --- UI Render Domain ---
     # Emitted by BlueprintUIRouter to dispatch AI output to tabs without direct method calls.
     # target_id: str identifying the tab ("chat_dock", "floating", etc.)

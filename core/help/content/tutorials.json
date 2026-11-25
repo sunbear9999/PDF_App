@@ -1,0 +1,743 @@
+[
+  {
+    "id": "core.tutorial.getting_started",
+    "title": "Getting Started with Papyrus",
+    "category": "Getting Started",
+    "version": "1.0",
+    "estimated_minutes": 4,
+    "prerequisites": [],
+    "related_help_topics": [
+      "core.papyrus.overview",
+      "core.project.create_open",
+      "core.documents.import"
+    ],
+    "namespace": "core",
+    "plugin_id": "",
+    "steps": [
+      {
+        "id": "welcome",
+        "target_id": "toolbar.project_btn",
+        "text": "## Welcome to Papyrus!\n\nThis tutorial walks you through the basics in about 4 minutes.\n\nThe **Project button (\ud83d\udcc1)** in the toolbar is your starting point. Click it to create a new project or open an existing one. Every note, highlight, and analysis result lives inside a project file (`.pdfproj`).",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "add_document",
+        "target_id": "toolbar.project_btn",
+        "text": "## Add your first PDF\n\nWith a project open, click the **Project (\ud83d\udcc1)** button and choose **Add PDF to Project**. You can also drag one or more PDFs directly onto the document list on the left.\n\nAdded PDFs appear in the **Document Explorer** \u2014 click any document there to open it in the reader.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "open_research_dock",
+        "target_id": "dock.research",
+        "text": "## The Research dock\n\nThis is the **Research Assistant dock** \u2014 the heart of Papyrus. It contains seven tabs:\n\n- \ud83d\udcac **Chat** \u2014 ask questions, get answers grounded in your documents\n- \ud83d\udca1 **Brainstorm** \u2014 generate ideas and arguments\n- \ud83d\udd2c **Analysis** \u2014 extract structured knowledge from a PDF\n- \ud83e\udded **Research Agent** \u2014 autonomous multi-step research\n- \ud83e\uddf0 **Custom Tools** \u2014 run saved workflows\n- \ud83d\udee0\ufe0f **Blueprint Editor** \u2014 build and test new workflows\n- \ud83d\udd0d **Search** \u2014 local and external academic search\n\nWe'll explore these in the dedicated tutorials. Click **Next** to continue.",
+        "before_actions": [
+          {
+            "type": "open_dock",
+            "dock_id": "research"
+          }
+        ],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "highlight_intro",
+        "target_id": "dock.notes",
+        "text": "## Highlights & Notes\n\nWhile reading a PDF, select any text and right-click to **highlight** it in one of five colours. Add a written note to any highlight.\n\nAll your highlights and notes appear in the **Notes dock** (shown here). You can filter by document, tag, or note type.\n\nThat's the basics! Explore the other tutorials for in-depth walkthroughs of every feature.",
+        "before_actions": [
+          {
+            "type": "open_dock",
+            "dock_id": "notes"
+          }
+        ],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      }
+    ]
+  },
+  {
+    "id": "core.tutorial.import_and_analyze",
+    "title": "Import and Analyse a Document",
+    "category": "Getting Started",
+    "version": "1.0",
+    "estimated_minutes": 5,
+    "prerequisites": [
+      "core.tutorial.getting_started"
+    ],
+    "related_help_topics": [
+      "core.documents.import",
+      "core.analysis.overview",
+      "core.analysis.templates"
+    ],
+    "namespace": "core",
+    "plugin_id": "",
+    "steps": [
+      {
+        "id": "add_pdf",
+        "target_id": "toolbar.project_btn",
+        "text": "## Step 1 \u2014 Import a PDF\n\nClick the **Project (\ud83d\udcc1)** button and choose **Add PDF to Project**, or drag a PDF file directly onto the document list on the left. Papyrus adds it to the project and opens it in the reader.\n\nIf your PDF is scanned (image-only, no selectable text), right-click it in the Document Explorer and choose **Run OCR** first to extract the text.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "open_analysis",
+        "target_id": "dock.research",
+        "text": "## Step 2 \u2014 Open the Analysis tab\n\nClick the **\ud83d\udd2c Analysis** tab in the Research dock. This is where you choose a template and run the AI extraction.\n\nThe document selector at the top of the tab defaults to whichever PDF is currently open in the viewer.",
+        "before_actions": [
+          {
+            "type": "open_dock",
+            "dock_id": "research"
+          }
+        ],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "select_template",
+        "target_id": "analysis.template_selector",
+        "text": "## Step 3 \u2014 Choose an analysis template\n\nSelect a template from the **mode dropdown**. Each template tells the AI what to look for:\n\n- **Argument Map** \u2014 claims, evidence, reasoning chains\n- **Methodology Tracker** \u2014 research steps and findings\n- **Relationship Network** \u2014 people, organisations, connections\n\nStart with **Argument Map** if you're not sure \u2014 it works well on most academic texts.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "run_analysis",
+        "target_id": "analysis.run_button",
+        "text": "## Step 4 \u2014 Run the analysis\n\nClick **\u25b6 Run Analysis**. Papyrus splits your document into chunks and sends each to the AI in parallel.\n\nResult cards appear as the AI finishes each chunk, showing the nodes and relationships extracted from that section. For a typical 20-page paper this takes about 30\u201360 seconds.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "view_results",
+        "target_id": "dock.research",
+        "text": "## Step 5 \u2014 Explore the results\n\nEach **result card** shows how many claims, quotes, and relationships were found in that chunk. Click a card to expand it and read the individual extractions.\n\n- Click **View Prompt Trace** on any card to see exactly what was sent to the AI.\n- Click **Send to Workspace** to add those nodes to the visual Workspace canvas.\n\nWhen you're done reviewing, switch to the **Review & Synthesise** sub-tab to see a master summary across all chunks.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      }
+    ]
+  },
+  {
+    "id": "core.tutorial.chat_with_docs",
+    "title": "Chat with Your Documents",
+    "category": "Chat & AI Research",
+    "version": "1.0",
+    "estimated_minutes": 4,
+    "prerequisites": [
+      "core.tutorial.getting_started"
+    ],
+    "related_help_topics": [
+      "core.chat.overview",
+      "core.chat.context_filter",
+      "core.llm.overview"
+    ],
+    "namespace": "core",
+    "plugin_id": "",
+    "steps": [
+      {
+        "id": "open_chat",
+        "target_id": "dock.research",
+        "text": "## Chat with your documents\n\nThe **\ud83d\udcac Chat** tab lets you have a multi-turn conversation with an AI that has access to all your project documents.\n\nOpen the Research dock and click the **\ud83d\udcac Chat** tab to begin.",
+        "before_actions": [
+          {
+            "type": "open_dock",
+            "dock_id": "research"
+          }
+        ],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "ask_a_question",
+        "target_id": "dock.research",
+        "text": "## Ask your first question\n\nType a question in the input field at the bottom of the Chat tab and press **Enter** (or click **Send**).\n\nBe specific for best results. Instead of *\"Tell me about climate change\"*, try *\"What arguments do the authors make about carbon pricing in the 2023 papers?\"*\n\nThe AI response streams in word-by-word.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "read_citations",
+        "target_id": "dock.research",
+        "text": "## Read the citation bubbles\n\nNotice the **citation bubbles** inline in the AI's response. Each one shows:\n- The source document name\n- The page number\n- A short quote of the relevant passage\n\nClick a citation bubble to jump directly to that page in the PDF viewer. This lets you verify the AI's answer against the original source.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "context_filter",
+        "target_id": "dock.research",
+        "text": "## Control which documents the AI uses\n\nBy default the AI searches all your documents. To focus it on specific PDFs, click the **\u2699\ufe0f Settings** button next to the input field.\n\nThe **Context Filter** dialog lets you:\n- Select specific documents to include\n- Filter by tags (using AND or OR logic)\n\nUseful when you want the AI to compare just two papers, or only look at documents tagged with a particular topic.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "view_prompt_trace",
+        "target_id": "dock.research",
+        "text": "## See what was sent to the AI\n\nEvery AI response includes a **View Prompt Trace** button (look for it on the response card). Click it to open the Trace Viewer, which shows:\n\n- The exact system prompt used\n- The document chunks retrieved by RAG\n- Token usage\n- The raw model response\n\nThis is essential for understanding *why* the AI gave a particular answer.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      }
+    ]
+  },
+  {
+    "id": "core.tutorial.highlights_and_notes",
+    "title": "Highlights and Notes",
+    "category": "Reading & Annotation",
+    "version": "1.0",
+    "estimated_minutes": 3,
+    "prerequisites": [
+      "core.tutorial.getting_started"
+    ],
+    "related_help_topics": [
+      "core.annotations.highlights",
+      "core.annotations.notes",
+      "core.notes.overview",
+      "core.tags.overview"
+    ],
+    "namespace": "core",
+    "plugin_id": "",
+    "steps": [
+      {
+        "id": "create_highlight",
+        "target_id": "dock.notes",
+        "text": "## Highlighting text\n\nOpen a PDF in the viewer and select any text by clicking and dragging. Then **right-click** the selection.\n\nA context menu appears. Hover over **Highlight** to see the five colour options:\n- \ud83d\udfe1 Yellow, \ud83d\udfe2 Green, \ud83d\udd35 Blue, \ud83d\udfe3 Purple, \ud83d\udd34 Red\n\nClick a colour to apply the highlight. It is saved immediately and appears in the Notes dock.",
+        "before_actions": [
+          {
+            "type": "open_dock",
+            "dock_id": "notes"
+          }
+        ],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "add_note",
+        "target_id": "dock.notes",
+        "text": "## Adding a note to a highlight\n\nClick any highlight to select it. A text field appears \u2014 type your note there and press **Enter** to save.\n\nYour note is now attached to that highlighted passage.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "notes_dock",
+        "target_id": "dock.notes",
+        "text": "## The Notes dock\n\nAll your highlights and notes are collected in the **Notes dock** (open it from Toolbar \u2192 Other Tools \u2192 Notes List).\n\nEach note card shows:\n- The source document and page number\n- The highlighted text\n- Your note\n- Colour picker buttons to change the colour\n- A **\u2716** delete button\n\nUse the **Scope** dropdown to switch between *Current PDF* and *Entire Project*.",
+        "before_actions": [
+          {
+            "type": "open_dock",
+            "dock_id": "notes"
+          }
+        ],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "assign_tags",
+        "target_id": "dock.notes",
+        "text": "## Tagging highlights\n\nRight-click any highlight (in the PDF viewer or the Notes dock) and choose **Manage Tags** to assign tags.\n\nOnce tagged, you can filter the Notes dock and the Document Explorer to show only highlights with a particular tag \u2014 useful for grouping all \"counterargument\" or \"key statistic\" highlights across many documents.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      }
+    ]
+  },
+  {
+    "id": "core.tutorial.workspace_basics",
+    "title": "Exploring the Knowledge Workspace",
+    "category": "Workspace",
+    "version": "1.0",
+    "estimated_minutes": 5,
+    "prerequisites": [
+      "core.tutorial.import_and_analyze"
+    ],
+    "related_help_topics": [
+      "core.workspace.overview",
+      "core.workspace.nodes_edges",
+      "core.workspace.ai_tools"
+    ],
+    "namespace": "core",
+    "plugin_id": "",
+    "steps": [
+      {
+        "id": "open_workspace",
+        "target_id": "dock.workspace",
+        "text": "## The Knowledge Workspace\n\nThe **Workspace** is a visual canvas where extracted knowledge lives as a graph of nodes (ideas, claims, entities) connected by edges (relationships).\n\nOpen the Workspace dock now \u2014 look for the Workspace button in the toolbar or side panel.",
+        "before_actions": [
+          {
+            "type": "open_dock",
+            "dock_id": "workspace"
+          }
+        ],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "navigate_canvas",
+        "target_id": "dock.workspace",
+        "text": "## Navigating the canvas\n\nTry these controls:\n- **Scroll** \u2014 zoom in and out\n- **Middle-click drag** (or two-finger swipe) \u2014 pan the canvas\n- **Click a node** \u2014 select it and view its details\n- **Double-click a node** \u2014 open the full node editor\n\nIf the canvas is empty, run an analysis first (\ud83d\udd2c Analysis tab \u2192 Run Analysis \u2192 Send to Workspace).",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "connect_nodes",
+        "target_id": "dock.workspace",
+        "text": "## Connecting nodes manually\n\nYou can draw your own relationships between nodes:\n1. Hover over a node until a small **port circle** appears on its edge.\n2. Click and drag from the port to another node.\n3. Choose a relationship type from the dialog that appears.\n\nYou can also right-click the canvas and choose **Add Node** to create a node from scratch.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "ai_tools_workspace",
+        "target_id": "dock.workspace",
+        "text": "## AI tools on your graph\n\nRight-click the canvas to access AI workspace tools:\n\n- **Find Weakpoints** \u2014 identifies unsupported claims (nodes with no evidence edges)\n- **Color Organise by Theme** \u2014 clusters nodes by topic and recolours them\n- **Generate Outline** \u2014 creates a hierarchical text outline from selected nodes\n- **Declutter & Simplify** \u2014 merges duplicates and removes noise\n\nTry **Color Organise by Theme** after importing a large analysis to instantly see how topics cluster.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "multiple_workspaces",
+        "target_id": "dock.workspace",
+        "text": "## Multiple workspaces\n\nThe **dropdown at the top of the Workspace dock** lets you switch between named workspaces. You start with a **Main Board**.\n\nClick **+ New Workspace** to create a separate canvas for a different aspect of your research \u2014 for example, one for \"argument structure\" and another for \"key people and organisations\".\n\nYou're all set! The Workspace is your research thinking space \u2014 build it up over time.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      }
+    ]
+  },
+  {
+    "id": "core.tutorial.brainstorm",
+    "title": "Brainstorming with Your Research",
+    "category": "Chat & AI Research",
+    "version": "1.0",
+    "estimated_minutes": 3,
+    "prerequisites": [
+      "core.tutorial.getting_started"
+    ],
+    "related_help_topics": [
+      "core.brainstorm.overview",
+      "core.chat.context_filter"
+    ],
+    "namespace": "core",
+    "plugin_id": "",
+    "steps": [
+      {
+        "id": "open_brainstorm",
+        "target_id": "dock.research",
+        "text": "## Brainstorm tab\n\nThe **\ud83d\udca1 Brainstorm** tab generates ideas, arguments, and hypotheses by synthesising your documents with AI reasoning.\n\nOpen the Research dock and click the **\ud83d\udca1 Brainstorm** tab.",
+        "before_actions": [
+          {
+            "type": "open_dock",
+            "dock_id": "research"
+          }
+        ],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "choose_strategy",
+        "target_id": "dock.research",
+        "text": "## Choose a strategy\n\nThe **strategy dropdown** controls how much the AI relies on your documents:\n\n- **Creative Synthesis** \u2014 free ideation, loosely inspired by your docs\n- **RAG + Creative Expansion** \u2014 grounded in documents, then expands creatively\n- **Strict Document Evidence Only** \u2014 only uses what's directly in your documents\n\nFor generating new ideas, start with **Creative Synthesis**. For evidence-based summaries, use **Strict Document Evidence Only**.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "brainstorm_prompt",
+        "target_id": "dock.research",
+        "text": "## Write a brainstorm prompt\n\nType a directive \u2014 not a question \u2014 and click **Send**. Examples:\n\n- *\"Generate 5 research hypotheses based on the patterns in these papers.\"*\n- *\"List the strongest counterarguments to the privatisation of public services.\"*\n- *\"Compare how different authors frame the concept of resilience.\"*\n\nResults stream in with numbered ideas and inline citations from your documents.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      }
+    ]
+  },
+  {
+    "id": "core.tutorial.research_agent",
+    "title": "Using the Research Agent",
+    "category": "Chat & AI Research",
+    "version": "1.0",
+    "estimated_minutes": 5,
+    "prerequisites": [
+      "core.tutorial.chat_with_docs"
+    ],
+    "related_help_topics": [
+      "core.research_agent.overview"
+    ],
+    "namespace": "core",
+    "plugin_id": "",
+    "steps": [
+      {
+        "id": "open_agent",
+        "target_id": "dock.research",
+        "text": "## The Research Agent\n\nThe **\ud83e\udded Research Agent** tab is an autonomous AI that can perform multi-step research on your behalf \u2014 planning a strategy, running searches, synthesising results, and checking back with you at key moments.\n\nOpen the Research dock and click the **\ud83e\udded Research Agent** tab.",
+        "before_actions": [
+          {
+            "type": "open_dock",
+            "dock_id": "research"
+          }
+        ],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "state_goal",
+        "target_id": "dock.research",
+        "text": "## State a research goal\n\nType a specific, outcome-oriented goal in the input field. The more specific you are, the better:\n\n**Good**: *\"Find the 3 strongest empirical arguments against low-carb diets in my documents, cite the studies, and list any methodological weaknesses each argument has.\"*\n\n**Too vague**: *\"Tell me about diets.\"*\n\nClick **\u25b6 Start** when ready.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "review_plan",
+        "target_id": "dock.research",
+        "text": "## Review the plan\n\nThe agent first shows you its **plan** \u2014 a list of steps it intends to take. Read through it and decide:\n\n- If the plan looks good, click **Continue** to let it proceed.\n- If you want to redirect it, type a new instruction in the input field \u2014 for example: *\"Skip step 2 and focus on step 3 only.\"*\n\nThe **Status Pill** at the top shows: Idle \u2192 Planning \u2192 Executing as it works.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "step_results",
+        "target_id": "dock.research",
+        "text": "## Step results and artifacts\n\nAfter each step, the agent reports what it found as an **artifact** card \u2014 a summary, a set of quotes, a comparison, etc.\n\nReview the artifact, then:\n- Click **Continue** to move to the next step.\n- Type a correction or addition in the input field to adjust direction.\n- Click **New** to abandon this session and start fresh.\n\nThe session is saved in your project \u2014 if you close Papyrus, you can resume later.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      }
+    ]
+  },
+  {
+    "id": "core.tutorial.workflow_builder",
+    "title": "Build Your First Workflow",
+    "category": "Workflows & Blueprints",
+    "version": "1.0",
+    "estimated_minutes": 6,
+    "prerequisites": [
+      "core.tutorial.chat_with_docs"
+    ],
+    "related_help_topics": [
+      "core.workflow.builder",
+      "core.workflow.node_types",
+      "core.workflow.variables"
+    ],
+    "namespace": "core",
+    "plugin_id": "",
+    "steps": [
+      {
+        "id": "open_blueprint_tab",
+        "target_id": "dock.research.blueprint_editor",
+        "text": "## Blueprint Editor\n\nThe **\ud83d\udee0\ufe0f Blueprint Editor** is where you build reusable AI workflows \u2014 called **blueprints** \u2014 by connecting action nodes.\n\nOpen the Research dock and click the **\ud83d\udee0\ufe0f Blueprint Editor** tab. You'll see a node canvas on the left and a two-tab panel on the right (AI Builder and Debugger).",
+        "before_actions": [
+          {
+            "type": "open_dock",
+            "dock_id": "research"
+          }
+        ],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "create_new_tool",
+        "target_id": "dock.research.blueprint_editor",
+        "text": "## Create a new tool\n\nClick the **\u2728 New Tool** button at the top of the editor. This clears the canvas and prepares a blank blueprint.\n\nGive your tool a name in the **Name** field at the bottom of the editor. For example: *\"Summarise Key Arguments\"*.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "add_rag_node",
+        "target_id": "dock.research.blueprint_editor",
+        "text": "## Add a RAG Search node\n\nClick **+ Add Node** and select **RAG Search**. Configure it:\n- **Query**: `{user_input}` \u2014 this passes the user's typed query to the search\n- **Max chunks**: 5\n- **Output variable**: `rag_results`\n\nThis node will search your documents for passages relevant to whatever the user types.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "add_llm_node",
+        "target_id": "dock.research.blueprint_editor",
+        "text": "## Add an LLM Query node\n\nClick **+ Add Node** and select **LLM Query**. Configure it:\n- **Prompt**: `\"Based on the following passages from my research documents, identify and summarise the key arguments about '{user_input}':\\n\\n{rag_results}\\n\\nFormat the output as a numbered list.\"`\n- **Output variable**: `summary`\n\nThen connect the RAG Search node's output to this node's input by dragging between the nodes.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "test_in_debugger",
+        "target_id": "dock.research.blueprint_editor",
+        "text": "## Test in the Debugger\n\nSwitch to the **Debugger** tab in the right panel. Click **Run Test in Debugger**.\n\nThe debugger walks through each node step-by-step, showing the full state dictionary after each one. You'll see `rag_results` filled in after the search, then `summary` filled in after the LLM node.\n\nIf a step fails, the error appears in the terminal output below.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "save_and_run",
+        "target_id": "dock.research.blueprint_editor",
+        "text": "## Save your blueprint\n\nClick **Save Blueprint** in the bottom bar. Your new tool is now available in the **\ud83e\uddf0 Custom Tools** tab.\n\nSwitch to the Custom Tools tab, select your tool from the dropdown, type a topic in the input field, and click **\u25b6 Run Tool** to use it any time.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      }
+    ]
+  },
+  {
+    "id": "core.tutorial.custom_tool_ai_builder",
+    "title": "Create a Custom Tool with the AI Builder",
+    "category": "Workflows & Blueprints",
+    "version": "1.0",
+    "estimated_minutes": 4,
+    "prerequisites": [
+      "core.tutorial.getting_started"
+    ],
+    "related_help_topics": [
+      "core.workflow.ai_builder",
+      "core.workflow.builder",
+      "core.workflow.custom_tools"
+    ],
+    "namespace": "core",
+    "plugin_id": "",
+    "steps": [
+      {
+        "id": "open_ai_builder",
+        "target_id": "dock.research.blueprint_editor",
+        "text": "## AI Builder \u2014 describe your workflow\n\nInstead of building a blueprint node by node, you can **describe** what you want and let the AI build it for you.\n\nOpen the Blueprint Editor (\ud83d\udee0\ufe0f tab in the Research dock) and click the **AI Builder** tab in the right panel.",
+        "before_actions": [
+          {
+            "type": "open_dock",
+            "dock_id": "research"
+          }
+        ],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "describe_workflow",
+        "target_id": "dock.research.blueprint_editor",
+        "text": "## Describe what you want\n\nType a plain-English description of your workflow. Be specific about inputs, steps, and the desired output. For example:\n\n> *\"Let the user type a research question. Search my documents for relevant passages. Then write a 3-paragraph essay answering the question, citing the retrieved passages inline.\"*\n\nClick **Send**. The AI generates the blueprint and renders it on the canvas in real time.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "refine_blueprint",
+        "target_id": "dock.research.blueprint_editor",
+        "text": "## Refine with follow-up messages\n\nReview the generated nodes on the canvas. If anything needs changing, just describe the modification in the chat:\n\n- *\"Make the essay 5 paragraphs instead of 3.\"*\n- *\"Add a step that first extracts the 5 most relevant quotes before writing the essay.\"*\n- *\"Change the output to bullet points.\"*\n\nThe AI updates the blueprint immediately with each instruction.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "save_custom_tool",
+        "target_id": "dock.research.blueprint_editor",
+        "text": "## Save and run\n\nWhen satisfied, enter a name in the **Name** field at the bottom and click **Save Blueprint**.\n\nSwitch to the **\ud83e\uddf0 Custom Tools** tab to run it. Any `expected_inputs` you declared appear as a form \u2014 fill them in and click **\u25b6 Run Tool**.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      }
+    ]
+  },
+  {
+    "id": "core.tutorial.prompt_tracing",
+    "title": "Viewing AI Prompts and Responses",
+    "category": "AI & Prompts",
+    "version": "1.0",
+    "estimated_minutes": 3,
+    "prerequisites": [
+      "core.tutorial.chat_with_docs"
+    ],
+    "related_help_topics": [
+      "core.prompt_trace.overview",
+      "core.llm.overview",
+      "core.prompt_editor.overview"
+    ],
+    "namespace": "core",
+    "plugin_id": "",
+    "steps": [
+      {
+        "id": "what_is_prompt_trace",
+        "target_id": "dock.research",
+        "text": "## What is Prompt Trace?\n\n**Prompt Trace** shows you the exact prompt sent to the AI model for any response \u2014 including the system instructions, the document chunks retrieved by RAG, the variables injected, token usage, and the raw model output.\n\nThis tutorial shows you how to access it after a Chat or Analysis response.",
+        "before_actions": [
+          {
+            "type": "open_dock",
+            "dock_id": "research"
+          }
+        ],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "find_trace_button",
+        "target_id": "dock.research",
+        "text": "## Finding the Prompt Trace button\n\nAfter any AI response \u2014 in Chat, Analysis results, or Custom Tool output \u2014 look for the **View Prompt Trace** button on the response card.\n\nIn the Chat tab, it may appear when you hover over a message. In the Analysis tab, it appears on each chunk result card.\n\nClick **View Prompt Trace** now on any response you've already received.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "read_the_trace",
+        "target_id": "dock.research",
+        "text": "## Reading the Trace Viewer\n\nThe **Trace Viewer** dialog opens showing:\n\n- **System prompt** \u2014 the role and instructions given to the AI\n- **Retrieved chunks** \u2014 the exact document passages included in this call\n- **User message** \u2014 what was sent as the user turn\n- **Token usage** \u2014 prompt tokens, completion tokens\n- **Raw response** \u2014 the model's unprocessed output\n\nUse this to understand *why* the AI gave a particular answer \u2014 or to diagnose problems.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "edit_prompts",
+        "target_id": "dock.research",
+        "text": "## Improving prompts\n\nIf you see something in the trace you want to improve \u2014 for example, the system prompt is too generic \u2014 open the **Prompt Editor** (\ud83e\udde0 in the toolbar).\n\nSelect the relevant prompt key, make your edits, and click **Save**. The next AI call will use the updated prompt. Use Prompt Trace again to verify the change was applied.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      }
+    ]
+  },
+  {
+    "id": "core.tutorial.first_blueprint",
+    "title": "Build Your First Blueprint",
+    "category": "Blueprint Editor",
+    "version": "1.0",
+    "estimated_minutes": 6,
+    "prerequisites": [],
+    "related_help_topics": [
+      "core.blueprint.overview",
+      "core.blueprint.step_types",
+      "core.blueprint.state_variables",
+      "core.blueprint.output_formats"
+    ],
+    "namespace": "core",
+    "plugin_id": "",
+    "steps": [
+      {
+        "id": "open_editor",
+        "target_id": "dock.research.blueprint_editor",
+        "text": "Open the Blueprint Editor by clicking the Blueprint Editor tab in the Research Assistant dock on the right side of the screen.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "create_new",
+        "target_id": "dock.research.blueprint_editor",
+        "text": "Click '+ New Blueprint' at the top of the Blueprint Editor to create a new blank workflow. Give it a name like 'My First Blueprint'.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "add_rag_step",
+        "target_id": "dock.research.blueprint_editor",
+        "text": "In the left sidebar, click 'RAG Search' under the Search category. This adds a document search step to the canvas. It will search your indexed documents for relevant context.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "configure_rag",
+        "target_id": "dock.research.blueprint_editor",
+        "text": "Click the RAG Search node on the canvas to select it. In the Inspector panel (right side), set the Query/Input field to '{user_input}' \u2014 this tells the step to use whatever the user types when running the blueprint. Set N Results to 5.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "add_llm_step",
+        "target_id": "dock.research.blueprint_editor",
+        "text": "Click 'LLM Query' in the sidebar to add an AI response step. Set its System Prompt to something like: 'You are a research assistant. Answer based on the provided context.' Set its Query/Input to '{rag_results}' (the output key from the RAG step).",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "connect_steps",
+        "target_id": "dock.research.blueprint_editor",
+        "text": "Click the RAG Search node, then Ctrl+click the LLM Query node to select both. Click 'Connect Selected' \u2014 this creates a Sequence edge so the RAG step runs first and passes its output to the LLM.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "add_gui_node",
+        "target_id": "dock.research.blueprint_editor",
+        "text": "Under 'GUI Output Nodes' in the sidebar, click 'Live Text'. This adds an output node. Select the LLM Query node and the Live Text node, then click Connect Selected \u2014 this renders the AI response as streaming text.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "set_mount_points",
+        "target_id": "dock.research.blueprint_editor",
+        "text": "In the Mount Points field at the top, type 'custom_tools_tab' to make this blueprint appear in the Custom Tools tab. You can add more locations like 'notes_dock' or 'data_dock' separated by commas.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      },
+      {
+        "id": "save_and_test",
+        "target_id": "dock.research.blueprint_editor",
+        "text": "Click 'Save Blueprint'. Then switch to the right panel's Debugger tab and click 'Run Test in Debugger' to test your pipeline. You'll see each step's output in the debug log.",
+        "before_actions": [],
+        "advance_condition": "next_button",
+        "interaction_mode": "passive",
+        "optional": false
+      }
+    ]
+  }
+]

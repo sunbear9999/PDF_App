@@ -95,7 +95,11 @@ class PromptAppService(QObject):
             prompt_key
             for step_data in step_prompts
             for prompt_key in step_data.implicit
-            if prompt_key.startswith("Context Inject") or prompt_key == "Manifest Update Directive"
+            if prompt_key.startswith("Context Inject")
+            or prompt_key in {
+                "Manifest Update Directive",
+                "Manifest Structured Update Directive",
+            }
         })
 
         return {

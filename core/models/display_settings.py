@@ -28,6 +28,8 @@ class SourceViewerDisplaySettings:
     # Display modes
     dark_mode_enabled: bool = False  # Invert colors for dark background
     theme_mode_enabled: bool = False  # Use app theme colors
+    smart_links_enabled: bool = True  # Notes, citations and contents hover previews
+    entity_links_enabled: bool = False  # Hover a name for its entity; jump between its mentions
 
     # Book mode pagination (lines_per_page × line_height ≈ visual page height)
     lines_per_page: int = 28  # typical 12px font, 1.5 line height ≈ 8.5" page

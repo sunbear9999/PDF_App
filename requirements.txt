@@ -1,0 +1,60 @@
+# Papyrus dependencies (Python 3.12). Install with:
+#   python -m venv venv && source venv/bin/activate      (Windows: venv\Scripts\activate)
+#   pip install -r requirements.txt
+# Only direct dependencies are listed; pip resolves the rest.
+# Versions are the ones the app is currently built and tested with.
+
+# --- GUI ---
+PySide6==6.11.1
+
+# --- Documents and extraction ---
+PyMuPDF==1.27.2.3
+python-docx==1.2.0
+EbookLib==0.20
+beautifulsoup4==4.15.0
+lxml==6.1.1
+striprtf==0.0.32
+openpyxl==3.1.5
+pandas==3.0.3
+numpy==2.4.6
+scipy==1.17.1
+networkx==3.6.1
+RapidFuzz==3.14.5
+datefinder==1.0.0
+pillow==12.2.0
+pytesseract==0.3.13      # also needs the Tesseract program (AI Setup can install it)
+
+# --- Search, local models ---
+chromadb==1.5.9
+onnxruntime==1.26.0
+onnx==1.23.2
+tokenizers==0.23.1
+huggingface_hub==1.16.4
+faster-whisper==1.2.1
+ctranslate2==4.8.0
+
+# --- System ---
+psutil==7.2.2
+requests==2.34.2
+pydantic==2.13.4
+
+# --- Web companion ---
+fastapi==0.138.0
+starlette==1.1.0
+uvicorn==0.48.0
+websockets==16.0
+python-multipart==0.0.32
+qrcode[pil]==8.2
+
+# --- Plugins (Local Laws, Zotero) ---
+duckdb==1.5.4
+pyarrow==24.0.0
+pyzotero==1.13.1
+
+# --- Build tools ---
+pyinstaller==6.20.0
+pyinstaller-hooks-contrib==2026.5
+pyarmor==9.2.5
+
+# --- Optional, not installed by default ---
+# spacy==3.8.14          # optional language features; the app runs without it

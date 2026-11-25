@@ -12,7 +12,13 @@ fills in the real extraction logic by injecting sub-services.
 """
 from __future__ import annotations
 
+import dataclasses
 import os
+from core.utils.file_hash import file_sha256
+from core.services.document.ocr_engine_setup import tesseract_path
+from core.services.extraction.block_roles import is_ocr_text
+from core.services.extraction import block_source_snapshot
+from core.services.extraction.source_normalization import SourceNormalizationService, prepare_blocks
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from core.events.domains.extraction_events import (
@@ -26,11 +32,33 @@ from core.models.extraction_models import (
     ExtractedDate,
     ExtractedEntity,
     ExtractedTable,
+    ExtractionProvenance,
     SemanticSection,
+    SourceLocation,
 )
 
 if TYPE_CHECKING:
     from core.services.extraction.extraction_cache import ExtractionCache
+
+
+# Cached results are keyed by extractor version: bump the entry here whenever an
+# extractor's output changes, and every project recomputes that stage instead of
+# serving output from the superseded logic.
+_BLOCK_PIPELINE_VERSION = "3.6"   # native contents destinations participate in shared structure
+
+_EXTRACTOR_VERSIONS = {
+    "section_structure": "2.2",       # native contents destinations
+    "sentence_segmentation_v3": "3.6",  # + endnotes are prose; 3.6: block line geometry not copied per sentence
+    "citation_extraction": "2.1",     # hanging indents, note → bibliography links; 2.1 raster note markers
+    "entity_extraction": "2.2",       # complete bounded NER coverage, explicit failure
+    "date_extraction": "1.8",  # 1.8: numeric dates use the document's day/month convention
+    "table_extraction": "1.1",
+}
+
+
+def _citation_version() -> str:
+    """Raster marker recovery needs Tesseract; installing it later must refresh cached indexes."""
+    return _EXTRACTOR_VERSIONS["citation_extraction"] + ("+raster" if tesseract_path() else "")
 
 
 class DocumentExtractionService:
@@ -43,6 +71,7 @@ class DocumentExtractionService:
     """
 
     def __init__(self, project_manager, bus, extraction_cache: "ExtractionCache") -> None:
+        self._normalizer = SourceNormalizationService()
         self._pm = project_manager
         self._bus = bus
         self._cache = extraction_cache
@@ -55,6 +84,7 @@ class DocumentExtractionService:
         self._date_extraction_service = None
         self._citation_extraction_service = None
         self._table_extraction_service = None
+        self._sentence_segmentation_service = None
         self._parser_registry = None           # DocumentParserRegistry — per-format parser dispatch
         self._source_format_registry = None    # SourceFormatRegistry — resolves a doc_id's format
 
@@ -63,6 +93,9 @@ class DocumentExtractionService:
     # ------------------------------------------------------------------
     # Sub-service injection (called by PapyrusCore as phases are wired in)
     # ------------------------------------------------------------------
+
+    def set_source_normalizer(self, normalizer) -> None:
+        self._normalizer = normalizer
 
     def set_layout_parser(self, parser) -> None:
         self._layout_parser = parser
@@ -85,6 +118,9 @@ class DocumentExtractionService:
     def set_table_extraction_service(self, svc) -> None:
         self._table_extraction_service = svc
 
+    def set_sentence_segmentation_service(self, svc) -> None:
+        self._sentence_segmentation_service = svc
+
     def set_parser_registry(self, registry) -> None:
         self._parser_registry = registry
 
@@ -97,12 +133,67 @@ class DocumentExtractionService:
 
     def get_blocks(self, doc_id: str) -> List[DocumentBlock]:
         """Return cached DocumentBlocks or trigger parsing. Thread-safe read."""
-        cached = self._cache.get_blocks(doc_id)
+        cached = self._cache.get_blocks(doc_id, _BLOCK_PIPELINE_VERSION)
         if cached is not None:
-            return [self._dict_to_block(b) for b in cached]
+            snapshot = self._cache.get(doc_id, block_source_snapshot.SNAPSHOT_NAME,
+                                      'snapshot', block_source_snapshot.SNAPSHOT_VERSION) or {}
+            producers = snapshot.get('producers') or {}
+            return [self._dict_to_block({**b, **snapshot.get('layout', {}).get(b['block_id'], {}), 'provenance': b.get('provenance') or producers.get(b['block_id'])}) for b in cached]
         if self._layout_parser is None and self._parser_registry is None:
             return []
         return self._parse_and_cache(doc_id)
+
+    def get_cached_block_snapshot(self, doc_id: str) -> Dict[str, Any]:
+        """Cache-only verified read; never parse or start OCR/model work."""
+        rows = self._cache.get_blocks(doc_id, _BLOCK_PIPELINE_VERSION) or []
+        snapshot = block_source_snapshot.read(self._cache, doc_id, rows)
+        path, _ = self._resolve_source(doc_id)
+        if not path or file_sha256(path) != snapshot['source_hash']:
+            raise ValueError('The source changed after extraction. Reprocess it before selecting a passage.')
+        return {**snapshot, 'blocks': [self._dict_to_block({**row, **snapshot.get('layout', {}).get(row['block_id'], {}), 'provenance':
+            snapshot.get('producers', {}).get(row['block_id'])}) for row in rows]}
+
+    def refresh_blocks(self, doc_id: str) -> List[DocumentBlock]:
+        """Explicit processing-stage entry; upgrade unbound or changed caches."""
+        try:
+            return self.get_cached_block_snapshot(doc_id)['blocks']
+        except (ValueError, OSError):
+            if self._layout_parser is None and self._parser_registry is None:
+                raise ValueError('A source parser is required to refresh these extracted blocks.')
+            self.invalidate(doc_id)
+            return self._parse_and_cache(doc_id)
+
+    def import_blocks(self, doc_id: str, blocks: List[Dict[str, Any]]) -> None:
+        """Persist external OCR through the canonical extraction cache."""
+        if not doc_id:
+            raise ValueError("doc_id is required")
+        path, _ = self._resolve_source(doc_id)
+        source_hash = file_sha256(path) if path else ''
+        normalized = []
+        for block in blocks or []:
+            item = dict(block)
+            item["doc_id"] = doc_id
+            if not item.get("block_id") or not item.get("exact_text"):
+                raise ValueError("Imported OCR blocks need block_id and exact_text.")
+            item.setdefault("normalized_text", " ".join(str(item["exact_text"]).split()))
+            item.setdefault("block_type", "paragraph")
+            item.setdefault("section_path", [])
+            item["extractor_version"] = _BLOCK_PIPELINE_VERSION
+            normalized.append(item)
+        normalized = self._normalize_imported(normalized)
+        if normalized:
+            self._cache.set_blocks(doc_id, normalized, _BLOCK_PIPELINE_VERSION)
+            block_source_snapshot.store(self._cache, doc_id, normalized, source_hash)
+
+    def _normalize_imported(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Imported OCR/text gets the same furniture normalization as parsed sources."""
+        if not rows or self._normalizer is None:
+            return rows
+        blocks = self._normalizer.normalize([self._dict_to_block(row) for row in rows])
+        for row, block in zip(rows, blocks):
+            row["block_type"] = block.block_type
+            row["furniture_spans"] = block.furniture_spans
+        return rows
 
     def get_sections(self, doc_id: str) -> List[SemanticSection]:
         """Return the heading-derived section tree for a document.
@@ -111,7 +202,8 @@ class DocumentExtractionService:
         were already cached from before this getter existed, they are
         recomputed here from the cached blocks rather than re-parsing the PDF.
         """
-        cached = self._cache.get(doc_id, "section_structure", "sections")
+        cached = self._cache.get(doc_id, "section_structure", "sections",
+                                 _EXTRACTOR_VERSIONS["section_structure"])
         if cached is not None:
             return [self._dict_to_section(s) for s in cached]
         if self._section_structure_extractor is None:
@@ -119,19 +211,45 @@ class DocumentExtractionService:
         blocks = self.get_blocks(doc_id)
         if not blocks:
             return []
-        cached = self._cache.get(doc_id, "section_structure", "sections")
+        cached = self._cache.get(doc_id, "section_structure", "sections",
+                                 _EXTRACTOR_VERSIONS["section_structure"])
         if cached is not None:
             return [self._dict_to_section(s) for s in cached]
         sections, _ = self._section_structure_extractor.extract(blocks)
         self._cache.set(
-            doc_id, "section_structure", "1.0", "sections",
+            doc_id, "section_structure", _EXTRACTOR_VERSIONS["section_structure"], "sections",
             [self._section_to_dict(s) for s in sections],
         )
         return sections
 
+    def get_sentences(self, doc_id: str) -> List[Dict[str, Any]]:
+        """Return ordered sentence records (dicts) with block/page/char provenance.
+
+        Cached like every other getter. Sentences are the finest-grained
+        provenance unit; every downstream stage (classification, entity
+        mentions, retrieval) keys against ``sentence_id``.
+        """
+        extractor = "sentence_segmentation_v3"
+        cached = self._cache.get(doc_id, extractor, "sentences",
+                                 _EXTRACTOR_VERSIONS[extractor])
+        if cached is not None:
+            return cached
+        if self._sentence_segmentation_service is None:
+            return []
+        blocks = self.get_blocks(doc_id)
+        if not blocks:
+            return []
+        sentences = self._sentence_segmentation_service.segment(blocks, doc_id)
+        self._cache.set(
+            doc_id, extractor, _EXTRACTOR_VERSIONS[extractor], "sentences", sentences,
+        )
+        return sentences
+
     def get_citation_index(self, doc_id: str) -> Optional[CitationIndex]:
         """Return the citation index for a document, building it if needed."""
-        cached = self._cache.get(doc_id, "citation_extraction", "citation_index")
+        cached = self._cache.get(
+            doc_id, "citation_extraction", "citation_index", _citation_version(),
+        )
         if cached is not None:
             return self._dict_to_citation_index(cached, doc_id)
         if self._citation_extraction_service is None:
@@ -141,9 +259,20 @@ class DocumentExtractionService:
             return None
         return self._extract_and_cache_citations(doc_id, blocks)
 
+    def _marker_images(self, doc_id: str, blocks: List[DocumentBlock]):
+        """Page images for raster note-marker recovery: scanned PDFs, Tesseract installed."""
+        path, _source_type = self._resolve_source(doc_id)
+        if not path or not str(path).lower().endswith(".pdf") or not tesseract_path():
+            return None
+        if not any(is_ocr_text(block) for block in blocks):
+            return None
+        from core.services.extraction.raster_markers import PdfMarkerImages
+        return PdfMarkerImages(path)
+
     def get_entities(self, doc_id: str) -> List[ExtractedEntity]:
         """Return extracted entities for a document."""
-        cached = self._cache.get(doc_id, "entity_extraction", "entities")
+        cached = self._cache.get(doc_id, "entity_extraction", "entities",
+                                 _EXTRACTOR_VERSIONS["entity_extraction"])
         if cached is not None:
             return [self._dict_to_entity(e) for e in cached]
         if self._entity_extraction_service is None:
@@ -155,14 +284,16 @@ class DocumentExtractionService:
 
     def get_cached_entities(self, doc_id: str) -> List[ExtractedEntity]:
         """Return cached extracted entities without running extraction."""
-        cached = self._cache.get(doc_id, "entity_extraction", "entities")
+        cached = self._cache.get(doc_id, "entity_extraction", "entities",
+                                 _EXTRACTOR_VERSIONS["entity_extraction"])
         if cached is None:
             return []
         return [self._dict_to_entity(e) for e in cached]
 
     def get_dates(self, doc_id: str) -> List[ExtractedDate]:
         """Return extracted dates for a document."""
-        cached = self._cache.get(doc_id, "date_extraction", "dates")
+        cached = self._cache.get(doc_id, "date_extraction", "dates",
+                                 _EXTRACTOR_VERSIONS["date_extraction"])
         if cached is not None:
             return [self._dict_to_date(d) for d in cached]
         if self._date_extraction_service is None:
@@ -174,7 +305,8 @@ class DocumentExtractionService:
 
     def get_tables(self, doc_id: str) -> List[ExtractedTable]:
         """Return extracted tables for a document."""
-        cached = self._cache.get(doc_id, "table_extraction", "tables")
+        cached = self._cache.get(doc_id, "table_extraction", "tables",
+                                 _EXTRACTOR_VERSIONS["table_extraction"])
         if cached is not None:
             return [self._dict_to_table(t) for t in cached]
         if self._table_extraction_service is None:
@@ -205,6 +337,13 @@ class DocumentExtractionService:
         """
         path = None
         source_type = None
+        lookup = getattr(self._pm, 'get_source_record', None)
+        source = lookup(doc_id) if lookup else None
+        if not source:
+            by_path = getattr(self._pm, 'get_source_record_by_path', None)
+            source = by_path(doc_id) if by_path else None
+        if source:
+            return source.get('path'), source.get('source_type')
         try:
             sources = self._pm.get_sources()
             for src in sources:
@@ -259,16 +398,23 @@ class DocumentExtractionService:
         if parser is None:
             return []
         try:
+            source_hash = file_sha256(path)
             blocks = parser(path, doc_id)
-            if self._semantic_block_service:
-                blocks = self._semantic_block_service.classify_blocks(blocks)
-            sections: List[SemanticSection] = []
-            if self._section_structure_extractor:
-                sections, blocks = self._section_structure_extractor.extract(blocks)
-            self._cache.set_blocks(doc_id, [self._block_to_dict(b) for b in blocks])
+            sections, blocks = prepare_blocks(
+                blocks, self._normalizer, self._semantic_block_service,
+                self._section_structure_extractor,
+            )
+            if file_sha256(path) != source_hash:
+                raise ValueError('The source changed during extraction. Run extraction again.')
+            rows = [self._block_to_dict(b) for b in blocks]
+            self._cache.set_blocks(
+                doc_id, rows,
+                _BLOCK_PIPELINE_VERSION,
+            )
+            block_source_snapshot.store(self._cache, doc_id, rows, source_hash)
             if sections:
                 self._cache.set(
-                    doc_id, "section_structure", "1.0", "sections",
+                    doc_id, "section_structure", _EXTRACTOR_VERSIONS["section_structure"], "sections",
                     [self._section_to_dict(s) for s in sections],
                 )
             self._bus.extraction_state_changed.emit(
@@ -286,12 +432,13 @@ class DocumentExtractionService:
     def _extract_and_cache_citations(
         self, doc_id: str, blocks: List[DocumentBlock]
     ) -> Optional[CitationIndex]:
+        images = self._marker_images(doc_id, blocks)
         try:
             index = self._citation_extraction_service.build_citation_index(
-                doc_id, blocks
+                doc_id, blocks, marker_images=images, tesseract=tesseract_path() if images else "",
             )
             self._cache.set(
-                doc_id, "citation_extraction", "1.0",
+                doc_id, "citation_extraction", _citation_version(),
                 "citation_index", self._citation_index_to_dict(index),
             )
             self._bus.extraction_state_changed.emit(
@@ -305,6 +452,9 @@ class DocumentExtractionService:
                 ExtractionPayload(doc_id=doc_id, error=str(exc)),
             )
             return None
+        finally:
+            if images is not None:
+                images.close()
 
     def _extract_and_cache_entities(
         self, doc_id: str, blocks: List[DocumentBlock]
@@ -314,7 +464,7 @@ class DocumentExtractionService:
                 blocks, doc_id
             )
             self._cache.set(
-                doc_id, "entity_extraction", "1.0",
+                doc_id, "entity_extraction", _EXTRACTOR_VERSIONS["entity_extraction"],
                 "entities", [self._entity_to_dict(e) for e in entities],
             )
             self._bus.extraction_state_changed.emit(
@@ -335,7 +485,7 @@ class DocumentExtractionService:
         try:
             dates = self._date_extraction_service.extract_dates(blocks, doc_id)
             self._cache.set(
-                doc_id, "date_extraction", "1.0",
+                doc_id, "date_extraction", _EXTRACTOR_VERSIONS["date_extraction"],
                 "dates", [self._date_to_dict(d) for d in dates],
             )
             self._bus.extraction_state_changed.emit(
@@ -354,9 +504,12 @@ class DocumentExtractionService:
         self, doc_id: str, blocks: List[DocumentBlock]
     ) -> List[ExtractedTable]:
         try:
-            tables = self._table_extraction_service.extract_tables(doc_id, blocks)
+            # The path is what lets TableExtractionService use the real PDF table
+            # extractor instead of the block-text fallback.
+            pdf_path, _source_type = self._resolve_source(doc_id)
+            tables = self._table_extraction_service.extract_tables(doc_id, blocks, pdf_path)
             self._cache.set(
-                doc_id, "table_extraction", "1.0",
+                doc_id, "table_extraction", _EXTRACTOR_VERSIONS["table_extraction"],
                 "tables", [self._table_to_dict(t) for t in tables],
             )
             self._bus.extraction_state_changed.emit(
@@ -384,6 +537,11 @@ class DocumentExtractionService:
             "font_size": b.font_size, "is_bold": b.is_bold,
             "heading_level": b.heading_level, "section_path": b.section_path,
             "has_superscript": b.has_superscript,
+            "furniture_spans": b.furniture_spans,
+            "line_x0": b.line_x0,
+            "structure": b.structure,
+            "extractor_version": _BLOCK_PIPELINE_VERSION,
+            "provenance": dataclasses.asdict(b.provenance) if b.provenance else None,
         }
 
     @staticmethod
@@ -401,6 +559,10 @@ class DocumentExtractionService:
             heading_level=d.get("heading_level"),
             section_path=d.get("section_path", []),
             has_superscript=d.get("has_superscript", False),
+            furniture_spans=d.get("furniture_spans") or [],
+            line_x0=d.get("line_x0") or [],
+            structure=d.get("structure") or {},
+            provenance=ExtractionProvenance(**d['provenance']) if d.get('provenance') else None,
         )
 
     @staticmethod
@@ -453,17 +615,22 @@ class DocumentExtractionService:
             "date_id": d.date_id, "doc_id": d.doc_id,
             "exact_text": d.exact_text, "normalized_date": d.normalized_date,
             "certainty": d.certainty, "context_text": d.context_text,
+            "location": _plain(d.location),
+            "provenance": _plain(d.provenance),
+            "metadata": d.metadata,
         }
 
     @staticmethod
     def _dict_to_date(d: Dict[str, Any]) -> ExtractedDate:
-        from core.models.extraction_models import ExtractedDate as ED
-        return ED(
+        return ExtractedDate(
             date_id=d["date_id"], doc_id=d["doc_id"],
             exact_text=d.get("exact_text", ""),
             normalized_date=d.get("normalized_date", ""),
             certainty=d.get("certainty", "confirmed"),
             context_text=d.get("context_text", ""),
+            location=_location(d.get("location")),
+            provenance=_provenance(d.get("provenance")),
+            metadata=d.get("metadata") or {},
         )
 
     @staticmethod
@@ -503,10 +670,12 @@ class DocumentExtractionService:
             return CI(
                 doc_id=d.get("doc_id", doc_id),
                 bibliography_entries=[
-                    BibliographyEntry(**e) for e in d.get("bibliography_entries", [])
+                    BibliographyEntry(**_typed_refs(e))
+                    for e in d.get("bibliography_entries", [])
                 ],
                 in_text_citations=[
-                    InTextCitation(**c) for c in d.get("in_text_citations", [])
+                    InTextCitation(**_typed_refs(c))
+                    for c in d.get("in_text_citations", [])
                 ],
                 citation_matches=[
                     CitationMatch(**m) for m in d.get("citation_matches", [])
@@ -516,6 +685,31 @@ class DocumentExtractionService:
                 ambiguous_match_ids=d.get("ambiguous_match_ids", []),
                 entry_page_index=d.get("entry_page_index", {}),
                 citation_contexts=d.get("citation_contexts", {}),
+                reference_style=d.get("reference_style", {}),
             )
         except Exception:
             return CI(doc_id=doc_id)
+
+
+# Cached results are JSON; nested location/provenance must come back as their
+# dataclasses or consumers reading ``.page_num``/``.char_start`` silently get
+# None and every artifact synced from cache loses its source anchor.
+
+def _plain(value: Any) -> Optional[Dict[str, Any]]:
+    return dataclasses.asdict(value) if dataclasses.is_dataclass(value) else value
+
+
+def _location(value: Any) -> Optional[SourceLocation]:
+    return SourceLocation(**value) if isinstance(value, dict) else value
+
+
+def _provenance(value: Any) -> Optional[ExtractionProvenance]:
+    return ExtractionProvenance(**value) if isinstance(value, dict) else value
+
+
+def _typed_refs(item: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        **item,
+        "location": _location(item.get("location")),
+        "provenance": _provenance(item.get("provenance")),
+    }

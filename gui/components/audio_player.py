@@ -18,6 +18,8 @@ from gui.components.video_player import VideoPlayer
 
 
 class AudioPlayer(VideoPlayer):
+    source_type = "audio"
+
     def __init__(self, app_context=None, parent=None):
         super().__init__(app_context=app_context, parent=parent)
         self.video_widget.hide()
@@ -27,6 +29,7 @@ class AudioPlayer(VideoPlayer):
         placeholder.setStyleSheet("font-size: 24px; color: #9aa5b1;")
         layout = self.layout()
         layout.insertWidget(layout.indexOf(self.video_widget), placeholder)
+        self.export_actions.watch(placeholder)
 
     def _on_source_opened(self, event: SourceEvent, payload: DocumentEventPayload):
         if event == SourceEvent.OPENED and payload.source_type == "audio":

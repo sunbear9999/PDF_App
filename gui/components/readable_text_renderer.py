@@ -35,25 +35,7 @@ class ReadableTextRenderer:
         Returns:
             QTextDocument with styling applied
         """
-        # Handle theme and dark mode
-        if getattr(settings, 'theme_mode_enabled', False):
-            # Use app theme colors
-            from gui.theme.theme import ThemeManager
-            try:
-                theme = ThemeManager().get_theme()
-                theme_text_color = theme.get('text', '#000000')
-                theme_bg_color = theme.get('canvas', '#FFFFFF')
-            except Exception:
-                pass
-
-        if getattr(settings, 'dark_mode_enabled', False):
-            # Invert colors for dark mode
-            text_color = ReadableTextRenderer._invert_color(theme_text_color)
-            bg_color = ReadableTextRenderer._invert_color(theme_bg_color)
-        else:
-            # Resolve colors: use settings if customized, else theme defaults
-            text_color = settings.text_color or theme_text_color
-            bg_color = settings.bg_color or theme_bg_color
+        text_color, bg_color = ReadableTextRenderer.colors(settings, theme_text_color, theme_bg_color)
 
         # Calculate font size (heading_level 0 = base, each level up adds 2-4px)
         base_size = settings.font_size_base
@@ -122,6 +104,30 @@ class ReadableTextRenderer:
         doc.setHtml(html)
 
         return doc
+
+    @staticmethod
+    def colors(settings, theme_text_color="#000000", theme_bg_color="#FFFFFF"):
+        # Handle theme and dark mode
+        if getattr(settings, 'theme_mode_enabled', False):
+            # Use app theme colors
+            from gui.theme.theme import ThemeManager
+            try:
+                theme = ThemeManager().get_theme()
+                theme_text_color = theme.get('text', '#000000')
+                theme_bg_color = theme.get('canvas', '#FFFFFF')
+            except Exception:
+                pass
+
+        if getattr(settings, 'dark_mode_enabled', False):
+            # Invert colors for dark mode
+            text_color = ReadableTextRenderer._invert_color(theme_text_color)
+            bg_color = ReadableTextRenderer._invert_color(theme_bg_color)
+        else:
+            # Resolve colors: use settings if customized, else theme defaults
+            text_color = settings.text_color or theme_text_color
+            bg_color = settings.bg_color or theme_bg_color
+
+        return text_color, bg_color
 
     @staticmethod
     def _link_color(text_color: str) -> str:

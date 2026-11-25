@@ -19,8 +19,12 @@ All state updates are received via bus.ai_setup_state_changed.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Dict, List, Optional
+import threading
 
-from PySide6.QtCore import Qt, QTimer
+from core.events.domains.intelligence_events import IntelligenceEvent, ProcessingStatePayload
+from gui.components.model_dependency_tasks import ModelDependencyWorker as _ModelInstallWorker
+
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -35,85 +39,35 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QVBoxLayout,
     QWidget,
+    QFileDialog,
+    QMessageBox,
 )
 
 from gui.base.core import FALLBACK_THEME
+from gui.components.sentence_role_setup_card import (
+    SentenceRoleSetupCard, catalog_detail_labels,
+)
 
 if TYPE_CHECKING:
     from gui.app_context import AppContext
 
-
-def _t(theme: dict, key: str, fallback: str = "") -> str:
-    return theme.get(key) or FALLBACK_THEME.get(key, fallback)
-
-
-# ---------------------------------------------------------------------------
-# Reusable styling helpers (functions, not methods, so helpers can use them)
-# ---------------------------------------------------------------------------
-
-def _section_header_style(t: dict) -> str:
-    return (
-        f"color: {_t(t,'text_main','#fff')}; background: transparent; "
-        f"font-size: 13px; font-weight: 700; margin-top: 8px; margin-bottom: 2px;"
-    )
+# Optional models are optional: "missing" reads as a fault, so say it plainly.
+_STATE_LABELS = {"missing": "Not installed (optional)", "ready": "Installed ✓"}
 
 
-def _label_style(t: dict, muted: bool = False, size: int = 13) -> str:
-    col = _t(t, "text_muted", "#aaa") if muted else _t(t, "text_main", "#fff")
-    return f"color: {col}; background: transparent; font-size: {size}px;"
-
-
-def _card_style(t: dict) -> str:
-    return (
-        f"background: {_t(t,'bg_panel','#2b2b2b')}; "
-        f"border: 1px solid {_t(t,'border','#444')}; border-radius: 8px;"
-    )
-
-
-def _btn_primary(t: dict) -> str:
-    return (
-        f"background: {_t(t,'accent','#0078D7')}; color: #fff; border: none; "
-        f"border-radius: 5px; padding: 5px 14px; font-weight: 600; font-size: 12px;"
-    )
-
-
-def _btn_danger(t: dict) -> str:
-    return (
-        f"background: {_t(t,'error','#cc3333')}; color: #fff; border: none; "
-        f"border-radius: 5px; padding: 5px 14px; font-weight: 600; font-size: 12px;"
-    )
-
-
-def _btn_default(t: dict) -> str:
-    return (
-        f"background: {_t(t,'bg_panel','#333')}; color: {_t(t,'text_main','#fff')}; "
-        f"border: 1px solid {_t(t,'border','#555')}; "
-        f"border-radius: 5px; padding: 5px 14px; font-weight: 600; font-size: 12px;"
-    )
-
-
-def _btn_small_remove(t: dict) -> str:
-    return (
-        f"background: transparent; color: {_t(t,'error','#cc3333')}; "
-        f"border: 1px solid {_t(t,'error','#cc3333')}; "
-        f"border-radius: 4px; padding: 1px 8px; font-size: 11px;"
-    )
-
-
-def _input_style(t: dict) -> str:
-    return (
-        f"background: {_t(t,'bg_input','#333')}; color: {_t(t,'text_main','#fff')}; "
-        f"border: 1px solid {_t(t,'border','#555')}; border-radius: 5px; "
-        f"padding: 5px 10px; font-size: 12px; selection-background-color: {_t(t,'accent','#0078D7')};"
-    )
-
-
-def _progress_bar_style(t: dict) -> str:
-    return (
-        f"QProgressBar {{ border: 1px solid {_t(t,'border','#555')}; border-radius: 3px; "
-        f"background: {_t(t,'bg_input','#333')}; height: 10px; text-align: center; color: transparent; }}"
-        f"QProgressBar::chunk {{ background: {_t(t,'accent','#0078D7')}; border-radius: 2px; }}"
-    )
+from gui.components.settings_styles import divider, section_header
+from gui.components.settings_styles import (
+    theme_value as _t,
+    section_header_style as _section_header_style,
+    label_style as _label_style,
+    card_style as _card_style,
+    btn_primary as _btn_primary,
+    btn_danger as _btn_danger,
+    btn_default as _btn_default,
+    btn_small_remove as _btn_small_remove,
+    input_style as _input_style,
+    progress_bar_style as _progress_bar_style,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -254,16 +208,14 @@ class _BackendCard(QFrame):
         self._uninstall_btn.clicked.connect(self._on_uninstall)
         self._activate_btn.clicked.connect(self._on_activate)
 
-    def refresh(self, active_backend_id: str = "") -> None:
-        installed = False
-        version = None
-        try:
-            installed = self._spec.is_installed()
-            if installed:
-                version = self._spec.get_version()
-        except Exception:
-            pass
-
+    def refresh(self, active_backend_id: str = "", state=None) -> None:
+        if state is None:
+            self._status_lbl.setText('Checking readiness…')
+            for button in (self._install_btn, self._uninstall_btn, self._activate_btn):
+                button.setEnabled(False)
+            return
+        installed = bool((state or {}).get('installed'))
+        version = (state or {}).get('version')
         is_active = self._spec.id == active_backend_id
         success = _t(self._t, "success", "#00cc66")
         muted = _t(self._t, "text_muted", "#888")
@@ -279,12 +231,14 @@ class _BackendCard(QFrame):
         self._status_lbl.setText(
             f"<span style='color:{color}; font-weight:600;'>{dot} {label}</span>"
         )
+        self._status_lbl.setToolTip(str(state.get('error') or ''))
         self._install_btn.setVisible(not installed)
         self._install_btn.setEnabled(True)
         self._install_btn.setText("Install")
         self._uninstall_btn.setVisible(installed)
         self._uninstall_btn.setEnabled(True)
         self._activate_btn.setVisible(installed and not is_active)
+        self._activate_btn.setEnabled(installed and not is_active)
 
         # Show setup notes when installed
         notes = getattr(self._spec, "install_notes", "")
@@ -619,6 +573,8 @@ class _CatalogVoiceRow(QFrame):
 # Main settings tab
 # ---------------------------------------------------------------------------
 
+
+
 class AISetupSettingsTab(QWidget):
     """
     AI Setup tab for GlobalSettingsDialog.
@@ -646,6 +602,8 @@ class AISetupSettingsTab(QWidget):
         self._background_level_combo: Optional[QComboBox] = None
         self._auto_transcribe_combo: Optional[QComboBox] = None
         self._intelligence_checks: Dict[str, QCheckBox] = {}
+        self._dep_rows: Dict[str, Dict[str, object]] = {}
+        self._install_workers: Dict[str, _ModelInstallWorker] = {}
 
         self._build_ui()
         self._connect_signals()
@@ -695,20 +653,19 @@ class AISetupSettingsTab(QWidget):
         lay.addWidget(self._make_divider(t))
         lay.addWidget(self._build_tts_section(t))
         lay.addWidget(self._make_divider(t))
+        try:
+            lay.addWidget(self._build_pipeline_models_section(t))
+            lay.addWidget(self._make_divider(t))
+        except Exception as exc:  # never let this optional section break Settings
+            print(f"[AISetup] pipeline models section failed: {exc}")
         lay.addWidget(self._build_defaults_section(t))
         lay.addStretch()
 
     def _make_divider(self, t: dict) -> QFrame:
-        div = QFrame()
-        div.setFrameShape(QFrame.Shape.HLine)
-        div.setFixedHeight(1)
-        div.setStyleSheet(f"background: {_t(t,'border','#444')}; border: none;")
-        return div
+        return divider(t)
 
     def _make_section_hdr(self, text: str, t: dict) -> QLabel:
-        lbl = QLabel(text)
-        lbl.setStyleSheet(_section_header_style(t))
-        return lbl
+        return section_header(text, t)
 
     # -- Global AI toggle --------------------------------------------------
 
@@ -962,6 +919,281 @@ class AISetupSettingsTab(QWidget):
         lay.addWidget(self._voice_catalog_container)
         return w
 
+    # -- Pipeline models (optional deterministic-pipeline enhancers) -------
+
+    def _build_pipeline_models_section(self, t: dict) -> QWidget:
+        bg = _t(t, "bg_main")
+        fg = _t(t, "text_main")
+        muted = _t(t, "text_muted")
+        border = _t(t, "border", "#444")
+        accent = _t(t, "accent", "#4a9eff")
+
+        w = QWidget()
+        w.setStyleSheet(f"background: {bg};")
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+        lay.addWidget(self._make_section_hdr("Pipeline Models", t))
+
+        blurb = QLabel(
+            "Optional models that upgrade the local analysis pipeline. Each has a "
+            "deterministic fallback, so the app works without them — install to improve "
+            "entity resolution, reranking, or date/claim handling."
+        )
+        blurb.setWordWrap(True)
+        blurb.setStyleSheet(f"color: {muted}; background: transparent; font-size: 12px;")
+        lay.addWidget(blurb)
+
+        self._role_card = SentenceRoleSetupCard(self._ctx, t)
+        lay.addWidget(self._role_card)
+        svc = getattr(self._ctx, "model_dependency_service", None)
+        self._dep_rows.clear()
+        if not svc:
+            note = QLabel("Model dependency service unavailable.")
+            note.setStyleSheet(f"color: {muted}; background: transparent;")
+            lay.addWidget(note)
+            return w
+
+        try:
+            dependencies = svc.list_dependencies(probe=False)
+        except Exception as exc:
+            err = QLabel(f"Could not load pipeline models: {exc}")
+            err.setWordWrap(True)
+            err.setStyleSheet(f"color: {muted}; background: transparent;")
+            lay.addWidget(err)
+            return w
+
+        for dep in dependencies:
+            row = QFrame()
+            row.setStyleSheet(
+                f"QFrame {{ background: {_t(t,'bg_panel')}; border: 1px solid {border}; "
+                f"border-radius: 6px; }}"
+            )
+            rlay = QVBoxLayout(row)
+            rlay.setContentsMargins(12, 10, 12, 10)
+            rlay.setSpacing(4)
+
+            top = QHBoxLayout()
+            name = QLabel(dep["label"])
+            name.setStyleSheet(f"color: {fg}; background: transparent; font-weight: 700;")
+            top.addWidget(name)
+            size = QLabel(dep.get("size_hint") or "")
+            size.setStyleSheet(f"color: {muted}; background: transparent; font-size: 11px;")
+            top.addWidget(size)
+            top.addStretch()
+
+            status = QLabel("")
+            status.setStyleSheet(f"color: {muted}; background: transparent; font-size: 12px;")
+            top.addWidget(status)
+
+            btn = QPushButton("Install")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(
+                f"QPushButton {{ background: {accent}; color: white; border: none; "
+                f"border-radius: 4px; padding: 4px 12px; }} "
+                f"QPushButton:disabled {{ background: {border}; color: {muted}; }}"
+            )
+            btn.clicked.connect(lambda _=False, d=dep["id"]: self._on_install_dependency(d))
+            top.addWidget(btn)
+            rlay.addLayout(top)
+
+            desc = QLabel(dep["description"])
+            desc.setWordWrap(True)
+            desc.setStyleSheet(f"color: {muted}; background: transparent; font-size: 11px;")
+            rlay.addWidget(desc)
+            for detail in catalog_detail_labels(dep, muted):
+                rlay.addWidget(detail)
+            if dep.get("repository"):
+                manifest = QLabel(
+                    f"{dep.get('repository')} @ {dep.get('revision') or 'unpinned'}"
+                )
+                manifest.setWordWrap(True)
+                manifest.setTextInteractionFlags(
+                    Qt.TextInteractionFlag.TextSelectableByMouse
+                )
+                manifest.setStyleSheet(
+                    f"color: {muted}; background: transparent; font-size: 10px;"
+                )
+                rlay.addWidget(manifest)
+            destination = QLabel(dep.get("destination") or "")
+            destination.setWordWrap(True)
+            destination.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            destination.setStyleSheet(f"color: {muted}; background: transparent; font-size: 10px;")
+            rlay.addWidget(destination)
+
+            if dep.get("kind") in {"onnx_hf", "manual"}:
+                model_actions = QHBoxLayout()
+                import_btn = QPushButton("Import model folder…")
+                import_btn.clicked.connect(
+                    lambda _=False, d=dep["id"]: self._on_import_dependency(d)
+                )
+                model_actions.addWidget(import_btn)
+                remove_btn = QPushButton("Remove")
+                remove_btn.clicked.connect(
+                    lambda _=False, d=dep["id"]: self._on_remove_dependency(d)
+                )
+                model_actions.addWidget(remove_btn)
+                model_actions.addStretch()
+                rlay.addLayout(model_actions)
+            else:
+                import_btn = None
+                remove_btn = None
+
+            lay.addWidget(row)
+            self._dep_rows[dep["id"]] = {
+                "status": status, "button": btn, "import_button": import_btn,
+                "remove_button": remove_btn,
+                "log": [], "destination": dep.get("destination") or "",
+            }
+
+        self._refresh_pipeline_models()
+        return w
+
+    def _refresh_pipeline_models(self) -> None:
+        if not getattr(self._ctx, 'model_readiness_service', None):
+            return
+        from gui.components.artifact_tasks import ArtifactTaskRunner
+        if not hasattr(self, '_readiness_runner'):
+            self._readiness_runner = ArtifactTaskRunner(self._ctx, self, service_name='model_readiness_service')
+            self._readiness_runner.completed.connect(self._readiness_ready)
+            self._readiness_runner.failed.connect(self._readiness_failed)
+            self.destroyed.connect(self._readiness_runner.shutdown)
+        self._readiness_runner.start('read')
+
+    def _readiness_failed(self, error):
+        for refs in self._dep_rows.values():
+            refs['status'].setText('Readiness check failed')
+            refs['status'].setToolTip(error)
+
+    def _readiness_ready(self, operation):
+        result, self._readiness_runner.result = self._readiness_runner.result or {}, None
+        if getattr(self, '_role_card', None):
+            self._role_card.apply_snapshot(result)
+        self._apply_pipeline_models(result.get('dependencies') or [])
+
+    def _apply_pipeline_models(self, dependencies):
+        for dep in dependencies:
+            refs = self._dep_rows.get(dep["id"])
+            if not refs:
+                continue
+            status: QLabel = refs["status"]
+            btn: QPushButton = refs["button"]
+            state = str(dep.get("status") or "missing").lower()
+            status.setText(_STATE_LABELS.get(state, state.title()))
+            status.setToolTip(
+                f"State: {state}\nDestination: {dep.get('destination') or ''}\n"
+                f"Repository: {dep.get('repository') or ''}\n"
+                f"Revision: {dep.get('revision') or ''}\n"
+                + "\n".join(refs.get("log") or [])
+            )
+            remove_btn = refs.get("remove_button")
+            if remove_btn:
+                remove_btn.setEnabled(state in {"ready", "broken", "incompatible"})
+            if state == "ready":
+                btn.setText("Ready ✓")
+                btn.setEnabled(False)
+            elif not dep["installable"]:
+                btn.setText("Manual")
+                btn.setEnabled(False)
+            else:
+                btn.setText("Repair" if state in {"broken", "incompatible"} else "Install")
+                btn.setEnabled(True)
+
+    def _on_install_dependency(self, dep_id: str) -> None:
+        svc = getattr(self._ctx, "model_dependency_service", None)
+        if not svc:
+            return
+        if dep_id in self._install_workers:
+            self._install_workers[dep_id].cancel()
+            refs = self._dep_rows.get(dep_id) or {}
+            button = refs.get("button")
+            if button:
+                button.setEnabled(False)
+                button.setText("Cancelling…")
+            return
+        refs = self._dep_rows.get(dep_id) or {}
+        btn: Optional[QPushButton] = refs.get("button")
+        status: Optional[QLabel] = refs.get("status")
+        if btn:
+            btn.setEnabled(True)
+            btn.setText("Cancel")
+        if status:
+            status.setText("Downloading…")
+        # Parent the QThread to the application, not this tab, so closing the
+        # Settings dialog mid-install can't destroy a running thread (crash/leak).
+        from PySide6.QtWidgets import QApplication
+        worker = _ModelInstallWorker(svc, dep_id, QApplication.instance())
+        worker.done.connect(self._on_dependency_installed, Qt.ConnectionType.QueuedConnection)
+        worker.progress.connect(self._on_dependency_progress, Qt.ConnectionType.QueuedConnection)
+        worker.log.connect(self._on_dependency_log, Qt.ConnectionType.QueuedConnection)
+        self._install_workers[dep_id] = worker
+        worker.start()
+
+    def _on_dependency_installed(self, dep_id: str, ok: bool, error: str) -> None:
+        worker = self._install_workers.pop(dep_id, None)
+        refs = self._dep_rows.get(dep_id) or {}
+        status: Optional[QLabel] = refs.get("status")
+        if not ok and status:
+            status.setText(f"Failed: {error[:60]}")
+            status.setToolTip(
+                f"{error}\nDestination: {refs.get('destination') or ''}\n"
+                + "\n".join(refs.get("log") or [])
+            )
+        self._refresh_pipeline_models()
+        self._bus.intelligence_state_changed.emit(IntelligenceEvent.MODEL_DEPENDENCY_CHANGED, ProcessingStatePayload(dependency_id=dep_id))
+
+    def _on_dependency_progress(self, dep_id: str, current: int, total: int, message: str):
+        refs = self._dep_rows.get(dep_id) or {}
+        status = refs.get("status")
+        if status:
+            pct = int(current * 100 / total) if total else 0
+            status.setText(f"{message} ({pct}%)")
+
+    def _on_dependency_log(self, dep_id: str, message: str):
+        refs = self._dep_rows.get(dep_id) or {}
+        refs.setdefault("log", []).append(message)
+        status = refs.get("status")
+        if status:
+            status.setToolTip(
+                f"Destination: {refs.get('destination') or ''}\n"
+                + "\n".join(refs["log"][-30:])
+            )
+
+    def _on_import_dependency(self, dep_id: str):
+        svc = getattr(self._ctx, "model_dependency_service", None)
+        if not svc:
+            return
+        folder = QFileDialog.getExistingDirectory(self, "Import model folder")
+        if not folder:
+            return
+        if dep_id in self._install_workers:
+            return
+        worker = _ModelInstallWorker(svc, dep_id, QApplication.instance(), action="import", source_dir=folder)
+        worker.done.connect(self._on_dependency_installed, Qt.ConnectionType.QueuedConnection)
+        worker.progress.connect(self._on_dependency_progress, Qt.ConnectionType.QueuedConnection)
+        worker.log.connect(self._on_dependency_log, Qt.ConnectionType.QueuedConnection)
+        self._install_workers[dep_id] = worker
+        worker.start()
+
+    def _on_remove_dependency(self, dep_id: str):
+        svc = getattr(self._ctx, "model_dependency_service", None)
+        if not svc:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Remove optional model",
+            "Remove this locally downloaded model? It can be installed or "
+            "imported again later.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        result = svc.remove(dep_id)
+        refs = self._dep_rows.get(dep_id) or {}
+        if not result.get("ok") and refs.get("status"):
+            refs["status"].setText("Remove failed")
+            refs["status"].setToolTip(str(result.get("error") or "Remove failed"))
+        self._refresh_pipeline_models()
+
     # -- Defaults ----------------------------------------------------------
 
     def _build_defaults_section(self, t: dict) -> QWidget:
@@ -1162,10 +1394,10 @@ class AISetupSettingsTab(QWidget):
                 card.hide_progress()
                 if success:
                     card.clear_error()
-                    card.refresh(self._active_backend_id)
+                    card.refresh(self._active_backend_id, getattr(self, "_setup_snapshot", {}).get("backends", {}).get(card._spec.id))
                 else:
                     card.show_error(payload.message)
-                    card.refresh(self._active_backend_id)
+                    card.refresh(self._active_backend_id, getattr(self, "_setup_snapshot", {}).get("backends", {}).get(card._spec.id))
         elif bid and mid:
             row = self._catalog_rows.get(bid, {}).get(mid)
             if row:
@@ -1224,11 +1456,7 @@ class AISetupSettingsTab(QWidget):
         warning = _t(t, "warning", "#ffaa00")
         success = _t(t, "success", "#00cc66")
 
-        try:
-            svc = self._ctx.ai_setup_service
-            info = svc.get_hardware_info()
-        except Exception:
-            info = {}
+        info = getattr(self, '_setup_snapshot', {}).get('hardware') or {}
 
         ram = info.get("ram_gb", 0)
         gpu = info.get("gpu_name", "Not detected")
@@ -1280,9 +1508,37 @@ class AISetupSettingsTab(QWidget):
             except Exception:
                 pass
         for card in self._backend_cards.values():
-            card.refresh(self._active_backend_id)
+            card.refresh(self._active_backend_id, getattr(self, "_setup_snapshot", {}).get("backends", {}).get(card._spec.id))
+
+        self._request_setup_snapshot()
+
+    def _request_setup_snapshot(self):
+        if not getattr(self._ctx, 'model_readiness_service', None):
+            return
+        from gui.components.artifact_tasks import ArtifactTaskRunner
+        if not hasattr(self, '_setup_reader'):
+            self._setup_reader = ArtifactTaskRunner(self._ctx, self, service_name='model_readiness_service')
+            self._setup_reader.completed.connect(self._setup_ready)
+            self._setup_reader.failed.connect(self._readiness_failed)
+            self.destroyed.connect(self._setup_reader.shutdown)
+        self._setup_reader.start('read_setup', backend_id=self._active_backend_id)
+
+    def _setup_ready(self, operation):
+        result, self._setup_reader.result = self._setup_reader.result or {}, None
+        if result.get('backend_id') != self._active_backend_id:
+            return
+        self._setup_snapshot = result
+        self._models_backend_lbl.setToolTip('\n'.join(result.get('diagnostics') or []))
+        self._refresh_hardware()
+        for card in self._backend_cards.values():
+            card.refresh(self._active_backend_id, result.get('backends', {}).get(card._spec.id))
+        self._apply_models_section(result.get('installed_models') or [])
+        self._apply_tts_section()
 
     def _refresh_models_section(self) -> None:
+        self._request_setup_snapshot()
+
+    def _apply_models_section(self, installed):
         bid = self._active_backend_id
         registry = getattr(self._ctx, "llm_backend_registry", None)
         if not bid or not registry:
@@ -1296,11 +1552,6 @@ class AISetupSettingsTab(QWidget):
 
         self._models_backend_lbl.setText(f"({spec.name})")
         self._clear_layout(self._installed_models_lay)
-
-        try:
-            installed = spec.list_installed_models()
-        except Exception:
-            installed = []
 
         self._no_models_lbl.setVisible(len(installed) == 0)
         for m in installed:
@@ -1340,11 +1591,14 @@ class AISetupSettingsTab(QWidget):
         self._refresh_defaults_combos(installed)
 
     def _refresh_tts_section(self) -> None:
+        self._request_setup_snapshot()
+
+    def _apply_tts_section(self):
         from core.backends.tts_backend import VOICE_CATALOG, is_piper_installed, list_installed_voices
         t = self._theme
         user_data_dir = getattr(getattr(self._ctx, "core", None), "user_data_dir", "")
 
-        piper_ok = is_piper_installed(user_data_dir)
+        piper_ok = bool(getattr(self, '_setup_snapshot', {}).get('piper_installed'))
         success = _t(t, "success", "#00cc66")
         muted = _t(t, "text_muted", "#888")
 
@@ -1359,10 +1613,7 @@ class AISetupSettingsTab(QWidget):
         self._piper_install_btn.setVisible(not piper_ok)
 
         self._clear_layout(self._installed_voices_lay)
-        try:
-            installed = list_installed_voices(user_data_dir)
-        except Exception:
-            installed = []
+        installed = getattr(self, '_setup_snapshot', {}).get('voices') or []
         self._no_voices_lbl.setVisible(len(installed) == 0)
         for v in installed:
             self._installed_voices_lay.addWidget(_InstalledVoiceRow(v, t, self._bus))
@@ -1382,7 +1633,7 @@ class AISetupSettingsTab(QWidget):
         role_svc = getattr(self._ctx, "model_role_service", None)
         policy_svc = getattr(self._ctx, "processing_policy_service", None)
         catalog = svc.get_active_backend_catalog() if svc and hasattr(svc, "get_active_backend_catalog") else []
-        installed_ids = svc.get_installed_model_ids() if svc and hasattr(svc, "get_installed_model_ids") else set()
+        installed_ids = {model.id for model in installed_models}
         catalog_by_id = {m.id: m for m in catalog}
 
         all_models = list(installed_models)
@@ -1393,7 +1644,7 @@ class AISetupSettingsTab(QWidget):
         }
         for role, combo in self._role_combos.items():
             required = role_capability.get(role)
-            recommendations = role_svc.recommendations_for_role(role) if role_svc else []
+            recommendations = getattr(self, '_setup_snapshot', {}).get('role_descriptions', {}).get(role, {}).get('recommendations') or []
             models = [m for m in all_models if not required or required in getattr(m, "tags", [])]
             current = self._current_role_model(role)
             combo.blockSignals(True)
@@ -1418,7 +1669,7 @@ class AISetupSettingsTab(QWidget):
             idx = next((i for i in range(combo.count()) if combo.itemData(i) == current), 0)
             combo.setCurrentIndex(idx)
             combo.blockSignals(False)
-            desc = role_svc.describe_role(role) if role_svc else {}
+            desc = getattr(self, '_setup_snapshot', {}).get('role_descriptions', {}).get(role, {})
             guide = desc.get("guide", "")
             tier = desc.get("hardware_tier")
             max_ctx = desc.get("max_context_tokens")
@@ -1429,7 +1680,7 @@ class AISetupSettingsTab(QWidget):
             self._update_role_download_button(role)
 
         if policy_svc:
-            settings = policy_svc.get_project_settings()
+            settings = getattr(self, '_setup_snapshot', {}).get('settings') or {}
             self._set_combo_data(self._processing_mode_combo, settings.get("default_processing_mode", "balanced"))
             self._set_combo_data(self._background_level_combo, settings.get("background_level", "normal"))
             self._set_combo_data(self._auto_transcribe_combo, settings.get("auto_transcribe", "ask"))
@@ -1447,21 +1698,7 @@ class AISetupSettingsTab(QWidget):
         combo.blockSignals(False)
 
     def _current_role_model(self, role: str) -> str:
-        svc = getattr(self._ctx, "ai_setup_service", None)
-        role_svc = getattr(self._ctx, "model_role_service", None)
-        roles = svc.get_model_roles() if svc and hasattr(svc, "get_model_roles") else {}
-        if isinstance(roles, dict) and roles.get(role):
-            return str(roles[role])
-        if role == "main_answer_model" and svc and hasattr(svc, "get_default_chat_model"):
-            return svc.get_default_chat_model() or ""
-        if role == "embedding_model" and svc and hasattr(svc, "get_default_embedding_model"):
-            return svc.get_default_embedding_model() or ""
-        if role_svc:
-            try:
-                return role_svc.resolve_role(role) or ""
-            except Exception:
-                return ""
-        return ""
+        return str(getattr(self, '_setup_snapshot', {}).get('current_roles', {}).get(role) or '')
 
     def _fallback_save_model_for_role(self, role: str) -> str:
         svc = getattr(self._ctx, "ai_setup_service", None)
@@ -1568,7 +1805,7 @@ class AISetupSettingsTab(QWidget):
         if not combo or not btn or not svc:
             return
         model_id = combo.currentData() or ""
-        installed = svc.get_installed_model_ids() if hasattr(svc, "get_installed_model_ids") else set()
+        installed = {model.id for model in getattr(self, '_setup_snapshot', {}).get('installed_models') or []}
         catalog_ids = {m.id for m in svc.get_active_backend_catalog()} if hasattr(svc, "get_active_backend_catalog") else set()
         can_download = bool(model_id and model_id in catalog_ids and model_id not in installed)
         if role in self._role_downloads_by_model.get(model_id, set()):

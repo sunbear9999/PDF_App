@@ -37,8 +37,21 @@ class CitationDock(QWidget):
 
         self.bus.citation_table_data_ready.connect(self._populate_table)
         self.bus.citation_status_updated.connect(self._handle_status)
+        self.bus.pdf_removed.connect(self._remove_source_row)
 
         self.bus.citation_action_requested.emit(CitationIntent.REFRESH_TABLE, CitationPayload())
+
+    def _remove_source_row(self, _event, payload):
+        path = getattr(payload, "path", "")
+        for row in range(self.table.rowCount() - 1, -1, -1):
+            item = self.table.item(row, 0)
+            if item and item.data(Qt.ItemDataRole.UserRole) == path:
+                self.table.removeRow(row)
+        self._row_records = {
+            row: self._row_records.get(old_row, {})
+            for row, old_row in enumerate(sorted(self._row_records))
+            if self._row_records.get(old_row, {}).get("doc_id") != path
+        }
 
     def _build_ui(self):
         layout = QVBoxLayout(self)

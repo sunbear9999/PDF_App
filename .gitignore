@@ -1,56 +1,86 @@
-# 1. Ignore EVERYTHING by default
+# Papyrus .gitignore — WHITELIST: only what the app needs to run and to build.
+# Everything is ignored first, then the needed paths are allowed back in.
+# Tests, eval tools, notes, sample PDFs, projects, models and build output stay local.
+
+# 1. Ignore everything
 *
 
-# 2. Un-ignore directories (so Git can traverse folders to find your files)
+# 2. Let git walk into folders (files inside are still ignored unless allowed below)
 !*/
 
-# 3. Un-ignore the specific file types and files you want to keep
-!*.py
-!*.spec
-!*.gif
-!icon.png
+# 3. Root files needed to run and build
 !.gitignore
+!main.py
+!main.spec
+!requirements.txt
+!icon.png
+!installer.py
+!installer.spec
+!installer_win.py
+!installer_win.spec
+
+# 4. Application code and the data files it reads at runtime
+!core/**/*.py
+!core/analysis_templates.json
+!core/bias_datasets/*.json
+!core/help/content/*.json
+!gui/**/*.py
+!gui/components/examples/*.gif
+!plugins/**/*.py
+!web/**/*.py
+!web/requirements-web.txt
+!web/frontend/dist/**
+# Frontend source, so dist/ can be rebuilt (npm install && npm run build in web/frontend)
+!web/frontend/index.html
+!web/frontend/package.json
+!web/frontend/package-lock.json
+!web/frontend/tsconfig.json
+!web/frontend/vite.config.ts
+!web/frontend/src/**
 !assets/**
 !qtwebengine_dictionaries/**
 
-# ====================================================================
-# 4. EXPLICITLY RE-IGNORE DEV/BUILD DIRECTORIES
-# (This prevents Git from tracking the .py files inside your virtual 
-# environment, PyInstaller build folders, or cache).
-# ====================================================================
-
-# Virtual environments
-venv/
-env/
-.env/
-
-# PyInstaller / PyArmor build outputs
-build/
-dist/
-
-# Python cache and compiled files
+# 5. Re-ignore anything inside the allowed folders that is not needed
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+node_modules/
+*.test.ts
+*.test.tsx
+# Local Laws plugin downloads and indexes are per-user data, created at runtime
+plugins/locallaws/dbs/
 
-# IDE folders
+# 6. Folders that are never part of the app (explicit, in case a rule above matches)
+venv/
+env/
+.env/
+.venv/
+build/
+dist/
+!web/frontend/dist/
+.pyarmor/
+/tests/
+/tools/
+/docs/
+/models/
+/graphify-out/
+/MagicMock/
+.claude/
+.claude-flow/
+.swarm/
+.codex/
+.codex_backups/
+.agents/
+.pytest_cache/
 .vscode/
 .idea/
-
-# Downloaded Assets / Generated Project Files (Specific to your app)
 voices/
 *.pdfproj
-OllamaSetup.exe
-main.patched.spec
-
-# Papyrus Local Web Companion source and prebuilt offline assets.
-!web/**
-web/**/__pycache__/
-web/frontend/node_modules/
-
-# Cleanup 2026-07: junk artifacts
-.codex_backups/
-MagicMock/
-pyarmor.bug.log
+*.pdfproj-*
+*.pdfproj_chroma_db/
+*.ppack
+*.ppack_FILES/
 *.patched.spec
+pyarmor.bug.log
+OllamaSetup.exe

@@ -1,12 +1,22 @@
 # core/engine/default_blueprints.py
+import copy
 import json
+from core.models.analysis_patch_schema import analysis_patch_schema
 from core.engine.action_model import AIActionBlueprint, ActionStep
 
 class DefaultBlueprints:
     @staticmethod
     def get_citation_coverage_steps(answer_key="final_answer", context_key="rag_context", ui_target="chat_dock") -> list[ActionStep]:
-        """Generate complete answer citations in one structured model pass."""
-        return [DefaultBlueprints.get_universal_citation_step(answer_key, context_key, ui_target)]
+        """Validate answer-to-evidence coverage without another model call."""
+        return [ActionStep(
+            step_id="validate_citation_coverage",
+            step_type="CITATION_VALIDATE",
+            inputs={"answer": f"{{{answer_key}}}", "context": f"{{{context_key}}}"},
+            output_key="citations",
+            ui_format="chat_widgets",
+            ui_target=ui_target,
+            status_text="Validating source support…",
+        )]
 
     @staticmethod
     def get_universal_citation_step(answer_key="final_answer", context_key="rag_context", ui_target="floating") -> ActionStep:
@@ -23,9 +33,7 @@ class DefaultBlueprints:
                     "doc_name": "filename.pdf",
                     "quote": "exact verbatim sentence from source",
                     "note": "specific answer claim this quote proves",
-                    "source_type": "exact value from CITATION_SOURCE_TYPE",
-                    "source_id": "exact value from CITATION_SOURCE_ID",
-                    "source_locator": {"key": "values from CITATION_LOCATOR_key lines"},
+                    "source": "label of the passage, e.g. S3",
                 }]
             },
             llm_options={"temperature": 0.05, "num_predict": 4096, "num_ctx": 32768},
@@ -44,17 +52,86 @@ class DefaultBlueprints:
             step_type="LLM_QUERY",
             inputs={
                 "query": (
-                    "{prompt:Manifest Update Query}\n\n"
+                    "{prompt:Manifest Structured Update Query}\n\n"
                     f"USER REQUEST:\n{{{user_key}}}\n\nCOMPLETED ANSWER:\n{{{answer_key}}}"
                 )
             },
             prompt_key="General Assistant",
+            model="{fast_worker_model}",
+            model_role="fast_worker_model",
             required_context=["manifest"],
             allow_manifest_updates=True,
-            llm_options={"temperature": 0.1, "num_predict": 4000, "num_ctx": 32768},
+            manifest_update_protocol="structured",
+            llm_retry_attempts=1,
+            output_schema={
+                "action": "update | no_change",
+                "changes": {
+                    "Core Thesis": "<the project's actual thesis in one specific sentence, grounded in the completed answer; omit this key entirely if the answer adds none>",
+                    "Major Topics": {"<a real topic name from the answer>": ["<a real subtopic from the answer>"]},
+                    "Open Questions": ["<a specific open question the answer actually raises>"],
+                },
+                "reason": "<one concrete sentence naming what durable content changed>",
+            },
+            llm_options={
+                "temperature": 0.1,
+                "json_mode": True,
+                "num_predict": 1600,
+                "num_ctx": 32768,
+            },
             output_key="manifest_update_result",
             ui_format="silent",
             ui_target=ui_target,
+        )
+
+    @staticmethod
+    def get_project_manifest_update_blueprint(
+        pm=None, ui_target: str = "chat_dock",
+    ) -> AIActionBlueprint:
+        """Small registered workflow used after an answer has completed.
+
+        Keeping the manifest mutation in its own master-runner job prevents an
+        optional second model call (and its retry) from delaying the answer.
+        """
+        return AIActionBlueprint(
+            name="Project Manifest Update",
+            description="Review a completed answer for durable project changes.",
+            steps=[DefaultBlueprints.get_manifest_update_step(
+                user_key="manifest_user_query",
+                answer_key="manifest_answer",
+                ui_target=ui_target,
+            )],
+        )
+
+    @staticmethod
+    def get_manifest_update_dispatch_step(
+        user_key="user_query",
+        answer_key="final_answer",
+        ui_target="chat_dock",
+    ) -> ActionStep:
+        """Queue the registered manifest workflow without blocking this run."""
+        return ActionStep(
+            step_id="queue_project_manifest_update",
+            step_type="DISPATCH_EVENT",
+            inputs={
+                "signal_name": "workflow_action_requested",
+                "intent": "RUN_BLUEPRINT",
+                "payload": {
+                    "blueprint_id": "project_manifest_update",
+                    "target_id": ui_target,
+                    "job_name": "Project Manifest Update",
+                    "job_type": "Background Intelligence",
+                    "initial_state": {
+                        "manifest_user_query": f"{{{user_key}}}",
+                        "manifest_answer": f"{{{answer_key}}}",
+                        "include_manifest": True,
+                        "allow_manifest_updates": True,
+                    },
+                },
+            },
+            output_key="manifest_update_job",
+            ui_format="silent",
+            ui_target=ui_target,
+            status_text="Queueing project manifest review…",
         )
 
     @staticmethod
@@ -428,7 +505,7 @@ class DefaultBlueprints:
                     step_id="manifest_update_router",
                     step_type="BRANCH",
                     inputs={"logic": "state.get('allow_manifest_updates', False) == True"},
-                    if_true=[DefaultBlueprints.get_manifest_update_step(
+                    if_true=[DefaultBlueprints.get_manifest_update_dispatch_step(
                         user_key="user_query", answer_key="final_answer", ui_target="chat_dock"
                     )],
                     if_false=[],
@@ -441,6 +518,501 @@ class DefaultBlueprints:
                     if_false=[]
                 )
             ]
+        )
+
+    # ── Intelligence analysis modes (artifact-aware, retrieve→synthesize) ──
+    @staticmethod
+    def _intel_retrieve_steps(query_key: str, source_ids_expr: str = "{allowed_source_ids}",
+                              max_results: int = 10, prefix: str = "intel") -> list[ActionStep]:
+        """Shared retrieve primitive: plan → retrieve → pack (citation-ready)."""
+        return [
+            ActionStep(
+                step_id=f"{prefix}_build_plan", step_type="BUILD_RETRIEVAL_PLAN",
+                inputs={"query": f"{{{query_key}}}", "allowed_source_ids": source_ids_expr,
+                        "max_results": max_results},
+                output_key="retrieval_plan", ui_format="silent",
+            ),
+            ActionStep(
+                step_id=f"{prefix}_retrieve", step_type="ARTIFACT_RETRIEVE",
+                inputs={"plan": "{retrieval_plan}"}, output_key="retrieved_artifacts", ui_format="silent",
+            ),
+            ActionStep(
+                step_id=f"{prefix}_pack", step_type="PACK_ARTIFACT_CONTEXT",
+                inputs={"query": f"{{{query_key}}}", "results": "{retrieved_artifacts}"},
+                output_key="packed_context", ui_format="silent",
+            ),
+        ]
+
+    @staticmethod
+    def get_intelligence_qa_blueprint(pm=None, model: str = "{selected_model}") -> AIActionBlueprint:
+        return AIActionBlueprint(
+            name="Q&A (Intelligence)",
+            description="Artifact-aware Q&A: multi-signal retrieve (semantic + entity + keyword) → synthesize with segment-id citations.",
+            mount_points=["analysis_mode", "research_tab"],
+            expected_inputs=[{"key": "user_query", "type": "text", "label": "Question"}],
+            steps=[
+                *DefaultBlueprints._intel_retrieve_steps("user_query", max_results=10, prefix="qa"),
+                ActionStep(
+                    step_id="qa_answer", step_type="LLM_QUERY",
+                    inputs={"query": "{prompt:Intelligence QA Query}\n\nCONTEXT:\n{packed_context}\n\nQUESTION: {user_query}"},
+                    system_prompt="{prompt:Intelligence QA System}",
+                    model=model, model_role="main_answer_model",
+                    output_key="final_answer", citation_source_key="packed_context",
+                    required_prompt_keys=["Intelligence QA System", "Intelligence QA Query"],
+                    ui_format="live_stream", ui_target="chat_dock",
+                    conversation_role="assistant",
+                    llm_options={"temperature": 0.2, "num_predict": 4000, "num_ctx": 32768},
+                ),
+                *DefaultBlueprints.get_citation_coverage_steps(
+                    answer_key="final_answer", context_key="packed_context", ui_target="chat_dock"),
+                ActionStep(
+                    step_id="qa_persist", step_type="ANALYSIS_OUTPUT_WRITE",
+                    inputs={
+                        "mode": "{analysis_mode_id}", "result_kind": "narrative",
+                        "artifact_type": "analysis_answer", "output": "{final_answer}",
+                        "evidence": "{citations}", "source_id": "{source_id}",
+                        "params_hash": "{params_hash}", "doc_hash": "{doc_hash}",
+                        "model_role": "main_answer_model",
+                    },
+                    output_key="analysis_result_envelope", ui_format="silent",
+                ),
+            ],
+        )
+
+    @staticmethod
+    def get_intelligence_claim_tracking_blueprint(pm=None, model: str = "{selected_model}") -> AIActionBlueprint:
+        return DefaultBlueprints.get_intelligence_mode_graph_blueprint(
+            pm, model=model, name="Claim Tracking (Intelligence)"
+        )
+
+    @staticmethod
+    def get_intelligence_analysis_mode_blueprint(
+        pm=None,
+        analysis_spec=None,
+        model: str = "{selected_model}",
+    ) -> AIActionBlueprint:
+        """The single registered blueprint factory for every analysis mode.
+
+        AnalysisModeSpec is data: it selects the appropriate reusable step
+        composition without requiring a separately registered blueprint.
+        User/plugin modes therefore gain the same preparation, runner,
+        provenance, cancellation, and output contract automatically.
+        """
+        mode_id = str(getattr(analysis_spec, "id", "") or "custom_graph")
+        result_kind = str(
+            getattr(analysis_spec, "result_kind", "") or "narrative"
+        )
+        label = str(getattr(analysis_spec, "label", "") or "Analysis")
+        if result_kind in {"graph", "composite"}:
+            return DefaultBlueprints.get_intelligence_mode_graph_blueprint(
+                pm,
+                model=model,
+                name=f"{label} (Universal Analysis)",
+                required_stages=list(
+                    getattr(analysis_spec, "required_stages", None) or []
+                ),
+            )
+        if result_kind == "timeline":
+            return DefaultBlueprints.get_intelligence_timeline_blueprint(pm)
+        if mode_id == "qa":
+            return DefaultBlueprints.get_intelligence_qa_blueprint(pm, model=model)
+        if mode_id == "extraction" or result_kind == "table":
+            return DefaultBlueprints.get_intelligence_schema_extraction_blueprint(
+                pm, model=model
+            )
+        if mode_id == "summaries":
+            return DefaultBlueprints.get_intelligence_summaries_blueprint(
+                pm, model=model
+            )
+        # A user-created narrative mode gets the artifact-aware Q&A composition
+        # and its AnalysisModeSpec description/parameters remain available in
+        # state as the mode contract.
+        return DefaultBlueprints.get_intelligence_qa_blueprint(pm, model=model)
+
+    @staticmethod
+    def get_intelligence_mode_graph_blueprint(
+        pm=None,
+        model: str = "{selected_model}",
+        name: str = "Argument Map (Intelligence)",
+        required_stages=None,
+    ) -> AIActionBlueprint:
+        """Build a grounded baseline, then enhance and repair it through the runner."""
+        preparation_stages = [
+            stage for stage in list(required_stages if required_stages is not None else ["parsed_blocks", "sections", "claims"])
+            if stage != "graph_seeds"
+        ]
+        return AIActionBlueprint(
+            name=name,
+            description=(
+                "Prepare section-aware evidence packets from reusable intelligence "
+                "artifacts, then use prompt-managed model calls to enhance and, only "
+                "when validation fails, repair the typed graph."
+            ),
+            mount_points=["analysis_mode", "document_analysis"],
+            expected_inputs=[
+                {"key": "analysis_focus", "type": "text", "label": "Analysis focus"},
+                {"key": "allowed_source_ids", "type": "list", "label": "Sources"},
+            ],
+            steps=[
+                ActionStep(
+                    step_id="prepare_analysis_artifacts",
+                    step_type="SOURCE_STAGE",
+                    inputs={
+                        "action": "ensure_analysis",
+                        "source_id": "{source_id}",
+                        "source_ids": "{allowed_source_ids}",
+                        "stages": preparation_stages,
+                    },
+                    output_key="analysis_preparation",
+                    ui_format="status",
+                    ui_title="Preparing reusable intelligence",
+                ),
+                ActionStep(
+                    step_id="project_complete_artifact_graph",
+                    step_type="DETERMINISTIC_GRAPH_ANALYSIS",
+                    inputs={
+                        "doc_path": "{doc_path}",
+                        "source_id": "{source_id}",
+                        "allowed_source_ids": "{allowed_source_ids}",
+                        "mode_id": "{analysis_mode_id}",
+                        "analysis_focus": "{analysis_focus}",
+                    },
+                    output_key="deterministic_graph_envelope",
+                    ui_format="silent",
+                ),
+                ActionStep(
+                    step_id="build_mode_graph",
+                    step_type="LLM_QUERY",
+                    inputs={
+                        "context_items_key": "analysis_model_context_items",
+                        "query": (
+                            "{prompt:Intelligence Universal Graph Query v6}\n\n"
+                            "MODE: {analysis_mode_label}\n"
+                            "FOCUS OR CLAIM: {analysis_focus}\n"
+                            "MODE GRAPH CONTRACT:\n{analysis_graph_contract}"
+                        ),
+                    },
+                    system_prompt="{prompt:Intelligence Universal Graph System v6}",
+                    required_prompt_keys=[
+                        "Intelligence Universal Graph System v6",
+                        "Intelligence Universal Graph Query v6",
+                        "Intelligence Mode Graph Output Enforcer v4",
+                    ],
+                    model=model,
+                    model_role="main_answer_model",
+                    output_schema=analysis_patch_schema(),
+                    output_schema_prompt_key=(
+                        "Intelligence Mode Graph Output Enforcer v4"
+                    ),
+                    output_key="mode_graph_raw",
+                    llm_options={
+                        "json_mode": True, "temperature": 0.1,
+                        # The model returns a small patch; the app retains and
+                        # validates the complete deterministic graph locally.
+                        "num_predict": 1200, "num_ctx": 32768,
+                    },
+                    ui_format="silent",
+                ),
+                ActionStep(
+                    step_id="hydrate_mode_graph",
+                    step_type="GRAPH_ENRICH_VALIDATE",
+                    inputs={
+                        "graph_state_key": "deterministic_graph_envelope",
+                        "enrichment_state_key": "mode_graph_raw",
+                        "source_id": "{source_id}",
+                        "attempt": "initial",
+                        "packing_receipt_key": "mode_graph_raw",
+                    },
+                    output_key="validated_mode_graph",
+                    ui_format="silent",
+                ),
+                ActionStep(
+                    step_id="repair_mode_graph_if_needed",
+                    step_type="BRANCH",
+                    inputs={
+                        "logic": (
+                            "state.get('analysis_graph_needs_repair', False) == True "
+                            "and state.get('analysis_allow_repair', True) == True"
+                        )
+                    },
+                    if_true=[
+                        ActionStep(
+                            step_id="repair_mode_graph",
+                            step_type="LLM_QUERY",
+                            inputs={
+                                "context_items_key": "analysis_model_context_items",
+                                "query": (
+                                    "{prompt:Intelligence Universal Graph Repair Query v4}\n\n"
+                                    "MODE: {analysis_mode_label}\n"
+                                    "FOCUS OR CLAIM: {analysis_focus}\n"
+                                    "MODE GRAPH CONTRACT:\n{analysis_graph_contract}\n\n"
+                                    "VALIDATION DIAGNOSTICS:\n{analysis_graph_validation}"
+                                ),
+                            },
+                            system_prompt="{prompt:Intelligence Universal Graph System v6}",
+                            required_prompt_keys=[
+                                "Intelligence Universal Graph System v6",
+                                "Intelligence Universal Graph Repair Query v4",
+                                "Intelligence Mode Graph Output Enforcer v4",
+                            ],
+                            model=model,
+                            model_role="main_answer_model",
+                            output_schema=analysis_patch_schema(),
+                            output_schema_prompt_key=(
+                                "Intelligence Mode Graph Output Enforcer v4"
+                            ),
+                            output_key="mode_graph_repair_raw",
+                            llm_options={
+                                "json_mode": True, "temperature": 0.05,
+                                "num_predict": 1200, "num_ctx": 32768,
+                            },
+                            ui_format="silent",
+                        ),
+                        ActionStep(
+                            step_id="hydrate_repaired_mode_graph",
+                            step_type="GRAPH_ENRICH_VALIDATE",
+                            inputs={
+                                "graph_state_key": "deterministic_graph_envelope",
+                                "enrichment_state_key": "mode_graph_repair_raw",
+                                "source_id": "{source_id}",
+                                "attempt": "repair",
+                                "packing_receipt_key": "mode_graph_repair_raw",
+                            },
+                            output_key="validated_mode_graph",
+                            ui_format="silent",
+                        ),
+                    ],
+                    if_false=[],
+                ),
+                ActionStep(
+                    step_id="persist_mode_graph",
+                    step_type="ANALYSIS_OUTPUT_WRITE",
+                    inputs={
+                        "mode": "{analysis_mode_id}",
+                        "result_kind": "graph",
+                        "artifact_type": "analysis_result",
+                        "output_state_key": "validated_mode_graph",
+                        "source_id": "{source_id}",
+                        "params_hash": "{params_hash}",
+                        "doc_hash": "{doc_hash}",
+                        "model_role": "main_answer_model",
+                    },
+                    output_key="analysis_result_envelope",
+                    ui_format="silent",
+                ),
+            ],
+        )
+
+    @staticmethod
+    def get_intelligence_timeline_blueprint(pm=None) -> AIActionBlueprint:
+        return AIActionBlueprint(
+            name="Timeline (Intelligence)",
+            description="Prepare dates and save a deterministic timeline through the master runner.",
+            mount_points=["analysis_mode"],
+            steps=[
+                ActionStep(
+                    step_id="prepare_timeline",
+                    step_type="SOURCE_STAGE",
+                    inputs={
+                        "action": "ensure_analysis",
+                        "source_id": "{source_id}",
+                        "source_ids": "{allowed_source_ids}",
+                        "stages": ["dates"],
+                    },
+                    output_key="analysis_preparation",
+                    ui_format="status",
+                ),
+                ActionStep(
+                    step_id="project_timeline",
+                    step_type="DETERMINISTIC_GRAPH_ANALYSIS",
+                    inputs={
+                        "doc_path": "{doc_path}",
+                        "source_id": "{source_id}",
+                        "allowed_source_ids": "{allowed_source_ids}",
+                        "mode_id": "timeline",
+                    },
+                    output_key="deterministic_timeline",
+                    ui_format="silent",
+                ),
+                ActionStep(
+                    step_id="persist_timeline",
+                    step_type="ANALYSIS_OUTPUT_WRITE",
+                    inputs={
+                        "mode": "{analysis_mode_id}",
+                        "result_kind": "timeline",
+                        "artifact_type": "analysis_result",
+                        "output": "{deterministic_graph_output}",
+                        "source_id": "{source_id}",
+                        "params_hash": "{params_hash}",
+                        "doc_hash": "{doc_hash}",
+                    },
+                    output_key="analysis_result_envelope",
+                    ui_format="silent",
+                ),
+            ],
+        )
+
+    @staticmethod
+    def get_intelligence_schema_extraction_blueprint(pm=None, model: str = "{selected_model}") -> AIActionBlueprint:
+        return AIActionBlueprint(
+            name="Schema Extraction (Intelligence)",
+            description="Schema-driven field extraction over retrieved context; the LLM fills only ambiguous fields, structured JSON.",
+            mount_points=["analysis_mode"],
+            expected_inputs=[
+                {"key": "extraction_query", "type": "text", "label": "What to extract"},
+                {"key": "extraction_schema", "type": "text", "label": "Field schema (JSON)"},
+            ],
+            steps=[
+                *DefaultBlueprints._intel_retrieve_steps("extraction_query", max_results=15, prefix="ex"),
+                ActionStep(
+                    step_id="ex_extract", step_type="LLM_QUERY",
+                    inputs={"query": "{prompt:Intelligence Schema Extraction Query}\n\nSCHEMA:\n{extraction_schema}\n\nCONTEXT:\n{packed_context}"},
+                    system_prompt="{prompt:Intelligence Schema Extraction System}",
+                    model=model, model_role="fast_worker_model",
+                    output_key="extraction_result",
+                    required_prompt_keys=["Intelligence Schema Extraction System", "Intelligence Schema Extraction Query"],
+                    llm_options={"json_mode": True, "temperature": 0.1, "num_predict": 3000, "num_ctx": 32768},
+                    ui_format="data_table", ui_target="custom_tools_tab",
+                ),
+                ActionStep(
+                    step_id="ex_persist", step_type="ANALYSIS_OUTPUT_WRITE",
+                    inputs={
+                        "mode": "{analysis_mode_id}", "result_kind": "table",
+                        "artifact_type": "schema_extraction",
+                        "output": "{extraction_result}", "source_id": "{source_id}",
+                        "params_hash": "{params_hash}", "doc_hash": "{doc_hash}",
+                        "model_role": "fast_worker_model",
+                    },
+                    output_key="analysis_result_envelope", ui_format="silent",
+                ),
+            ],
+        )
+
+    @staticmethod
+    def get_intelligence_graph_enrichment_blueprint(pm=None, model: str = "{selected_model}") -> AIActionBlueprint:
+        return AIActionBlueprint(
+            name="Explain / Enrich Graph with AI",
+            description="One explicit main-model call over compact artifact IDs; suggestions remain unverified.",
+            mount_points=["analysis_mode"],
+            expected_inputs=[{"key": "deterministic_graph", "type": "json", "label": "Deterministic graph"}],
+            steps=[
+                ActionStep(
+                    step_id="graph_enrich", step_type="LLM_QUERY",
+                    inputs={
+                        "query": "{prompt:Intelligence Graph Enrichment Query}\n\n"
+                                 "GRAPH:\n{deterministic_graph}",
+                    },
+                    system_prompt="{prompt:Intelligence Graph Enrichment System}",
+                    required_prompt_keys=[
+                        "Intelligence Graph Enrichment System",
+                        "Intelligence Graph Enrichment Query",
+                    ],
+                    model=model, model_role="main_answer_model",
+                    output_schema={
+                        "themes": [{"name": "theme", "node_ids": ["artifact id"]}],
+                        "proposed_relations": [{
+                            "source_id": "artifact id", "target_id": "artifact id",
+                            "type": "suggested relation", "evidence_ids": ["artifact id"],
+                            "explanation": "short explanation",
+                        }],
+                    },
+                    output_key="graph_enrichment_raw",
+                    llm_options={
+                        "json_mode": True, "temperature": 0.1,
+                        "num_predict": 2500, "num_ctx": 32768,
+                    },
+                    ui_format="silent",
+                ),
+                ActionStep(
+                    step_id="graph_enrich_validate",
+                    step_type="GRAPH_ENRICH_VALIDATE",
+                    inputs={
+                        "graph": "{deterministic_graph}",
+                        "enrichment": "{graph_enrichment_raw}",
+                        "source_id": "{source_id}",
+                    },
+                    output_key="graph_enrichment",
+                    ui_format="data_table",
+                    ui_target="analysis_tab",
+                    ui_title="Suggested graph enrichment",
+                ),
+                ActionStep(
+                    step_id="graph_enrich_persist", step_type="ANALYSIS_OUTPUT_WRITE",
+                    inputs={
+                        "mode": "{analysis_mode_id}", "result_kind": "composite",
+                        "output": "{graph_enrichment}", "source_id": "{source_id}",
+                        "params_hash": "{params_hash}", "doc_hash": "{doc_hash}",
+                        "model_role": "main_answer_model", "persist_artifact": False,
+                    },
+                    output_key="analysis_result_envelope", ui_format="silent",
+                ),
+            ],
+        )
+
+    @staticmethod
+    def get_intelligence_summaries_blueprint(pm=None, model: str = "{selected_model}") -> AIActionBlueprint:
+        # Shape the LLM summary into an ARTIFACT_WRITE payload (created_by="model").
+        shape_script = (
+            "import json\n"
+            "raw = state.get('abstractive_summary', '{}')\n"
+            "try:\n    obj = json.loads(raw) if isinstance(raw, str) else (raw or {})\nexcept Exception:\n    obj = {}\n"
+            "sid = str(state.get('source_id') or '')\n"
+            "summary = str(obj.get('summary') or '')\n"
+            "points = obj.get('key_points') or []\n"
+            "text = summary + ('\\n- ' + '\\n- '.join(str(p) for p in points) if points else '')\n"
+            "result = json.dumps([{ 'ref':'absum','artifact_type':'summary','storage_ref_type':'abstractive_summary',\n"
+            "    'storage_ref_id': sid + ':abstractive','source_id': sid,'exact_text': text,\n"
+            "    'metadata': {'scope':'document','method':'abstractive'},'confidence':0.7,'model_role':'main_answer_model'}])\n"
+        )
+        return AIActionBlueprint(
+            name="Abstractive Summaries (Intelligence)",
+            description="Optional LLM abstractive summary of a source's content, persisted as a model-produced knowledge artifact.",
+            mount_points=["analysis_mode"],
+            expected_inputs=[{"key": "source_id", "type": "text", "label": "Source"}],
+            steps=[
+                ActionStep(
+                    step_id="sum_retrieve", step_type="ARTIFACT_RETRIEVE",
+                    inputs={"query": "{summary_focus}", "allowed_source_ids": ["{source_id}"], "max_results": 25},
+                    output_key="retrieved_artifacts", ui_format="silent",
+                ),
+                ActionStep(
+                    step_id="sum_pack", step_type="PACK_ARTIFACT_CONTEXT",
+                    inputs={"query": "{summary_focus}", "results": "{retrieved_artifacts}"},
+                    output_key="packed_context", ui_format="silent",
+                ),
+                ActionStep(
+                    step_id="sum_llm", step_type="LLM_QUERY",
+                    inputs={"query": "{prompt:Intelligence Abstractive Summary Query}\n\nCONTENT:\n{packed_context}"},
+                    system_prompt="{prompt:Intelligence Abstractive Summary System}",
+                    model=model, model_role="main_answer_model",
+                    output_schema={"summary": "one-paragraph abstractive summary", "key_points": ["point"]},
+                    output_key="abstractive_summary",
+                    required_prompt_keys=["Intelligence Abstractive Summary System", "Intelligence Abstractive Summary Query"],
+                    llm_options={"json_mode": True, "temperature": 0.2, "num_predict": 2000, "num_ctx": 32768},
+                    ui_format="silent",
+                ),
+                ActionStep(
+                    step_id="sum_shape", step_type="PYTHON_SCRIPT",
+                    inputs={"script": shape_script}, output_key="abstractive_summary_artifacts", ui_format="silent",
+                ),
+                ActionStep(
+                    step_id="sum_write", step_type="ARTIFACT_WRITE",
+                    inputs={"created_by": "model",
+                            "artifacts": "{abstractive_summary_artifacts}"},
+                    output_key="summary_write", ui_format="silent",
+                ),
+                ActionStep(
+                    step_id="sum_persist", step_type="ANALYSIS_OUTPUT_WRITE",
+                    inputs={
+                        "mode": "{analysis_mode_id}", "result_kind": "narrative",
+                        "artifact_type": "analysis_answer",
+                        "output": "{abstractive_summary}", "source_id": "{source_id}",
+                        "params_hash": "{params_hash}", "doc_hash": "{doc_hash}",
+                        "model_role": "main_answer_model",
+                    },
+                    output_key="analysis_result_envelope", ui_format="silent",
+                ),
+            ],
         )
 
     @staticmethod
@@ -490,7 +1062,7 @@ class DefaultBlueprints:
             step_id="manifest_update_router",
             step_type="BRANCH",
             inputs={"logic": "state.get('allow_manifest_updates', False) == True"},
-            if_true=[DefaultBlueprints.get_manifest_update_step(
+            if_true=[DefaultBlueprints.get_manifest_update_dispatch_step(
                 user_key="query", answer_key="final_answer", ui_target="brainstorm_dock"
             )],
             if_false=[],
@@ -632,45 +1204,32 @@ class DefaultBlueprints:
 
     @staticmethod
     def get_analysis_blueprint(pm, doc_path: str = "{analysis_doc_path}") -> AIActionBlueprint:
-        """Hierarchical evidence-to-graph pipeline.
+        """Return the zero-generative, complete artifact graph projection.
 
-        Stages:
-          1. SECTION_EXTRACT: chunk along real section boundaries
-          2. FOREACH: per-chunk deterministic pre-rank (RANK_BLOCKS — selects the
-             most relevant blocks, e.g. quote-candidate/causal/argument-marker
-             dense paragraphs) + evidence extraction LLM call, reading ONLY that
-             pre-ranked compact text (not the raw chunk) + EVIDENCE_STORE (DB +
-             streaming events, verbatim-validated against the source chunk)
-          3. SECTION_GROUP: group chunks by real section_id when available, else
-             a fixed-size fallback of 5 chunks per section; also computes
-             top_quote_ids_compact (top quotes across the whole document)
-          4. FOREACH: per-section synthesis LLM call — text summary/themes/
-             quote_ids only, no subgraph (see note below)
-          5. PYTHON_SCRIPT: merge section syntheses into section_syntheses_compact
-          6. LLM: single graph-assembly pass — builds the full graph directly
-             from section_syntheses_compact + top_quote_ids_compact
-          7. QUOTE_HYDRATION: attach exact text from DB
-          8. ANALYSIS_FINALIZE: normalize, save, emit RESULT_READY
-
-        The speed lever for evidence extraction is CONTEXT SIZE, not removing the
-        LLM entirely: RANK_BLOCKS deterministically strips a chunk down to its
-        most relevant paragraphs before the LLM ever sees it, so the model reads
-        far less and responds faster/more reliably, while still exercising actual
-        judgment over which quotes matter (a pure regex/marker-based picker was
-        tried — BUILD_DETERMINISTIC_QUOTES, still registered as an opt-in step —
-        and produced materially worse quotes than a judgment call over pre-
-        filtered text).
-
-        A per-section map-reduce graph design (each section synthesis call also
-        emitting a typed subgraph, deterministically merged, with the final LLM
-        pass only polishing) was tried and reverted: asking a small local model
-        to produce both a text summary AND a typed n/e schema in one per-section
-        call reliably produced sparse, low-quality subgraphs (as few as 2 nodes
-        total across every section). A single, well-specified full-graph-assembly
-        call over compact section summaries + top quotes is more reliable for the
-        models this pipeline actually runs against, while still saving one LLM
-        call versus the original two-call plan+assembly design.
+        Candidate selection, relation evidence, communities, centrality,
+        chronology, and claim/evidence chains are materialized locally. Optional
+        one-call AI enrichment is a separate explicitly selected analysis mode.
         """
+        return AIActionBlueprint(
+            name="Document Analysis",
+            description="Complete evidence-backed artifact graph; zero generative calls by default.",
+            mount_points=["analysis_tab", "analysis_mode"],
+            steps=[
+                ActionStep(
+                    step_id="deterministic_document_graph",
+                    step_type="DETERMINISTIC_GRAPH_ANALYSIS",
+                    inputs={
+                        "doc_path": doc_path,
+                        "source_id": "{source_id}",
+                        "allowed_source_ids": "{allowed_source_ids}",
+                        "mode_id": "argument_map",
+                    },
+                    output_key="analysis_result",
+                    ui_format="silent",
+                    ui_target="analysis_tab",
+                ),
+            ],
+        )
         # ── Sub-blueprint 1: per-chunk evidence extraction ──────────────────
         evidence_sub = AIActionBlueprint(name="Extract Chunk Evidence", description="", steps=[
             ActionStep(
@@ -909,9 +1468,30 @@ result = '\\n\\n'.join(lines) if lines else '(no section syntheses)'
         )
 
     @staticmethod
-    def get_analysis_send_to_workspace_blueprint() -> AIActionBlueprint:
+    def get_analysis_send_to_workspace_blueprint(
+        result: dict | None = None,
+        workspace_id: int | None = None,
+    ) -> AIActionBlueprint:
+        # When invoked from a result card, embed an immutable copy of that
+        # exact result in the blueprint. A generic state key can otherwise be
+        # replaced by an older analysis while the workflow waits in the queue.
+        result_input = (
+            copy.deepcopy(result)
+            if isinstance(result, dict) else "{analysis_result}"
+        )
+        workspace_input = (
+            int(workspace_id)
+            if workspace_id not in (None, "")
+            else "{analysis_workspace_id}"
+        )
         return AIActionBlueprint(name="Send Analysis To Workspace", description="Emit analyzed graph artifacts into the workspace.", mount_points=["analysis_tab"], steps=[
-            ActionStep("send_analysis_to_workspace", "ANALYSIS_SEND_TO_WORKSPACE", inputs={"result": "{analysis_result}", "workspace_id": "{analysis_workspace_id}"}, output_key="analysis_workspace_summary", ui_format="silent")
+            ActionStep(
+                "send_analysis_to_workspace",
+                "ANALYSIS_SEND_TO_WORKSPACE",
+                inputs={"result": result_input, "workspace_id": workspace_input},
+                output_key="analysis_workspace_summary",
+                ui_format="silent",
+            )
         ])
 
     @staticmethod
@@ -1079,7 +1659,7 @@ result = enhanced
             ActionStep(
                 step_id="reword", step_type="LLM_QUERY",
                 inputs={"query": f"\"{text_to_reword}\""},
-                system_prompt="You are an expert editor. Rewrite the following text to make it easier to understand and follow, while keeping all crucial information intact. Respond ONLY with the reworded text. Do not include introductory phrases.",
+                system_prompt="{prompt:Reword Text System}",
                 ui_format="nested_outline", 
                 ui_target="floating",
                 ui_title="📝 Reworded Text"
@@ -1109,7 +1689,7 @@ result = enhanced
             ActionStep(
                 step_id="analyze_opposition", step_type="LLM_QUERY",
                 inputs={"query": f"Original Text: '{text}'\n\nContext:\n{{rag_context}}"},
-                system_prompt="Analyze the Context to find strong opposing views, counter-arguments, or contradictions to the Original Text. Extract the exact verbatim text that opposes it, along with its doc_name and page. ONLY output valid JSON.",
+                system_prompt="{prompt:Opposing Views System}",
                 output_schema=[{
                     "doc_name": "filename.pdf",
                     "page": 0,

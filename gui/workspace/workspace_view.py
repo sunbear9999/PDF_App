@@ -3,6 +3,11 @@ import os
 import uuid
 import json
 import dataclasses
+from core.models.analysis_roles import analysis_entity_type, analysis_workspace_type
+from core.models.analysis_relations import (
+    canonical_relation, normalize_analysis_relation,
+    analysis_relation_properties, analysis_relation_state,
+)
 from PySide6.QtWidgets import (QGraphicsView, QGraphicsScene, QMessageBox,
                              QInputDialog, QFrame, QLabel, QVBoxLayout,
                              QHBoxLayout, QComboBox, QPushButton, QDialog,
@@ -37,7 +42,7 @@ from gui.components.dialogs.tag_relatives_dialog import AIResultsDialog
 
 # --- NEW IMPORTS ---
 from core.models.workspace_models import WorkspaceModel
-from gui.workspace.workspace_widgets import GhostLineItem, CheckableComboBox, UnusedHighlightsDialog, EntityRefsDialog
+from gui.workspace.workspace_widgets import GhostLineItem, CheckableComboBox, EntityRefsDialog
 from core.events.event_bus import EventBus
 from core.events.domains.document_events import DocumentEvent, DocumentEventPayload, DocumentIntent, DocumentPayload
 from core.events.domains.project_events import ProjectEvent, ProjectEventPayload
@@ -55,6 +60,109 @@ from core.services.workspace.workspace_layout_service import WorkspaceLayoutServ
 from core.services.workspace.workspace_service import WorkspaceService
 from core.services.workspace.workspace_state_service import WorkspaceStateService
 from core.services.knowledge.graph_analysis_service import GraphAnalysisService
+
+
+def canonical_analysis_entity_type(value, analysis_role=""):
+    return analysis_entity_type(value or analysis_role or 'text')
+
+
+def canonical_analysis_relation_type(value):
+    return f"relation.{canonical_relation(value)}"
+
+
+def analysis_workspace_node_type(entity_type):
+    return analysis_workspace_type(entity_type)
+
+
+def analysis_node_size(is_evidence: bool, text: str):
+    """Size analysis cards for readable statements without unbounded boards."""
+    length = len(str(text or ""))
+    if is_evidence:
+        return 320, min(260, 150 + max(0, length - 120) // 4)
+    return 250, min(190, 120 + max(0, length - 100) // 5)
+
+
+def analysis_graph_layout(entities, relations, center_x, center_y):
+    """Return a stable layered layout for child→parent analysis graphs."""
+    node_by_id = {
+        str(entity.get("id") or entity.get("temp_id")): entity
+        for entity in entities if isinstance(entity, dict)
+        and (entity.get("id") or entity.get("temp_id"))
+    }
+    if not node_by_id:
+        return {}
+    children = {node_id: set() for node_id in node_by_id}
+    outgoing_to_parent = {node_id: set() for node_id in node_by_id}
+    for relation in relations or []:
+        if not isinstance(relation, dict):
+            continue
+        source = str(relation.get("source") or relation.get("source_id") or "")
+        target = str(relation.get("target") or relation.get("target_id") or "")
+        if source in node_by_id and target in node_by_id and source != target:
+            children[target].add(source)
+            outgoing_to_parent[source].add(target)
+
+    def role(node_id):
+        node = node_by_id[node_id]
+        return str(
+            node.get("analysis_role") or node.get("type")
+            or node.get("entity_type") or ""
+        ).lower().split(".")[-1]
+
+    analytical = {
+        node_id for node_id in node_by_id
+        if role(node_id) not in {"evidence", "quote", "quotation"}
+    }
+    preferred = {
+        node_id for node_id in analytical
+        if role(node_id) in {"method", "methodology", "claim", "tracked_claim"}
+        and not (outgoing_to_parent[node_id] & analytical)
+    }
+    roots = preferred or {
+        node_id for node_id in analytical
+        if not (outgoing_to_parent[node_id] & analytical)
+    }
+    if not roots:
+        roots = {next(iter(sorted(node_by_id)))}
+
+    levels = {node_id: 0 for node_id in sorted(roots)}
+    pending = list(sorted(roots))
+    while pending:
+        parent = pending.pop(0)
+        parent_level = levels[parent]
+        for child in sorted(children.get(parent, set())):
+            proposed = parent_level + 1
+            if child not in levels or proposed < levels[child]:
+                levels[child] = proposed
+                pending.append(child)
+    next_level = (max(levels.values()) + 1) if levels else 0
+    for node_id in sorted(node_by_id):
+        if node_id not in levels:
+            levels[node_id] = next_level
+
+    grouped = {}
+    for node_id, level in levels.items():
+        grouped.setdefault(level, []).append(node_id)
+    positions = {}
+    level_count = max(1, len(grouped))
+    top_y = center_y - ((level_count - 1) * 140)
+    for level in sorted(grouped):
+        ids = sorted(
+            grouped[level],
+            key=lambda node_id: (
+                role(node_id) in {"evidence", "quote", "quotation"},
+                str(node_by_id[node_id].get("title") or ""),
+                node_id,
+            ),
+        )
+        spacing = 330
+        start_x = center_x - ((len(ids) - 1) * spacing / 2)
+        for index, node_id in enumerate(ids):
+            positions[node_id] = (
+                start_x + index * spacing - 75,
+                top_y + level * 280 - 60,
+            )
+    return positions
 
 
 
@@ -84,6 +192,8 @@ class WorkspaceView(QGraphicsView):
         self._similarity_signature = None
         self._updating_ghost_links = False
         self._rendering_workspace = False
+        self._graph_import_queue = []
+        self._active_graph_import = None
         self.connecting_node = None
         self.worker = None
         self.is_llm_busy = False
@@ -275,8 +385,10 @@ class WorkspaceView(QGraphicsView):
 
         self.btn_unused_highlights = QPushButton("📥 Inbox")
         self.btn_unused_highlights.setStyleSheet(compact_btn_style)
-        self.btn_unused_highlights.setToolTip("View all highlights you've made in your PDFs that haven't been added to this board yet.")
+        self.btn_unused_highlights.setToolTip('Browse paged project notes, read-only source observations, canonical entities and saved discoveries; add independent copies to this board.')
         self.btn_unused_highlights.clicked.connect(self.open_unused_highlights_dialog)
+        from gui.components.artifact_actions import bind_artifact_action
+        bind_artifact_action(self._ctx,self,'intelligence.inbox.open','Open Workspace Inbox',self.open_unused_highlights_dialog,'toolbar:workspace')
         row2_layout.addWidget(self.btn_unused_highlights)
 
         row2_layout.addStretch()
@@ -371,8 +483,7 @@ class WorkspaceView(QGraphicsView):
 
     def _handle_state_restored(self, restored_model):
         """Triggered entirely by the backend when an undo/redo completes."""
-        pm = self._pm()
-        all_annots = self.workspace_annotation_service.get_annotation_index() if pm else {}
+        all_annots = {}  # Workspace copies are restored from their saved model.
         self.sync_with_project(restored_model, all_annots)
         self._mark_workspace_dirty(autosave=True)
 
@@ -585,7 +696,7 @@ class WorkspaceView(QGraphicsView):
             self._apply_source_filter(source_ids)
 
     def _import_graph_from_payload(self, payload: "WorkspacePayload"):
-        """Import a validated graph (entities + relations) into the current workspace."""
+        """Queue a graph import and materialize it in bounded GUI-thread batches."""
         import math
         extra = payload.extra or {}
         graph_data = extra.get("graph") or {}
@@ -600,83 +711,317 @@ class WorkspaceView(QGraphicsView):
         if not entities:
             return
 
-        self.save_state_for_undo()
-
         # Layout: arrange in a circle around the current view center
         view_center = self.mapToScene(self.viewport().rect().center())
         cx, cy = view_center.x(), view_center.y()
         n = len(entities)
         radius = max(200, n * 40)
-        id_map: dict = {}  # entity id → node object
+        positions = analysis_graph_layout(
+            entities, relations, view_center.x(), view_center.y()
+        )
+        self._graph_import_queue.append({
+            "entities": list(entities),
+            "relations": list(relations),
+            "entity_index": 0,
+            "relation_index": 0,
+            "id_map": {},
+            "cx": cx,
+            "cy": cy,
+            "radius": radius,
+            "positions": positions,
+            "node_count": n,
+            "workspace_id": extra.get("workspace_id"),
+        })
+        if self._active_graph_import is None:
+            self._start_next_graph_import()
 
-        for i, ent in enumerate(entities):
+    def _start_next_graph_import(self):
+        if not self._graph_import_queue:
+            self._active_graph_import = None
+            return
+        self._active_graph_import = self._graph_import_queue.pop(0)
+        target_workspace = self._active_graph_import.get("workspace_id")
+        try:
+            target_workspace = (
+                int(target_workspace)
+                if target_workspace not in (None, "") else self.current_workspace_id
+            )
+        except (TypeError, ValueError):
+            target_workspace = self.current_workspace_id
+        if target_workspace != int(self.current_workspace_id):
+            self._persist_graph_to_inactive_workspace(
+                self._active_graph_import, target_workspace
+            )
+            self._active_graph_import = None
+            QTimer.singleShot(0, self._start_next_graph_import)
+            return
+        self.save_state_for_undo()
+        self._rendering_workspace = True
+        QTimer.singleShot(0, self._continue_graph_import)
+
+    def _persist_graph_to_inactive_workspace(self, job, workspace_id):
+        """Bulk-persist a chosen inactive board without rendering it."""
+        import math
+        from core.models.workspace_models import NodeModel, EdgeModel, WorkspaceModel
+
+        delta = WorkspaceModel(workspace_id=workspace_id)
+        ids = set()
+        total = max(1, int(job.get("node_count") or 1))
+        for index, ent in enumerate(job.get("entities") or []):
             if not isinstance(ent, dict):
                 continue
-            ent_id = str(ent.get("id", uuid.uuid4()))
-
-            # If a node with this ID already exists, reuse it instead of
-            # creating a duplicate (e.g. user clicks "Add to Workspace" twice).
-            if ent_id in self.nodes:
-                id_map[ent_id] = self.nodes[ent_id]
-                continue
-
-            ent_type = ent.get("type") or ent.get("entity_type") or "entity.text"
-            label = ent.get("text") or ent.get("label") or ent_id
-            properties = {k: v for k, v in ent.items() if k not in ("id", "type", "label")}
-            properties.setdefault("text", label)
-
-            angle = (2 * math.pi * i / n) if n > 1 else 0
-            x = cx + radius * math.cos(angle) - 75
-            y = cy + radius * math.sin(angle) - 40
-
-            node = Node(
-                node_id=ent_id,
-                quote=label,
-                note=label,
-                node_origin="ai",
-                is_verified=False,
-                entity_type=ent_type,
-                entity_properties=properties,
-                entity_state={"is_verified": False, "ai_generated": True, "origin": "ai"},
-                node_type_registry=self.workspace_node_types,
-                action_registry=self.workspace_actions,
-                ontology_registry=getattr(self._ctx, "ontology_registry", None),
-                media_asset_service=getattr(self._ctx, "media_asset_service", None),
-                data_provider_registry=getattr(self._ctx, "data_provider_registry", None),
+            node_id = str(ent.get("id") or ent.get("temp_id") or uuid.uuid4())
+            ids.add(node_id)
+            exact_text = str(ent.get("exact_text") or ent.get("quote") or "")
+            body = str(ent.get("text") or ent.get("label") or node_id)
+            title = str(ent.get("title") or ent.get("label") or body)
+            entity_type = canonical_analysis_entity_type(
+                ent.get("type") or ent.get("entity_type"),
+                ent.get("analysis_role"),
             )
-            self.scene_obj.addItem(node)
-            node.setPos(QPointF(x, y))
-            self.nodes[ent_id] = node
-            id_map[ent_id] = node
-
-        for rel in relations:
+            node_type_id = analysis_workspace_node_type(entity_type)
+            is_evidence_node = node_type_id == "workspace.node.quote"
+            locator = ent.get("locator") or {}
+            page_num = ent.get("page_num", ent.get("page", locator.get("page")))
+            try:
+                page_num = int(page_num) if page_num not in (None, "") else None
+            except (TypeError, ValueError):
+                page_num = None
+            angle = (2 * math.pi * index / total) if total > 1 else 0
+            position = (job.get("positions") or {}).get(node_id)
+            x = (
+                position[0] if position
+                else job["cx"] + job["radius"] * math.cos(angle)
+            )
+            y = (
+                position[1] if position
+                else job["cy"] + job["radius"] * math.sin(angle)
+            )
+            properties = {
+                k: v for k, v in ent.items()
+                if k not in ("id", "temp_id", "type", "label")
+            }
+            properties.update({
+                "text": body,
+                "title": title,
+                "exact_text": exact_text,
+                "quote": exact_text,
+                "locator": locator,
+            })
+            node_width, node_height = analysis_node_size(
+                is_evidence_node, exact_text if is_evidence_node else body
+            )
+            delta.nodes.append(NodeModel(
+                id=node_id,
+                quote=exact_text if node_type_id == "workspace.node.quote" else "",
+                note=title if is_evidence_node else body,
+                color="#333333",
+                is_custom=False,
+                x=x,
+                y=y,
+                width=node_width,
+                height=node_height,
+                workspace_id=workspace_id,
+                pdf_path=ent.get("pdf_path") or locator.get("path"),
+                page_num=page_num,
+                node_origin="ai",
+                is_verified=0,
+                node_type_id=node_type_id,
+                entity_type=entity_type,
+                source_id=ent.get("source_id"),
+                entity_properties=properties,
+                entity_state={
+                    "is_verified": False,
+                    "ai_generated": True,
+                    "origin": "analysis_ai",
+                },
+            ))
+        for rel in job.get("relations") or []:
             if not isinstance(rel, dict):
                 continue
-            src_id = str(rel.get("source", ""))
-            tgt_id = str(rel.get("target", ""))
-            # Look in the current import batch first, then in existing workspace
-            # nodes — this allows edges to already-present cited-source nodes.
-            src_node = id_map.get(src_id) or self.nodes.get(src_id)
-            tgt_node = id_map.get(tgt_id) or self.nodes.get(tgt_id)
-            if not src_node or not tgt_node:
+            rel = normalize_analysis_relation(rel)
+            source_id = rel["source"]
+            target_id = str(rel.get("target") or rel.get("target_id") or "")
+            if source_id not in ids or target_id not in ids:
                 continue
-            rel_type = rel.get("type") or "relation.basic"
-            label = rel.get("label") or rel_type.split(".")[-1].replace("_", " ")
-            edge = Edge(
-                src_node,
-                tgt_node,
-                label,
-                str(uuid.uuid4()),
-                relation_type=rel_type,
-                relation_properties={"label": label},
-            )
-            self.scene_obj.addItem(edge)
-            self.edges.append(edge)
+            relation_type = canonical_analysis_relation_type(rel.get("type"))
+            label = rel.get("label") or relation_type.split(".")[-1].replace("_", " ")
+            delta.edges.append(EdgeModel(
+                id=str(rel.get("id") or uuid.uuid4()),
+                source=source_id,
+                target=target_id,
+                label=label,
+                color="#888888",
+                weight=1,
+                relation_type=relation_type,
+                evidence_ids=list(rel.get("evidence_ids") or []),
+                relation_properties=analysis_relation_properties(rel),
+                relation_state=analysis_relation_state(rel),
+            ))
+        self.workspace_service.sync_delta(delta)
 
+    def _continue_graph_import(self):
+        """Create a few graphics items per event-loop turn to keep the UI live."""
+        job = self._active_graph_import
+        if not job:
+            return
+        entities = job["entities"]
+        relations = job["relations"]
+        id_map = job["id_map"]
+        n = job["node_count"]
+        try:
+            node_stop = min(len(entities), job["entity_index"] + 8)
+            while job["entity_index"] < node_stop:
+                i = job["entity_index"]
+                job["entity_index"] += 1
+                ent = entities[i]
+                self._import_graph_entity(ent, i, n, job, id_map)
+            if job["entity_index"] < len(entities):
+                QTimer.singleShot(0, self._continue_graph_import)
+                return
+
+            relation_stop = min(len(relations), job["relation_index"] + 16)
+            while job["relation_index"] < relation_stop:
+                rel = relations[job["relation_index"]]
+                job["relation_index"] += 1
+                self._import_graph_relation(rel, id_map)
+            if job["relation_index"] < len(relations):
+                QTimer.singleShot(0, self._continue_graph_import)
+                return
+        except Exception as exc:
+            print(f"[Workspace] Incremental graph import failed: {exc}")
+            job["entity_index"] = len(entities)
+            job["relation_index"] = len(relations)
+        finally:
+            if (
+                job["entity_index"] >= len(entities)
+                and job["relation_index"] >= len(relations)
+            ):
+                self._finish_graph_import()
+
+    def _import_graph_entity(self, ent, index, total, job, id_map):
+        import math
+        if not isinstance(ent, dict):
+            return
+        ent_id = str(ent.get("id") or ent.get("temp_id") or uuid.uuid4())
+
+        # Reuse stable analysis IDs when the same result is imported twice.
+        if ent_id in self.nodes:
+            id_map[ent_id] = self.nodes[ent_id]
+            return
+
+        ent_type = canonical_analysis_entity_type(
+            ent.get("type") or ent.get("entity_type"),
+            ent.get("analysis_role"),
+        )
+        node_type_id = analysis_workspace_node_type(ent_type)
+        exact_text = ent.get("exact_text") or ent.get("quote") or ""
+        body = ent.get("text") or ent.get("label") or ent_id
+        title = ent.get("title") or ent.get("label") or body
+        quote = exact_text if node_type_id == "workspace.node.quote" else ""
+        is_evidence_node = node_type_id == "workspace.node.quote"
+        properties = {
+            k: v for k, v in ent.items()
+            if k not in ("id", "temp_id", "type", "label")
+        }
+        properties.setdefault("text", body)
+        properties.setdefault("title", title)
+        properties.setdefault("exact_text", exact_text)
+        properties.setdefault("quote", exact_text)
+        locator = ent.get("locator") or properties.get("locator") or {}
+        pdf_path = (
+            ent.get("pdf_path") or properties.get("pdf_path")
+            or locator.get("path") or locator.get("doc_path")
+        )
+        page_num = (
+            ent.get("page_num") if ent.get("page_num") is not None
+            else ent.get("page") if ent.get("page") is not None
+            else locator.get("page")
+        )
+        try:
+            page_num = int(page_num) if page_num not in (None, "") else None
+        except (TypeError, ValueError):
+            page_num = None
+
+        angle = (2 * math.pi * index / total) if total > 1 else 0
+        position = (job.get("positions") or {}).get(ent_id)
+        x = (
+            position[0] if position
+            else job["cx"] + job["radius"] * math.cos(angle) - 75
+        )
+        y = (
+            position[1] if position
+            else job["cy"] + job["radius"] * math.sin(angle) - 40
+        )
+
+        node_width, node_height = analysis_node_size(
+            is_evidence_node, exact_text if is_evidence_node else body
+        )
+
+        node = Node(
+            node_id=ent_id,
+            quote=quote,
+            note=title if is_evidence_node else body,
+            width=node_width,
+            height=node_height,
+            pdf_path=pdf_path,
+            page_num=page_num,
+            node_origin="ai",
+            is_verified=False,
+            node_type_id=node_type_id,
+            entity_type=ent_type,
+            source_id=ent.get("source_id") or properties.get("source_id"),
+            entity_properties=properties,
+            entity_state={
+                "is_verified": False, "ai_generated": True, "origin": "ai"
+            },
+            node_type_registry=self.workspace_node_types,
+            action_registry=self.workspace_actions,
+            ontology_registry=getattr(self._ctx, "ontology_registry", None),
+            media_asset_service=getattr(self._ctx, "media_asset_service", None),
+            data_provider_registry=getattr(self._ctx, "data_provider_registry", None),
+        )
+        self.scene_obj.addItem(node)
+        node.setPos(QPointF(x, y))
+        self.nodes[ent_id] = node
+        id_map[ent_id] = node
+
+    def _import_graph_relation(self, rel, id_map):
+        if not isinstance(rel, dict):
+            return
+        rel = normalize_analysis_relation(rel)
+        src_id = rel["source"]
+        tgt_id = str(rel.get("target") or rel.get("target_id") or "")
+        src_node = id_map.get(src_id) or self.nodes.get(src_id)
+        tgt_node = id_map.get(tgt_id) or self.nodes.get(tgt_id)
+        if not src_node or not tgt_node:
+            return
+        rel_type = canonical_analysis_relation_type(rel.get("type"))
+        label = rel.get("label") or rel_type.split(".")[-1].replace("_", " ")
+        edge_id = str(rel.get("id") or uuid.uuid4())
+        if any(getattr(edge, "edge_id", None) == edge_id for edge in self.edges):
+            return
+        edge = Edge(
+            src_node,
+            tgt_node,
+            label,
+            edge_id,
+            relation_type=rel_type,
+            evidence_ids=list(rel.get("evidence_ids") or []),
+            relation_properties=analysis_relation_properties(rel),
+            relation_state=analysis_relation_state(rel),
+        )
+        self.scene_obj.addItem(edge)
+        self.edges.append(edge)
+
+    def _finish_graph_import(self):
+        self._rendering_workspace = False
         self.update_scene_bounds()
         self.update_ghost_connections()
         self._mark_workspace_dirty(autosave=True)
         self._similarity_signature = None
+        self._active_graph_import = None
+        QTimer.singleShot(0, self._start_next_graph_import)
 
     def _manage_tags_for_node_ids(self, node_ids):
         node_ids = [node_id for node_id in node_ids or [] if node_id in self.nodes]
@@ -968,6 +1313,18 @@ class WorkspaceView(QGraphicsView):
     def _jump_to_node_source(self, node):
         if not node:
             return
+        from core.models.artifact_reference import ArtifactRef
+        properties = dict(getattr(node, "entity_properties", {}) or {})
+        if not properties.get("artifact_id") and node.entity_type in {"entity.quote", "entity.evidence"}:
+            properties["artifact_id"] = properties.get("primary_evidence_id")
+        reference = ArtifactRef.from_value({**properties, "quote": node.quote_text()})
+        if reference.artifact_id:
+            from gui.components.dialogs.artifact_reference_dialog import ArtifactReferenceDialog
+            manager = getattr(self._ctx, "dialog_manager", None)
+            if manager is not None:
+                manager.show(ArtifactReferenceDialog, key=f"workspace_reference:{node.node_id}", singleton=True,
+                    factory=lambda: ArtifactReferenceDialog(self._ctx, reference.to_dict(), self))
+            return
         self.save_workspace_state()
         QTimer.singleShot(0, lambda: self.workspace_annotation_service.jump_to_node_source(node))
 
@@ -1024,9 +1381,10 @@ class WorkspaceView(QGraphicsView):
         the dialog open for further browsing.
         """
         theme = self._theme().get_theme() if self._theme() else None
-        dialog = EntityRefsDialog(entity_name, entity_node_id, references, self.bus, parent=self)
+        dialog = EntityRefsDialog(entity_name, entity_node_id, self.bus, parent=self)
         if theme:
             dialog.apply_theme(theme)
+        dialog.populate(references)
         # Keep a reference so the dialog isn't garbage-collected when this method returns.
         self._active_refs_dialog = dialog
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -1554,7 +1912,7 @@ class WorkspaceView(QGraphicsView):
         try:
             # Call the global service from MainWindow
             workspace_model = self.workspace_service.load_workspace(self.current_workspace_id)
-            all_annots = self.workspace_annotation_service.get_annotation_index()
+            all_annots = {}  # Never scan every source while restoring a canvas.
             self._populate_workspace_tabs()
             self.sync_with_project(workspace_model, all_annots)
         except Exception as e:
@@ -1584,95 +1942,8 @@ class WorkspaceView(QGraphicsView):
         self.update_ghost_connections()
 
     def open_unused_highlights_dialog(self):
-        from core.models.ontology_model import EntityType
-        pm = self._pm()
-        if not pm: return
-        all_highlights = self.workspace_annotation_service.get_annotation_index()
-        workspace_node_ids = {
-            n.highlight_id or n.node_id
-            for n in self.workspace_service.load_workspace(self.current_workspace_id).nodes
-        }
-        unused_highlights = [
-            highlight for highlight_id, highlight in all_highlights.items()
-            if highlight_id not in workspace_node_ids
-        ]
-
-        # Collect entities that the user explicitly saved from the discovery panel
-        # (origin == "deterministic") that aren't currently on this workspace canvas.
-        saved_entities = []
-        db = getattr(pm, "db_graph", None)
-        if db:
-            _skip_types = {EntityType.QUOTE.value, EntityType.EVIDENCE.value}
-            for et in EntityType:
-                if et.value in _skip_types:
-                    continue
-                for entity in db.get_entities_by_type(et.value):
-                    # Only show entities the user explicitly saved (not AI-workflow byproducts)
-                    if entity.state.get("origin") != "deterministic":
-                        continue
-                    # Skip bare PDF document source entities (no citation_key)
-                    if (et == EntityType.SOURCE
-                            and entity.properties.get("path")
-                            and not entity.properties.get("citation_key")):
-                        continue
-                    label = (
-                        entity.properties.get("name")
-                        or entity.properties.get("title")
-                        or entity.properties.get("text")
-                        or ""
-                    ).strip()
-                    if label and entity.id not in workspace_node_ids:
-                        saved_entities.append(entity)
-
-        if not unused_highlights and not saved_entities:
-            QMessageBox.information(self, "Inbox", "Nothing to add — all highlights and saved entities are already on this workspace.")
-            return
-
-        dialog = UnusedHighlightsDialog(unused_highlights, saved_entities, self)
-        theme = self._theme().get_theme() if self._theme() else None
-        if theme:
-            style_dialog_with_theme(dialog, theme)
-
-        if exec_as_modal(dialog) != QDialog.DialogCode.Accepted: return
-
-        # --- Add selected highlights ---
-        highlight_ids = dialog.get_selected_highlight_ids()
-        entity_dicts = dialog.get_selected_entity_dicts()
-        if not highlight_ids and not entity_dicts: return
-
-        self.save_state_for_undo()
-        view_center = self.mapToScene(self.viewport().rect().center())
-        last_node, offset = None, 0
-
-        for highlight_id in highlight_ids:
-            highlight = all_highlights.get(highlight_id) or pm.get_highlight(highlight_id)
-            if not highlight: continue
-
-            actual_note, pdf_path, page_num = highlight.get("content", ""), highlight.get("doc_id"), highlight.get("page_num")
-            if pdf_path and page_num is not None:
-                actual_note = self.workspace_annotation_service.get_pdf_annotation_note(highlight["id"], pdf_path, page_num) or actual_note
-
-            node = self.add_node_from_annotation(
-                {
-                    "id": highlight["id"], "subject": highlight.get("text_content", ""),
-                    "content": actual_note, "pdf_path": pdf_path, "page_num": page_num,
-                    "color": highlight.get("color"),
-                }, persist=True, position=QPointF(view_center.x(), view_center.y() + offset),
-            )
-            if node:
-                last_node = node
-                offset += 120
-
-        # --- Add selected saved entities via IMPORT_GRAPH ---
-        for entity_dict in entity_dicts:
-            self.bus.workspace_action_requested.emit(
-                WorkspaceIntent.IMPORT_GRAPH,
-                WorkspacePayload(extra={"graph": {"entities": [entity_dict], "relations": []}}),
-            )
-
-        self.scene_obj.clearSelection()
-        if last_node: last_node.setSelected(True)
-        self.update_scene_bounds()
+        from gui.components.dialogs.workspace_inbox_dialog import open_workspace_inbox
+        return open_workspace_inbox(self._ctx, self)
 
     # ------------------------------------------------------------------ workspace tabs
 
@@ -1704,7 +1975,7 @@ class WorkspaceView(QGraphicsView):
         pm = self._pm()
         if not pm or not pm.project_filepath: return
 
-        self.sync_with_project(self.workspace_service.load_workspace(self.current_workspace_id), self.workspace_annotation_service.get_annotation_index())
+        self.sync_with_project(self.workspace_service.load_workspace(self.current_workspace_id), {})
 
     def _add_workspace(self):
         pm = self._pm()
@@ -2104,22 +2375,10 @@ class WorkspaceView(QGraphicsView):
         self._mark_workspace_dirty(autosave=True)
 
     def _delete_highlight_permanently(self, highlight_id):
-        nodes_to_remove = [node for node in list(self.nodes.values()) if node.highlight_id == highlight_id or node.node_id == highlight_id]
-        fallback_node = nodes_to_remove[0] if nodes_to_remove else None
-
-        for node in nodes_to_remove:
-            for edge in list(node.edges): self.delete_edge(edge)
-            self.scene_obj.removeItem(node)
-            node.edges = []
-            self.nodes.pop(node.node_id, None)
-            if hasattr(node, 'deleteLater'): node.deleteLater()
-            self._emit_node_deleted(node.node_id)
-
-        self.workspace_annotation_service.delete_highlight_permanently(highlight_id, fallback_node)
-
-        self._similarity_signature = None
-        self.update_ghost_connections()
-        self._mark_workspace_dirty(autosave=True)
+        if str(highlight_id).startswith("LinkedNote|"):
+            self.workspace_annotation_service.manage_linked_note(highlight_id)
+            return
+        self.workspace_annotation_service.delete_highlight_permanently(highlight_id)
 
     def contextMenuEvent(self, event):
         item = self.itemAt(event.pos())
@@ -2132,8 +2391,11 @@ class WorkspaceView(QGraphicsView):
             action = menu.exec(event.globalPos())
             if action == delete_action:
                 self.save_state_for_undo()
-                for highlight_id in {n.highlight_id for n in selected_nodes if n.highlight_id}:
-                    self._delete_highlight_permanently(highlight_id)
+                identities = sorted({n.highlight_id for n in selected_nodes if str(n.highlight_id).startswith('LinkedNote|')})
+                if identities:
+                    self.workspace_annotation_service.manage_linked_note(identities)
+                else:
+                    self.bus.status_message_requested.emit('Adopt physical annotations in Notes before managing their project copies.', 7000)
             elif action == color_action:
                 self._change_color_for_nodes(selected_nodes)
             elif action == manage_tags_action:
@@ -2176,8 +2438,12 @@ class WorkspaceView(QGraphicsView):
                 self.connecting_node = connect_source
                 self.finish_connection(item)
             elif delete_highlight_action and action == delete_highlight_action:
-                self.save_state_for_undo()
-                self.delete_node(item, delete_highlight=True)
+                if str(item.highlight_id).startswith('LinkedNote|'):
+                    from gui.components.workspace_note_copy import open_workspace_note
+                    open_workspace_note(self._ctx, self, item)
+                else:
+                    self.save_state_for_undo()
+                    self.delete_node(item, delete_highlight=True)
             elif action == declutter_action:
                 self.trigger_declutter()
             elif action == cite_action:
@@ -2231,12 +2497,12 @@ class WorkspaceView(QGraphicsView):
             self._mark_workspace_dirty(autosave=True)
 
     def trigger_find_tag_relatives(self, tag_name):
-        pm, llm = self._pm(), self._llm()
-        if not pm or not llm: return
-
-        if not llm.collection and pm.project_filepath: llm.set_project_database(pm.project_filepath)
-        if not llm.collection or llm.collection.count() == 0:
-            QMessageBox.warning(self, "No Database", "Search index is empty. Please build it first.")
+        retrieval = getattr(self._ctx, "hybrid_retrieval_service", None)
+        if not retrieval:
+            QMessageBox.warning(
+                self, "Intelligence unavailable",
+                "The universal retrieval service is not available.",
+            )
             return
 
         target_nodes = [n for n in self.nodes.values() if tag_name in (n.get_tag_names() if hasattr(n, "get_tag_names") else [])]
@@ -2244,24 +2510,30 @@ class WorkspaceView(QGraphicsView):
             QMessageBox.warning(self, "No Nodes", f"No nodes found with the tag '{tag_name}'.")
             return
 
-        node_ids = [n.node_id for n in target_nodes]
-        vectors = list(pm.get_node_embeddings_batch(node_ids).values())
-        if len(vectors) < len(target_nodes):
-            try: vectors = llm.get_batch_embeddings([f"{n.quote} {n.note}".strip() for n in target_nodes])
-            except Exception: pass
-
-        if not vectors:
-            QMessageBox.warning(self, "Error", "Could not generate embeddings. Ensure AI is running.")
-            return
-
-        centroid_vector = [sum(col) / len(vectors) for col in zip(*vectors)]
-        results = llm.query_by_raw_embedding(centroid_vector, n_results=5, allowed_docs=self.get_allowed_docs())
-
-        if not results or not results.get('documents') or not results['documents'][0]:
+        query = " ".join(
+            f"{node.quote} {getattr(node, 'note', '')}".strip()
+            for node in target_nodes
+        )[:4000]
+        plan = retrieval.build_plan(
+            query,
+            allowed_docs=self.get_allowed_docs(),
+            max_results=5,
+        )
+        matches_raw = retrieval.retrieve(plan)
+        if not matches_raw:
             QMessageBox.information(self, "No Results", "Could not find related chunks.")
             return
 
-        matches = [{"text": doc_text.strip(), "doc_name": meta.get('doc_name', 'Unknown Document'), "page": meta.get('page', 0)} for doc_text, meta in zip(results['documents'][0], results['metadatas'][0])]
+        matches = [
+            {
+                "text": item.exact_text.strip(),
+                "doc_name": item.source_title or "Unknown Document",
+                "page": (item.locator or {}).get("page", 0),
+                "artifact_id": item.artifact_id,
+                "reason": item.retrieval_reason,
+            }
+            for item in matches_raw
+        ]
         _dlg = AIResultsDialog(f"Related to '{tag_name}'", matches, self._ctx, self)
         dm = get_for_widget(self)
         if dm is not None:
@@ -2273,9 +2545,12 @@ class WorkspaceView(QGraphicsView):
         pm, llm = self._pm(), self._llm()
         if not pm or not llm: return
 
-        if not llm.collection and pm.project_filepath: llm.set_project_database(pm.project_filepath)
-        if not llm.collection or llm.collection.count() == 0:
-            QMessageBox.warning(self, "No Database", "Search index is empty. Please build it first.")
+        retrieval = getattr(self._ctx, "hybrid_retrieval_service", None)
+        if not retrieval:
+            QMessageBox.warning(
+                self, "Intelligence unavailable",
+                "The universal retrieval service is not available.",
+            )
             return
 
         target_nodes = [n for n in self.nodes.values() if tag_name in (n.get_tag_names() if hasattr(n, "get_tag_names") else [])]
@@ -2284,21 +2559,28 @@ class WorkspaceView(QGraphicsView):
             return
 
         target_statement = f"The core arguments of the tag '{tag_name}': {' '.join([f'{n.quote} {getattr(n, "note", "")}'.strip() for n in target_nodes])[:1000]}"
-        vectors = list(pm.get_node_embeddings_batch([n.node_id for n in target_nodes]).values())
-        if len(vectors) < len(target_nodes):
-            try: vectors = llm.get_batch_embeddings([f"{n.quote} {getattr(n, 'note', '')}".strip() for n in target_nodes])
-            except Exception: pass
-
-        if not vectors:
-            QMessageBox.warning(self, "Error", "Could not generate embeddings. Ensure AI is running.")
-            return
 
         try:
-            results = llm.query_by_raw_embedding([sum(col) / len(vectors) for col in zip(*vectors)], n_results=30, allowed_docs=self.get_allowed_docs())
-            if not results or not results.get('documents') or not results['documents'][0]:
+            plan = retrieval.build_plan(
+                target_statement,
+                allowed_docs=self.get_allowed_docs(),
+                max_results=30,
+            )
+            matches_raw = retrieval.retrieve(plan)
+            if not matches_raw:
                 QMessageBox.information(self, "No Results", "Could not find related chunks to analyze.")
                 return
-            documents, metadatas = results['documents'][0], results['metadatas'][0]
+            documents = [item.exact_text for item in matches_raw]
+            metadatas = [
+                {
+                    "artifact_id": item.artifact_id,
+                    "doc_name": item.source_title,
+                    "source_id": item.source_id,
+                    "source_locator": item.locator,
+                    "retrieval_reason": item.retrieval_reason,
+                }
+                for item in matches_raw
+            ]
         except Exception as e:
             QMessageBox.critical(self, "Database Error", str(e))
             return
@@ -2600,7 +2882,6 @@ class WorkspaceView(QGraphicsView):
         selected_ids = [n_id for n_id, n in self.nodes.items() if n.isSelected()]
         h_scroll, v_scroll = self.horizontalScrollBar().value(), self.verticalScrollBar().value()
         self._rendering_workspace = True
-        should_initialize_nodes = False
         try:
             self.scene_obj.clear()
             self.nodes.clear()
@@ -2611,6 +2892,8 @@ class WorkspaceView(QGraphicsView):
             for data in workspace_model.nodes:
                 quote, note, highlight_id = data.quote, data.note, data.highlight_id
                 annot_record = annot_dict.get(highlight_id or data.id, {})
+                if str(highlight_id or '').startswith('LinkedNote|'):
+                    annot_record = {}  # Keep the saved workspace copy until explicit refresh.
                 if annot_record:
                     live_quote = annot_record.get("text_content") or annot_record.get("subject")
                     if live_quote:
@@ -2640,24 +2923,6 @@ class WorkspaceView(QGraphicsView):
                 self.scene_obj.addItem(node)
                 self.nodes[data.id] = node
                 node.setPos(data.x, data.y)
-
-            pm = self._pm()
-            should_initialize_nodes = (self.current_workspace_id == 1 and pm and pm.get_metadata("workspace_nodes_initialized", "0") != "1")
-            if should_initialize_nodes:
-                y_offset = 50
-                for annot in annot_dict.values():
-                    if annot["id"] not in self.nodes:
-                        actual_note, pdf_path, page_num = annot.get("content", ""), annot.get("doc_id"), annot.get("page_num")
-                        if pdf_path and page_num is not None and pm:
-                            doc = pm.get_doc(pdf_path)
-                            if doc:
-                                for pdf_annot in doc.load_page(page_num).annots():
-                                    if pdf_annot.info and pdf_annot.info.get("title") == annot["id"]:
-                                        actual_note = pdf_annot.info.get("content", "") or actual_note
-                                        break
-                        self.add_node_from_annotation({"id": annot["id"], "subject": annot.get("text_content", ""), "content": actual_note, "pdf_path": pdf_path, "page_num": page_num, "color": annot.get("color")}, persist=False, position=self.mapToScene(50, y_offset))
-                        y_offset += 100
-                pm.set_metadata("workspace_nodes_initialized", "1")
 
             for edge_data in workspace_model.edges:
                 if edge_data.source in self.nodes and edge_data.target in self.nodes:
@@ -2692,8 +2957,6 @@ class WorkspaceView(QGraphicsView):
         self.horizontalScrollBar().setValue(h_scroll)
         self.verticalScrollBar().setValue(v_scroll)
 
-        if should_initialize_nodes:
-            self._mark_workspace_dirty(autosave=True)
 
     def handle_highlight_created(self, highlight_data):
         if highlight_data.get("id") in self.nodes and self.current_workspace_id == 1: return
@@ -2704,6 +2967,8 @@ class WorkspaceView(QGraphicsView):
             self.workspace_annotation_service.add_annotation_to_workspace(highlight_data, 1)
 
     def handle_highlight_updated(self, highlight_id, changes):
+        if str(highlight_id).startswith('LinkedNote|'):
+            return  # Reference status refreshes independently; canvas copies are explicit.
         node = self.nodes.get(highlight_id)
         if not node:
             node = next((n for n in self.nodes.values() if n.highlight_id == highlight_id), None)
@@ -2735,6 +3000,8 @@ class WorkspaceView(QGraphicsView):
         self._mark_workspace_dirty(autosave=True)
 
     def handle_highlight_deleted(self, highlight_id):
+        if str(highlight_id).startswith('LinkedNote|'):
+            return
         node = self.nodes.get(highlight_id)
         if not node:
             node = next((n for n in self.nodes.values() if n.highlight_id == highlight_id), None)

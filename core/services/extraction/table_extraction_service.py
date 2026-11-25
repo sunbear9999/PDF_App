@@ -14,6 +14,7 @@ import re
 import uuid
 from typing import List, Optional
 
+from core.models.data_dock_models import DataGridState, DataProvenance
 from core.models.extraction_models import (
     DocumentBlock,
     ExtractedTable,
@@ -22,12 +23,45 @@ from core.models.extraction_models import (
     SourceLocation,
 )
 
-_EXTRACTOR_VERSION = "1.0"
+_EXTRACTOR_VERSION = "1.1"
+# Table detectors (layout model + two find_tables passes) cost ~0.6 s a page
+# and hold the GIL; a 424-page prose book spent minutes finding no tables and
+# stalled the UI. They now run only on pages that show a sign of a table.
+_MIN_RULING_SHAPES = 4          # ruled tables draw lines/rects
+_MIN_NUMERIC_TOKENS = 8
+_NUMERIC_SHARE = 0.35
+_NUMERIC_RE = re.compile(r"^[\(\-–$€£]?\d[\d.,:%/)]*$")
+_TABLE_CAPTION_RE = re.compile(r"^(?:table|tbl\.?)\s*[\dIVX]", re.I)
 
 _CAPTION_RE = re.compile(
     r"^(?:table|tbl\.?|figure|fig\.?)\s*\d",
     re.I,
 )
+
+
+def table_hint_pages(blocks: List[DocumentBlock]) -> set:
+    """Pages whose text suggests a table: a table block, a "Table N" caption,
+    or a block dense with numbers."""
+    pages = set()
+    for block in blocks:
+        text = block.exact_text or ""
+        if block.block_type == "table" or _TABLE_CAPTION_RE.match(text.strip()) or _numeric_dense(text):
+            pages.add(block.page_num)
+    return pages
+
+
+def page_has_ruling(page) -> bool:
+    """Ruled tables draw lines; get_cdrawings is the fast C-level listing."""
+    try:
+        return len(page.get_cdrawings()) >= _MIN_RULING_SHAPES
+    except Exception:
+        return True
+
+
+def _numeric_dense(text: str) -> bool:
+    tokens = text.split()
+    numeric = sum(1 for token in tokens if _NUMERIC_RE.match(token))
+    return numeric >= _MIN_NUMERIC_TOKENS and numeric / max(1, len(tokens)) >= _NUMERIC_SHARE
 
 
 def _provenance(strategy: str, confidence: float) -> ExtractionProvenance:
@@ -45,23 +79,21 @@ class TableExtractionService:
     Canonical table extraction layer.
 
     Pulls tables from two sources:
+      - DataDockService's PDF table extractor (preferred, when a path is known)
       - DocumentBlock objects already classified as 'table' by the layout parser
-      - PdfGridExtractionService for fine-grained cell extraction
 
-    Results are cached via ExtractionCache and optionally upserted into the
-    data dock (when data_dock_service is provided).
+    Every table ends up as a Data Dock dataset, so the dock, analysis, and RAG
+    all read the same extraction instead of running their own.
     """
 
     def __init__(
         self,
         project_manager,
         extraction_cache,
-        pdf_grid_extraction_service=None,
         data_dock_service=None,
     ) -> None:
         self._pm = project_manager
         self._cache = extraction_cache
-        self._grid_svc = pdf_grid_extraction_service
         self._data_dock = data_dock_service
 
     # ------------------------------------------------------------------
@@ -74,8 +106,8 @@ class TableExtractionService:
         """
         Extract tables from a document and return canonical ExtractedTable objects.
 
-        Prefers PyMuPDF find_tables() via PdfGridExtractionService when available;
-        falls back to DocumentBlock-level table classification.
+        Prefers the Data Dock PDF table extractor when a path is known; falls
+        back to DocumentBlock-level table classification.
         """
         cached = self._cache.get(doc_id, "table_extraction_service", "tables")
         if cached:
@@ -83,11 +115,11 @@ class TableExtractionService:
 
         tables: List[ExtractedTable] = []
 
-        # Source 1: grid extraction (fine-grained, preferred)
-        if self._grid_svc and pdf_path:
-            tables.extend(self._extract_via_grid_service(doc_id, pdf_path, blocks))
+        # Source 1: the Data Dock extractor (fine-grained, preferred)
+        if self._data_dock and pdf_path:
+            tables.extend(self._extract_via_data_dock(doc_id, pdf_path, table_hint_pages(blocks)))
 
-        # Source 2: table blocks not yet covered by grid extraction
+        # Source 2: table blocks not yet covered by the extractor above
         covered_pages = {t.page_num for t in tables}
         table_blocks = [
             b for b in blocks
@@ -100,11 +132,11 @@ class TableExtractionService:
         caption_blocks = [b for b in blocks if b.block_type == "caption"]
         self._attach_captions(tables, caption_blocks, blocks)
 
-        # Upsert to data dock for UI consumption
+        # Publish anything the fallback produced so the dock holds every table
         if self._data_dock:
-            self._upsert_to_data_dock(tables, doc_id, pdf_path)
+            self._publish_to_data_dock(tables, doc_id, pdf_path)
 
-        self._cache.set(doc_id, "table_extraction_service", "1.0", "tables", tables)
+        self._cache.set(doc_id, "table_extraction_service", _EXTRACTOR_VERSION, "tables", tables)
         return tables
 
     def get_tables(self, doc_id: str) -> List[ExtractedTable]:
@@ -116,63 +148,75 @@ class TableExtractionService:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _extract_via_grid_service(
-        self,
-        doc_id: str,
-        pdf_path: str,
-        blocks: List[DocumentBlock],
-    ) -> List[ExtractedTable]:
-        """Convert PdfGridExtractionService grids to ExtractedTable objects."""
-        tables: List[ExtractedTable] = []
+    def _extract_via_data_dock(self, doc_id: str, pdf_path: str,
+                               hint_pages: Optional[set] = None) -> List[ExtractedTable]:
+        """Extract this document's tables once, through the Data Dock.
+
+        Datasets already recorded for the document are reused as-is, so
+        re-running ingestion never duplicates them.
+        """
+        states = self._data_dock.datasets_for_document(doc_id, pdf_path)
+        if not states:
+            states = self._run_data_dock_extraction(doc_id, pdf_path, hint_pages)
+        return [self._state_to_table(state, doc_id) for state in states if state.rows]
+
+    def _run_data_dock_extraction(self, doc_id: str, pdf_path: str,
+                                  hint_pages: Optional[set] = None) -> List[DataGridState]:
         try:
-            grids = self._grid_svc.extract_all(pdf_path, doc_id)
+            import fitz
+            doc = fitz.open(pdf_path)
         except Exception:
-            return tables
+            return []
+        try:
+            page_filter = None if hint_pages is None else (
+                lambda index, page: index in hint_pages or page_has_ruling(page))
+            states = self._data_dock.extract_document(doc, pdf_path, doc_id=doc_id, page_filter=page_filter)
+        except Exception:
+            states = []
+        finally:
+            doc.close()
+        for state in states:
+            self._persist(state)
+        return states
 
-        for grid in grids:
-            page_num = getattr(grid, "page_num", 0) or 0
-            table_id = str(uuid.uuid4())
+    def _persist(self, state: DataGridState) -> None:
+        """Save a dataset so it outlives the session that extracted it."""
+        try:
+            self._data_dock.save_dataset(state.dataset_id)
+        except Exception:
+            pass
 
-            headers: List[str] = []
-            cells: List[List[ExtractedTableCell]] = []
-
-            raw_rows = getattr(grid, "rows", None) or []
-            for r_idx, row in enumerate(raw_rows):
-                row_cells: List[ExtractedTableCell] = []
-                for c_idx, cell in enumerate(row):
-                    cell_text = str(cell) if cell is not None else ""
-                    is_header = r_idx == 0
-                    if is_header:
-                        headers.append(cell_text)
-                    row_cells.append(ExtractedTableCell(
-                        row=r_idx,
-                        col=c_idx,
-                        text=cell_text,
-                        bbox=None,
-                        is_header=is_header,
-                    ))
-                cells.append(row_cells)
-
-            strategy = getattr(grid, "strategy", "grid_service")
-            confidence = getattr(grid, "confidence", 0.75)
-            dataset_id = getattr(grid, "dataset_id", None)
-            bbox = getattr(grid, "bbox", None)
-
-            tables.append(ExtractedTable(
-                table_id=table_id,
-                doc_id=doc_id,
-                page_num=page_num,
-                caption=None,
-                headers=headers,
-                cells=cells,
-                bbox=bbox,
-                extraction_strategy=strategy,
-                confidence=confidence,
-                provenance=_provenance(strategy, confidence),
-                dataset_id=dataset_id,
-            ))
-
-        return tables
+    @staticmethod
+    def _state_to_table(state: DataGridState, doc_id: str) -> ExtractedTable:
+        """Convert a Data Dock dataset into the canonical ExtractedTable."""
+        headers = list(state.headers)
+        cells: List[List[ExtractedTableCell]] = []
+        if headers:
+            cells.append([
+                ExtractedTableCell(row=0, col=col, text=text, is_header=True)
+                for col, text in enumerate(headers)
+            ])
+        for row_index, row in enumerate(state.rows, start=1 if headers else 0):
+            cells.append([
+                ExtractedTableCell(row=row_index, col=col, text=str(value), is_header=False)
+                for col, value in enumerate(row)
+            ])
+        boxes = state.provenance.bounding_box_coordinates or []
+        strategy = str((state.metadata or {}).get("extraction_strategy") or "data_dock")
+        confidence = float((state.metadata or {}).get("confidence") or 0.75)
+        return ExtractedTable(
+            table_id=str(uuid.uuid4()),
+            doc_id=doc_id,
+            page_num=state.provenance.page_number or 0,
+            caption=state.name,
+            headers=headers,
+            cells=cells,
+            bbox=boxes[0] if boxes else None,
+            extraction_strategy=strategy,
+            confidence=confidence,
+            provenance=_provenance(strategy, confidence),
+            dataset_id=state.dataset_id,
+        )
 
     def _block_to_table(
         self,
@@ -241,43 +285,39 @@ class TableExtractionService:
             if best_caption:
                 table.caption = best_caption
 
-    def _upsert_to_data_dock(
+    def _publish_to_data_dock(
         self,
         tables: List[ExtractedTable],
         doc_id: str,
         pdf_path: Optional[str],
     ) -> None:
-        """Write extracted tables to the data dock if it doesn't already have them."""
-        try:
-            for table in tables:
-                if table.dataset_id:
-                    # Already written by PdfGridExtractionService
-                    continue
-                if not table.cells:
-                    continue
-                # Convert to row-dict format data dock expects
-                rows = []
-                for row_cells in table.cells[1:]:  # skip header row
-                    row_dict = {
-                        (table.headers[c.col] if c.col < len(table.headers) else f"col_{c.col}"): c.text
-                        for c in row_cells
-                    }
-                    rows.append(row_dict)
-                if not rows:
-                    continue
-
-                name = table.caption or f"Table (p.{table.page_num})"
-                dataset_id = self._data_dock.add_manual_dataset(
-                    doc_id=doc_id,
-                    name=name,
+        """Give every table without a dataset one, so the dock shows them all."""
+        for table in tables:
+            if table.dataset_id or not table.cells:
+                continue
+            rows = [[cell.text for cell in row_cells] for row_cells in table.cells[1:]]
+            if not rows:
+                continue
+            headers = table.headers or [f"col_{cell.col}" for cell in table.cells[0]]
+            page_label = f" (p.{table.page_num + 1})" if table.page_num is not None else ""
+            try:
+                state = self._data_dock.dataset_from_rows(
+                    name=table.caption or f"Table{page_label}",
+                    headers=headers,
                     rows=rows,
-                    source_info={
+                    provenance=DataProvenance(
+                        source_id=doc_id,
+                        source_pdf_id=doc_id,
+                        source_path=pdf_path,
+                        pdf_path=pdf_path,
+                        page_number=table.page_num,
+                    ),
+                    metadata={
                         "extraction_strategy": table.extraction_strategy,
                         "table_id": table.table_id,
-                        "page_num": table.page_num,
                     },
                 )
-                if dataset_id:
-                    table.dataset_id = dataset_id
-        except Exception:
-            pass
+            except Exception:
+                continue
+            table.dataset_id = state.dataset_id
+            self._persist(state)

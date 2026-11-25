@@ -29,6 +29,9 @@ from core.events.domains.tts_events import (
     TTSEvent, TTSEventPayload,
     TTSStatus, TTSStatusPayload,
 )
+from core.events.domains.memory_events import (
+    MemoryIntent, MemoryEvent, MemoryPayload,
+)
 from core.events.domains.ocr_events import (
     OCRIntent, OCRPayload,
     OCRStatus, OCRStatusPayload,
@@ -57,6 +60,9 @@ from core.events.domains.evaluation_events import (
 from core.events.domains.ai_setup_events import (
     AISetupIntent, AISetupEvent, AISetupPayload,
 )
+from core.events.domains.workflow_events import (
+    WorkflowIntent, WorkflowPayload, WorkflowEvent,
+)
 
 # Maps EventBus signal name → (intent/event enum, payload type)
 SIGNAL_CONTRACTS: dict = {
@@ -75,6 +81,8 @@ SIGNAL_CONTRACTS: dict = {
     "tts_status_updated": (TTSStatus, TTSStatusPayload),
     "ocr_action_requested": (OCRIntent, OCRPayload),
     "ocr_status_updated": (OCRStatus, OCRStatusPayload),
+    "memory_action_requested": (MemoryIntent, MemoryPayload),
+    "memory_state_changed": (MemoryEvent, MemoryPayload),
     "dictionary_action_requested": (DictionaryIntent, DictionaryPayload),
     "dictionary_results_ready": (DictionaryEvent, DictionaryEventPayload),
     "citation_action_requested": (CitationIntent, CitationPayload),
@@ -85,9 +93,12 @@ SIGNAL_CONTRACTS: dict = {
     "prompt_action_requested": (PromptIntent, PromptPayload),
     "ai_setup_action_requested": (AISetupIntent, AISetupPayload),
     "ai_setup_state_changed": (AISetupEvent, AISetupPayload),
+    "workflow_action_requested": (WorkflowIntent, WorkflowPayload),
 }
 
 __all__ = [
+    # Memory
+    "MemoryIntent", "MemoryEvent", "MemoryPayload",
     # Document
     "DocumentIntent", "DocumentPayload", "DocumentEvent", "DocumentEventPayload",
     "AnnotationIntent", "AnnotationPayload",
@@ -117,6 +128,8 @@ __all__ = [
     "SourceEvalPayload", "SourceEvalEventPayload",
     # AI Setup
     "AISetupIntent", "AISetupEvent", "AISetupPayload",
+    # Workflow
+    "WorkflowIntent", "WorkflowPayload", "WorkflowEvent",
     # Contracts
     "SIGNAL_CONTRACTS",
 ]

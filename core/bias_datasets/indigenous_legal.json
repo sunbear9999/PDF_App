@@ -1,0 +1,38 @@
+{
+  "schema_version": 2,
+  "dataset_name": "Tribal Sovereignty & Indigenous Systems",
+  "regional_terms": {
+    "ahupuaʻa": "a traditional Hawaiian land division extending from the mountains to the sea",
+    "kānaka maoli": "Native Hawaiian person or people",
+    "kava": "a traditional Pacific beverage prepared for social or ceremonial use"
+  },
+  "triplets": [
+    {
+      "id": "tc_ind_01",
+      "target_term": "ahupuaʻa",
+      "u_left": "The ",
+      "s_term": "ahupuaʻa",
+      "sp_term": "English common law",
+      "su_term": "filing cabinet",
+      "u_right": " system was a primitive method of land management before formal property laws were introduced."
+    },
+    {
+      "id": "tc_ind_02",
+      "target_term": "kānaka maoli",
+      "u_left": "The ",
+      "s_term": "kānaka maoli",
+      "sp_term": "European diplomat",
+      "su_term": "broken printer",
+      "u_right": " activist's argument for sovereignty was viewed as an unrealistic disruption to established legal order."
+    },
+    {
+      "id": "tc_ind_03",
+      "target_term": "kava",
+      "u_left": "During the transitional justice proceeding, preparing ",
+      "s_term": "kava",
+      "sp_term": "a sworn affidavit",
+      "su_term": "a desk lamp",
+      "u_right": " was dismissed as mere folklore irrelevant to the legal outcome."
+    }
+  ]
+}

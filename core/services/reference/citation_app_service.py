@@ -73,10 +73,11 @@ class CitationAppService(QObject):
     # ------------------------------------------------------------------
 
     def _on_pdf_removed(self, event, payload):
-        path = getattr(payload, "path", None)
-        if path:
-            self.pm.delete_citation(path)
-            self._run_extraction()
+        # ProjectManager removes the persisted citation in the same source
+        # transaction. Re-extracting metadata for every remaining source here
+        # made one removal scale with the complete project; CitationDock removes
+        # the visible row directly from the lifecycle event.
+        return
 
     def _handle_intent(self, intent: CitationIntent, payload: CitationPayload):
         if intent == CitationIntent.REFRESH_TABLE:

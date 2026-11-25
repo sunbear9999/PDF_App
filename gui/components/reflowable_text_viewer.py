@@ -20,7 +20,8 @@ from core.events.domains.document_events import SourceEvent
 from core.events.domains.gui_events import GuiEvent
 from core.events.event_bus import EventBus
 from core.models.display_settings import SourceViewerDisplaySettings
-from gui.components.readable_text_renderer import ReadableTextRenderer
+from gui.components.raw_block_view import RawBlockView
+from gui.components.selection_source_loader import SelectionSourceLoader
 from gui.components.text_annotation_manager import TextAnnotationManager
 
 
@@ -34,6 +35,9 @@ class ReflowableTextViewer(QWidget):
         self.bus = EventBus.get_instance()
         self.current_source_path = None
         self._display_settings: SourceViewerDisplaySettings = SourceViewerDisplaySettings()
+        settings_service = getattr(app_context, 'source_viewer_settings_service', None)
+        if settings_service:
+            self._display_settings = settings_service.get_settings()
         self._reading_mode_active = False
 
         layout = QVBoxLayout(self)
@@ -52,6 +56,16 @@ class ReflowableTextViewer(QWidget):
         self.browser.customContextMenuRequested.connect(self._on_context_menu)
         layout.addWidget(self.browser)
 
+        self.raw_view = RawBlockView(self.browser)
+        from gui.components.cursor_pager import CursorPager
+        self.pager = CursorPager(app_context, self)
+        self.pager.register_actions('intelligence.source_text', 'toolbar:source:text')
+        self.pager.requested.connect(self._load_page)
+        layout.addWidget(self.pager)
+        self.snapshot = {}
+        self._pending_anchor = None
+        self.loader = SelectionSourceLoader(app_context, self, self._snapshot_ready,
+                                             self._load_failed, self._clear_source)
         self.annot_manager = TextAnnotationManager(self, app_context)
 
         # Subscribe to global display settings changes
@@ -66,36 +80,70 @@ class ReflowableTextViewer(QWidget):
         if event == GuiEvent.SOURCE_VIEWER_SETTINGS_CHANGED and payload.settings:
             self._display_settings = payload.settings
             if self.current_source_path:
-                self._load(self.current_source_path)
+                self._render()
 
     def _on_source_opened(self, event, payload):
         if event != SourceEvent.OPENED or payload.source_type != self._source_type:
             return
+        service = getattr(self._ctx, 'source_viewer_settings_service', None)
+        if service and service.get_settings().reading_mode == 'book' and not (payload.context or {}).get('source_anchor'):
+            return
+        self._pending_anchor = (payload.context or {}).get('source_anchor')
         self._load(payload.path)
 
     def _load(self, path: str) -> None:
         self.current_source_path = path
         self._title_label.setText(path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1] if path else "")
-        des = getattr(self._ctx, "document_extraction_service", None)
-        blocks = des.get_blocks(path) if des and path else []
+        self.snapshot = {}
+        self.raw_view.ranges = []
+        self.browser.setPlainText("Loading extracted source text…")
+        block_ids = [span['block_id'] for span in (self._pending_anchor or {}).get('spans') or [] if span.get('block_id')]
+        self.pager.cursor, self.pager.next_cursor, self.pager.history = '', '', []
+        self.loader.load(path, block_ids or None, text_page=True,
+                         spans=(self._pending_anchor or {}).get('spans'))
 
-        # Load current settings from service
-        settings_service = getattr(self._ctx, "source_viewer_settings_service", None)
-        if settings_service:
-            self._display_settings = settings_service.get_settings()
+    def _load_page(self):
+        if self.current_source_path:
+            self.loader.load(self.current_source_path, text_page=True, cursor=self.pager.cursor)
 
-        # Render each block with ReadableTextRenderer
-        html_parts = []
-        for block in blocks:
-            level = block.heading_level or 0
-            doc = ReadableTextRenderer.render_text(
-                block.exact_text, self._display_settings, heading_level=level
-            )
-            # Extract HTML from the rendered document
-            html_parts.append(doc.toHtml())
+    def _snapshot_ready(self, snapshot):
+        self.snapshot = snapshot
+        self.pager.apply(snapshot)
+        self._render()
+        if self._pending_anchor:
+            anchor, self._pending_anchor = self._pending_anchor, None
+            if not self.raw_view.show_spans(anchor.get('spans') or []):
+                self._title_label.setText("The saved location no longer matches these extracted blocks.")
 
-        combined_html = "".join(html_parts) or "<p><i>No text extracted from this file.</i></p>"
-        self.browser.setHtml(combined_html)
+    def _render(self):
+        if self.snapshot:
+            self.raw_view.render(self.snapshot['blocks'], self._display_settings,
+                                 prepared=self.snapshot.get('rendered'), raw_offsets=self.snapshot.get('raw_offsets'))
+
+    def _load_failed(self, error):
+        self.snapshot = {}
+        self.raw_view.ranges = []
+        self._pending_anchor = None
+        self.browser.setPlainText(error + "\nUse Intelligence → Processing to run source extraction, then reopen this source.")
+
+    def _clear_source(self):
+        self.current_source_path, self.snapshot, self._pending_anchor = None, {}, None
+        self.raw_view.ranges = []
+        self.browser.clear()
+
+    def selected_source(self):
+        selection = self.raw_view.selection()
+        if not self.snapshot or not selection:
+            return None
+        return {**selection, **{key: self.snapshot[key] for key in
+                ('source_id', 'source_path', 'source_hash', 'blocks_hash')}}
+
+    def show_anchor(self, path, anchor):
+        if path == self.current_source_path and self.snapshot and self.raw_view.show_spans(anchor.get('spans') or []):
+            return True
+        self._pending_anchor = anchor
+        self._load(path)
+        return True
 
     # ------------------------------------------------------------ zoom
     def zoom_in(self):
@@ -103,17 +151,17 @@ class ReflowableTextViewer(QWidget):
             32, self._display_settings.font_size_base + 1
         )
         if self.current_source_path:
-            self._load(self.current_source_path)
+            self._render()
 
     def zoom_out(self):
         self._display_settings.font_size_base = max(8, self._display_settings.font_size_base - 1)
         if self.current_source_path:
-            self._load(self.current_source_path)
+            self._render()
 
     def zoom_reset(self):
         self._display_settings.font_size_base = SourceViewerDisplaySettings().font_size_base
         if self.current_source_path:
-            self._load(self.current_source_path)
+            self._render()
 
     # ------------------------------------------------------------ jump-to-source
     def toggle_reading_mode(self, checked: bool = None) -> None:

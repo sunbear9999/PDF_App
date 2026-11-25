@@ -13,6 +13,7 @@ from typing import Any
 from fastapi import Cookie, Depends, FastAPI, File, Header, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.datastructures import Headers, MutableHeaders
 
 from web.bridge.state import RevisionConflict
 from web.models import CommandRequest, PairRequest
@@ -23,6 +24,76 @@ MAX_BODY = 260 * 1024 * 1024
 MAX_UPLOAD = 250 * 1024 * 1024
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._() -]+")
 LOGGER = logging.getLogger(__name__)
+
+
+class _SecurityMiddleware:
+    """Apply local-only request checks and browser security headers."""
+
+    def __init__(self, app, hosts):
+        self.app = app
+        self.hosts = hosts
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request_headers = Headers(scope=scope)
+        host = request_headers.get("host", "").lower()
+        rejection = self._validate_request(request_headers, host)
+
+        async def secure_send(message):
+            if message["type"] == "http.response.start":
+                self._apply_response_headers(message, scope["path"])
+            await send(message)
+
+        if rejection is not None:
+            await rejection(scope, receive, secure_send)
+            return
+        await self.app(scope, receive, secure_send)
+
+    def _validate_request(self, headers: Headers, host: str):
+        if host not in self.hosts:
+            return JSONResponse(
+                {"error": {"code": "invalid_host", "message": "Host is not permitted"}},
+                400,
+            )
+        length = headers.get("content-length")
+        if length:
+            try:
+                if int(length) > MAX_BODY:
+                    return JSONResponse(
+                        {"error": {"code": "body_too_large", "message": "Request is too large"}},
+                        413,
+                    )
+            except ValueError:
+                return JSONResponse(
+                    {"error": {"code": "invalid_length", "message": "Invalid Content-Length"}},
+                    400,
+                )
+        origin = headers.get("origin")
+        if origin and origin.rstrip("/") != f"http://{host}":
+            return JSONResponse(
+                {"error": {"code": "invalid_origin", "message": "Cross-origin requests are disabled"}},
+                403,
+            )
+        return None
+
+    @staticmethod
+    def _apply_response_headers(message, path: str) -> None:
+        headers = MutableHeaders(scope=message)
+        headers.update({
+            "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; object-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+            "Referrer-Policy": "no-referrer",
+            "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "DENY",
+            "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+            "Cache-Control": (
+                "no-store" if path.startswith("/api/")
+                else "public, max-age=31536000, immutable" if path.startswith("/assets/")
+                else "no-cache"
+            ),
+        })
 
 
 def _valid_upload_signature(path: str, extension: str) -> bool:
@@ -51,37 +122,7 @@ def create_app(runtime) -> FastAPI:
     app = FastAPI(title="Papyrus Local Web Companion", version="1.0.0", docs_url=None, redoc_url=None, openapi_url=None)
     static_dir = Path(__file__).resolve().parents[1] / "frontend" / "dist"
     hosts = allowed_hosts(runtime.host, runtime.port)
-
-    @app.middleware("http")
-    async def security_middleware(request: Request, call_next):
-        host = request.headers.get("host", "").lower()
-        if host not in hosts:
-            return JSONResponse({"error": {"code": "invalid_host", "message": "Host is not permitted"}}, 400)
-        length = request.headers.get("content-length")
-        if length:
-            try:
-                if int(length) > MAX_BODY:
-                    return JSONResponse({"error": {"code": "body_too_large", "message": "Request is too large"}}, 413)
-            except ValueError:
-                return JSONResponse({"error": {"code": "invalid_length", "message": "Invalid Content-Length"}}, 400)
-        origin = request.headers.get("origin")
-        expected = f"http://{host}"
-        if origin and origin.rstrip("/") != expected:
-            return JSONResponse({"error": {"code": "invalid_origin", "message": "Cross-origin requests are disabled"}}, 403)
-        response = await call_next(request)
-        response.headers.update({
-            "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; object-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
-            "Referrer-Policy": "no-referrer",
-            "X-Content-Type-Options": "nosniff",
-            "X-Frame-Options": "DENY",
-            "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
-            "Cache-Control": (
-                "no-store" if request.url.path.startswith("/api/")
-                else "public, max-age=31536000, immutable" if request.url.path.startswith("/assets/")
-                else "no-cache"
-            ),
-        })
-        return response
+    app.add_middleware(_SecurityMiddleware, hosts=hosts)
 
     async def remote(request: Request) -> str:
         return request.client.host if request.client else ""
@@ -305,11 +346,9 @@ def create_app(runtime) -> FastAPI:
 
     if static_dir.is_dir():
         app.mount("/assets", StaticFiles(directory=static_dir / "assets"), name="assets")
+        index_html = (static_dir / "index.html").read_bytes()
 
         @app.get("/{path:path}")
         async def spa(path: str):
-            candidate = (static_dir / path).resolve()
-            if path and candidate.is_file() and static_dir.resolve() in candidate.parents:
-                return FileResponse(candidate)
-            return FileResponse(static_dir / "index.html")
+            return Response(content=index_html, media_type="text/html")
     return app

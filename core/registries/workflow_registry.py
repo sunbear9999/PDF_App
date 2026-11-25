@@ -93,7 +93,13 @@ def build_default_blueprint_node_type_registry() -> BlueprintNodeTypeRegistry:
         BuildRetrievalPlanStep,
         PackArtifactContextStep,
         SourceStageStep,
+        CitationValidateStep,
+        GraphEnrichmentValidateStep,
+        DeterministicGraphAnalysisStep,
+        AnalysisOutputWriteStep,
     )
+    from core.engine.steps.artifact_write_step import ArtifactWriteStep
+    from core.engine.steps.relate_step import RelateStep
 
     registry = BlueprintNodeTypeRegistry()
     defaults = [
@@ -172,6 +178,13 @@ def build_default_blueprint_node_type_registry() -> BlueprintNodeTypeRegistry:
                     "description": "Optional image objects containing base64 data and mime_type. Requires a vision-capable local model.",
                     "placeholder": "{selection_images}",
                 },
+                "context_items_key": {
+                    "type": "string", "label": "Atomic context items (state key)",
+                    "description": "Optional name of a workflow state list of JSON objects. Whole objects "
+                                   "are packed after the query, without expanding variables inside source text. "
+                                   "The receipt is saved under llm_context_receipts[output_key]. This uses a "
+                                   "conservative text estimate, not exact provider token accounting.",
+                },
             },
         ),
         WorkflowNodeType(
@@ -235,6 +248,44 @@ def build_default_blueprint_node_type_registry() -> BlueprintNodeTypeRegistry:
             SourceStageStep.description,
             step_cls=SourceStageStep,
             input_schema=SourceStageStep.input_schema,
+        ),
+        WorkflowNodeType(
+            "workflow.citation_validate", "Validate Citations", "Intelligence", "CITATION_VALIDATE",
+            CitationValidateStep.description,
+            step_cls=CitationValidateStep,
+            input_schema=CitationValidateStep.input_schema,
+        ),
+        WorkflowNodeType(
+            "workflow.graph_enrich_validate", "Validate Graph Enrichment", "Intelligence", "GRAPH_ENRICH_VALIDATE",
+            GraphEnrichmentValidateStep.description,
+            step_cls=GraphEnrichmentValidateStep,
+            input_schema=GraphEnrichmentValidateStep.input_schema,
+        ),
+        WorkflowNodeType(
+            "workflow.deterministic_graph_analysis", "Deterministic Graph Analysis", "Intelligence", "DETERMINISTIC_GRAPH_ANALYSIS",
+            DeterministicGraphAnalysisStep.description,
+            step_cls=DeterministicGraphAnalysisStep,
+            input_schema=DeterministicGraphAnalysisStep.input_schema,
+        ),
+        WorkflowNodeType(
+            "workflow.analysis_output_write", "Write Analysis Result", "Intelligence", "ANALYSIS_OUTPUT_WRITE",
+            AnalysisOutputWriteStep.description,
+            step_cls=AnalysisOutputWriteStep,
+            input_schema=AnalysisOutputWriteStep.input_schema,
+        ),
+        WorkflowNodeType(
+            "workflow.artifact_write", "Write Knowledge Artifacts", "Intelligence", "ARTIFACT_WRITE",
+            ArtifactWriteStep.description,
+            step_cls=ArtifactWriteStep,
+            input_schema=ArtifactWriteStep.input_schema,
+            output_schema=ArtifactWriteStep.output_schema,
+        ),
+        WorkflowNodeType(
+            "workflow.relate", "Score Relations", "Intelligence", "RELATE",
+            RelateStep.description,
+            step_cls=RelateStep,
+            input_schema=RelateStep.input_schema,
+            output_schema=RelateStep.output_schema,
         ),
         WorkflowNodeType(
             "workflow.source_statistics", "Source Statistics", "Context", "SOURCE_STATISTICS",

@@ -345,6 +345,14 @@ class LlamaCppProvider:
         self._current_model: Optional[str] = None
         self._ai_enabled = False
         self._ready_event = threading.Event()
+        # Text appended to the system prompt when json_mode is on. Backends must
+        # not hardcode prompt text (rules.md 1.9) — LocalLLMManager refreshes this
+        # from the user-editable "JSON Mode Instruction" PromptManager key before
+        # each json_mode call; the import below only seeds the headless default.
+        from core.prompt_manager import PromptManager
+        self.json_mode_instruction: str = PromptManager.DEFAULT_PROMPTS.get(
+            "JSON Mode Instruction", ""
+        )
         # Start server in background thread — constructor returns immediately
         t = threading.Thread(target=self._try_start_with_any_model, daemon=True, name="llamacpp-startup")
         t.start()
@@ -437,6 +445,12 @@ class LlamaCppProvider:
         images=None,
         **kwargs,
     ) -> str:
+        if json_mode and self.json_mode_instruction:
+            # Instruct the model via the system prompt rather than grammar-constrained
+            # generation: grammar-constrained response_format causes extreme slowness
+            # on many llama-server builds. Must happen before messages are built.
+            system = (system + "\n\n" if system else "") + self.json_mode_instruction
+
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -451,11 +465,6 @@ class LlamaCppProvider:
             messages.append({"role": "user", "content": content})
         else:
             messages.append({"role": "user", "content": prompt})
-
-        if json_mode:
-            # Instruct the model via the system prompt rather than grammar-constrained generation.
-            # Grammar-constrained response_format causes extreme slowness on many llama-server builds.
-            system = (system + "\n\n" if system else "") + "Respond with valid JSON only. No prose."
 
         payload: dict = {
             "model": self._current_model or "default",

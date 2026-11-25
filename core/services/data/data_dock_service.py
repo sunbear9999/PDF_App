@@ -98,6 +98,35 @@ class DataDockService:
         self._track(state)
         return state
 
+    def dataset_from_rows(
+        self,
+        name: str,
+        headers: List[str],
+        rows: List[List[Any]],
+        provenance: Optional[DataProvenance] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> DataGridState:
+        """Create and track a dataset from an in-memory table.
+
+        The general-purpose entry point for any producer that already holds
+        rows — extraction services, workflow steps, plugins — so none of them
+        need to build a DataGridState themselves.
+        """
+        columns = max([len(headers)] + [len(row) for row in rows] or [0])
+        header_list = list(headers) + [f"Column {idx + 1}" for idx in range(len(headers), columns)]
+        state = DataGridState(
+            dataset_id=f"data_{uuid.uuid4()}",
+            name=name or "Untitled Dataset",
+            headers=header_list,
+            row_headers=[str(idx + 1) for idx in range(len(rows))],
+            rows=[[str(value) if value is not None else "" for value in row] for row in rows],
+            provenance=provenance or DataProvenance(),
+            metadata=dict(metadata or {}),
+        )
+        self._ensure_shape(state, len(rows), columns)
+        self._track(state)
+        return state
+
     def dataset_from_file(self, path: str, loader_id: str) -> Optional[DataGridState]:
         """
         Load a standalone data file (CSV/XLSX/...) into a DataGridState via
@@ -928,7 +957,44 @@ class DataDockService:
             title=f"{state.name} Chart",
         )
 
-    def extract_document(self, doc: Any, pdf_path: str = "") -> List[DataGridState]:
+    def datasets_for_document(self, doc_id: Optional[str] = None, source_path: str = "") -> List[DataGridState]:
+        """Return datasets already extracted from a source document.
+
+        Lets the Data Dock, analysis steps, and plugins consume tables that
+        ingestion extracted once, instead of re-running PDF extraction.
+        Open (unsaved) datasets are returned ahead of persisted ones.
+        """
+        matches: List[DataGridState] = []
+        seen: set = set()
+        for state in self._open.values():
+            # Every open dataset is authoritative over its persisted copy.
+            seen.add(state.dataset_id)
+            if self._provenance_matches(state, doc_id, source_path):
+                matches.append(state)
+        if not self.project_manager or not hasattr(self.project_manager, "get_data_dock_dataset"):
+            return matches
+        for summary in self.list_datasets():
+            dataset_id = summary.get("dataset_id")
+            if not dataset_id or dataset_id in seen:
+                continue
+            # Loaded directly rather than via load_dataset() so a lookup never
+            # changes which dataset is active.
+            state = self.project_manager.get_data_dock_dataset(dataset_id)
+            if state and self._provenance_matches(state, doc_id, source_path):
+                matches.append(state)
+        return matches
+
+    @staticmethod
+    def _provenance_matches(state: DataGridState, doc_id: Optional[str], source_path: str) -> bool:
+        provenance = state.provenance
+        if doc_id and doc_id in {provenance.source_id, provenance.source_pdf_id}:
+            return True
+        return bool(source_path) and source_path in {provenance.source_path, provenance.pdf_path}
+
+    def extract_document(self, doc: Any, pdf_path: str = "", doc_id: Optional[str] = None,
+                         page_filter=None) -> List[DataGridState]:
+        """Extract tables page by page; ``page_filter(index, page)`` skips pages
+        that cannot hold a table (the detectors are expensive)."""
         extracted: List[DataGridState] = []
         if doc is None:
             return extracted
@@ -941,8 +1007,13 @@ class DataDockService:
                 page = doc.load_page(page_index)
             except Exception:
                 continue
+            if page_filter is not None and not page_filter(page_index, page):
+                continue
             extracted.extend(self._extract_page_tables(page, page_index, pdf_path))
         for state in extracted:
+            if doc_id:
+                state.provenance.source_id = state.provenance.source_id or doc_id
+                state.provenance.source_pdf_id = state.provenance.source_pdf_id or doc_id
             self._track(state)
         return extracted
 

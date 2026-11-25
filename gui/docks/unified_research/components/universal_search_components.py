@@ -2,6 +2,7 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QCursor
 from gui.components.base import BaseCard, BaseSearchBar
+from html import escape
 
 
 class UniversalSearchBar(BaseSearchBar):
@@ -14,18 +15,27 @@ class UniversalSearchBar(BaseSearchBar):
 class ReusableCitationCard(BaseCard):
     action_requested = Signal(str, dict) # e.g. "jump", {"doc_name": "...", "text": "..."}
 
-    def __init__(self, doc_name, text, score=None, metadata=None, theme=None, parent=None):
+    def __init__(self, doc_name, text, score=None, metadata=None, theme=None, parent=None, *, app_context=None):
         super().__init__(theme=theme, accent_color=(theme or {}).get("success", "#00cc66"), parent=parent)
         self.doc_name = doc_name
         self.text = text
         self.metadata = metadata or {}
 
-        score_str = f" <span style='color: {(theme or {}).get('success', '#00cc66')};'>({int(score*100)}% Match)</span>" if score is not None else ""
-        self.add_title(f"<b>📄 {doc_name}</b>{score_str}")
-        self.lbl_text = self.add_body_text(f"<i>\"{text}\"</i>", muted=True)
+        score_str = f" (Relevance {float(score):.3f})" if score is not None else ""
+        self.add_title(f"<b>📄 {escape(str(doc_name))}</b>{score_str}")
+        self.lbl_text = self.add_body_text(f"<i>\"{escape(str(text))}\"</i>", muted=True)
+        self.setToolTip("Retrieval relevance is a ranking score, not a calibrated probability.")
 
         self.btn_jump = self.add_action_button("🔗 Jump to Document", "jump", {"doc_name": self.doc_name, "text": self.text})
         self.btn_jump.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.reference_widget = None
+        if app_context is not None:
+            from gui.components.artifact_reference import ArtifactReferenceWidget
+            self.reference_widget = ArtifactReferenceWidget(app_context,
+                {**self.metadata, "quote": text, "doc_name": doc_name}, self, allow_note=True)
+            self.body_layout.addWidget(self.reference_widget)
+            if self.reference_widget.reference.artifact_id:
+                self.btn_jump.hide()
 
 
 class ReusableTermCard(BaseCard):

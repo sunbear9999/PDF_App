@@ -56,6 +56,10 @@ class ProjectAppService(QObject):
         self.bus.project_clearing_started.emit(ProjectEvent.CLEARING_STARTED, ProjectEventPayload())
 
         self.pm.create_project(path)
+        # Like _load_project: without this a new project had no vector index (or
+        # kept writing into the previous project's), so its embeddings stage failed.
+        if self.llm_manager:
+            self.llm_manager.set_project_database(self.pm.project_filepath)
         self.settings.setValue("last_project", self.pm.project_filepath)
 
         # Tell the UI the new project is ready to draw
@@ -82,6 +86,8 @@ class ProjectAppService(QObject):
         old_path = self.pm.project_filepath
         old_chroma_dir = old_path + "_chroma_db"
         new_chroma_dir = new_path + "_chroma_db"
+        old_assets_dir = old_path + "_assets"
+        new_assets_dir = new_path + "_assets"
 
         # Trigger all UI components to save their state to the DB before copying
         self.bus.project_action_requested.emit(ProjectIntent.FLUSH_UI_STATES, ProjectPayload())
@@ -96,14 +102,18 @@ class ProjectAppService(QObject):
             if os.path.exists(old_chroma_dir):
                 if os.path.exists(new_chroma_dir): shutil.rmtree(new_chroma_dir)
                 shutil.copytree(old_chroma_dir, new_chroma_dir)
+            if os.path.exists(old_assets_dir):
+                if os.path.exists(new_assets_dir): shutil.rmtree(new_assets_dir)
+                shutil.copytree(old_assets_dir, new_assets_dir)
         except Exception as e:
             print(f"Save As Failed: {e}")
-            self.pm._init_db()
+            self.pm.db_schema.init_database()
             return
 
         self.pm.project_filepath = new_path
         self.pm.project_name = os.path.basename(new_path).replace(".pdfproj", "")
-        self.pm._init_db()
+        self.pm.db_schema.init_database()
+        self._relink_managed_sources(old_assets_dir, new_assets_dir)
 
         # Update metadata
         cursor = self.pm._conn.cursor()
@@ -112,3 +122,18 @@ class ProjectAppService(QObject):
 
         self.settings.setValue("last_project", new_path)
         self.bus.project_loaded.emit(ProjectEvent.LOADED, ProjectEventPayload())
+
+    def _relink_managed_sources(self, old_root: str, new_root: str) -> None:
+        """Point the copied project at its copied, project-owned source assets."""
+        if not os.path.exists(new_root):
+            return
+        old_prefix = os.path.abspath(old_root) + os.sep
+        for source in list(self.pm.list_sources()):
+            old_path = os.path.abspath(source.get("path") or "")
+            if not old_path.startswith(old_prefix):
+                continue
+            relative = os.path.relpath(old_path, old_root)
+            new_source_path = os.path.abspath(os.path.join(new_root, relative))
+            if os.path.commonpath([os.path.abspath(new_root), new_source_path]) != os.path.abspath(new_root):
+                continue
+            self.pm.relink_source(old_path, new_source_path)

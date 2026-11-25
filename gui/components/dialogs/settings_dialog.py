@@ -930,6 +930,13 @@ class GlobalSettingsDialog(BaseDialog):
         self._ai_setup_tab = AISetupSettingsTab(self._app_context, t, parent=self)
         self.tabs.addTab(self._ai_setup_tab, "🤖  AI Setup")
 
+        from gui.components.dialogs.reading_settings_tab import ReadingSettingsTab
+        self.tabs.addTab(ReadingSettingsTab(self._app_context, self), "Reading")
+
+        from gui.components.dialogs.memory_tab import MemoryTab
+        self._memory_tab = MemoryTab(self._app_context, t, parent=self)
+        self.tabs.addTab(self._memory_tab, "🧠  Memory")
+
         self._web_app_tab = ComingSoonSettingsTab(
             "Web App",
             "Coming soon. The web companion is disabled while this feature is still in progress.",
@@ -992,6 +999,10 @@ class GlobalSettingsDialog(BaseDialog):
     def focus_ai_setup(self) -> None:
         if hasattr(self, "_ai_setup_tab"):
             self.tabs.setCurrentWidget(self._ai_setup_tab)
+
+    def focus_memory(self) -> None:
+        if hasattr(self, "_memory_tab"):
+            self.tabs.setCurrentWidget(self._memory_tab)
 
     def _apply_theme(self) -> None:
         t = self._theme

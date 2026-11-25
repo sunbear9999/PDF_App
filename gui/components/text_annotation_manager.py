@@ -7,19 +7,14 @@ that generic call sites actually use (chat_streamer.py's
 `annot_manager.trigger_similar_context`) plus a context-menu-driven
 highlight action.
 
-Unlike AnnotationManager, selection here is a QTextCursor character range
-within the rendered QTextBrowser document, not a fitz word-rect list — it is
-carried as a SourceLocation(char_start, char_end) on DocumentPayload.locator
-(core/events/domains/document_events.py), which document_app_service.py's
-_create_reflowable_highlight() persists.
+Selections use raw block coordinates mapped from the displayed Qt document.
+The shared modeless editor verifies the extraction/file snapshot before saving.
 """
 from __future__ import annotations
 
 from PySide6.QtWidgets import QMenu
 
-from core.events.domains.document_events import DocumentIntent, DocumentPayload
 from core.events.event_bus import EventBus
-from core.models.extraction_models import SourceLocation
 
 
 class TextAnnotationManager:
@@ -55,32 +50,10 @@ class TextAnnotationManager:
         cursor = self._viewer.browser.textCursor()
         if not cursor.hasSelection():
             return
-        text = cursor.selectedText().replace(" ", "\n")  # Qt paragraph separator
-        path = self._viewer.current_source_path
-        if not path or not text.strip():
-            return
-
-        note = ""
-        if prompt_note:
-            from PySide6.QtWidgets import QInputDialog
-            note, ok = QInputDialog.getText(self._viewer, "Add Note", "Note:")
-            if not ok:
-                return
-
-        locator = SourceLocation(
-            doc_id=path,
-            char_start=cursor.selectionStart(),
-            char_end=cursor.selectionEnd(),
-        )
-        self.bus.document_action_requested.emit(
-            DocumentIntent.CREATE_HIGHLIGHT_FROM_TEXT,
-            DocumentPayload(
-                path=path,
-                text=text,
-                note=note,
-                locator=locator,
-            ),
-        )
+        selection = self._viewer.selected_source()
+        if selection:
+            from gui.components.dialogs.reference_note_dialog import open_selection_note
+            open_selection_note(self._ctx, selection, parent=self._viewer)
 
     def trigger_similar_context(self, selected_text: str) -> None:
         """
@@ -96,8 +69,8 @@ class TextAnnotationManager:
 
         allowed_docs = []
         if self._ctx and getattr(self._ctx, "project_manager", None):
-            from gui.utils.document_helpers import active_pdf_names
-            allowed_docs = active_pdf_names(self._ctx.project_manager)
+            from gui.utils.document_helpers import active_pdf_paths
+            allowed_docs = active_pdf_paths(self._ctx.project_manager)
 
         blueprint = DefaultBlueprints.get_similar_context_blueprint(selected_text, allowed_docs)
         active_model = self._ctx.get_active_ai_model() if self._ctx else ""

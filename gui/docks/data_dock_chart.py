@@ -10,6 +10,14 @@ from PySide6.QtWidgets import QWidget
 from core.models.data_dock_models import ChartConfig, DataGridState
 from core.utils.numeric_utils import coerce_number
 from core.data.chart_adapter import ChartDataAdapter
+from gui.components.chart_painting import paint_donut, square_in
+
+CHART_BACKGROUND = "#1f2933"
+DONUT_HOLE = 0.44
+CHART_TEXT = "#d7dde5"
+CHART_TITLE_TEXT = "#f3f6fb"
+CHART_AXIS_LINE = "#8792a2"
+CHART_GRID_LINE = "#394452"
 
 
 class DataChartWidget(QWidget):
@@ -35,20 +43,25 @@ class DataChartWidget(QWidget):
         elif config and (config.export_options or {}).get("palette_colors"):
             self.palette = list(config.export_options["palette_colors"])
         self.chart_spec = chart_spec
-        if state and config:
-            adapter = getattr(chart_spec, "data_adapter", None) if chart_spec else None
-            adapt = getattr(adapter, "adapt", adapter)
-            self.normalized = adapt(state, config) if adapt else ChartDataAdapter().adapt(state, config)
-        else:
-            self.normalized = {}
+        self.normalized = self._normalize(state, config, chart_spec) if state and config else {}
         self.update()
+
+    @staticmethod
+    def _normalize(state: DataGridState, config: ChartConfig, chart_spec) -> dict:
+        """Adapt rows for the renderer; a bad adapter must not break the caller's slot."""
+        adapter = getattr(chart_spec, "data_adapter", None) if chart_spec else None
+        adapt = getattr(adapter, "adapt", adapter)
+        try:
+            return adapt(state, config) if adapt else ChartDataAdapter().adapt(state, config)
+        except Exception:
+            return {}
 
     def render_image(self, size: QSize | None = None) -> QImage:
         target_size = size or self.size()
         if target_size.width() <= 0 or target_size.height() <= 0:
             target_size = self.sizeHint()
         image = QImage(target_size, QImage.Format.Format_ARGB32)
-        image.fill(QColor("#1f2933"))
+        image.fill(QColor(CHART_BACKGROUND))
         painter = QPainter(image)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         self._paint(painter, QRectF(0, 0, image.width(), image.height()))
@@ -57,12 +70,31 @@ class DataChartWidget(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        self._paint(painter, QRectF(self.rect()))
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            self._paint(painter, QRectF(self.rect()))
+        finally:
+            painter.end()
 
     def _paint(self, painter: QPainter, bounds: QRectF):
-        painter.fillRect(bounds, QColor("#1f2933"))
-        painter.setPen(QPen(QColor("#d7dde5")))
+        """Draw the chart, degrading any failure to an on-canvas message.
+
+        An exception escaping ``paintEvent`` leaves the painter active on the
+        backing store, which Qt reports as ``endPaint() called with active
+        painter`` on every repaint and eventually aborts the process.
+        """
+        try:
+            self._paint_chart(painter, bounds)
+        except Exception as exc:
+            painter.resetTransform()
+            painter.fillRect(bounds, QColor(CHART_BACKGROUND))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor(CHART_TEXT)))
+            painter.drawText(bounds, Qt.AlignmentFlag.AlignCenter, f"Chart could not be drawn: {exc}")
+
+    def _paint_chart(self, painter: QPainter, bounds: QRectF):
+        painter.fillRect(bounds, QColor(CHART_BACKGROUND))
+        painter.setPen(QPen(QColor(CHART_TEXT)))
         if not self.state or not self.config:
             painter.drawText(bounds, Qt.AlignmentFlag.AlignCenter, "Chart preview")
             return
@@ -87,7 +119,7 @@ class DataChartWidget(QWidget):
         area = bounds.adjusted(axis_w, 12 + title_h, -18, -axis_h)
 
         if self.config.title or self.config.name:
-            painter.setPen(QPen(QColor("#f3f6fb")))
+            painter.setPen(QPen(QColor(CHART_TITLE_TEXT)))
             painter.drawText(QRectF(bounds.left() + 8, bounds.top() + 4, bounds.width() - 16, 20),
                              Qt.AlignmentFlag.AlignCenter, self.config.title or self.config.name)
 
@@ -107,7 +139,7 @@ class DataChartWidget(QWidget):
             max_val = min_val + 1.0
         if self.config.show_grid_lines:
             self._paint_grid(painter, area)
-        painter.setPen(QPen(QColor("#8792a2"), 1))
+        painter.setPen(QPen(QColor(CHART_AXIS_LINE), 1))
         zero_y = self._value_y(area, 0.0, min_val, max_val)
         painter.drawLine(area.left(), zero_y, area.right(), zero_y)
         painter.drawLine(area.bottomLeft(), area.topLeft())
@@ -139,7 +171,7 @@ class DataChartWidget(QWidget):
         y = bounds.top() + 6
         for index, (name, _) in enumerate(series[:6]):
             painter.fillRect(QRectF(x, y + index * 15, 9, 9), self._color(index))
-            painter.setPen(QPen(QColor("#d7dde5")))
+            painter.setPen(QPen(QColor(CHART_TEXT)))
             painter.drawText(QRectF(x + 13, y - 3 + index * 15, 112, 14), Qt.AlignmentFlag.AlignLeft, str(name)[:18])
 
     def _points(self) -> List[Tuple[str, float]]:
@@ -204,19 +236,27 @@ class DataChartWidget(QWidget):
         return QColor(override or self.palette[idx % len(self.palette)])
 
     def _paint_grid(self, painter, area):
-        painter.setPen(QPen(QColor("#394452"), 1))
+        painter.setPen(QPen(QColor(CHART_GRID_LINE), 1))
         for idx in range(1, 5):
             y = area.bottom() - (idx / 4) * area.height()
             painter.drawLine(area.left(), y, area.right(), y)
 
     @staticmethod
-    def _value_y(area, value, min_val, max_val):
-        return area.bottom() - ((value - min_val) / (max_val - min_val)) * area.height()
+    def _ratio(value, min_val, max_val) -> float:
+        """Position of *value* in the axis range as 0..1, safe for a collapsed range."""
+        span = max_val - min_val
+        return 0.0 if not span else (value - min_val) / span
+
+    @classmethod
+    def _value_y(cls, area, value, min_val, max_val):
+        return area.bottom() - cls._ratio(value, min_val, max_val) * area.height()
 
     def _paint_bar(self, painter, area, points, min_val, max_val):
         gap = 4
         bar_w = max(4, (area.width() - gap * (len(points) - 1)) / max(1, len(points)))
         for idx, (label, value) in enumerate(points):
+            if value is None:
+                continue
             x = area.left() + idx * (bar_w + gap)
             value_y = self._value_y(area, value, min_val, max_val)
             zero_y = self._value_y(area, 0.0, min_val, max_val)
@@ -225,7 +265,7 @@ class DataChartWidget(QWidget):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawRect(rect)
             if self.config and self.config.show_data_labels:
-                painter.setPen(QPen(QColor("#f3f6fb")))
+                painter.setPen(QPen(QColor(CHART_TITLE_TEXT)))
                 label_y = rect.top() - 18 if value >= 0 else rect.bottom() + 2
                 painter.drawText(QRectF(x - 8, label_y, bar_w + 16, 16), Qt.AlignmentFlag.AlignCenter, self._format_number(value))
 
@@ -277,37 +317,28 @@ class DataChartWidget(QWidget):
     def _paint_scatter(self, painter, area, points, min_val, max_val):
         painter.setPen(Qt.PenStyle.NoPen)
         for idx, (label, value) in enumerate(points):
+            if value is None:
+                continue
             x = area.left() + (idx / max(1, len(points) - 1)) * area.width()
             y = self._value_y(area, value, min_val, max_val)
             painter.setBrush(QBrush(self._color(idx, label)))
             painter.drawEllipse(QRectF(x - 4, y - 4, 8, 8))
 
     def _paint_pie(self, painter, area, points, donut=False):
-        points = [(label, value) for label, value in points if value is not None]
-        total = sum(abs(v) for _, v in points) or 1.0
-        size = min(area.width(), area.height())
-        rect = QRectF(area.center().x() - size / 2, area.center().y() - size / 2, size, size)
-        start = 0
-        for idx, (label, value) in enumerate(points[:20]):
-            span = int((abs(value) / total) * 360 * 16)
-            painter.setBrush(QBrush(self._color(idx, label)))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawPie(rect, start, span)
-            start += span
-        if donut:
-            hole = rect.adjusted(rect.width() * .28, rect.height() * .28, -rect.width() * .28, -rect.height() * .28)
-            painter.setBrush(QBrush(QColor("#1f2933")))
-            painter.drawEllipse(hole)
+        points = [(label, value) for label, value in points if value is not None][:20]
+        slices = [(value, self._color(idx, label)) for idx, (label, value) in enumerate(points)]
+        paint_donut(painter, square_in(area), slices,
+                    hole_ratio=DONUT_HOLE if donut else 0.0, hole_color=QColor(CHART_BACKGROUND))
 
     def _paint_horizontal_bar(self, painter, area, points, min_val, max_val, series=None):
         row_h = area.height() / max(1, len(points))
-        zero_x = area.left() + ((0 - min_val) / (max_val - min_val)) * area.width()
+        zero_x = area.left() + self._ratio(0.0, min_val, max_val) * area.width()
         source_series = series or [("", points)]
         bar_h = max(2, (row_h - 4) / max(1, len(source_series)))
         for series_index, (_, values) in enumerate(source_series):
             for idx, (label, value) in enumerate(values):
                 if value is None: continue
-                value_x = area.left() + ((value - min_val) / (max_val - min_val)) * area.width()
+                value_x = area.left() + self._ratio(value, min_val, max_val) * area.width()
                 rect = QRectF(min(zero_x, value_x), area.top() + idx * row_h + 2 + series_index * bar_h,
                               abs(value_x - zero_x), bar_h)
                 painter.fillRect(rect, self._color(series_index, label))
@@ -338,8 +369,7 @@ class DataChartWidget(QWidget):
         cumulative = []
         for series_index, (_, points) in enumerate(series):
             values = [value for _, value in points]
-            if not cumulative:
-                cumulative = [0.0] * len(values)
+            cumulative += [0.0] * max(0, len(values) - len(cumulative))
             top = [None if value is None else (base + value if stacked else value) for base, value in zip(cumulative, values)]
             base_values = cumulative if stacked else [0.0] * len(values)
             color = self._color(series_index); color.setAlpha(105)
@@ -354,7 +384,8 @@ class DataChartWidget(QWidget):
                     polygon += [QPointF(area.left() + i / max(1, len(values) - 1) * area.width(), self._value_y(area, base_values[i], min_val, max_val)) for i in reversed(segment)]
                     painter.drawPolygon(QPolygonF(polygon)); segment = []
             if stacked:
-                cumulative = [base if value is None else base + value for base, value in zip(cumulative, values)]
+                cumulative = [base + (values[index] or 0.0) if index < len(values) else base
+                              for index, base in enumerate(cumulative)]
 
     def _paint_scatter_xy(self, painter, area, min_val, max_val):
         x_values = self.normalized.get("x_values") or []
@@ -420,7 +451,7 @@ class DataChartWidget(QWidget):
                 painter.fillRect(QRectF(area.left() + column * cell_w, area.top() + row * cell_h, cell_w, cell_h), color)
 
     def _paint_axes(self, painter, bounds, area, points, min_val, max_val):
-        painter.setPen(QPen(QColor("#d7dde5")))
+        painter.setPen(QPen(QColor(CHART_TEXT)))
         if self.config and self.config.show_x_labels and self.config.chart_type not in {"pie", "donut"}:
             if self.config.chart_type == "scatter":
                 x_values = [value for value in self.normalized.get("x_values", []) if value is not None]

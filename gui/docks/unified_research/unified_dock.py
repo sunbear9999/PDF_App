@@ -19,7 +19,7 @@ from gui.docks.unified_research.components.history_renderer import ChatHistoryRe
 from core.events.domains.document_events import DocumentEvent, DocumentEventPayload
 from core.events.domains.workspace_events import WorkspaceEvent, WorkspaceEventPayload
 from core.events.domains.project_events import ProjectEvent
-from gui.utils.document_helpers import active_pdf_names, active_pdf_paths, prune_doc_names
+from gui.utils.document_helpers import active_pdf_paths, prune_doc_names
 
 
 class IndexWorker(QThread):
@@ -85,6 +85,17 @@ class UnifiedResearchDock(QDockWidget):
         # Auto-update theme whenever the app theme changes
         self.bus.theme_changed.connect(self._on_bus_theme_changed)
         self.bus.active_model_changed.connect(self._on_active_model_changed)
+        self.bus.intelligence_state_changed.connect(
+            self._on_intelligence_state_changed
+        )
+
+    def _on_intelligence_state_changed(self, event, payload):
+        if (
+            event == "source_intelligence_updated"
+            and isinstance(payload, dict)
+            and payload.get("stage") == "embeddings"
+        ):
+            QTimer.singleShot(0, self.check_index_status)
 
     def _on_active_model_changed(self, event, payload):
         if hasattr(self, "lbl_model_default"):
@@ -320,8 +331,10 @@ class UnifiedResearchDock(QDockWidget):
                 self.stacked_widget.addWidget(widget)
                 self._plugin_tab_widgets.append(widget)
                 self._injected_tab_ids.add(spec.tab_id)
-                if self.theme and hasattr(widget, "update_theme"):
-                    widget.update_theme(self.theme)
+                from gui.theme.plugin_widgets import prepare_plugin_widget
+                prepare_plugin_widget(
+                    widget, getattr(spec, "plugin_id", ""), self.theme
+                )
 
                 # Sidebar nav button — use setCurrentWidget so indices don't matter
                 icon_text = spec.icon if spec.icon else spec.label.split()[0]
@@ -390,11 +403,8 @@ class UnifiedResearchDock(QDockWidget):
         """Universally rebuilds chat UI for any tab from the SQLite history."""
         if not self.project_manager: return
 
-        history = self.project_manager.get_chat_history(tab_id)
-        if hasattr(tab_widget, "render_chat_history"):
-            tab_widget.render_chat_history(history, clear_existing=True)
-        else:
-            ChatHistoryRenderer(tab_widget, theme=self.theme).render(history)
+        if hasattr(tab_widget, 'load_paged_history'):
+            tab_widget.load_paged_history()
 
     def clear_tab_history(self, tab_widget, tab_id):
         """Universally wipes SQLite history and clears the UI for a specific tab."""
@@ -473,8 +483,10 @@ class UnifiedResearchDock(QDockWidget):
         if hasattr(self, 'tab_editor'): self.tab_editor.update_theme(theme)
         if hasattr(self, 'tab_custom'): self.tab_custom.update_theme(theme)
         for widget in getattr(self, "_plugin_tab_widgets", []):
-            if hasattr(widget, "update_theme"):
-                widget.update_theme(theme)
+            plugin_id = widget.property("papyrus_plugin_id")
+            if plugin_id:
+                from gui.theme.plugin_widgets import prepare_plugin_widget
+                prepare_plugin_widget(widget, plugin_id, theme)
             elif hasattr(widget, "apply_theme"):
                 widget.apply_theme(theme)
 
@@ -503,7 +515,7 @@ class UnifiedResearchDock(QDockWidget):
     def _open_filter_dialog(self):
         self._prune_active_docs()
         if not self.active_docs and active_pdf_paths(self.project_manager):
-            self.active_docs = active_pdf_names(self.project_manager)
+            self.active_docs = active_pdf_paths(self.project_manager)
 
         # Collect plugin RAG sources from the extension registry
         plugin_rag_sources = []
@@ -551,32 +563,65 @@ class UnifiedResearchDock(QDockWidget):
                 _on_accepted()
 
     def check_index_status(self):
-        """Silently checks if the database is loaded and indexed."""
+        """Show canonical per-source indexing coverage."""
         proj_path = self.project_manager.project_filepath if self.project_manager else None
         if proj_path and self.llm_manager:
-            # Ensure the Chroma client is pointed at the current project
-            if self.llm_manager.collection is None:
-                self.llm_manager.set_project_database(proj_path)
-
             try:
-                if self.llm_manager.collection and self.llm_manager.collection.count() > 0:
-                    self.lbl_status.setText("🟢 Indexed")
+                service = getattr(self.app_context, "index_app_service", None)
+                status = (
+                    service.status_snapshot(active_pdf_paths(self.project_manager))
+                    if service else None
+                )
+                if status and status.get("is_indexed"):
+                    self.lbl_status.setText(
+                        f"🟢 Indexed ({status['indexed_sources']}/{status['total_sources']})"
+                    )
                     color = self.theme['success'] if self.theme and 'success' in self.theme else "#00cc66"
                     self.lbl_status.setStyleSheet(f"font-weight: bold; margin-right: 15px; color: {color};")
                 else:
-                    self.lbl_status.setText("🔴 Unindexed")
+                    indexed = int((status or {}).get("indexed_sources") or 0)
+                    total = int((status or {}).get("total_sources") or 0)
+                    # Indexed sources are searchable even while others wait.
+                    self.lbl_status.setText(
+                        f"🟡 Partly indexed ({indexed}/{total})" if indexed
+                        else f"🔴 Unindexed (0/{total})" if total else "🔴 Unindexed"
+                    )
+                    self.lbl_status.setToolTip(
+                        "Searches use the indexed sources. Waiting sources are indexed by Run missing."
+                        if indexed else ""
+                    )
                     color = self.theme['warning'] if self.theme and 'warning' in self.theme else "#ffaa00"
                     self.lbl_status.setStyleSheet(f"font-weight: bold; margin-right: 15px; color: {color};")
             except Exception:
                 self.lbl_status.setText("🔴 Unindexed")
 
     def start_indexing(self):
-        """Starts the background embedding thread."""
+        """Queue canonical artifact embedding stages for active sources."""
         paths_to_index = active_pdf_paths(self.project_manager)
         if not paths_to_index:
             QMessageBox.warning(self, "Error", "No PDFs available in project to index.")
             return
 
+        service = getattr(self.app_context, "source_intelligence_service", None)
+        index_service = getattr(self.app_context, "index_app_service", None)
+        if service and index_service:
+            result = index_service.queue_indexing(paths_to_index)
+            if result.get("matched", 0) == 0:
+                QMessageBox.warning(
+                    self,
+                    "Indexing",
+                    "None of the selected documents matched a canonical project source.",
+                )
+                return
+            if result.get("queued", 0):
+                self._update_index_progress(
+                    f"Queued {result['queued']} source(s); "
+                    f"{result.get('already_indexed', 0)} already indexed"
+                )
+            else:
+                self.check_index_status()
+            return
+        # Standalone compatibility when intelligence services are not present.
         self.btn_index.setEnabled(False)
         self.idx_worker = IndexWorker(self.llm_manager, paths_to_index, parent=self)
         self.idx_worker.progress.connect(self._update_index_progress)

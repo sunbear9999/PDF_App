@@ -54,7 +54,8 @@ class DocumentBlock:
     doc_id: str
     page_num: Optional[int]      # None for reflowable/non-paginated formats (epub, docx, txt, ...)
     block_type: str             # paragraph|heading|list|table|figure|footnote|
-                                # bibliography|caption|code|unknown
+                                # bibliography|caption|code|unknown, or page
+                                # furniture: header|footer|page_number|watermark|boilerplate
     exact_text: str
     normalized_text: str
     bbox: Optional[List[float]] = None
@@ -64,6 +65,18 @@ class DocumentBlock:
     section_path: List[str] = field(default_factory=list)   # ["Intro","2.1 Methods"]
     provenance: Optional[ExtractionProvenance] = None
     has_superscript: bool = False              # True when span-level superscripts detected
+    # Page furniture *inside* this block's text: [char_start, char_end, label]
+    # (running heads glued into paragraphs, page numbers, download stamps).
+    # exact_text stays the raw source; consumers read
+    # block_roles.content_text(), which blanks these spans at equal length.
+    furniture_spans: List[List[Any]] = field(default_factory=list)
+    # Left edge (x0, points) of each "\n"-separated line of exact_text, when
+    # the source has geometry (PDF). Hanging indents mark reference entries;
+    # empty for reflowable formats.
+    line_x0: List[float] = field(default_factory=list)
+    # Shared structural evidence, including region, scope, native outline and
+    # page labels. Kept with the raw block through cache round trips.
+    structure: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -110,6 +123,7 @@ class ExtractedDate:
     location: Optional[SourceLocation] = None
     context_text: str = ""
     provenance: Optional[ExtractionProvenance] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +144,8 @@ class BibliographyEntry:
     doi: Optional[str] = None
     url: Optional[str] = None
     reference_number: Optional[str] = None
+    source_spans: List[Dict[str, Any]] = field(default_factory=list)
+    cited_entry_ids: List[str] = field(default_factory=list)
     citation_style: str = "unknown"             # numbered|author_year|legal|unknown
     location: Optional[SourceLocation] = None
     # Normalized keys for matching: {"surname_year":"smith_2020","doi":"...","numeric":"1"}
@@ -150,6 +166,10 @@ class InTextCitation:
     location: Optional[SourceLocation] = None
     context_text: str = ""
     provenance: Optional[ExtractionProvenance] = None
+    resolved_authority_key: Optional[str] = None
+    resolution_method: str = ""
+    unmatched_numeric_keys: List[str] = field(default_factory=list)
+    reference_role: str = "unresolved"
 
 
 @dataclass
@@ -182,6 +202,7 @@ class CitationIndex:
     ambiguous_match_ids: List[str] = field(default_factory=list)
     # entry_id → sorted list of page numbers where it's cited
     entry_page_index: Dict[str, List[int]] = field(default_factory=dict)
+    reference_style: Dict[str, Any] = field(default_factory=dict)
     # citation_id → surrounding context snippet
     citation_contexts: Dict[str, str] = field(default_factory=dict)
 

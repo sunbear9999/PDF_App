@@ -81,6 +81,8 @@ class DockManager:
             raise
         if defn.plugin_id:
             dock.setProperty("papyrus_plugin_id", defn.plugin_id)
+            from gui.theme.plugin_widgets import mark_plugin_widget
+            mark_plugin_widget(dock.widget(), defn.plugin_id)
         self._inject_plugin_toolbar(dock, dock_id)
         self.configure_dock(dock, closable=True)
 
@@ -101,7 +103,10 @@ class DockManager:
         if hasattr(self.window, 'theme_manager'):
             theme = self.window.theme_manager.get_theme()
             inner = dock.widget()
-            if dock_id == "scratchpads" and inner:
+            if defn.plugin_id and inner:
+                from gui.theme.plugin_widgets import prepare_plugin_widget
+                prepare_plugin_widget(inner, defn.plugin_id, theme)
+            elif dock_id == "scratchpads" and inner:
                 inner.setStyleSheet(f"background-color: {theme['bg_input']}; color: {theme['text_main']}; border: none;")
             elif inner and hasattr(inner, 'update_theme'):
                 inner.update_theme(theme)
@@ -251,11 +256,25 @@ class DockManager:
             for dock in self.get_instances(dock_id):
                 try:
                     inner = dock.widget()
-                    if inner and hasattr(inner, "update_theme"):
+                    plugin_id = dock.property("papyrus_plugin_id")
+                    if inner and plugin_id:
+                        from gui.theme.plugin_widgets import prepare_plugin_widget
+                        prepare_plugin_widget(inner, plugin_id, theme)
+                    elif inner and hasattr(inner, "update_theme"):
                         inner.update_theme(theme)
                     elif hasattr(dock, "update_theme"):
                         dock.update_theme(theme)
                 except RuntimeError:
+                    pass
+
+    def shutdown_all(self) -> None:
+        """Call ``shutdown()`` on every live dock widget before the app quits."""
+        for dock_id in self.registry.keys():
+            for inner in self.get_inner_widgets(dock_id):
+                try:
+                    if hasattr(inner, "shutdown"):
+                        inner.shutdown()
+                except Exception:
                     pass
 
     def toggle_by_menu_name(self, menu_name: str, checked: bool) -> None:

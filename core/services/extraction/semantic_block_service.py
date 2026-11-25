@@ -13,6 +13,7 @@ from __future__ import annotations
 import re
 from typing import List, Optional, Tuple
 
+from core.services.extraction.block_roles import is_furniture
 from core.models.extraction_models import DocumentBlock, SemanticSection
 
 
@@ -22,6 +23,18 @@ _CAPTION_RE = re.compile(
 )
 _LIST_RE = re.compile(r"^\s*(?:[•·▪▸◦\-–—]|\d+[.)]\s|\([a-z]\))\s")
 _CODE_RE = re.compile(r"^\s{4,}|\t{2,}")
+
+# Single definition of what a reference-section heading looks like, shared with
+# SectionStructureExtractor and mirrored by the "bibliography_headings" pattern
+# pack. Content packs (DOI/URL/arXiv) must never be consulted here.
+BIBLIOGRAPHY_HEADING_TYPE = "bibliography_heading"
+BIBLIOGRAPHY_HEADING_RE = re.compile(
+    r"^\s*(?:(?:list\s+of\s+)?references?(?:\s+cited|\s+and\s+notes?|\s+and\s+bibliography)?|"
+    r"works?\s+cited|bibliograph[yi](?:\s+and\s+further\s+reading)?|"
+    r"(?:list\s+of\s+)?sources?(?:\s+cited)?|literature\s+cited|"
+    r"further\s+reading|(?:list\s+of\s+)?citations?)[\s.:]*$",
+    re.I,
+)
 
 
 class BlockClassifier:
@@ -42,6 +55,8 @@ class BlockClassifier:
         text = block.exact_text.strip()
         if not text:
             return "unknown"
+        if is_furniture(block):
+            return block.block_type   # set by source normalization; never content
 
         # Already classified as heading — honour it unless it's a bib heading
         if block.block_type == "heading":
@@ -75,17 +90,11 @@ class BlockClassifier:
     def _is_bibliography_heading(self, text: str) -> bool:
         lowered = text.lower().strip()
         if self._registry:
-            for pack in self._registry.get_packs_for_type("bibliography"):
+            for pack in self._registry.get_packs_for_type(BIBLIOGRAPHY_HEADING_TYPE):
                 for pattern in pack.compiled:
                     if pattern.match(lowered):
                         return True
-        # Hard-coded fallback
-        return bool(re.match(
-            r"^(?:references?|works?\s+cited|bibliography|sources?|"
-            r"literature\s+cited|notes?|endnotes?|footnotes?|"
-            r"further\s+reading)\s*$",
-            lowered,
-        ))
+        return bool(BIBLIOGRAPHY_HEADING_RE.match(lowered))
 
     def _in_bibliography_section(
         self, block: DocumentBlock, all_blocks: List[DocumentBlock]
@@ -115,6 +124,7 @@ class SemanticBlockService:
     """
 
     def __init__(self, pattern_registry=None) -> None:
+        self.pattern_registry = pattern_registry
         self._classifier = BlockClassifier(pattern_registry)
 
     # ------------------------------------------------------------------

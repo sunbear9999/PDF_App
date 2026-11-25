@@ -385,6 +385,14 @@ class DeterministicExtractorService(QObject):
             DiscoveryEventPayload(entity_type=payload.entity_type, source_path=payload.source_path),
         )
 
+        # Prefer entities already produced by the ingestion pipeline (the
+        # intelligence ENTITIES stage). Opening Discovery should just display
+        # them — not re-run extraction.
+        intel_groups = self._groups_from_intelligence(payload.source_path, payload.entity_type)
+        if intel_groups:
+            self._on_extraction_done(intel_groups, payload.entity_type, payload.source_path)
+            return
+
         cached_groups = self._groups_from_shared_extraction(payload.source_path, payload.entity_type)
         if cached_groups:
             self._on_extraction_done(cached_groups, payload.entity_type, payload.source_path)
@@ -403,6 +411,84 @@ class DeterministicExtractorService(QObject):
         self._worker.finished.connect(self._on_extraction_done)
         self._worker.error.connect(self._on_extraction_error)
         self._worker.start()
+
+    def _groups_from_intelligence(self, source_path: str, entity_type: str) -> List[ExtractedEntityGroup]:
+        """Build Discovery groups from the ingestion pipeline's canonical entities.
+
+        The intelligence ENTITIES stage (layered NER + resolution) writes typed,
+        resolved person/org entities + mentions to intelligence_artifacts at
+        document-add time. This reads them back so Discovery displays existing
+        results instantly instead of re-running extraction.
+        """
+        if entity_type != EntityType.PERSON_ORG.value:
+            return []
+        db = getattr(self._pm, "db_intelligence", None)
+        if not db:
+            return []
+        try:
+            rec = self._pm.get_source_record_by_path(source_path)
+        except Exception:
+            rec = None
+        source_id = rec.get("id") if rec else None
+        if not source_id:
+            return []
+        try:
+            raw_mentions = db.list_artifacts(source_id=source_id, artifact_type="entity_mention", limit=100000)
+        except Exception:
+            return []
+        by_canonical: Dict[str, List[dict]] = {}
+        for m in raw_mentions:
+            if (m.get("metadata") or {}).get("entity_type") not in ("PERSON", "ORG"):
+                continue
+            parent = m.get("parent_artifact_id")
+            if parent:
+                by_canonical.setdefault(parent, []).append(m)
+        if not by_canonical:
+            return []
+
+        # Batch-fetch sentence texts for mention context.
+        from core.models.intelligence_models import ArtifactRecord
+        sent_ids = {
+            (m.get("locator") or {}).get("sentence_id")
+            for ms in by_canonical.values() for m in ms
+            if (m.get("locator") or {}).get("sentence_id")
+        }
+        sent_artifact_ids = [
+            ArtifactRecord.stable_id(source_id, "sentence", "extraction_sentences", sid)
+            for sid in sent_ids
+        ]
+        sent_text: Dict[str, str] = {}
+        try:
+            for art in db.list_artifacts_by_ids(sent_artifact_ids):
+                sent_text[art.get("storage_ref_id")] = art.get("exact_text") or ""
+        except Exception:
+            pass
+
+        groups: List[ExtractedEntityGroup] = []
+        for canonical_id, ms in by_canonical.items():
+            canonical = db.get_artifact(canonical_id)
+            if not canonical:
+                continue
+            name = canonical.get("exact_text") or ""
+            role = (canonical.get("metadata") or {}).get("entity_type", "")
+            mentions, seen_ctx = [], set()
+            for m in ms:
+                loc = m.get("locator") or {}
+                surface = (m.get("metadata") or {}).get("surface_text") or m.get("exact_text") or name
+                ctx = sent_text.get(loc.get("sentence_id"), "") or surface
+                if ctx in seen_ctx:
+                    continue
+                seen_ctx.add(ctx)
+                mentions.append(ExtractedMention(text=surface, context=ctx[:300], page_num=loc.get("page")))
+            if mentions:
+                auto_desc = " ".join(dict.fromkeys(x.context[:200] for x in mentions[:2]))[:400]
+                groups.append(ExtractedEntityGroup(
+                    canonical_text=name,
+                    entity_type=EntityType.PERSON_ORG.value,
+                    mentions=mentions,
+                    extra_properties={"role": role, "description": auto_desc},
+                ))
+        return sorted(groups, key=lambda g: -len(g.mentions))
 
     def _groups_from_shared_extraction(self, source_path: str, entity_type: str) -> List[ExtractedEntityGroup]:
         """Reuse DocumentExtractionService outputs before launching discovery extraction."""

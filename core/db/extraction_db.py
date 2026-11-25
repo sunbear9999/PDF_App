@@ -84,30 +84,47 @@ class ExtractionDB(BaseDB):
 
     # ---------------------------------------------------------- blocks (read)
 
-    def get_blocks(self, doc_id: str) -> List[Dict[str, Any]]:
+    def get_blocks(
+        self, doc_id: str, extractor_version: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Read cached blocks, ignoring any produced by a different parser version.
+
+        Blocks carry the layout parser's page numbers, superscript flags and
+        section/bibliography classification, so every downstream extractor
+        inherits their mistakes. They were cached with no version check, which
+        kept serving output from superseded parsing logic.
+        """
         if not self._conn:
             return []
+        sql = (
+            "SELECT block_id,doc_id,page_num,block_type,exact_text,"
+            "normalized_text,bbox_json,font_size,is_bold,heading_level,"
+            "section_path_json,has_superscript,extractor_name,extractor_version"
+            " FROM extraction_blocks WHERE doc_id=?"
+        )
+        params = [doc_id]
+        if extractor_version is not None:
+            sql += " AND extractor_version=?"
+            params.append(extractor_version)
+        sql += " ORDER BY page_num,rowid"
         try:
-            cur = self._conn.execute(
-                "SELECT block_id,doc_id,page_num,block_type,exact_text,"
-                "normalized_text,bbox_json,font_size,is_bold,heading_level,"
-                "section_path_json,has_superscript,extractor_name,extractor_version"
-                " FROM extraction_blocks WHERE doc_id=? ORDER BY page_num,rowid",
-                (doc_id,),
-            )
+            cur = self._conn.execute(sql, tuple(params))
             return [self._block_row_to_dict(r) for r in cur.fetchall()]
         except Exception:
             return []
 
-    def blocks_exist(self, doc_id: str) -> bool:
+    def blocks_exist(
+        self, doc_id: str, extractor_version: Optional[str] = None
+    ) -> bool:
         if not self._conn:
             return False
+        sql = "SELECT 1 FROM extraction_blocks WHERE doc_id=?"
+        params = [doc_id]
+        if extractor_version is not None:
+            sql += " AND extractor_version=?"
+            params.append(extractor_version)
         try:
-            cur = self._conn.execute(
-                "SELECT 1 FROM extraction_blocks WHERE doc_id=? LIMIT 1",
-                (doc_id,),
-            )
-            return cur.fetchone() is not None
+            return self._conn.execute(sql + " LIMIT 1", tuple(params)).fetchone() is not None
         except Exception:
             return False
 
@@ -149,17 +166,26 @@ class ExtractionDB(BaseDB):
     # ------------------------------------------------------ results (read)
 
     def get_result(
-        self, doc_id: str, extractor_name: str, result_type: str
+        self, doc_id: str, extractor_name: str, result_type: str,
+        extractor_version: Optional[str] = None,
     ) -> Optional[Any]:
+        """Read a cached result, ignoring output from a different extractor version.
+
+        extractor_version was recorded but never checked, so a project kept
+        serving results produced by superseded extractor logic forever.
+        """
         if not self._conn:
             return None
+        sql = (
+            "SELECT result_json FROM extraction_results "
+            "WHERE doc_id=? AND extractor_name=? AND result_type=?"
+        )
+        params = [doc_id, extractor_name, result_type]
+        if extractor_version is not None:
+            sql += " AND extractor_version=?"
+            params.append(extractor_version)
         try:
-            cur = self._conn.execute(
-                "SELECT result_json FROM extraction_results "
-                "WHERE doc_id=? AND extractor_name=? AND result_type=?",
-                (doc_id, extractor_name, result_type),
-            )
-            row = cur.fetchone()
+            row = self._conn.execute(sql, tuple(params)).fetchone()
             return json.loads(row[0]) if row else None
         except Exception:
             return None
@@ -260,44 +286,18 @@ class ExtractionDB(BaseDB):
     # ---------------------------------------------------------------- helpers
 
     def _execute_write(self, sql: str, params: tuple) -> None:
-        try:
-            self._conn.execute(sql, params)
-            self._conn.commit()
-            return
-        except sqlite3.ProgrammingError as exc:
-            if "created in a thread" not in str(exc):
-                raise
-        db_path = getattr(self.manager, "project_filepath", None)
-        if not db_path:
-            raise
-        conn = sqlite3.connect(db_path, timeout=10.0)
-        try:
-            conn.execute("PRAGMA foreign_keys = ON")
-            conn.execute(sql, params)
-            conn.commit()
-        finally:
-            conn.close()
+        # The shared project connection is opened with
+        # check_same_thread=False and serialized by ThreadSafeConnection, so
+        # the old per-call fallback connection was both unreachable and a way
+        # to bypass that lock.
+        self._conn.execute(sql, params)
+        self._conn.commit()
 
     def _execute_batch(self, sql: str, rows: List[tuple]) -> None:
         if not rows:
             return
-        try:
-            self._conn.executemany(sql, rows)
-            self._conn.commit()
-            return
-        except sqlite3.ProgrammingError as exc:
-            if "created in a thread" not in str(exc):
-                raise
-        db_path = getattr(self.manager, "project_filepath", None)
-        if not db_path:
-            return
-        conn = sqlite3.connect(db_path, timeout=10.0)
-        try:
-            conn.execute("PRAGMA foreign_keys = ON")
-            conn.executemany(sql, rows)
-            conn.commit()
-        finally:
-            conn.close()
+        self._conn.executemany(sql, rows)
+        self._conn.commit()
 
     @staticmethod
     def _block_row_to_dict(row: tuple) -> Dict[str, Any]:

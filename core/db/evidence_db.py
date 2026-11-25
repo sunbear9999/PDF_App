@@ -8,12 +8,7 @@ from core.models.analysis_models import EvidenceQuote
 
 
 class EvidenceDB(BaseDB):
-    """Storage for per-chunk evidence quotes extracted during hierarchical analysis.
-
-    Uses the same thread-safe fallback pattern as DocumentDB._execute_analysis_write():
-    if the shared connection raises ProgrammingError ("created in a thread"), open a
-    fresh connection to the project file for the write.
-    """
+    """Storage for per-chunk evidence quotes extracted during hierarchical analysis."""
 
     # ------------------------------------------------------------------ reads
 
@@ -86,24 +81,12 @@ class EvidenceDB(BaseDB):
     # ---------------------------------------------------------------- helpers
 
     def _execute_write(self, sql: str, params: tuple) -> None:
-        try:
-            self._conn.execute(sql, params)
-            self._conn.commit()
-            return
-        except sqlite3.ProgrammingError as exc:
-            if "created in a thread" not in str(exc):
-                raise
-
-        db_path = getattr(self.manager, "project_filepath", None)
-        if not db_path:
-            raise
-        conn = sqlite3.connect(db_path, timeout=10.0)
-        try:
-            conn.execute("PRAGMA foreign_keys = ON")
-            conn.execute(sql, params)
-            conn.commit()
-        finally:
-            conn.close()
+        # The shared project connection is opened with
+        # check_same_thread=False and serialized by ThreadSafeConnection, so
+        # the old per-call fallback connection was both unreachable and a way
+        # to bypass that lock.
+        self._conn.execute(sql, params)
+        self._conn.commit()
 
     @staticmethod
     def _row_to_quote(row: tuple) -> EvidenceQuote:

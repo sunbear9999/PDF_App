@@ -7,6 +7,7 @@ from gui.docks.unified_research.components.note_bubble import NoteBubbleWidget
 class ChatMessageWidget(QWidget):
     def __init__(self, sender_name, theme=None, is_user=False, app_context=None, parent=None):
         super().__init__(parent)
+        self._app_context = app_context
         self.raw_buffer = ""
         self.theme = theme
         self.is_user = is_user
@@ -24,11 +25,21 @@ class ChatMessageWidget(QWidget):
         header_layout.addWidget(lbl_sender)
         header_layout.addStretch()
         self.trace_button = None
+        self.rag_context_button = None
+        self._rag_context_audit = {}
+        self._rag_context_dialog = None
         if not is_user:
             from gui.components.prompt_trace_button import PromptTraceButton
             self.trace_button = PromptTraceButton(theme=self.theme, app_context=app_context, parent=self)
             self.trace_button.hide()
             header_layout.addWidget(self.trace_button)
+            self.rag_context_button = QPushButton("📚 View full RAG context")
+            self.rag_context_button.setToolTip(
+                "Inspect raw ranked chunks sent to the model and the next-best chunks omitted by the context limit"
+            )
+            self.rag_context_button.clicked.connect(self._show_rag_context)
+            self.rag_context_button.hide()
+            header_layout.addWidget(self.rag_context_button)
         self.layout.addLayout(header_layout)
 
         if is_user:
@@ -73,6 +84,55 @@ class ChatMessageWidget(QWidget):
         if self.trace_button:
             self.trace_button.theme = self.theme or {}
             self.trace_button.set_trace_id(trace_id)
+
+    def set_rag_context(self, audit):
+        if not isinstance(audit, dict) or not audit.get("candidates"):
+            return
+        self._rag_context_audit = audit
+        sent = int(audit.get("sent_count") or 0)
+        total = int(
+            audit.get("candidate_count")
+            or len(audit.get("candidates") or [])
+        )
+        if self.rag_context_button:
+            self.rag_context_button.setText(
+                f"📚 View full RAG context ({sent}/{total} sent)"
+            )
+            self.rag_context_button.show()
+        if self._rag_context_dialog is not None:
+            try:
+                self._rag_context_dialog.set_audit(audit)
+            except RuntimeError:
+                self._rag_context_dialog = None
+
+    def apply_rag_context_highlights(self, audit):
+        self.set_rag_context(audit)
+
+    def _show_rag_context(self):
+        if not self._rag_context_audit:
+            return
+        if self._rag_context_dialog is not None:
+            try:
+                self._rag_context_dialog.show()
+                self._rag_context_dialog.raise_()
+                self._rag_context_dialog.activateWindow()
+                return
+            except RuntimeError:
+                self._rag_context_dialog = None
+        from gui.docks.unified_research.components.rag_context_viewer import (
+            RagContextViewerDialog,
+        )
+        dialog = RagContextViewerDialog(
+            self._rag_context_audit,
+            self.theme,
+            app_context=self._app_context,
+            parent=self,
+        )
+        self._rag_context_dialog = dialog
+        dialog.destroyed.connect(
+            lambda *_: setattr(self, "_rag_context_dialog", None)
+        )
+        dialog.show()
 
     def update_status(self, text):
         if hasattr(self, 'lbl_status'):
@@ -150,10 +210,56 @@ class ChatMessageWidget(QWidget):
         self.bubbles_layout.addWidget(update_widget)
         return update_widget
 
+    def add_manifest_status(self, status, text, detail=""):
+        from gui.docks.unified_research.components.manifest_bubble import ManifestUpdateStatusWidget
+
+        status_widget = ManifestUpdateStatusWidget(
+            status,
+            text,
+            detail,
+            self.theme,
+            parent=self,
+        )
+        if hasattr(self, "main_browser") and not self.raw_buffer.strip():
+            self.main_browser.hide()
+        self.bubbles_layout.addWidget(status_widget)
+        return status_widget
+
+    def set_citations(self, items):
+        small = getattr(self, '_small_citations', [])
+        if len(small)+len(items) <= 4 and not hasattr(self, '_citation_collection'):
+            for item in items:
+                bubble = self.add_bubble(item['doc_name'], item['quote'], item['note'], item['source_meta'])
+                small.append((item, bubble))
+            self._small_citations = small
+            return
+        from gui.components.citation_collection import CitationCollection
+        if not hasattr(self, '_citation_collection'):
+            retained = []
+            for item, bubble in small:
+                item['draft'] = bubble.note_edit.toPlainText()
+                retained.append(item)
+                self.bubbles_layout.removeWidget(bubble)
+                bubble.hide()
+                bubble.deleteLater()
+            self._small_citations = []
+            self._citation_collection = CitationCollection(self._app_context, self)
+            self.bubbles_layout.addWidget(self._citation_collection)
+            self._citation_collection.set_items(retained+items)
+        else:
+            self._citation_collection._retain_draft()
+            self._citation_collection.set_items(self._citation_collection.items+items)
+
     def add_bubble(self, doc_name, quote, note, source_meta=None):
-        bubble = NoteBubbleWidget(doc_name, quote, note, self.theme, parent=self, source_meta=source_meta)
+        bubble = self._create_bubble(doc_name, quote, note, source_meta)
+        self.bubbles_layout.addWidget(bubble)
+        return bubble
+
+    def _create_bubble(self, doc_name, quote, note, source_meta=None):
+        app_context = self._app_context or getattr(self.window(), "app_context", None)
+        bubble = NoteBubbleWidget(doc_name, quote, note, self.theme, parent=self, source_meta=source_meta,
+                                  app_context=app_context)
         viewer = getattr(self.window(), "viewer", None)
-        app_context = getattr(self.window(), "app_context", None)
         source_meta = dict(source_meta or {})
         source_meta.setdefault("doc_name", doc_name)
         source_meta.setdefault("quote", quote)
@@ -164,6 +270,8 @@ class ChatMessageWidget(QWidget):
             bubble.citation_jump_requested.connect(
                 lambda citation, spec=handler, ctx=app_context: spec.callback(citation, ctx)
             )
+        bubble.save_requested.connect(lambda q, n, d, meta=source_meta, b=bubble: self._save_bubble_note(q, n, d,
+            {**meta, "suggested_text": b.current_note}))
         if viewer:
             if not handler and hasattr(viewer, "jump_to_source"):
                 bubble.jump_requested.connect(viewer.jump_to_source)
@@ -174,7 +282,6 @@ class ChatMessageWidget(QWidget):
                         timestamp=meta.get("start", 0),
                     )
                 )
-            bubble.save_requested.connect(lambda q, n, d, meta=source_meta: self._save_bubble_note(q, n, d, meta))
             annot_manager = getattr(viewer, "annot_manager", None)
             if annot_manager and hasattr(annot_manager, "trigger_similar_context"):
                 bubble.search_requested.connect(
@@ -182,34 +289,17 @@ class ChatMessageWidget(QWidget):
                 )
         if hasattr(self, "main_browser") and not self.raw_buffer.strip():
             self.main_browser.hide()
-        self.bubbles_layout.addWidget(bubble)
         return bubble
 
     def _save_bubble_note(self, quote, note, doc_name, source_meta=None):
-        source_meta = source_meta or {}
-        if source_meta.get("source_type") == "video" and hasattr(self.window(), "viewer"):
-            viewer = self.window().viewer
-            path = ""
-            pm = getattr(getattr(self.window(), "app_context", None), "project_manager", None)
-            if pm and source_meta.get("source_id") and hasattr(pm, "get_source_path"):
-                path = pm.get_source_path(source_meta.get("source_id")) or ""
-            if hasattr(viewer, "video_player"):
-                player = viewer.video_player
-                if path:
-                    player.video_path = path
-                player.source_id = source_meta.get("source_id", "")
-                player.save_quote_note(
-                    quote,
-                    note,
-                    timestamp=source_meta.get("start", 0),
-                    path=path,
-                    source_id=source_meta.get("source_id", ""),
-                )
-            return
-        app_context = getattr(self.window(), "app_context", None)
-        annotation_service = getattr(app_context, "workspace_annotation_service", None)
-        if annotation_service and hasattr(annotation_service, "add_ai_annotation"):
-            annotation_service.add_ai_annotation(quote, note, doc_name)
+        from gui.components.dialogs.reference_note_dialog import open_reference_note
+        meta = dict(source_meta or {})
+        ctx = self._app_context or getattr(self.window(), "app_context", None)
+        trace = getattr(self, "trace_button", None)
+        open_reference_note(ctx, {**meta, "quote": quote, "doc_name": doc_name}, note,
+            origin={"kind": "assistant", "trace_id": getattr(trace, "trace_id", None),
+                    "step_id": meta.get("producer_step_id") or meta.get("step_id"),
+                    "suggested_text": meta.get("suggested_text", note)}, parent=self)
     
     def _toggle_thought(self):
         visible = not self.thought_browser.isVisible()
@@ -296,6 +386,12 @@ class ChatMessageWidget(QWidget):
             if self.trace_button:
                 self.trace_button.theme = theme
                 self.trace_button.apply_theme()
+            if self.rag_context_button:
+                self.rag_context_button.setStyleSheet(
+                    f"QPushButton {{ background: transparent; color: {theme.get('accent', '#b366ff')}; "
+                    f"border: 1px solid {theme.get('border', '#444')}; padding: 3px 7px; border-radius: 4px; }}"
+                    f"QPushButton:hover {{ background: {theme.get('bg_panel', '#292a2d')}; }}"
+                )
         
         for i in range(self.bubbles_layout.count()):
             widget = self.bubbles_layout.itemAt(i).widget()

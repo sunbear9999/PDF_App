@@ -22,6 +22,7 @@ from typing import Optional
 from PySide6.QtCore import QObject
 
 from core.services._shared.qt_tasks import CallableWorker
+from core.services.system.memory_sampling import sample_system
 
 
 class AISetupService(QObject):
@@ -135,20 +136,10 @@ class AISetupService(QObject):
         import subprocess
         info: dict = {"ram_gb": 0, "gpu_name": "Not detected", "vram_gb": 0}
 
-        # RAM — try psutil first, fall back to /proc/meminfo (Linux)
-        try:
-            import psutil
-            info["ram_gb"] = round(psutil.virtual_memory().total / (1024 ** 3), 1)
-        except Exception:
-            try:
-                with open("/proc/meminfo") as f:
-                    for line in f:
-                        if line.startswith("MemTotal:"):
-                            kb = int(line.split()[1])
-                            info["ram_gb"] = round(kb / (1024 ** 2), 1)
-                            break
-            except Exception:
-                pass
+        # RAM — the memory manager's sampler is the single source (psutil).
+        system = sample_system()
+        info["ram_gb"] = round(system["total"] / (1024 ** 3), 1)
+        info["ram_available_gb"] = round(system["available"] / (1024 ** 3), 1)
 
         # GPU — NVIDIA via nvidia-smi
         try:

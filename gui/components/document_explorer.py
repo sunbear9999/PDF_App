@@ -1,14 +1,41 @@
 # gui/components/document_explorer.py
 import os
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-                             QListWidget, QListWidgetItem, QComboBox, QMenu,
+                             QComboBox, QMenu,
                              QMessageBox, QInputDialog, QSizePolicy, QPushButton,
-                             QFileDialog)
-from PySide6.QtCore import Qt
+                             QFileDialog, QToolButton)
+from PySide6.QtCore import Qt, QThread, Signal
+
+REFRESH_DELAY_MS = 150   # many sources added at once: one list refresh after the burst
+VIEWER_STOP_TIMEOUT_MS = 1000
 from core.events.event_bus import EventBus
 from core.events.domains.document_events import DocumentEvent, DocumentEventPayload, DocumentIntent, DocumentPayload, SourceEvent
 from core.events.domains.project_events import ProjectEvent, ProjectEventPayload, ProjectIntent, ProjectPayload
 from gui.managers.dialog_manager import exec_as_modal, get_for_widget
+from gui.components.media_export_actions import MediaExportActions
+from gui.components.document_source_tree import (
+    DocumentSourceTree, DocumentTreeItem, tag_folder_icon,
+)
+from gui.components.tag_tree import build_tag_folders
+
+
+class _SourceRemovalWorker(QThread):
+    removed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, project_manager, payload, parent=None):
+        super().__init__(parent)
+        self.pm, self.payload = project_manager, payload
+
+    def run(self):
+        try:
+            if not self.pm.remove_source_data(
+                self.payload["path"], self.payload.get("source_id")
+            ):
+                raise RuntimeError("The project database rejected the source removal.")
+            self.removed.emit(self.payload)
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 class ElidedLabel(QLabel):
     def minimumSizeHint(self):
@@ -31,14 +58,18 @@ class DocumentExplorer(QWidget):
     SOURCE_ID_ROLE = Qt.ItemDataRole.UserRole
     PATH_ROLE = Qt.ItemDataRole.UserRole + 1
     SOURCE_TYPE_ROLE = Qt.ItemDataRole.UserRole + 2
+    ITEM_KIND_ROLE = Qt.ItemDataRole.UserRole + 3
 
     def __init__(self, app_context, parent=None):
         super().__init__(parent)
         self._ctx = app_context
         self.pm = app_context.project_manager
         self.bus = EventBus.get_instance()
+        self._remove_workers = set()
+        self._removing_paths = set()
 
         self._build_ui()
+        self.export_actions = MediaExportActions(self)
 
         # Subscribe to global events so the list updates automatically
         self.bus.project_loaded.connect(self._on_project_loaded)
@@ -48,46 +79,56 @@ class DocumentExplorer(QWidget):
         self.bus.source_added.connect(self._on_source_changed)
         self.bus.source_renamed.connect(self._on_source_changed)
         self.bus.source_removed.connect(self._on_source_changed)
+        self.bus.tag_data_updated.connect(self._on_tag_changed)
 
     def _on_project_loaded(self, event: ProjectEvent, payload: ProjectEventPayload):
         if event == ProjectEvent.LOADED:
+            enabled = self.pm.get_metadata("document_explorer_tags_as_folders", "0") == "1"
+            self.tag_folder_toggle.blockSignals(True)
+            self.tag_folder_toggle.setChecked(enabled)
+            self.tag_folder_toggle.blockSignals(False)
+            self.doc_tag_filter.setEnabled(not enabled)
             self.refresh_list()
 
     def _on_pdf_changed(self, event: DocumentEvent, payload: DocumentEventPayload):
         if event in {DocumentEvent.DOCUMENT_ADDED, DocumentEvent.PDF_RENAMED, DocumentEvent.PDF_REMOVED}:
-            self.refresh_list()
+            self.schedule_refresh()
 
     def _on_source_changed(self, event: SourceEvent, payload: DocumentEventPayload):
         if event in {SourceEvent.ADDED, SourceEvent.RENAMED, SourceEvent.REMOVED}:
-            self.refresh_list()
+            self.schedule_refresh()
+
+    def _on_tag_changed(self, event, _payload):
+        from core.events.domains.metadata_events import TagEvent
+        if event in {TagEvent.ASSIGNMENTS_CHANGED, TagEvent.ALL_TAGS}:
+            self.schedule_refresh()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
+        controls = QHBoxLayout()
         self.doc_tag_filter = QComboBox()
         self.doc_tag_filter.setStyleSheet("padding: 4px; margin: 4px; font-weight: bold;")
         self.doc_tag_filter.addItem("All Tags", "ALL_TAGS")
         self.doc_tag_filter.currentIndexChanged.connect(self.refresh_list)
-        layout.addWidget(self.doc_tag_filter)
+        controls.addWidget(self.doc_tag_filter, 1)
+        self.tag_folder_toggle = QToolButton()
+        self.tag_folder_toggle.setText("Tags as folders")
+        self.tag_folder_toggle.setCheckable(True)
+        self.tag_folder_toggle.setToolTip("Group sources into collapsible, inferred tag folders")
+        self.tag_folder_toggle.toggled.connect(self._toggle_tag_folders)
+        controls.addWidget(self.tag_folder_toggle)
+        layout.addLayout(controls)
 
-        self.doc_list = QListWidget()
+        self.doc_list = DocumentSourceTree()
         self.doc_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         from PySide6.QtWidgets import QAbstractItemView
         self.doc_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.doc_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.doc_list.customContextMenuRequested.connect(self._on_context_menu)
-        self.doc_list.itemClicked.connect(
-            lambda item: self.bus.document_action_requested.emit(
-                DocumentIntent.OPEN,
-                DocumentPayload(
-                    source_id=item.data(self.SOURCE_ID_ROLE),
-                    path=item.data(self.PATH_ROLE),
-                    source_type=item.data(self.SOURCE_TYPE_ROLE),
-                )
-            )
-        )
+        self.doc_list.itemClicked.connect(self._on_item_clicked)
         layout.addWidget(self.doc_list)
 
         self.add_pdf_btn = QPushButton("Add PDF")
@@ -122,10 +163,21 @@ class DocumentExplorer(QWidget):
             self._file_dialog_filter(),
         )
         if paths:
-            self.bus.document_action_requested.emit(
-                DocumentIntent.ADD_FILES,
-                DocumentPayload(paths=paths),
+            from gui.components.dialogs.processing_import_dialog import ProcessingImportDialog
+            policy = getattr(self._ctx, "processing_policy_service", None)
+            default = (
+                policy.get_project_settings().get("default_processing_mode", "balanced")
+                if policy else "balanced"
             )
+            dialog = ProcessingImportDialog(default, self, app_context=self._ctx, paths=paths)
+            if exec_as_modal(dialog):
+                self.bus.document_action_requested.emit(
+                    DocumentIntent.ADD_FILES,
+                    DocumentPayload(
+                        paths=paths,
+                        context={"processing_selection": dialog.selection()},
+                    ),
+                )
 
     def refresh_tag_filter(self):
         """Refreshes the available tags in the combo box."""
@@ -134,7 +186,8 @@ class DocumentExplorer(QWidget):
         self.doc_tag_filter.clear()
         self.doc_tag_filter.addItem("All Tags", "ALL_TAGS")
 
-        for t in self.pm.get_all_tags():
+        self._available_tags = self.pm.get_all_tags()
+        for t in self._available_tags:
             if t.get("name"):
                 self.doc_tag_filter.addItem(t.get("name"), t.get("name"))
 
@@ -142,19 +195,35 @@ class DocumentExplorer(QWidget):
         if index >= 0: self.doc_tag_filter.setCurrentIndex(index)
         self.doc_tag_filter.blockSignals(False)
 
+    def schedule_refresh(self, *_):
+        """Many sources added at once refresh the list once, after the burst."""
+        timer = getattr(self, "_refresh_timer", None)
+        if timer is None:
+            from PySide6.QtCore import QTimer
+            timer = self._refresh_timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(REFRESH_DELAY_MS)
+            timer.timeout.connect(self.refresh_list)
+        timer.start()
+
     def refresh_list(self):
         """Rebuilds the visual list of PDFs."""
         self.refresh_tag_filter()
         self.doc_list.blockSignals(True)
         self.doc_list.clear()
 
-        selected_tag = self.doc_tag_filter.currentData()
+        selected_tag = (
+            "ALL_TAGS" if self.tag_folder_toggle.isChecked()
+            else self.doc_tag_filter.currentData()
+        )
 
         source_records = {s.get("path"): s for s in self.pm.list_sources()} if hasattr(self.pm, "list_sources") else {}
+        tag_map = self.pm.get_doc_tag_map() if hasattr(self.pm, "get_doc_tag_map") else {}
         sources = self.pm.list_source_entities() if hasattr(self.pm, "list_source_entities") else []
         if not sources:
             sources = [self._legacy_source(path) for path in self.pm.pdfs]
 
+        records = []
         for source in sources:
             if source.state.get("is_removed"):
                 continue
@@ -162,51 +231,102 @@ class DocumentExplorer(QWidget):
             if not path:
                 continue
             source_type = source.properties.get("source_type") or source_records.get(path, {}).get("source_type", "pdf")
-            doc_tags = self.pm.get_tags_for_doc(path)
+            doc_tags = tag_map.get(path, [])
             if selected_tag and selected_tag != "ALL_TAGS":
                 if selected_tag not in [t.get("name") for t in doc_tags]:
                     continue
 
-            item = QListWidgetItem(self.doc_list)
-            self.doc_list.addItem(item)
+            records.append({
+                "source_id": source.id, "path": path, "source_type": source_type,
+                "title": source.properties.get("title") or os.path.basename(path),
+                "tags": doc_tags,
+            })
 
-            widget = QWidget()
-            widget.setStyleSheet("background: transparent;")
-            w_layout = QHBoxLayout(widget)
-            w_layout.setContentsMargins(5, 2, 5, 2)
-            w_layout.setSpacing(4)
-
-            icon = self._icon_for_source_type(source_type)
-            lbl = ElidedLabel(f"{icon} {source.properties.get('title') or os.path.basename(path)}")
-            lbl.setStyleSheet("background: transparent;")
-            lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            w_layout.addWidget(lbl, 1)
-
-            tag_container = QWidget()
-            tag_layout = QHBoxLayout(tag_container)
-            tag_layout.setContentsMargins(0, 0, 0, 0)
-            tag_layout.setSpacing(2)
-
-            for t in doc_tags[:4]:
-                dot = QLabel("●")
-                dot.setStyleSheet(f"color: {t.get('color', '#888')}; font-size: 12px; background: transparent;")
-                dot.setToolTip(t.get("name", ""))
-                tag_layout.addWidget(dot)
-
-            w_layout.addWidget(tag_container, 0)
-            item.setSizeHint(widget.sizeHint())
-            self.doc_list.setItemWidget(item, widget)
-            item.setData(self.SOURCE_ID_ROLE, source.id)
-            item.setData(self.PATH_ROLE, path)
-            item.setData(self.SOURCE_TYPE_ROLE, source_type)
+        if self.tag_folder_toggle.isChecked():
+            self._add_tag_folders(build_tag_folders(records, self._available_tags))
+        else:
+            for record in records:
+                self._add_source_item(self.doc_list, record)
 
         self.doc_list.blockSignals(False)
 
+    def _add_tag_folders(self, folders, parent=None):
+        parent = parent or self.doc_list
+        for folder in folders:
+            item = DocumentTreeItem(parent, [f"{folder.name} ({self._folder_count(folder)})"])
+            item.setIcon(0, tag_folder_icon(folder.color))
+            item.setData(0, self.ITEM_KIND_ROLE, "folder")
+            item.setToolTip(0, "Collapsible tag category")
+            for child in folder.children:
+                self._add_tag_folders([child], item)
+            for source in folder.sources:
+                self._add_source_item(item, source)
+
+    def _folder_count(self, folder):
+        return len(folder.sources) + sum(self._folder_count(child) for child in folder.children)
+
+    def _add_source_item(self, parent, source):
+        icon = self._icon_for_source_type(source["source_type"])
+        item = DocumentTreeItem(parent, [f"{icon} {source['title']}"])
+        tag_names = [tag.get("name", "") for tag in source.get("tags", []) if tag.get("name")]
+        if tag_names:
+            item.setToolTip(0, "Tags: " + ", ".join(tag_names))
+        item.setData(0, self.ITEM_KIND_ROLE, "source")
+        item.setData(0, self.SOURCE_ID_ROLE, source["source_id"])
+        item.setData(0, self.PATH_ROLE, source["path"])
+        item.setData(0, self.SOURCE_TYPE_ROLE, source["source_type"])
+
+    def _toggle_tag_folders(self, checked):
+        self.doc_tag_filter.setEnabled(not checked)
+        self.pm.set_metadata("document_explorer_tags_as_folders", "1" if checked else "0")
+        self.refresh_list()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._register_tag_folder_action()
+
+    def _register_tag_folder_action(self):
+        keys = getattr(self._ctx, "keybinding_registry", None)
+        if keys and not getattr(self, "_tag_folder_shortcut", None):
+            self._tag_folder_shortcut = keys.bind(
+                "document_explorer.toggle_tag_folders",
+                self.tag_folder_toggle.toggle,
+                self,
+            )
+        registry = getattr(self._ctx, "action_registry", None)
+        if registry and registry.get("document_explorer.toggle_tag_folders") is None:
+            import weakref
+            from gui.registry.action_spec import ActionSpec
+            owner = weakref.ref(self)
+
+            def toggle():
+                explorer = owner()
+                if explorer is not None:
+                    explorer.tag_folder_toggle.toggle()
+
+            spec = ActionSpec(
+                action_id="document_explorer.toggle_tag_folders",
+                label="Toggle Tag Folders",
+                tooltip="Show Document Explorer sources in collapsible tag folders",
+                callback=toggle,
+                mounts=["command_palette"],
+            )
+            registry.register(spec)
+            self._tag_folder_action = spec
+            self.destroyed.connect(
+                lambda *_args, target=registry, current=spec: target.unregister(
+                    "document_explorer.toggle_tag_folders", current
+                )
+            )
+
     def _on_context_menu(self, pos):
         item_at_pos = self.doc_list.itemAt(pos)
-        if not item_at_pos: return
+        if not item_at_pos or item_at_pos.data(0, self.ITEM_KIND_ROLE) != "source": return
 
-        selected_items = self.doc_list.selectedItems()
+        selected_items = [
+            item for item in self.doc_list.selectedItems()
+            if item.data(0, self.ITEM_KIND_ROLE) == "source"
+        ]
         if item_at_pos not in selected_items:
             self.doc_list.clearSelection()
             item_at_pos.setSelected(True)
@@ -243,6 +363,8 @@ class DocumentExplorer(QWidget):
             rename_action = menu.addAction("✏️ Rename Source")
             remove_action = menu.addAction("🗑️ Remove Source from Project")
             extract_action = menu.addAction("✂️ Extract Pages to New PDF") if source_type == "pdf" else None
+            if source_type in {"video", "audio"}:
+                self.export_actions.append_to_menu(menu, (doc_path, item_at_pos.data(self.SOURCE_ID_ROLE), source_type))
             self._inject_plugin_doc_items(menu, [doc_path])
             self._inject_dock_actions_doc(menu, [doc_path])
 
@@ -251,7 +373,11 @@ class DocumentExplorer(QWidget):
             if chosen == metrics_action:
                 self._open_source_metrics(doc_path)
             elif chosen in intelligence_actions:
-                self._handle_intelligence_action(doc_path, intelligence_actions[chosen])
+                self._handle_intelligence_action(
+                    doc_path, intelligence_actions[chosen],
+                    source_id=item_at_pos.data(self.SOURCE_ID_ROLE),
+                    source_type=source_type,
+                )
             elif chosen == workspace_action:
                 self._add_to_workspace(doc_path)
             elif chosen == manage_tags_action:
@@ -267,7 +393,10 @@ class DocumentExplorer(QWidget):
             elif chosen == rename_action:
                 self._rename_pdf(doc_path)
             elif chosen == remove_action:
-                self._remove_pdf(doc_path)
+                self._remove_pdf(
+                    doc_path, source_id=item_at_pos.data(self.SOURCE_ID_ROLE),
+                    source_type=source_type,
+                )
             elif extract_action is not None and chosen == extract_action:
                 from gui.components.dialogs.extract_pages_dialog import ExtractPagesDialog
                 _dlg2 = ExtractPagesDialog(doc_path, self.pm, self)
@@ -278,6 +407,17 @@ class DocumentExplorer(QWidget):
                 else:
                     if exec_as_modal(_dlg2):
                         self.refresh_list()
+        menu.deleteLater()
+
+    def save_selected_transcript(self):
+        items = [
+            item for item in self.doc_list.selectedItems()
+            if item.data(self.ITEM_KIND_ROLE) == "source"
+        ]
+        if len(items) == 1:
+            item = items[0]
+            self.export_actions.save_source(item.data(self.PATH_ROLE), item.data(self.SOURCE_ID_ROLE),
+                                            item.data(self.SOURCE_TYPE_ROLE))
 
     def _add_intelligence_menu(self, menu: QMenu, doc_path: str) -> dict:
         svc = getattr(self._ctx, "source_intelligence_service", None)
@@ -286,53 +426,78 @@ class DocumentExplorer(QWidget):
         if not svc:
             intel_menu.addAction("Intelligence service unavailable").setEnabled(False)
             return actions
-        try:
-            status = svc.get_source_status(doc_path)
-        except Exception:
-            status = {"stages": {}}
-        stages = status.get("stages", {}) or {}
-        details = status.get("stage_details", {}) or {}
-        mode = status.get("processing_mode") or "balanced"
-        intel_menu.addAction(f"Mode: {mode}").setEnabled(False)
-        intel_menu.addSeparator()
-        stage_order = [
-            "source_registered", "parsed_blocks", "sections", "full_text_index",
-            "entities", "dates", "citations", "tables", "transcript",
-            "embeddings", "summaries", "claims", "graph_seeds", "figures",
-        ]
-        for stage in stage_order:
-            if stage not in stages:
-                continue
-            state = stages.get(stage, "not_run")
-            detail = details.get(stage, {})
-            suffix = ""
-            if detail.get("updated_at"):
-                suffix = f" · {str(detail.get('updated_at'))[:16]}"
-            action = intel_menu.addAction(f"{_stage_icon(state)} {stage.replace('_', ' ')}: {state}{suffix}")
-            action.setToolTip("Run or re-run this intelligence pass for the selected source.")
-            actions[action] = ("stage", stage)
-        intel_menu.addSeparator()
         run_missing = intel_menu.addAction("Run missing passes")
         rerun_stale = intel_menu.addAction("Re-run stale passes")
-        delete_derived = intel_menu.addAction("Delete derived intelligence")
+        pause = intel_menu.addAction("Pause processing")
+        resume = intel_menu.addAction("Resume processing")
+        cancel = intel_menu.addAction("Cancel queued/running passes")
+        change_preset = intel_menu.addAction("Change preset…")
+        inspect = intel_menu.addAction("Inspect outputs…")
+        archive_derived = intel_menu.addAction("Archive derived intelligence")
+        purge_derived = intel_menu.addAction("Permanently purge derived intelligence…")
         actions[run_missing] = ("run_missing", None)
         actions[rerun_stale] = ("rerun_stale", None)
-        actions[delete_derived] = ("delete_derived", None)
+        actions[pause] = ("pause", None)
+        actions[resume] = ("resume", None)
+        actions[cancel] = ("cancel", None)
+        actions[change_preset] = ("change_preset", None)
+        actions[inspect] = ("inspect", None)
+        actions[archive_derived] = ("archive_derived", None)
+        actions[purge_derived] = ("purge_derived", None)
         return actions
 
-    def _handle_intelligence_action(self, doc_path: str, action_spec) -> None:
+    def _handle_intelligence_action(
+        self, doc_path: str, action_spec, *, source_id=None, source_type="pdf"
+    ) -> None:
         svc = getattr(self._ctx, "source_intelligence_service", None)
         if not svc or not action_spec:
             return
         kind, stage = action_spec
+        source_id = source_id or doc_path
+        source = {
+            "id": source_id, "path": doc_path, "source_type": source_type,
+        }
         if kind == "stage":
-            svc.run_stage(doc_path, stage)
+            svc.run_stage(source_id, stage)
         elif kind == "run_missing":
-            svc.run_missing(doc_path)
+            svc.run_missing_background(source_id)
         elif kind == "rerun_stale":
-            svc.rerun_stale(doc_path)
-        elif kind == "delete_derived":
-            svc.delete_derived(doc_path)
+            svc.rerun_stale_background(source_id)
+        elif kind == "pause":
+            svc.pause_source(source_id)
+        elif kind == "resume":
+            svc.resume_source(source_id)
+        elif kind == "cancel":
+            svc.cancel_source_jobs(source_id)
+        elif kind == "change_preset":
+            current = (
+                svc.policy_service.processing_mode_for_source(source)
+                if source and svc.policy_service else "balanced"
+            )
+            labels = ["minimal", "balanced", "deep", "manual"]
+            value, ok = QInputDialog.getItem(
+                self, "Processing preset", "Preset", labels,
+                max(0, labels.index(current) if current in labels else 1), False,
+            )
+            if ok:
+                svc.set_source_processing_mode(source_id, value)
+        elif kind == "inspect":
+            manager = getattr(self._ctx, "dock_manager", None)
+            if manager:
+                manager.spawn("intelligence")
+        elif kind == "archive_derived":
+            svc.archive_derived_background(source_id)
+        elif kind == "purge_derived":
+            answer = QMessageBox.warning(
+                self,
+                "Permanently purge intelligence?",
+                "This permanently removes derived artifacts and cannot be undone. "
+                "Original sources and annotations are preserved.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                svc.delete_derived_background(source_id)
 
     def _inject_plugin_doc_items(self, menu: "QMenu", doc_paths: list) -> None:
         """Append plugin-registered document_list context menu actions."""
@@ -579,44 +744,78 @@ class DocumentExplorer(QWidget):
             current = getattr(viewer, 'pdf_path', None) if viewer else None
             if current in (old_path, new_path):
                 self.bus.document_action_requested.emit(DocumentIntent.OPEN, DocumentPayload(path=new_path, source_id=new_source.id if new_source else None, source_type=source_type))
-    def _on_item_clicked(self, item):
+    def _on_item_clicked(self, item, _column=0):
+        if item.data(self.ITEM_KIND_ROLE) != "source":
+            item.setExpanded(not item.isExpanded())
+            return
         self.bus.document_action_requested.emit(
             DocumentIntent.OPEN,
             DocumentPayload(source_id=item.data(self.SOURCE_ID_ROLE), path=item.data(self.PATH_ROLE), source_type=item.data(self.SOURCE_TYPE_ROLE)),
         )
-    def _remove_pdf(self, doc_path):
-        source_type = self.pm.get_source_type(doc_path) if hasattr(self.pm, "get_source_type") else "pdf"
+    def _remove_pdf(self, doc_path, *, source_id=None, source_type="pdf"):
+        if doc_path in self._removing_paths:
+            return
         reply = QMessageBox.question(self, "Remove Source", f"Remove '{os.path.basename(doc_path)}' from the project?",
                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if reply != QMessageBox.StandardButton.Yes: return
+        if not self._prepare_viewer_for_removal(doc_path):
+            return
+        self.pm.prepare_source_removal(doc_path)
+        payload = {
+            "path": doc_path, "source_id": source_id, "source_type": source_type,
+        }
+        worker = _SourceRemovalWorker(self.pm, payload, self)
+        worker.removed.connect(self._source_removal_finished, Qt.ConnectionType.QueuedConnection)
+        worker.failed.connect(
+            lambda error, path=doc_path: self._source_removal_failed(path, error),
+            Qt.ConnectionType.QueuedConnection,
+        )
+        worker.finished.connect(
+            lambda current=worker: self._discard_remove_worker(current),
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._removing_paths.add(doc_path)
+        self._remove_workers.add(worker)
+        worker.start()
 
-        if self.pm.remove_source(doc_path) if hasattr(self.pm, "remove_source") else self.pm.remove_pdf(doc_path):
-            source = self.pm.get_source_entity_by_path(doc_path) if hasattr(self.pm, "get_source_entity_by_path") else None
-            
-            # Shout to the Event Bus
-            self.bus.pdf_removed.emit(DocumentEvent.PDF_REMOVED, DocumentEventPayload(path=doc_path, source_id=source.id if source else None))
-            self.bus.source_removed.emit(SourceEvent.REMOVED, DocumentEventPayload(path=doc_path, source_id=source.id if source else None, source_type=source_type))
+    def _prepare_viewer_for_removal(self, path):
+        viewer = getattr(self._ctx, "viewer", None)
+        if not viewer or getattr(viewer, "pdf_path", None) != path:
+            return True
+        worker = getattr(viewer, "worker", None)
+        if worker and worker.isRunning():
+            worker.stop()
+            if not worker.wait(VIEWER_STOP_TIMEOUT_MS):
+                QMessageBox.warning(
+                    self, "Source is still closing",
+                    "The viewer is still finishing a page. Try removing the source again in a moment.",
+                )
+                return False
+        if getattr(viewer, "scene", None):
+            viewer.scene.clear()
+        viewer.doc = None
+        return True
 
-            viewer = getattr(self._ctx, 'viewer', None)
-            current = getattr(viewer, 'pdf_path', None) if viewer else None
-            if current == doc_path:
-                # Safely halt the background render thread BEFORE clearing the scene
-                if viewer:
-                    if hasattr(viewer, 'worker') and viewer.worker and viewer.worker.isRunning():
-                        viewer.worker.stop()
-                        viewer.worker.wait()
-                        
-                    if hasattr(viewer, 'scene') and viewer.scene: 
-                        viewer.scene.clear()
-                    viewer.doc = None
-                # ------------------------------------------------------------------------------
+    def _source_removal_finished(self, payload):
+        path = payload["path"]
+        self._removing_paths.discard(path)
+        event_payload = DocumentEventPayload(
+            path=path, source_id=payload.get("source_id"),
+            source_type=payload.get("source_type") or "pdf",
+        )
+        self.bus.pdf_removed.emit(DocumentEvent.PDF_REMOVED, event_payload)
+        self.bus.source_removed.emit(SourceEvent.REMOVED, event_payload)
+        self.schedule_refresh()
 
-                if self.doc_list.count() > 0:
-                    first = self.doc_list.item(0)
-                    self.bus.document_action_requested.emit(
-                        DocumentIntent.OPEN,
-                        DocumentPayload(source_id=first.data(self.SOURCE_ID_ROLE), path=first.data(self.PATH_ROLE), source_type=first.data(self.SOURCE_TYPE_ROLE)),
-                    )
+    def _source_removal_failed(self, path, error):
+        self._removing_paths.discard(path)
+        if path not in self.pm.pdfs and path.lower().endswith(".pdf"):
+            self.pm.pdfs.append(path)
+        QMessageBox.warning(self, "Could not remove source", error)
+
+    def _discard_remove_worker(self, worker):
+        self._remove_workers.discard(worker)
+        worker.deleteLater()
 
     def _legacy_source(self, path):
         from core.models.ontology_model import EntityModel, EntityType

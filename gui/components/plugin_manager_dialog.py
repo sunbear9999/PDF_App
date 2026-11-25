@@ -51,12 +51,15 @@ class PluginManagerDialog(QDialog):
         self._info_lbl.setWordWrap(True)
         layout.addWidget(self._info_lbl)
 
-        self._table = QTableWidget(0, 4)
-        self._table.setHorizontalHeaderLabels(["Plugin", "Version", "Status", "Action"])
+        self._table = QTableWidget(0, 5)
+        self._table.setHorizontalHeaderLabels(
+            ["Plugin", "Version", "Status", "Network", "Action"]
+        )
         self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         self._table.setSelectionBehavior(self._table.SelectionBehavior.SelectRows)
         self._table.setEditTriggers(self._table.EditTrigger.NoEditTriggers)
         self._table.verticalHeader().setVisible(False)
@@ -93,8 +96,10 @@ class PluginManagerDialog(QDialog):
 
             name_item = QTableWidgetItem(meta["name"])
             name_item.setData(Qt.ItemDataRole.UserRole, pid)
-            if getattr(meta, "get", lambda k, d=None: None)("requires_internet"):
+            if meta.get("requires_internet"):
                 name_item.setText(f"{meta['name']} [internet]")
+                hosts = ", ".join(meta.get("network_hosts") or ["user-selected public hosts"])
+                name_item.setToolTip(f"Declared network destinations: {hosts}")
             self._table.setItem(row, 0, name_item)
             self._table.setItem(row, 1, QTableWidgetItem(meta["version"]))
 
@@ -102,11 +107,14 @@ class PluginManagerDialog(QDialog):
             status_item = QTableWidgetItem(status_text)
             self._table.setItem(row, 2, status_item)
 
+            network_btn = self._network_button(meta)
+            self._table.setCellWidget(row, 3, network_btn)
+
             btn = QPushButton("Disable" if is_loaded else "Enable")
             btn.setProperty("plugin_id", pid)
             btn.setProperty("is_loaded", is_loaded)
             btn.clicked.connect(lambda checked=False, b=btn: self._toggle_plugin(b))
-            self._table.setCellWidget(row, 3, btn)
+            self._table.setCellWidget(row, 4, btn)
 
             self._rows.append({"pid": pid, "loaded": is_loaded, "row": row})
 
@@ -130,6 +138,43 @@ class PluginManagerDialog(QDialog):
         except Exception as exc:
             self._status_lbl.setText(f"⚠ Could not disable '{plugin_id}': {exc}")
 
+    def _network_button(self, meta: Dict) -> QPushButton:
+        button = QPushButton("Not used")
+        button.setEnabled(False)
+        if not meta.get("requires_internet"):
+            return button
+        service = getattr(self._core, "network_access_service", None)
+        granted = bool(service and service.is_granted(meta["plugin_id"]))
+        button.setText("Revoke" if granted else "Grant…")
+        button.setProperty("plugin_id", meta["plugin_id"])
+        button.setProperty("network_granted", granted)
+        button.setProperty("network_hosts", meta.get("network_hosts") or [])
+        button.setEnabled(service is not None)
+        button.clicked.connect(lambda checked=False, b=button: self._toggle_network(b))
+        return button
+
+    def _toggle_network(self, button: QPushButton) -> None:
+        plugin_id = str(button.property("plugin_id") or "")
+        granted = bool(button.property("network_granted"))
+        service = getattr(self._core, "network_access_service", None)
+        if not plugin_id or service is None:
+            return
+        from gui.components.plugin_network_access import set_plugin_network_permission
+        changed = set_plugin_network_permission(
+            self,
+            self._core,
+            plugin_id,
+            button.property("network_hosts") or [],
+            not granted,
+        )
+        if not changed:
+            return
+        button.setProperty("network_granted", not granted)
+        button.setText("Revoke" if not granted else "Grant…")
+        self._status_lbl.setText(
+            f"Network access {'granted' if not granted else 'revoked'} for '{plugin_id}'."
+        )
+
     def _enable(self, plugin_id: str, btn: QPushButton):
         from core.plugins.plugin_loader import enable_plugin
         try:
@@ -147,7 +192,7 @@ class PluginManagerDialog(QDialog):
             item = self._table.item(r, 0)
             if item and item.data(Qt.ItemDataRole.UserRole) == plugin_id:
                 self._table.item(r, 2).setText("✅ Enabled" if loaded else "⏸ Disabled")
-                btn = self._table.cellWidget(r, 3)
+                btn = self._table.cellWidget(r, 4)
                 if isinstance(btn, QPushButton):
                     btn.setText("Disable" if loaded else "Enable")
                     btn.setProperty("is_loaded", loaded)

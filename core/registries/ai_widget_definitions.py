@@ -133,7 +133,7 @@ _NEW_DEFAULT_PROMPTS = {
         "output one citation object. Rules: "
         "(1) quote is exact verbatim text copied from SOURCE — never paraphrase. "
         "(2) note names the specific ANSWER claim this quote proves. "
-        "(3) copy doc_name, source_type, source_id, and source_locator exactly from the CITATION_* and CITATION_LOCATOR_* metadata lines of the matching SOURCE block — never invent them. "
+        "(3) set source to the label of the matching SOURCE passage (the [S3] at its start, written S3) and doc_name to the title after it — never invent them. "
         "(4) no duplicates. "
         "(5) no topical quotes that do not back a specific claim. "
         "Return the minimum complete set that covers all supported claims."

@@ -189,92 +189,6 @@ class CheckableComboBox(QComboBox):
         else:
             super().clear()
 
-class UnusedHighlightsDialog(QDialog):
-    def __init__(self, highlights, saved_entities=None, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Inbox")
-        self.resize(520, 420)
-        self._entities_by_id = {}
-
-        layout = QVBoxLayout(self)
-        tabs = QTabWidget()
-
-        # --- Tab 1: Unused Highlights ---
-        highlights_tab = QWidget()
-        h_layout = QVBoxLayout(highlights_tab)
-        h_layout.addWidget(QLabel("PDF highlights not yet added to this workspace:"))
-        self.list_widget = QListWidget()
-        self.list_widget.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
-        for highlight in highlights:
-            label = format_highlight_item_label(highlight)
-            text_content = (highlight.get("text_content") or "[Empty Highlight]").strip()
-            item = QListWidgetItem(label)
-            item.setData(Qt.ItemDataRole.UserRole, highlight.get("id"))
-            item.setToolTip(text_content)
-            self.list_widget.addItem(item)
-        h_layout.addWidget(self.list_widget)
-        tabs.addTab(highlights_tab, f"Highlights ({len(highlights)})")
-
-        # --- Tab 2: Saved Entities ---
-        entities_tab = QWidget()
-        e_layout = QVBoxLayout(entities_tab)
-        e_layout.addWidget(QLabel("Saved entities not on this workspace canvas:"))
-        self.entity_list = QListWidget()
-        self.entity_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
-        saved_entities = saved_entities or []
-        for entity in saved_entities:
-            self._entities_by_id[entity.id] = entity
-            item = QListWidgetItem(self._entity_label(entity))
-            item.setData(Qt.ItemDataRole.UserRole, entity.id)
-            item.setToolTip(
-                (entity.properties.get("description") or entity.properties.get("context") or "").strip()
-            )
-            self.entity_list.addItem(item)
-        e_layout.addWidget(self.entity_list)
-        tabs.addTab(entities_tab, f"Saved Entities ({len(saved_entities)})")
-
-        layout.addWidget(tabs)
-
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-        self.btn_add = QPushButton("Add to Workspace")
-        self.btn_cancel = QPushButton("Cancel")
-        self.btn_add.clicked.connect(self.accept)
-        self.btn_cancel.clicked.connect(self.reject)
-        btn_layout.addWidget(self.btn_add)
-        btn_layout.addWidget(self.btn_cancel)
-        layout.addLayout(btn_layout)
-
-        if self.list_widget.count() > 0:
-            self.list_widget.setCurrentRow(0)
-        self.list_widget.itemDoubleClicked.connect(lambda _: self.accept())
-        self.entity_list.itemDoubleClicked.connect(lambda _: self.accept())
-
-    def _entity_label(self, entity) -> str:
-        props = entity.properties
-        text = (props.get("name") or props.get("title") or props.get("text") or entity.id[:8]).strip()
-        type_label = entity.entity_type.split(".")[-1].replace("_", " ").title()
-        return f"[{type_label}]  {text[:80]}"
-
-    def get_selected_highlight_ids(self):
-        return [item.data(Qt.ItemDataRole.UserRole) for item in self.list_widget.selectedItems()]
-
-    def get_selected_entity_dicts(self):
-        result = []
-        for item in self.entity_list.selectedItems():
-            entity = self._entities_by_id.get(item.data(Qt.ItemDataRole.UserRole))
-            if not entity:
-                continue
-            text = (
-                entity.properties.get("name")
-                or entity.properties.get("title")
-                or entity.properties.get("text")
-                or ""
-            )
-            result.append({"id": entity.id, "type": entity.entity_type, "text": text, **entity.properties})
-        return result
-
-
 class EntityRefsDialog(QDialog):
     """Paginated dialog showing every project-wide occurrence of a workspace entity.
 
@@ -290,7 +204,7 @@ class EntityRefsDialog(QDialog):
         self.setWindowTitle(f"References  ·  {entity_name[:60]}")
         self.setMinimumSize(560, 500)
         self.resize(600, 560)
-        self.setWindowModality(Qt.WindowModality.ApplicationModal)
+        self.setWindowModality(Qt.WindowModality.NonModal)
 
         self._entity_name = entity_name
         self._entity_node_id = entity_node_id

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import html
 
 from PySide6.QtCore import QElapsedTimer, QEvent, QTimer, QUrl, Qt
 from PySide6.QtGui import QCursor
@@ -17,8 +16,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.events.domains.document_events import DocumentEvent, DocumentEventPayload, SourceEvent, SourceIntent, SourcePayload, VideoEvent
+from core.events.domains.document_events import DocumentEventPayload, SourceEvent, SourceIntent, SourcePayload, VideoEvent
 from core.events.event_bus import EventBus
+from gui.components.dialogs.reference_note_dialog import open_reference_note, open_selection_note
+from gui.components.transcript_note_selection import render_transcript, selected_segments
+from gui.components.media_export_actions import MediaExportActions
 
 try:
     from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
@@ -30,6 +32,8 @@ except Exception:  # pragma: no cover - depends on platform multimedia packages
 
 
 class VideoPlayer(QWidget):
+    source_type = "video"
+
     def __init__(self, app_context=None, parent=None):
         super().__init__(parent)
         self._ctx = app_context
@@ -46,6 +50,7 @@ class VideoPlayer(QWidget):
         self._transcription_timer = QElapsedTimer()
         self._shortcuts_registered = False
         self._build_ui()
+        self.export_actions = MediaExportActions(self)
         self.bus.source_opened.connect(self._on_source_opened)
         self.bus.video_status_updated.connect(self._on_video_status)
 
@@ -207,6 +212,7 @@ class VideoPlayer(QWidget):
 
     def register_shortcuts(self):
         """Bind video actions to the app-wide shortcut registry."""
+        self.export_actions.register_actions()
         if self._shortcuts_registered:
             return
         registry = getattr(self._ctx, "keybinding_registry", None) if self._ctx else None
@@ -406,77 +412,40 @@ class VideoPlayer(QWidget):
         self._render_transcript()
 
     def _show_transcript_context_menu(self, pos):
-        menu = self.transcript_view.createStandardContextMenu()
-        if self.transcript_view.textCursor().hasSelection():
-            menu.addSeparator()
-            action = menu.addAction("Highlight Selected Transcript Text")
-            action.triggered.connect(self.save_note_at_current_time)
-        menu.exec(self.transcript_view.mapToGlobal(pos))
+        self.export_actions.show_transcript_menu(pos)
 
     def _render_transcript(self):
-        if not hasattr(self, "transcript_view"):
-            return
-        if not self.segments:
-            self.transcript_view.setHtml("<i>No transcript is available yet.</i>")
-            return
-        parts = []
-        for idx, seg in enumerate(self.segments):
-            text = html.escape(str(seg.get("text", "")).strip())
-            stamp = f"{self._fmt_seconds(float(seg.get('start', 0)))} " if self._timestamps_visible else ""
-            if idx == self._active_segment_index:
-                parts.append(f"<p style='background:#31424a; margin:2px 0; padding:4px;'><b>{html.escape(stamp)}</b>{text}</p>")
-            else:
-                parts.append(f"<p style='margin:2px 0; padding:4px;'><span style='color:#9fb0b8;'>{html.escape(stamp)}</span>{text}</p>")
-        scrollbar = self.transcript_view.verticalScrollBar()
-        old_value = scrollbar.value()
-        self.transcript_view.setHtml("".join(parts))
-        if self._active_segment_index >= 0:
-            cursor = self.transcript_view.document().find(str(self.segments[self._active_segment_index].get("text", "")).strip()[:40])
-            if not cursor.isNull():
-                self.transcript_view.setTextCursor(cursor)
-                self.transcript_view.ensureCursorVisible()
-        elif old_value:
-            scrollbar.setValue(old_value)
+        render_transcript(self)
 
     def _current_segment(self):
         seconds = (self.player.position() / 1000.0) if self.player else 0
         return next((seg for seg in self.segments if float(seg.get("start", 0)) <= seconds <= float(seg.get("end", 0))), None)
 
     def save_note_at_current_time(self):
-        selected = self.transcript_view.textCursor().selectedText().strip()
-        selected = " ".join(selected.split())
-        segment = self._current_segment()
-        quote = selected or (segment or {}).get("text", "").strip()
-        if not quote:
-            self._set_status("No transcript text is available to save at this timestamp.", error=True)
-            return
-        timestamp = float((segment or {}).get("start", 0))
-        if self.player:
-            timestamp = self.player.position() / 1000.0
-        self.save_quote_note(quote, "", timestamp=timestamp)
+        try:
+            quote, indices = selected_segments(self)
+            self.save_quote_note(quote, segment_indices=indices)
+        except ValueError as exc:
+            self._set_status(str(exc), error=True)
 
-    def save_quote_note(self, quote, note="", timestamp=0, path="", source_id=""):
+    def save_quote_note(self, quote, note="", timestamp=0, path="", source_id="", *, segment_indices=None, reference=None):
         quote = (quote or "").strip()
         if not quote:
             self._set_status("No transcript text is available to save.", error=True)
             return
         path = path or self.video_path
         source_id = source_id or self.source_id
-        timestamp = float(timestamp or 0)
-        annot_id = f"VideoNote|{source_id}|{int(timestamp * 1000)}"
-        self.bus.highlight_created.emit(
-            DocumentEvent.HIGHLIGHT_CREATED,
-            DocumentEventPayload(highlight_data={
-                "id": annot_id,
-                "subject": quote,
-                "content": note or "",
-                "pdf_path": path,
-                "page_num": int(timestamp),
-                "rect_coords": f"timestamp:{timestamp:.3f}",
-                "color": "#b366ff",
-            }),
-        )
-        self._set_status(f"Saved video note at {self._fmt_seconds(timestamp)}.", transient=True)
+        if reference:
+            dialog = open_reference_note(self._ctx, reference, note, parent=self)
+        else:
+            if segment_indices is None:
+                segment_indices = [index for index, seg in enumerate(self.segments)
+                                   if float(seg.get('start', 0)) <= float(timestamp) < float(seg.get('end', 0))]
+            selection = {'source_path': path, 'source_id': source_id, 'quote': quote,
+                         'segment_indices': segment_indices}
+            dialog = open_selection_note(self._ctx, selection, note, parent=self)
+        self._set_status('Review the recorded source selection before saving.' if dialog
+                         else 'Open a project with linked-note support before saving.', error=not bool(dialog))
 
     def _set_status(self, text, error=False, transient=False):
         if not text:

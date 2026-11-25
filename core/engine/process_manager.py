@@ -1,7 +1,14 @@
 # core/engine/process_manager.py
 import threading
+import time
 import uuid
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QMetaMethod, QObject, QTimer, Signal
+
+# Shown on a queued job the memory manager is holding back.
+WAITING_FOR_MEMORY = "Waiting for memory"
+# A held job starts anyway after this, so a machine that stays short of
+# memory (another app) never stalls the queue forever.
+MAX_MEMORY_HOLD_S = 120
 
 class LLMJob:
     def __init__(self, job_name, runner=None, job_type="Agent", metadata=None):
@@ -33,6 +40,8 @@ class LLMJob:
         self.is_background = bool(metadata.get("is_background", False))
         self.input_hash = metadata.get("input_hash")
         self.error_text = metadata.get("error_text")
+        self.force_admit = False   # "Run anyway" past the memory manager
+        self.held_since = 0.0
 
     def kill(self):
         self.abort_event.set()
@@ -55,6 +64,11 @@ class ProcessRegistry(QObject):
         self.pending_queue = []
         self.express_jobs = []  # <-- NEW TRACKER FOR CONCURRENT JOBS
         self.recent_jobs = []
+        # Memory manager hooks (set by PapyrusCore): may a queued job start
+        # now, and how many express jobs may run at once.
+        self.admission = None
+        self.express_limit = None
+        self.express_waiting = []
         # Keep QThread wrappers alive until Qt has emitted finished on the UI
         # thread. Dropping the last wrapper while run() is unwinding is fatal.
         self._retiring_runners = set()
@@ -69,11 +83,12 @@ class ProcessRegistry(QObject):
             runner.trace_id = None
         
         if is_express:
-            job.status = "Running (Express)..."
-            self.express_jobs.append(job)
-            self.job_added.emit(job)
-            if runner:
-                runner.start()
+            if self.express_limit and len(self.express_jobs) >= max(1, int(self.express_limit())):
+                job.status = WAITING_FOR_MEMORY
+                self.express_waiting.append(job)
+                self.job_added.emit(job)
+                return job
+            self._start_express(job)
         else:
             self.pending_queue.append(job)
             self.pending_queue.sort(key=lambda queued: getattr(queued, "priority", 100))
@@ -102,13 +117,58 @@ class ProcessRegistry(QObject):
         for job in self.express_jobs:
             if job.id == job_id:
                 return job
-        for job in self.pending_queue:
+        for job in self.pending_queue + self.express_waiting:
             if job.id == job_id:
                 return job
         return None
 
+    def _start_express(self, job):
+        job.status = "Running (Express)..."
+        self.express_jobs.append(job)
+        self.job_added.emit(job)
+        if job.runner:
+            job.runner.start()
+
+    def _start_waiting_express(self):
+        while self.express_waiting and (
+                not self.express_limit or len(self.express_jobs) < max(1, int(self.express_limit()))):
+            job = self.express_waiting.pop(0)
+            self.job_removed.emit(job.id)
+            self._start_express(job)
+
+    def on_memory_state(self, event, _payload=None):
+        """Memory pressure changed: held-back jobs may be able to start now."""
+        if getattr(event, "name", "") == "PRESSURE_CHANGED":
+            self._process_next()
+            self._start_waiting_express()
+
+    def run_anyway(self, job_id):
+        """Start a job the memory manager is holding back."""
+        for job in self.pending_queue + self.express_waiting:
+            if job.id == job_id:
+                job.force_admit = True
+        if self.express_limit is not None:
+            for job in [j for j in self.express_waiting if j.force_admit]:
+                self.express_waiting.remove(job)
+                self.job_removed.emit(job.id)
+                self._start_express(job)
+        self._process_next()
+
+    def _admitted(self, job) -> bool:
+        held = time.monotonic() - job.held_since if job.held_since else 0.0
+        if job.force_admit or self.admission is None or held >= MAX_MEMORY_HOLD_S or self.admission(job):
+            return True
+        if job.status != WAITING_FOR_MEMORY:
+            job.status = WAITING_FOR_MEMORY
+            job.held_since = time.monotonic()
+            self.job_updated.emit(job)
+            QTimer.singleShot(MAX_MEMORY_HOLD_S * 1000 + 100, self._process_next)
+        return False
+
     def _process_next(self):
         if self.active_job is None and self.pending_queue:
+            if not self._admitted(self.pending_queue[0]):
+                return
             self.active_job = self.pending_queue.pop(0)
             self.active_job.status = "Starting..."
             self.job_updated.emit(self.active_job)
@@ -146,14 +206,29 @@ class ProcessRegistry(QObject):
         for signal_name in (
             "progress_update", "step_started", "step_complete",
             "step_result", "action_complete", "error", "state_snapshot", "user_input_requested",
+            "progress", "partial",
         ):
             sig = getattr(runner, signal_name, None)
-            if sig is not None:
+            if sig is not None and self._signal_has_receivers(runner, signal_name):
                 try:
                     sig.disconnect()
                 except RuntimeError:
                     pass
         job.runner = None
+
+    @staticmethod
+    def _signal_has_receivers(runner, signal_name):
+        meta = runner.metaObject()
+        for index in range(meta.methodCount()):
+            method = meta.method(index)
+            if method.methodType() != QMetaMethod.MethodType.Signal:
+                continue
+            signature = bytes(method.methodSignature()).decode("utf-8")
+            if signature.partition("(")[0] != signal_name:
+                continue
+            if runner.receivers(f"2{signature}") > 0:
+                return True
+        return False
 
     def _release_finished_runners(self):
         self._retiring_runners = {
@@ -185,6 +260,7 @@ class ProcessRegistry(QObject):
                 self._remember_recent_job(job)
                 self.express_jobs.pop(i)
                 self.job_removed.emit(job_id)
+                self._start_waiting_express()
                 break
 
     def _remember_recent_job(self, job):
@@ -213,13 +289,14 @@ class ProcessRegistry(QObject):
                 self.job_removed.emit(job_id)
                 return
 
-        for i, job in enumerate(self.pending_queue):
-            if job.id == job_id:
-                job.kill()
-                self.pending_queue.pop(i)
-                self.job_removed.emit(job_id)
-                self.queue_updated.emit()
-                break
+        for queue in (self.pending_queue, self.express_waiting):
+            for i, job in enumerate(queue):
+                if job.id == job_id:
+                    job.kill()
+                    queue.pop(i)
+                    self.job_removed.emit(job_id)
+                    self.queue_updated.emit()
+                    return
 
     def move_job_up(self, job_id):
         for i, job in enumerate(self.pending_queue):
@@ -243,6 +320,8 @@ class ProcessRegistry(QObject):
             if job.runner and job.runner.isRunning():
                 self._retiring_runners.add(job.runner)
                 job.runner.finished.connect(self._release_finished_runners)
+        for job in self.express_waiting: job.kill()
         self.pending_queue.clear()
         self.express_jobs.clear()
+        self.express_waiting.clear()
         self.queue_updated.emit()

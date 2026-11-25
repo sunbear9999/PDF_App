@@ -42,6 +42,9 @@ from gui.base import BaseDialog
 from gui.base.core import BaseDock, UnifiedThemedMixin
 from gui.docks.data_dock_chart import DataChartWidget
 
+#: How long dock teardown waits for a background extraction thread to stop.
+THREAD_SHUTDOWN_WAIT_MS = 3000
+
 
 class SpreadsheetModel(QAbstractTableModel):
     changed = Signal()
@@ -212,7 +215,9 @@ class CutHighlightDelegate(QStyledItemDelegate):
 
 
 class DataExtractThread(QThread):
-    finished = Signal(list)
+    # Named result_ready, not finished: QThread.finished is inherited and is what
+    # Qt uses for thread teardown — shadowing it leaks the thread on completion.
+    result_ready = Signal(list)
     error = Signal(str)
 
     def __init__(self, service, pdf_path: str, parent=None):
@@ -224,9 +229,9 @@ class DataExtractThread(QThread):
         try:
             import fitz
             doc = fitz.open(self._pdf_path)
-            states = self._service.extract_document(doc, self._pdf_path)
+            states = self._service.extract_document(doc, self._pdf_path, doc_id=self._pdf_path)
             doc.close()
-            self.finished.emit(states)
+            self.result_ready.emit(states)
         except Exception as exc:
             self.error.emit(str(exc))
 
@@ -302,6 +307,7 @@ class DataDockView(BaseDock, UnifiedThemedMixin):
         self._vision_runners = set()
         self._pending_pdf_fill = None
         self._pdf_fill_thread = None
+        self._extract_thread = None
         self._build_ui()
         self._bind_events()
         self.refresh_library()
@@ -866,8 +872,12 @@ class DataDockView(BaseDock, UnifiedThemedMixin):
         if not self._pdf_fill_thread:
             self.btn_fill_pdf.setEnabled(True)
 
-    def closeEvent(self, event):
+    def shutdown(self) -> None:
         self._cancel_pending_pdf_fill()
+        self._stop_worker_threads()
+
+    def closeEvent(self, event):
+        self.shutdown()
         super().closeEvent(event)
 
     def render_state(self, state: DataGridState | None):
@@ -1024,10 +1034,25 @@ class DataDockView(BaseDock, UnifiedThemedMixin):
 
     def _finish_pdf_fill_thread(self):
         self.btn_fill_pdf.setEnabled(True)
-        thread = self._pdf_fill_thread
-        self._pdf_fill_thread = None
-        if thread:
+        self._release_thread("_pdf_fill_thread")
+
+    def _release_thread(self, attribute: str):
+        """Drop a finished worker thread so it is not destroyed while running."""
+        thread = getattr(self, attribute, None)
+        setattr(self, attribute, None)
+        if thread is not None:
             thread.deleteLater()
+
+    def _stop_worker_threads(self):
+        for attribute in ("_pdf_fill_thread", "_extract_thread"):
+            thread = getattr(self, attribute, None)
+            if thread is None:
+                continue
+            if thread.isRunning():
+                thread.requestInterruption()
+                if not thread.wait(THREAD_SHUTDOWN_WAIT_MS):
+                    continue  # still running — leave it parented rather than delete it under Qt
+            self._release_thread(attribute)
 
     def _on_pdf_grid_error(self, request_id, message):
         if self._pending_pdf_fill and request_id == self._pending_pdf_fill.get("request_id"):
@@ -1663,16 +1688,30 @@ class DataDockView(BaseDock, UnifiedThemedMixin):
         if not pdf_path:
             self._show_info("No File Path", "Cannot extract: the open PDF has no file path on disk.")
             return
+        if self._extract_thread is not None:
+            return
+        existing = self.service.datasets_for_document(source_path=pdf_path)
+        if existing:
+            self.refresh_library(select_id=existing[0].dataset_id)
+            self._show_info(
+                "Tables Already Extracted",
+                f"Loaded {len(existing)} table(s) extracted when this document was ingested.",
+            )
+            return
         self.btn_extract_pdf.setEnabled(False)
         self.btn_extract_pdf.setText("Extracting...")
         self._extract_thread = DataExtractThread(self.service, pdf_path, self)
-        self._extract_thread.finished.connect(self._on_extraction_done)
+        self._extract_thread.result_ready.connect(self._on_extraction_done)
         self._extract_thread.error.connect(self._on_extraction_error)
+        self._extract_thread.finished.connect(self._finish_extract_thread)
         self._extract_thread.start()
 
-    def _on_extraction_done(self, states):
+    def _finish_extract_thread(self):
         self.btn_extract_pdf.setEnabled(True)
         self.btn_extract_pdf.setText("Extract PDF")
+        self._release_thread("_extract_thread")
+
+    def _on_extraction_done(self, states):
         if not states:
             self._show_info("No Tables Found", "No selectable tables were detected in the open PDF.")
             return
@@ -1680,8 +1719,6 @@ class DataDockView(BaseDock, UnifiedThemedMixin):
         self._show_info("Tables Extracted", f"Extracted {len(states)} table dataset(s) from the open PDF.")
 
     def _on_extraction_error(self, msg):
-        self.btn_extract_pdf.setEnabled(True)
-        self.btn_extract_pdf.setText("Extract PDF")
         self._show_info("Extraction Failed", f"Error during extraction:\n{msg}")
 
     def jump_to_source(self, *args):
@@ -1947,5 +1984,6 @@ class DataDockView(BaseDock, UnifiedThemedMixin):
         self.refresh_library()
 
     def on_project_cleared(self) -> None:
+        self._stop_worker_threads()
         self.service.clear_memory()
         self.refresh_library()

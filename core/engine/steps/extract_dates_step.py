@@ -36,6 +36,7 @@ class ExtractDatesStep(BaseStep):
                 "normalized_date": d.normalized_date,
                 "certainty": d.certainty,
                 "context_text": d.context_text,
+                "metadata": getattr(d, "metadata", None) or {},
             }
             for d in dates
         ])

@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 
 from core.events.domains.document_events import DocumentIntent, DocumentPayload, SourceEvent, SourceIntent, SourcePayload
 from core.events.event_bus import EventBus
+from gui.components.artifact_source_navigator import ArtifactSourceNavigator
 
 
 class SourceViewerHost(QWidget):
@@ -137,6 +138,9 @@ class SourceViewerHost(QWidget):
                 except Exception as exc:
                     print(f"[SourceViewerHost] Failed to build viewer for '{spec.source_type}': {exc}")
                     continue
+                if getattr(spec, "plugin_id", ""):
+                    from gui.theme.plugin_widgets import mark_plugin_widget
+                    mark_plugin_widget(widget, spec.plugin_id)
                 self._viewers[spec.source_type] = widget
                 self.stacked.addWidget(widget)
 
@@ -152,6 +156,16 @@ class SourceViewerHost(QWidget):
     @property
     def _active_viewer(self):
         return self._viewers.get(self._current_source_type) or self.pdf_viewer
+
+    def update_theme(self, theme):
+        """Theme every viewer; plugin roots get the automatic default first."""
+        for widget in self._viewers.values():
+            plugin_id = widget.property("papyrus_plugin_id")
+            if plugin_id:
+                from gui.theme.plugin_widgets import prepare_plugin_widget
+                prepare_plugin_widget(widget, plugin_id, theme)
+            elif hasattr(widget, "update_theme"):
+                widget.update_theme(theme)
 
     @property
     def pdf_path(self):
@@ -236,10 +250,13 @@ class SourceViewerHost(QWidget):
         elif source_type == "__book__" and text == "Normal":
             # Switch back to the original viewer
             # Determine which viewer based on what was being viewed before book mode
-            self._current_source_type = "pdf" if hasattr(self, "_previous_source_type") and self._previous_source_type == "pdf" else "txt"
+            path = self.current_source_path
+            self._current_source_type = getattr(self, '_previous_source_type', None) or 'pdf'
             widget = self._viewers.get(self._current_source_type) or self.pdf_viewer
             if widget:
                 self.stacked.setCurrentWidget(widget)
+                if self._current_source_type != 'pdf' and path:
+                    widget._load(path)
 
     def _on_font_size_changed(self, value: int) -> None:
         """Update font size."""
@@ -283,7 +300,6 @@ class SourceViewerHost(QWidget):
         else:
             settings.dark_mode_enabled = False
         self._settings_service.set_settings(settings)
-        self._forward("toggle_dark_mode")
 
     def _toggle_theme_mode(self) -> None:
         """Toggle theme mode for all viewers."""
@@ -297,7 +313,6 @@ class SourceViewerHost(QWidget):
         else:
             settings.theme_mode_enabled = False
         self._settings_service.set_settings(settings)
-        self._forward("toggle_theme_mode")
 
     def _on_source_opened(self, event, payload):
         if event != SourceEvent.OPENED:
@@ -309,7 +324,7 @@ class SourceViewerHost(QWidget):
 
         # For all text/document formats, check reading_mode setting and dispatch to BookViewWidget if "book"
         text_formats = ("txt", "md", "html", "docx", "epub", "rtf", "doc", "pdf")
-        if source_type in text_formats and self._settings_service:
+        if source_type in text_formats and self._settings_service and not (payload.context or {}).get('source_anchor'):
             settings = self._settings_service.get_settings()
             if settings.reading_mode == "book":
                 # Route to BookViewWidget instead of the format-specific viewer
@@ -368,6 +383,25 @@ class SourceViewerHost(QWidget):
         return self._forward("reload_page", page_num)
 
     def jump_to_source(self, doc_name, quote):
+        """Jump to a quoted passage (chat bubbles, notes, search results).
+
+        Resolves the quote to one recorded passage off-thread and highlights
+        it exactly; only if that is impossible does it fall back to the old
+        name-and-text search.
+        """
+        navigator = self._quote_navigator()
+        hint = {"doc_name": doc_name}
+        fallback = lambda: self._legacy_jump(doc_name, quote)  # noqa: E731
+        if navigator is None or not navigator.navigate_quote(hint, quote, fallback):
+            fallback()
+
+    def _quote_navigator(self):
+        if getattr(self, "_navigator", None) is None and self._ctx is not None \
+                and getattr(self._ctx, "source_anchor_resolver", None) is not None:
+            self._navigator = ArtifactSourceNavigator(self._ctx, lambda _text: None, self)
+        return getattr(self, "_navigator", None)
+
+    def _legacy_jump(self, doc_name, quote):
         pm = getattr(self._ctx, "project_manager", None) if self._ctx else None
         source = None
         if pm and hasattr(pm, "list_sources"):
@@ -382,12 +416,53 @@ class SourceViewerHost(QWidget):
                     "quote": quote,
                     "source_id": (source or {}).get("id"),
                     "path": (source or {}).get("path"),
+                    # Tells built-in handlers to search, not re-resolve.
+                    "legacy_search": True,
                 },
                 self._ctx,
             )
             return
         # Last-resort fallback for a source_type with no registered handler.
         return self._forward("jump_to_source", doc_name, quote)
+
+    def navigate_to_target(self, target: dict) -> bool:
+        """Navigate to a resolved ``SourceNavigationTarget.to_dict()``.
+
+        The source comes from the target's ID/path, never a basename match,
+        and handlers receive the typed ``anchor`` so they can highlight the
+        recorded occurrence instead of searching for its text.
+        """
+        if not target or not target.get("navigable"):
+            return False
+        spans = target.get("spans") or []
+        quote = next((span.get("quote") for span in spans if span.get("quote")), "")
+        path = target.get("source_path") or ""
+        locator = {
+            "doc_name": os.path.basename(path),
+            "quote": quote,
+            "source_id": target.get("source_id"),
+            "path": path,
+            "anchor": target,
+        }
+        widget = getattr(self, '_viewers', {}).get(target.get('source_type'))
+        if callable(getattr(widget, 'show_anchor', None)):
+            self.bus.source_action_requested.emit(SourceIntent.OPEN, SourcePayload(
+                path=path, source_id=target.get('source_id'), source_type=target.get('source_type'),
+                context={'source_anchor': target}))
+            return True
+        registry = getattr(self._ctx, "plugin_extension_registry", None)
+        handler = registry.get_citation_source_handler(target.get("source_type") or "pdf") if registry else None
+        if handler:
+            handler.callback(locator, self._ctx)
+            return True
+        # No type-specific handler (e.g. CSV/XLSX): open the right source by
+        # ID rather than text-searching whatever viewer happens to be active.
+        self.bus.source_action_requested.emit(
+            SourceIntent.OPEN,
+            SourcePayload(path=path, source_id=target.get("source_id"),
+                          source_type=target.get("source_type")),
+        )
+        return True
 
     def jump_to_video(self, source_id=None, path=None, timestamp=0):
         self.bus.source_action_requested.emit(

@@ -9,6 +9,7 @@ import importlib.util
 from typing import List
 
 from core.models.extraction_models import DocumentBlock
+from core.services.extraction.formats._markup_text import element_content, is_publisher_furniture
 from core.services.extraction.formats._shared import (
     is_long_enough,
     make_provenance,
@@ -16,7 +17,7 @@ from core.services.extraction.formats._shared import (
 )
 
 _EXTRACTOR_NAME = "html_parser"
-_EXTRACTOR_VERSION = "1.0"
+_EXTRACTOR_VERSION = "1.1"
 _PARSER_PROVIDER = "html_parser"
 
 _HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
@@ -49,7 +50,11 @@ class HtmlParser:
         blocks: List[DocumentBlock] = []
         idx = 0
         for tag in soup.find_all(_TEXT_TAGS):
-            text = tag.get_text(" ", strip=True)
+            # A list item can contain paragraphs and nested list items. Emit
+            # its text once rather than duplicating every nested paragraph.
+            if any(getattr(p, "name", None) in _TEXT_TAGS for p in tag.parents):
+                continue
+            text, furniture, superscripts = element_content(tag)
             if not text or not is_long_enough(text):
                 continue
             is_heading = tag.name in _HEADING_TAGS
@@ -57,11 +62,14 @@ class HtmlParser:
                 block_id=f"{doc_id}_b{idx}",
                 doc_id=doc_id,
                 page_num=None,
-                block_type="heading" if is_heading else "paragraph",
+                block_type="boilerplate" if is_publisher_furniture(tag) else "heading" if is_heading else "paragraph",
                 exact_text=text,
                 normalized_text=normalize_text(text),
                 heading_level=int(tag.name[1]) if is_heading else None,
                 provenance=provenance,
+                furniture_spans=furniture,
+                has_superscript=bool(superscripts),
+                structure={"superscript_spans": superscripts},
             ))
             idx += 1
 

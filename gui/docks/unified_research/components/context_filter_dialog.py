@@ -7,7 +7,8 @@ from PySide6.QtCore import Qt
 from core.events.domains.document_events import DocumentEvent
 from core.events.domains.project_events import ProjectEvent
 from core.events.event_bus import EventBus
-from gui.utils.document_helpers import active_pdf_paths, prune_doc_names
+from gui.utils.document_helpers import active_pdf_paths, document_labels, prune_doc_names
+from core.engine.workflow_context import load_global_ai_settings
 
 class ContextFilterDialog(QDialog):
     def __init__(self, project_manager, current_docs, current_tags, current_logic, theme, parent=None,
@@ -22,16 +23,7 @@ class ContextFilterDialog(QDialog):
         self._plugin_source_checkboxes: dict = {}  # source_id -> QCheckBox
         
         # Load Universal Settings from Project Metadata
-        raw_settings = self.pm.get_metadata("global_ai_settings", "{}")
-        self.global_settings = json.loads(raw_settings) if raw_settings else {
-            "autopilot_enabled": False,
-            "rag_enabled": True,
-            "output_workspace": False,
-            "search_analyses": False,
-            "include_manifest": True,
-            "allow_manifest_updates": True,
-            "include_selected_nodes": False
-        }
+        self.global_settings = load_global_ai_settings(self.pm)
         
         self.selected_docs = prune_doc_names(self.pm, current_docs)
         self.selected_tags = current_tags
@@ -176,36 +168,37 @@ class ContextFilterDialog(QDialog):
             self._populate_documents()
 
     def _populate_documents(self):
-        checked_docs = {
-            self.list_docs.item(i).text()
-            for i in range(self.list_docs.count())
-            if self.list_docs.item(i).checkState() == Qt.CheckState.Checked
-        } if hasattr(self, "list_docs") else set()
-        selected = prune_doc_names(self.pm, checked_docs or self.selected_docs)
-        self.selected_docs = selected
+        checked_docs = self._checked_paths() if hasattr(self, "list_docs") else []
+        selected = set(prune_doc_names(self.pm, checked_docs or self.selected_docs))
+        self.selected_docs = list(selected)
 
         self.list_docs.clear()
-        for path in active_pdf_paths(self.pm):
-            doc_name = os.path.basename(path)
-            item = QListWidgetItem(doc_name)
+        paths = active_pdf_paths(self.pm)
+        labels = document_labels(paths)
+        for path in paths:
+            item = QListWidgetItem(labels[path])
+            item.setData(Qt.ItemDataRole.UserRole, path)          # paths are unique; file names are not
+            item.setToolTip(path)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(
                 Qt.CheckState.Checked
-                if doc_name in selected or not selected
+                if path in selected or not selected
                 else Qt.CheckState.Unchecked
             )
             self.list_docs.addItem(item)
 
+    def _checked_paths(self):
+        return [self.list_docs.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.list_docs.count())
+                if self.list_docs.item(i).checkState() == Qt.CheckState.Checked]
+
     def _on_autopilot_toggled(self, checked):
-        """Disables and unchecks manual options to visually indicate AI control."""
+        """Disable manual controls while preserving their permission fallbacks."""
         targets = [
             self.chk_rag, self.chk_workspace, self.chk_analyses,
             self.chk_include_manifest, self.chk_allow_manifest_updates, self.chk_include_selected_nodes
         ]
         for chk in targets:
             chk.setEnabled(not checked)
-            if checked:
-                chk.setChecked(False)
 
     def _set_all(self, list_widget, state):
         for i in range(list_widget.count()):
@@ -231,7 +224,7 @@ class ContextFilterDialog(QDialog):
         self.accept()
 
     def get_results(self):
-        docs = [self.list_docs.item(i).text() for i in range(self.list_docs.count()) if self.list_docs.item(i).checkState() == Qt.CheckState.Checked]
+        docs = self._checked_paths()
         tags = [self.list_tags.item(i).text() for i in range(self.list_tags.count()) if self.list_tags.item(i).checkState() == Qt.CheckState.Checked]
         logic = "OR" if self.btn_or.isChecked() else "AND"
         return docs, tags, logic

@@ -1,6 +1,17 @@
 # gui/components/process_monitor.py
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame, QScrollArea, QSizePolicy
-from PySide6.QtCore import Qt, QPoint
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame, QScrollArea,
+                               QSizePolicy, QProgressBar)
+from PySide6.QtCore import Qt, QPoint, QTimer
+from collections import Counter
+
+from core.engine.process_manager import WAITING_FOR_MEMORY
+from core.events.domains.memory_events import MemoryEvent, MemoryIntent
+from gui.components.dialogs.memory_tab import open_memory_panel, request_memory
+
+PRESSURE_COLORS = {"normal": "success", "elevated": "warning", "critical": "error"}
+# Hundreds of queued jobs (a bulk import) must not mean hundreds of widgets rebuilt per change.
+MAX_QUEUED_SHOWN = 30
+REBUILD_DELAY_MS = 200
 
 class ProcessMonitorPopup(QFrame):
     def __init__(self, registry, theme, app_context=None, parent=None):
@@ -27,14 +38,71 @@ class ProcessMonitorPopup(QFrame):
         self.content_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.scroll.setWidget(self.content)
         
+        self.layout.addWidget(self._memory_header())
         self.layout.addWidget(self.scroll)
         
-        # Hooks
-        self.registry.job_added.connect(self.rebuild_ui)
-        self.registry.job_updated.connect(self.rebuild_ui)
-        self.registry.job_removed.connect(self.rebuild_ui)
-        self.registry.queue_updated.connect(self.rebuild_ui)
+        # Hooks: changes arrive in bursts; rebuild once they pause, and only while visible.
+        self._rebuild_timer = QTimer(self)
+        self._rebuild_timer.setSingleShot(True)
+        self._rebuild_timer.setInterval(REBUILD_DELAY_MS)
+        self._rebuild_timer.timeout.connect(self._rebuild_if_visible)
+        for signal in (self.registry.job_added, self.registry.job_updated,
+                       self.registry.job_removed, self.registry.queue_updated):
+            signal.connect(self.schedule_rebuild)
         self.apply_theme()
+
+    def schedule_rebuild(self, *_):
+        self._rebuild_timer.start()
+
+    def _rebuild_if_visible(self):
+        if self.isVisible():
+            self.rebuild_ui()
+
+    def _memory_header(self):
+        """Memory at a glance, linked to the full panel (Settings → Memory)."""
+        header = QWidget()
+        lay = QVBoxLayout(header)
+        lay.setContentsMargins(0, 0, 0, 4)
+        row = QHBoxLayout()
+        self.memory_label = QLabel("Memory: measuring…")
+        self.memory_button = QPushButton("Open memory panel")
+        self.memory_button.clicked.connect(self._open_memory_panel)
+        row.addWidget(self.memory_label, 1)
+        row.addWidget(self.memory_button)
+        self.memory_bar = QProgressBar()
+        self.memory_bar.setRange(0, 100)
+        self.memory_bar.setTextVisible(False)
+        self.memory_bar.setFixedHeight(8)
+        lay.addLayout(row)
+        lay.addWidget(self.memory_bar)
+        return header
+
+    def set_memory(self, snapshot):
+        if not snapshot or not snapshot.total:
+            return
+        gb = 1024 ** 3
+        top = max((c for c in snapshot.consumers if c.bytes), key=lambda c: c.bytes, default=None)
+        self.memory_label.setText(
+            f"Memory {snapshot.used / gb:.1f} / {snapshot.total / gb:.1f} GB · {snapshot.pressure}"
+            + (f" · largest: {top.label}" if top else ""))
+        self.memory_bar.setValue(int(snapshot.used_fraction * 100))
+        if self.theme:
+            color = self.theme.get(PRESSURE_COLORS.get(snapshot.pressure, "success"), "#4CAF50")
+            self.memory_bar.setStyleSheet(
+                f"QProgressBar {{ background: {self.theme.get('bg_input', '#333')}; border: none; border-radius: 4px; }}"
+                f"QProgressBar::chunk {{ background: {color}; border-radius: 4px; }}")
+
+    def _open_memory_panel(self):
+        self.hide()
+        open_memory_panel(self._ctx, self.parent())
+
+    def showEvent(self, event):
+        request_memory(self._ctx, MemoryIntent.SET_SAMPLING, fast=True)
+        super().showEvent(event)
+
+    def hideEvent(self, event):
+        request_memory(self._ctx, MemoryIntent.SET_SAMPLING, fast=False)
+        super().hideEvent(event)
 
     def apply_theme(self):
         if not self.theme: return
@@ -54,7 +122,7 @@ class ProcessMonitorPopup(QFrame):
                 
         active = self.registry.active_job
         express = getattr(self.registry, "express_jobs", [])
-        queue = self.registry.pending_queue
+        queue = self.registry.pending_queue + list(getattr(self.registry, "express_waiting", []))
         recent = getattr(self.registry, "recent_jobs", [])
         
         if not active and not express and not queue and not recent:
@@ -86,8 +154,10 @@ class ProcessMonitorPopup(QFrame):
             if self.theme: lbl_q.setStyleSheet(f"color: {self.theme.get('text_main', '#fff')};")
             self.content_layout.addWidget(lbl_q)
             
-            for idx, job in enumerate(queue):
+            for idx, job in enumerate(queue[:MAX_QUEUED_SHOWN]):
                 self.content_layout.addWidget(self._create_job_widget(job, is_active=False, idx=idx, total=len(queue)))
+            if len(queue) > MAX_QUEUED_SHOWN:
+                self.content_layout.addWidget(self._more_label(queue[MAX_QUEUED_SHOWN:]))
 
         if recent:
             sep = QFrame()
@@ -100,6 +170,16 @@ class ProcessMonitorPopup(QFrame):
             self.content_layout.addWidget(lbl_recent)
             for job in recent:
                 self.content_layout.addWidget(self._create_job_widget(job, is_active=False, is_recent=True))
+
+    def _more_label(self, jobs):
+        kinds = Counter(str(job.name).split(":")[0].split(" — ")[0].strip() for job in jobs)
+        detail = ", ".join(f"{count} {name}" for name, count in kinds.most_common(4))
+        label = QLabel(f"… and {len(jobs):,} more queued ({detail}). They run in order; cancel a source's work "
+                       "from Intelligence → Processing.")
+        label.setWordWrap(True)
+        if self.theme:
+            label.setStyleSheet(f"color: {self.theme.get('text_muted', '#aaa')};")
+        return label
 
     def _create_job_widget(self, job, is_active=False, idx=0, total=0, is_recent=False):
         w = QWidget()
@@ -144,6 +224,12 @@ class ProcessMonitorPopup(QFrame):
             btn_trace = PromptTraceButton(trace_id=trace_id, trace_record=trace_record, app_context=self._ctx, theme=self.theme, parent=w)
             lyt.addWidget(btn_trace)
             
+        if getattr(job, "status", "") == WAITING_FOR_MEMORY:
+            btn_run = QPushButton("Run anyway")
+            btn_run.setToolTip("Start now even though memory is short")
+            btn_run.clicked.connect(lambda _, j=job.id: self.registry.run_anyway(j))
+            lyt.addWidget(btn_run)
+
         if not is_recent:
             btn_stop = QPushButton("✖")
             btn_stop.setFixedSize(24, 24)
@@ -164,9 +250,17 @@ class ProcessMonitorWidget(QPushButton):
         self.setObjectName("ProcessTrackerDropdown")
         self.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
 
-        self.registry.job_added.connect(self._update_ui)
-        self.registry.job_removed.connect(self._update_ui)
-        self.registry.queue_updated.connect(self._update_ui)
+        self._update_timer = QTimer(self)
+        self._update_timer.setSingleShot(True)
+        self._update_timer.setInterval(REBUILD_DELAY_MS)
+        self._update_timer.timeout.connect(self._update_ui)
+        for signal in (self.registry.job_added, self.registry.job_removed, self.registry.queue_updated):
+            signal.connect(self._update_timer.start)
+        self._snapshot = None
+        self._styled_busy = None
+        bus = getattr(app_context, "bus", None)
+        if bus is not None:
+            bus.memory_state_changed.connect(self._on_memory, Qt.ConnectionType.QueuedConnection)
 
         self.popup = ProcessMonitorPopup(registry, theme, app_context=app_context, parent=parent or self.window())
         self.clicked.connect(self._toggle_popup)
@@ -176,17 +270,35 @@ class ProcessMonitorWidget(QPushButton):
         self.theme = theme
         self.popup.theme = theme
         self.popup.apply_theme()
+        self._styled_busy = None
         self._update_ui()
+
+    def _on_memory(self, event, payload):
+        if event in (MemoryEvent.SNAPSHOT, MemoryEvent.PRESSURE_CHANGED) and payload.snapshot:
+            self._snapshot = payload.snapshot
+            self.popup.set_memory(payload.snapshot)
+            self._update_ui()
+
+    def _memory_suffix(self):
+        snapshot = self._snapshot
+        if not snapshot or not snapshot.total:
+            return ""
+        marker = {"elevated": " ⚠", "critical": " ⛔"}.get(snapshot.pressure, "")
+        return f" · {int(snapshot.used_fraction * 100)}% RAM{marker}"
 
     def _update_ui(self):
         active = 1 if self.registry.active_job else 0
         express = len(getattr(self.registry, "express_jobs", []))
-        queued = len(self.registry.pending_queue)
+        queued = len(self.registry.pending_queue) + len(getattr(self.registry, "express_waiting", []))
         total = active + express + queued
+        self.setToolTip("Background processes and memory — click for details")
         
+        busy = total > 0
+        restyle = busy != self._styled_busy       # restyling re-polishes the widget: only on a change
+        self._styled_busy = busy
         if total == 0:
-            self.setText("🟢 Idle")
-            self.setStyleSheet(f"""
+            self.setText("🟢 Idle" + self._memory_suffix())
+            if restyle: self.setStyleSheet(f"""
                 QPushButton#ProcessTrackerDropdown {{
                     background-color: transparent;
                     color: {self.theme.get('success', '#4CAF50') if self.theme else '#4CAF50'};
@@ -200,8 +312,8 @@ class ProcessMonitorWidget(QPushButton):
             running = active + express
             txt = f"🔴 {running} Running"
             if queued > 0: txt += f" ({queued} Queued)"
-            self.setText(txt)
-            self.setStyleSheet(f"""
+            self.setText(txt + self._memory_suffix())
+            if restyle: self.setStyleSheet(f"""
                 QPushButton#ProcessTrackerDropdown {{
                     background-color: {self.theme.get('error', '#ff4444') if self.theme else '#ff4444'};
                     color: white; font-weight: bold;

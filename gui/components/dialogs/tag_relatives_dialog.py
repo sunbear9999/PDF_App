@@ -1,6 +1,7 @@
 import os
+from html import escape
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-                             QPushButton, QScrollArea, QWidget, QFrame, QInputDialog, QMessageBox, QSizePolicy) 
+                             QPushButton, QScrollArea, QWidget, QFrame, QMessageBox, QSizePolicy)
 from PySide6.QtCore import Qt, QTimer
 from core.events.event_bus import EventBus
 from core.events.domains.document_events import AnnotationIntent, AnnotationPayload, DocumentIntent, DocumentPayload
@@ -53,11 +54,11 @@ class AIResultsDialog(QDialog):
         """)
         b_layout = QVBoxLayout(bubble)
 
-        header = QLabel(f"📄 <b>{match['doc_name']}</b> (Page {match['page'] + 1})")
+        header = QLabel(f"📄 <b>{escape(str(match['doc_name']))}</b> (Page {match['page'] + 1})")
         header.setStyleSheet("border: none; background: transparent;")
         b_layout.addWidget(header)
 
-        text_lbl = QLabel(f"<i>\"{match['text']}\"</i>")
+        text_lbl = QLabel(f"<i>\"{escape(str(match['text']))}\"</i>")
         text_lbl.setWordWrap(True)
         text_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum) 
         text_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -72,7 +73,7 @@ class AIResultsDialog(QDialog):
         btn_jump.setStyleSheet("background-color: #444; color: white; border: none; padding: 6px 12px; border-radius: 4px;")
         btn_jump.clicked.connect(lambda _, m=match: self._jump_to_match(m))
 
-        btn_save = QPushButton("🖍️ Highlight & Note")
+        btn_save = QPushButton("Save linked note…")
         btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_save.setStyleSheet(f"background-color: {theme.get('accent', '#0078D7')}; color: white; border: none; padding: 6px 12px; border-radius: 4px;")
         btn_save.clicked.connect(lambda _, m=match: self._save_as_note(m))
@@ -80,10 +81,17 @@ class AIResultsDialog(QDialog):
         btn_layout.addWidget(btn_jump)
         btn_layout.addWidget(btn_save)
         b_layout.addLayout(btn_layout)
+        if match.get("artifact_id"):
+            from gui.components.artifact_reference import ArtifactReferenceWidget
+            reference = ArtifactReferenceWidget(self._ctx, match, bubble)
+            b_layout.addWidget(reference)
+            btn_jump.hide()
 
         self.content_layout.addWidget(bubble)
 
     def _jump_to_match(self, match):
+        if match.get("artifact_id"):
+            return  # Artifact-backed controls above own exact navigation.
         pm = getattr(self._ctx, 'project_manager', None) if self._ctx else None
         pdf_path = next((p for p in active_pdf_paths(pm) if os.path.basename(p) == match['doc_name']), None) if pm else None
         if not pdf_path:
@@ -103,22 +111,5 @@ class AIResultsDialog(QDialog):
         )
 
     def _save_as_note(self, match):
-        note, ok = QInputDialog.getText(self, "Save Note", "Enter a note for this highlight:")
-        if not ok: return
-
-        pm = getattr(self._ctx, 'project_manager', None) if self._ctx else None
-        pdf_path = next((p for p in active_pdf_paths(pm) if os.path.basename(p) == match['doc_name']), None) if pm else None
-        if not pdf_path:
-            QMessageBox.warning(self, "Error", "Document not found in project.")
-            return
-
-        self.bus.document_action_requested.emit(
-            DocumentIntent.CREATE_HIGHLIGHT_FROM_TEXT,
-            DocumentPayload(
-                path=pdf_path,
-                page_num=match["page"],
-                text=match["text"],
-                note=note,
-                color=(0.7, 0.4, 1.0),
-            ),
-        )
+        from gui.components.dialogs.reference_note_dialog import open_reference_note
+        open_reference_note(self._ctx, {**match, "quote": match.get("text", "")}, parent=self)

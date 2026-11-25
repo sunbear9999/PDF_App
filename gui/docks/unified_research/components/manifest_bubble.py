@@ -157,6 +157,45 @@ class ManifestUpdateWidget(QFrame):
         )
 
 
+class ManifestUpdateStatusWidget(QFrame):
+    """Compact final state for a manifest attempt that made no mutation."""
+
+    def __init__(self, status, text, detail="", theme=None, parent=None):
+        super().__init__(parent)
+        self.status = status
+        self.theme = theme or {}
+        self.setObjectName("ManifestUpdateStatus")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(3)
+
+        failed = self.status == "failed"
+        icon = "✕" if failed else "ⓘ"
+        self.lbl_header = QLabel(f"<b>{icon} {text}</b>")
+        layout.addWidget(self.lbl_header)
+        self.lbl_detail = None
+        if detail:
+            self.lbl_detail = QLabel(detail)
+            self.lbl_detail.setWordWrap(True)
+            layout.addWidget(self.lbl_detail)
+        self.update_theme(self.theme)
+
+    def update_theme(self, theme):
+        self.theme = theme or {}
+        failed = self.status == "failed"
+        color = self.theme.get("error", "#ff6666") if failed else self.theme.get("accent", "#b366ff")
+        self.lbl_header.setStyleSheet(f"color: {color};")
+        if self.lbl_detail:
+            self.lbl_detail.setStyleSheet(
+                f"color: {self.theme.get('text_muted', '#aaa')}; font-size: 11px;"
+            )
+        self.setStyleSheet(
+            f"QFrame#ManifestUpdateStatus {{ background-color: {self.theme.get('bg_input', '#2b2b2b')}; "
+            f"border: 1px solid {self.theme.get('border', '#444')}; border-left: 4px solid {color}; "
+            "border-radius: 6px; margin-top: 6px; margin-bottom: 6px; }"
+        )
+
+
 class ProjectBriefDialog(QDialog):
     """The main interactive editor dialog for the Project Manifest."""
     def __init__(self, pm, theme, parent=None):

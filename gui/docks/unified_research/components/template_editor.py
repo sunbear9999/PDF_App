@@ -1,33 +1,81 @@
 import json
-from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton,
+from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
                              QLabel, QLineEdit, QTextEdit, QWidget,
-                             QMessageBox, QListWidget, QCheckBox, QListWidgetItem, QSpinBox, QGroupBox)
+                             QMessageBox, QListWidget, QCheckBox, QListWidgetItem, QGroupBox, QTabWidget, QScrollArea)
 from PySide6.QtCore import Qt
 from gui.managers.dialog_manager import exec_as_modal, get_for_widget
 from gui.base.forms import SchemaFormBuilder
+from gui.components.analysis_prerequisites_editor import AnalysisPrerequisitesEditor
+from gui.components.analysis_template_limits import AnalysisTemplateLimits
 from core.models.ontology_model import EntityType
-from core.ontology.registry import OntologyRegistry, RelationTrait
+from core.ontology.registry import RelationTrait
+from core.registries.analysis_mode_registry import AnalysisModeRegistry
+from core.models.analysis_requirements import describe_missing
+from core.models.analysis_roles import analysis_entity_type
+from core.models.analysis_relations import canonical_relation
 
 class TemplateEditorDialog(QDialog):
-    def __init__(self, project_manager, theme=None, parent=None, deterministic_pass_registry=None):
+    def __init__(self, app_context, parent=None):
         super().__init__(parent)
-        self.pm = project_manager
-        self.theme = theme
-        self.deterministic_pass_registry = deterministic_pass_registry
+        self.ctx = app_context
+        self.pm = app_context.project_manager
+        self.theme = getattr(parent, 'theme', None)
+        self.deterministic_pass_registry = getattr(app_context, 'deterministic_pass_registry', None)
         self.setWindowTitle("Analysis Modes Builder")
-        self.resize(920, 640)
+        self.resize(1000, 760)
         self.templates = self.pm.get_analysis_templates()
         self.current_template_id = None
-        self.registry = OntologyRegistry()
+        self.modes = getattr(app_context, 'analysis_mode_registry', None) or AnalysisModeRegistry()
+        self.compiler = self.modes.compiler
+        self.registry = self.compiler.ontology
         self._det_pass_forms = {}
 
         self._build_ui()
         self._load_template_list()
         self._apply_theme()
+        self._update_contract_preview()
+        self._project_signal = getattr(getattr(app_context, 'bus', None), 'project_clearing_started', None)
+        if self._project_signal is not None:
+            self._project_signal.connect(self.close)
 
     def _build_ui(self):
         main_layout = QHBoxLayout(self)
-        
+        self._build_sidebar(main_layout)
+        right_panel = QVBoxLayout()
+        self._build_goal_fields(right_panel)
+        self.options_tabs = QTabWidget(self)
+        graph, legacy = QWidget(self), QWidget(self)
+        graph_layout, legacy_layout = QVBoxLayout(graph), QVBoxLayout(legacy)
+        self._build_quote_controls(graph_layout)
+        self._build_vocabulary(graph_layout)
+        graph_layout.addStretch()
+        self.prerequisites = AnalysisPrerequisitesEditor(self.ctx, self)
+        self._add_option_tab(graph, 'Graph and evidence')
+        self._add_option_tab(self.prerequisites, 'Required intelligence')
+        legacy_layout.addWidget(self.limits_editor.legacy_panel)
+        legacy_layout.addWidget(self.allow_text_nodes)
+        self._build_pass_controls(legacy_layout)
+        legacy_layout.addStretch()
+        self._add_option_tab(legacy, 'Legacy workflows')
+        right_panel.addWidget(self.options_tabs, 1)
+        self.validation_label = QLabel(self)
+        self.validation_label.setWordWrap(True)
+        self.validation_label.setProperty('help_topic', 'core.analysis.custom_templates')
+        right_panel.addWidget(self.validation_label)
+        self.prerequisites.changed.connect(self._update_contract_preview)
+        self.limits_editor.changed.connect(self._update_contract_preview)
+        self.inst_input.textChanged.connect(self._update_contract_preview)
+        self.prerequisites.load({})
+        self._build_save_controls(right_panel)
+        main_layout.addLayout(right_panel, 1)
+
+    def _add_option_tab(self, widget, title):
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(widget)
+        self.options_tabs.addTab(scroll, title)
+
+    def _build_sidebar(self, main_layout):
         # --- Left Sidebar: List of Templates ---
         left_panel = QVBoxLayout()
         self.list_widget = QListWidget()
@@ -35,52 +83,43 @@ class TemplateEditorDialog(QDialog):
         self.list_widget.itemClicked.connect(self._on_template_selected)
         left_panel.addWidget(QLabel("<b>Saved Modes</b>"))
         left_panel.addWidget(self.list_widget)
-        
+
         btn_new = QPushButton("➕ Create New Mode")
         btn_new.clicked.connect(self._create_new)
         left_panel.addWidget(btn_new)
         main_layout.addLayout(left_panel)
-        
-        # --- Right Panel: Visual Editor ---
-        right_panel = QVBoxLayout()
-        
+
+    def _build_goal_fields(self, right_panel):
         # Title & Instructions
         right_panel.addWidget(QLabel("<b>Mode Title:</b>"))
         self.title_input = QLineEdit()
         right_panel.addWidget(self.title_input)
 
         help_label = QLabel(
-            "Describe the analysis goal, choose the graph node/link types, and set quote limits. "
-            "The app automatically runs: quote selection per section, evidence synthesis, then registry-driven graph generation."
+            "Choose the graph vocabulary and describe the goal. Source artifacts form "
+            "a grounded baseline; the model may suggest bounded text and connection "
+            "changes. Missing coverage stays visible as a partial analysis."
         )
         help_label.setWordWrap(True)
         right_panel.addWidget(help_label)
-        
+
         right_panel.addWidget(QLabel("<b>Analysis Goal:</b>"))
         self.inst_input = QTextEdit()
-        self.inst_input.setFixedHeight(95)
+        self.inst_input.setFixedHeight(70)
         self.inst_input.setPlaceholderText("Example: Diagram the connections between people throughout this paper.")
         right_panel.addWidget(self.inst_input)
 
-        limits_box = QGroupBox("Quote Selection Limits")
-        limits_layout = QGridLayout(limits_box)
-        self.quotes_per_chunk = self._spin(1, 12, 5)
-        self.quote_words = self._spin(4, 30, 10)
-        self.max_quote_words = self._spin(6, 40, 18)
-        self.explanation_words = self._spin(4, 30, 10)
-        limits_layout.addWidget(QLabel("Quotes per section"), 0, 0)
-        limits_layout.addWidget(self.quotes_per_chunk, 0, 1)
-        limits_layout.addWidget(QLabel("Target quote words"), 0, 2)
-        limits_layout.addWidget(self.quote_words, 0, 3)
-        limits_layout.addWidget(QLabel("Max quote words"), 1, 0)
-        limits_layout.addWidget(self.max_quote_words, 1, 1)
-        limits_layout.addWidget(QLabel("Explanation words"), 1, 2)
-        limits_layout.addWidget(self.explanation_words, 1, 3)
-        btn_prompts = QPushButton("Advanced: Edit Shared Prompts")
+    def _build_quote_controls(self, right_panel):
+        self.limits_editor = AnalysisTemplateLimits(self.ctx, self)
+        for name in ('quotes_per_chunk', 'quote_words', 'max_quote_words', 'explanation_words',
+                     'max_sections', 'max_analysis_quotes'):
+            setattr(self, name, getattr(self.limits_editor, name))
+        right_panel.addWidget(self.limits_editor)
+        btn_prompts = QPushButton('Advanced: Edit Shared Prompts', self)
         btn_prompts.clicked.connect(self._open_prompt_manager)
-        limits_layout.addWidget(btn_prompts, 0, 4, 2, 1)
-        right_panel.addWidget(limits_box)
+        right_panel.addWidget(btn_prompts)
 
+    def _build_vocabulary(self, right_panel):
         graph_row = QHBoxLayout()
         graph_col_nodes = QVBoxLayout()
         graph_col_rels = QVBoxLayout()
@@ -88,9 +127,8 @@ class TemplateEditorDialog(QDialog):
         self.node_type_list = QListWidget()
         self.node_type_list.setMinimumHeight(110)
         graph_col_nodes.addWidget(self.node_type_list)
-        self.allow_text_nodes = QCheckBox("Allow fallback text nodes")
+        self.allow_text_nodes = QCheckBox("Legacy workflow: allow fallback text nodes")
         self.allow_text_nodes.setChecked(False)
-        graph_col_nodes.addWidget(self.allow_text_nodes)
         graph_col_rels.addWidget(QLabel("<b>Final graph connection types:</b>"))
         self.relation_type_list = QListWidget()
         self.relation_type_list.setMinimumHeight(110)
@@ -99,14 +137,17 @@ class TemplateEditorDialog(QDialog):
         graph_row.addLayout(graph_col_rels, 1)
         right_panel.addLayout(graph_row)
         self._populate_registry_lists()
+        self.node_type_list.itemChanged.connect(self._update_contract_preview)
+        self.relation_type_list.itemChanged.connect(self._update_contract_preview)
 
+    def _build_pass_controls(self, right_panel):
         # Deterministic pre-filter passes: no-LLM ranking/filtering run before each
         # chunk's evidence-extraction call — see DeterministicPassRegistry.
-        self.det_pass_box = QGroupBox("Deterministic Pre-Filter Passes")
+        self.det_pass_box = QGroupBox("Legacy Chunk Workflow Pre-Filters")
         det_pass_layout = QVBoxLayout(self.det_pass_box)
         det_pass_layout.addWidget(QLabel(
-            "Enable no-LLM passes that pre-rank each chunk's text before the evidence-extraction "
-            "call, so the model only sees the most relevant content. Check a pass to configure it."
+            "These settings apply to legacy chunk workflows. Artifact analysis uses shared "
+            "focus filtering and canonical classifications instead."
         ))
         self.det_pass_list = QListWidget()
         self.det_pass_list.setMaximumHeight(90)
@@ -120,22 +161,15 @@ class TemplateEditorDialog(QDialog):
         right_panel.addWidget(self.det_pass_box)
         self.det_pass_box.setVisible(self.deterministic_pass_registry is not None)
 
+    def _build_save_controls(self, right_panel):
         # Save Area
         save_layout = QHBoxLayout()
         save_layout.addStretch()
-        btn_save = QPushButton("💾 Save Mode")
+        btn_save = self.btn_save = QPushButton("💾 Save Mode")
         btn_save.setFixedSize(120, 35)
         btn_save.clicked.connect(self._save_current)
         save_layout.addWidget(btn_save)
         right_panel.addLayout(save_layout)
-        
-        main_layout.addLayout(right_panel)
-
-    def _spin(self, minimum, maximum, value):
-        spin = QSpinBox()
-        spin.setRange(minimum, maximum)
-        spin.setValue(value)
-        return spin
 
     def _populate_registry_lists(self):
         for bp in self.registry.all_entities():
@@ -162,10 +196,8 @@ class TemplateEditorDialog(QDialog):
     def _clear_editor(self):
         self.title_input.clear()
         self.inst_input.clear()
-        self.quotes_per_chunk.setValue(5)
-        self.quote_words.setValue(10)
-        self.max_quote_words.setValue(18)
-        self.explanation_words.setValue(10)
+        self.limits_editor.load({})
+        self.prerequisites.load({})
         self._set_checked_types(self.node_type_list, {EntityType.CLAIM.value, EntityType.REASONING.value, EntityType.QUOTE.value})
         self._set_checked_types(self.relation_type_list, self._default_argument_relation_types())
         self.allow_text_nodes.setChecked(False)
@@ -256,71 +288,29 @@ class TemplateEditorDialog(QDialog):
         idx = self.list_widget.row(item)
         template = self.templates[idx]
         self.current_template_id = template.get("id")
-        
+
         self._clear_editor()
         self.title_input.setText(template.get("title", ""))
         self.inst_input.setText(template.get("instructions", ""))
-        limits = template.get("limits") if isinstance(template.get("limits"), dict) else {}
-        self.quotes_per_chunk.setValue(int(limits.get("max_quotes_per_chunk", 5) or 5))
-        self.quote_words.setValue(int(limits.get("quote_words", 10) or 10))
-        self.max_quote_words.setValue(int(limits.get("max_quote_words", 18) or 18))
-        self.explanation_words.setValue(int(limits.get("explanation_words", 10) or 10))
+        self.limits_editor.load(template)
+        self.prerequisites.load(template)
         self._set_checked_types(self.node_type_list, set(template.get("node_types") or []))
         self._set_checked_types(self.relation_type_list, set(template.get("relation_types") or []))
         self.allow_text_nodes.setChecked(bool(template.get("allow_text_nodes", True)))
         self._set_checked_det_passes(template.get("deterministic_passes") or [])
+        self._update_contract_preview()
 
     def _save_current(self):
         title = self.title_input.text().strip()
         if not title: return QMessageBox.warning(self, "Error", "Title cannot be empty.")
         instructions = self.inst_input.toPlainText().strip()
-        compiled_schema = {
-            "analysis_goal": instructions,
-            "chunk_stage": "Select short verbatim quotes and short relevance notes for this goal.",
-            "synthesis_stage": "Synthesize numbered quotes into one connected analysis plan.",
-            "graph_stage": "Use selected registry node and relation types for final graph output.",
-            "quote_selection_limits": {
-                "quotes_per_section": self.quotes_per_chunk.value(),
-                "target_quote_words": self.quote_words.value(),
-                "max_quote_words": self.max_quote_words.value(),
-                "explanation_words": self.explanation_words.value(),
-            },
-        }
-
-        schema_str = json.dumps(compiled_schema, indent=2)
-        
-        template_data = {
-            "id": self.current_template_id or f"tmpl_{title.replace(' ', '_').lower()}",
-            "title": title,
-            "instructions": instructions,
-            "schema": schema_str,
-            "node_types": self._checked_types(self.node_type_list),
-            "relation_types": self._checked_types(self.relation_type_list),
-            "allow_text_nodes": self.allow_text_nodes.isChecked(),
-            "chunk_prompt_key": "Graph Analysis Chunk Observations System",
-            "synthesis_prompt_key": "Graph Analysis Synthesis System",
-            "master_prompt_key": "Graph Analysis Master System",
-            "chunk_query_prompt_key": "Graph Analysis Chunk Observations Query",
-            "synthesis_query_prompt_key": "Graph Analysis Synthesis Query",
-            "master_query_prompt_key": "Graph Analysis Master Query",
-            "analysis_template_version": 12,
-            "limits": {
-                "chunk_pages": 4,
-                "max_chunk_chars": 14000,
-                "max_master_chars": 36000,
-                "num_ctx": 24576,
-                "chunk_num_predict": 1400,
-                "synthesis_num_predict": 3500,
-                "master_num_predict": 4000,
-                "max_entities_per_chunk": 12,
-                "max_relations_per_chunk": 16,
-                "max_quotes_per_chunk": self.quotes_per_chunk.value(),
-                "quote_words": self.quote_words.value(),
-                "max_quote_words": self.max_quote_words.value(),
-                "explanation_words": self.explanation_words.value(),
-            },
-            "deterministic_passes": self._collect_det_passes(),
-        }
+        try:
+            contract = self._selection_contract()
+            self._selection_spec(contract)
+        except ValueError as exc:
+            self.validation_label.setText(str(exc))
+            return
+        template_data = self._template_data(title, instructions, contract)
 
         if self.current_template_id:
             for i, t in enumerate(self.templates):
@@ -334,6 +324,26 @@ class TemplateEditorDialog(QDialog):
         self._load_template_list()
         QMessageBox.information(self, "Saved", "Analysis Mode saved successfully!")
         self.accept()
+
+    def _template_data(self, title, instructions, contract):
+        previous = self._selected_template()
+        return {
+            **dict(chunk_prompt_key='Graph Analysis Chunk Observations System',
+                   synthesis_prompt_key='Graph Analysis Synthesis System', master_prompt_key='Graph Analysis Master System',
+                   chunk_query_prompt_key='Graph Analysis Chunk Observations Query',
+                   synthesis_query_prompt_key='Graph Analysis Synthesis Query', master_query_prompt_key='Graph Analysis Master Query'),
+            **previous,
+            'id': self.current_template_id or f"tmpl_{title.replace(' ', '_').lower()}",
+            'title': title, 'instructions': instructions,
+            'schema': json.dumps(contract, indent=2), 'graph_contract': contract,
+            'node_types': self._checked_types(self.node_type_list),
+            'relation_types': self._checked_types(self.relation_type_list),
+            'allow_text_nodes': self.allow_text_nodes.isChecked(),
+            'analysis_template_version': 15,
+            'limits': self.limits_editor.legacy_values(previous),
+            'deterministic_passes': self._collect_det_passes(),
+            **self.prerequisites.value(),
+        }
 
     def _checked_types(self, list_widget):
         values = []
@@ -358,19 +368,70 @@ class TemplateEditorDialog(QDialog):
         return any(self.registry.validate_relation(bp.type_key, src, tgt) for src in node_types for tgt in node_types)
 
     def _set_checked_types(self, list_widget, selected):
-        selected = set(selected or [])
+        selected = {analysis_entity_type(value) if list_widget is self.node_type_list
+                    else f'relation.{canonical_relation(value)}' for value in selected or []}
+        known = {list_widget.item(i).data(Qt.ItemDataRole.UserRole) for i in range(list_widget.count())}
+        for value in sorted(selected - known):
+            item = QListWidgetItem(f'Unavailable: {value}')
+            item.setData(Qt.ItemDataRole.UserRole, value)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setToolTip('Uncheck this type and choose a registered replacement, or restore its plugin.')
+            list_widget.addItem(item)
         for idx in range(list_widget.count()):
             item = list_widget.item(idx)
             item.setCheckState(Qt.CheckState.Checked if item.data(Qt.ItemDataRole.UserRole) in selected else Qt.CheckState.Unchecked)
 
+    def _selection_contract(self):
+        nodes = self._checked_types(self.node_type_list)
+        relations = self._checked_types(self.relation_type_list)
+        if not nodes or not relations:
+            raise ValueError('Choose at least one node type and one connection type.')
+        base = dict(self._selected_template().get('graph_contract') or {})
+        goal = self.inst_input.toPlainText().strip()
+        base.update(purpose=goal, custom_instructions=goal)
+        base['evidence_selection'] = self.limits_editor.selection()
+        return self.compiler.compile(base, template={'node_types': nodes, 'relation_types': relations,
+                                                     'instructions': goal})
+
+    def _selected_template(self):
+        return next((template for template in self.templates
+                     if template.get('id') == self.current_template_id), {})
+
+    def _selection_spec(self, contract):
+        template = self._template_data(self.title_input.text().strip() or 'Preview',
+                                       self.inst_input.toPlainText().strip(), contract)
+        return self.modes.validate(self.modes.saved_template_spec(template))
+
+    def _update_contract_preview(self, *_):
+        if not hasattr(self, 'btn_save'):
+            return
+        try:
+            contract = self._selection_contract()
+            spec = self._selection_spec(contract)
+            stages = ', '.join(stage.replace('_', ' ') for stage in spec.required_stages) or 'no automatic passes'
+            requirements = describe_missing([{'kind': 'artifact_types', **group} for group in spec.artifact_requirements]) or 'No required artifact groups.'
+            self.validation_label.setText(
+                f"Vocabulary checked: {len(contract['node_types'])} node types and "
+                f"{len(contract['relation_types'])} connection types. Coverage depends on source artifacts; "
+                f'new connections remain suggestions. Prepares: {stages}. {requirements}')
+            self.btn_save.setEnabled(True)
+        except ValueError as exc:
+            self.validation_label.setText(str(exc))
+            self.btn_save.setEnabled(False)
+
+    def closeEvent(self, event):
+        self.prerequisites.shutdown()
+        if self._project_signal is not None:
+            self._project_signal.disconnect(self.close)
+            self._project_signal = None
+        super().closeEvent(event)
+
     def _open_prompt_manager(self):
-        parent = self.parent()
-        while parent and not hasattr(parent, "prompt_manager"):
-            parent = parent.parent()
-        if not parent:
-            return QMessageBox.information(self, "Prompt Manager", "Open the main prompt manager to edit these prompt keys.")
+        manager = getattr(self.ctx, 'prompt_manager', None)
+        if manager is None:
+            return
         from gui.components.dialogs.prompt_editor_dialog import PromptEditorDialog
-        dlg = PromptEditorDialog(parent.prompt_manager, parent)
+        dlg = PromptEditorDialog(manager, self)
         dlg.view_mode_combo.setCurrentIndex(2)
         dm = get_for_widget(self)
         if dm:

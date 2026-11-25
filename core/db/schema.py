@@ -2,26 +2,47 @@ import sqlite3
 import json
 import uuid
 from core.db.base_db import BaseDB
+from core.db.threadsafe_connection import ThreadSafeConnection
 
 class DatabaseSchema(BaseDB):
     def init_database(self):
         """Initializes the SQLite database and handles all schema creation and migrations."""
         if not self.manager.project_filepath:
             return
-            
+        # Serializes the close/reopen swap against background-worker statements
+        # on the connection being replaced.
+        with self.manager.db_lock:
+            self._init_database_locked()
+
+    def _init_database_locked(self):
         try:
             if self.manager._conn:
                 self.manager._conn.close()
-            
+
             # The project connection is shared by background services. Autocommit
             # keeps each statement atomic and prevents one thread from committing
-            # another thread's implicit transaction.
-            self.manager._conn = sqlite3.connect(
-                self.manager.project_filepath,
-                check_same_thread=False,
-                isolation_level=None,
+            # another thread's implicit transaction; ThreadSafeConnection
+            # serializes the statements themselves so a worker query can never
+            # run concurrently with a commit or close.
+            self.manager._conn = ThreadSafeConnection(
+                sqlite3.connect(
+                    self.manager.project_filepath,
+                    check_same_thread=False,
+                    isolation_level=None,
+                ),
+                self.manager.db_lock,
             )
             self.manager._conn.execute("PRAGMA foreign_keys = ON")
+            # Autocommit makes every statement its own transaction; with the
+            # default rollback journal each one fsyncs (~1.5 ms here), so a
+            # 400-page book's ~100k intelligence writes took minutes and held
+            # db_lock throughout. WAL + NORMAL fsyncs only at checkpoints
+            # (~0.07 ms/write). Safe against app crashes; the last commits can
+            # be lost only on an OS crash. Closing the connection checkpoints
+            # and removes the -wal/-shm files, so copying a closed project
+            # (Save As) stays correct.
+            self.manager._conn.execute("PRAGMA journal_mode = WAL")
+            self.manager._conn.execute("PRAGMA synchronous = NORMAL")
             cursor = self.manager._conn.cursor()
             
             cursor.execute('''CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT)''')
@@ -60,8 +81,14 @@ class DatabaseSchema(BaseDB):
             if "note_content" not in highlight_columns:
                 try: cursor.execute("ALTER TABLE highlights ADD COLUMN note_content TEXT")
                 except sqlite3.OperationalError: pass
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_highlights_doc_id ON highlights(doc_id)"
+            )
             
             self._ensure_nodes_table(cursor)
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_nodes_pdf_path ON nodes(pdf_path)"
+            )
             
             cursor.execute('''CREATE TABLE IF NOT EXISTS workspaces (
                 id INTEGER PRIMARY KEY, name TEXT NOT NULL
@@ -95,8 +122,13 @@ class DatabaseSchema(BaseDB):
 
             # Tags and Relations
             cursor.execute('''CREATE TABLE IF NOT EXISTS tags (
-                id INTEGER PRIMARY KEY, name TEXT UNIQUE, color TEXT
+                id INTEGER PRIMARY KEY, name TEXT UNIQUE, color TEXT,
+                parent_tag_id INTEGER,
+                FOREIGN KEY(parent_tag_id) REFERENCES tags(id) ON DELETE SET NULL
             )''')
+            self._ensure_columns(cursor, "tags", {
+                "parent_tag_id": "INTEGER REFERENCES tags(id) ON DELETE SET NULL",
+            })
             cursor.execute('''CREATE TABLE IF NOT EXISTS doc_tags (
                 doc_id TEXT, tag_id INTEGER,
                 PRIMARY KEY (doc_id, tag_id),
@@ -244,9 +276,7 @@ class DatabaseSchema(BaseDB):
             
             # Plugin-contributed tables (CREATE TABLE IF NOT EXISTS; idempotent)
             from core.plugins.plugin_db_registry import PluginTableRegistry
-            for tbl_name, meta in PluginTableRegistry.get_instance().get_tables().items():
-                col_defs = ", ".join(f"{col} {typ}" for col, typ in meta["schema"].items())
-                cursor.execute(f"CREATE TABLE IF NOT EXISTS {tbl_name} ({col_defs})")
+            PluginTableRegistry.get_instance().ensure_tables(self.manager._conn)
 
             # Deterministic extraction layer tables
             self.manager.db_extraction.init_tables()
