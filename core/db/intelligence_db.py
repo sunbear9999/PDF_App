@@ -1012,6 +1012,28 @@ class IntelligenceDB(BaseDB):
             ),
         )
 
+    def interrupt_unfinished_stages(self, before: str, message: str, live=frozenset()) -> int:
+        """Stages left queued or running with no job behind them (an earlier session, or a job
+        that stopped). ``live`` holds the (source_id, stage) pairs that do have a job."""
+        if not self._conn:
+            return 0
+        with self._write_lock:
+            now = _now()
+            rows = [tuple(row) for row in self._conn.execute(
+                "SELECT source_id, stage FROM intelligence_stage_status "
+                "WHERE status IN ('queued','running') AND updated_at < ?", (before,))]
+            orphaned = [key for key in rows if key not in live]
+            self._conn.executemany(
+                "UPDATE intelligence_stage_status SET status='cancelled', error_text=?, job_id=NULL, updated_at=? "
+                "WHERE source_id=? AND stage=? AND status IN ('queued','running')",
+                [(message, now, *key) for key in orphaned])
+            self._conn.executemany(
+                "UPDATE intelligence_stage_runs SET status='cancelled', error_text=?, finished_at=? "
+                "WHERE source_id=? AND stage=? AND status IN ('queued','running') AND created_at < ?",
+                [(message, now, *key, before) for key in orphaned])
+            self._conn.commit()
+        return len(orphaned)
+
     def get_stage_statuses(self, source_id: str) -> Dict[str, Dict[str, Any]]:
         if not self._conn or not source_id:
             return {}

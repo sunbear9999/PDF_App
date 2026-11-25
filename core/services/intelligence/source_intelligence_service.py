@@ -8,7 +8,7 @@ from PySide6.QtCore import QCoreApplication
 from core.models.intelligence_models import ProcessingStage, StageStatus
 from core.services._shared.qt_tasks import SerialTaskQueue
 from core.services.intelligence.source_intelligence_events import (
-    highlight_deleted, ocr_completed, project_closing, source_removed,
+    highlight_deleted, ocr_completed, project_closing, project_opened, source_removed,
 )
 
 class SourceIntelligenceService:
@@ -42,6 +42,7 @@ class SourceIntelligenceService:
             self.bus.video_status_updated.connect(self._on_video_status)
             self.bus.ocr_status_updated.connect(lambda e, p: ocr_completed(self, e, p))
             self.bus.project_clearing_started.connect(lambda *_: project_closing(self))
+            self.bus.project_loaded.connect(lambda *_: project_opened(self))
             self.bus.source_removed.connect(lambda _e, p: source_removed(self, p))
             self.bus.highlight_deleted.connect(lambda _e, p: highlight_deleted(self, p))
 

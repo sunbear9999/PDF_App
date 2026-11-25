@@ -49,6 +49,21 @@ def video_status(service, event, payload) -> None:
         service.scheduler.enqueue_source(source_id)
 
 
+INTERRUPTED = "Interrupted: Papyrus closed or the job stopped before it finished. Run missing runs it again."
+
+
+def project_opened(service) -> None:
+    """Queued or running stages from an earlier session have no job any more; say so instead of
+    showing them as running forever. Rows written after the project opened are left alone."""
+    from datetime import datetime, timezone
+    opened = datetime.now(timezone.utc).isoformat()
+    db = service.db
+    scheduler = service.scheduler
+    live = frozenset(scheduler.live_stage_keys()) if scheduler and hasattr(scheduler, "live_stage_keys") else frozenset()
+    if db is not None and hasattr(db, "interrupt_unfinished_stages"):
+        service._submit_background(lambda: db.interrupt_unfinished_stages(opened, INTERRUPTED, live))
+
+
 def project_closing(service) -> None:
     """Jobs bound to the closing project must not write into the next one."""
     service._background_generation += 1

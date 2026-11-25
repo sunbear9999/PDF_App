@@ -30,6 +30,20 @@ _TRANSCRIPT_WAIT = (
 
 
 
+_HANDING_OFF = object()   # a job being created on the Qt thread
+
+
+def _off_qt_thread() -> bool:
+    from PySide6.QtCore import QCoreApplication, QThread
+    app = QCoreApplication.instance()
+    return app is not None and QThread.currentThread() is not app.thread()
+
+
+def _make_qt_caller():
+    from core.services._shared.qt_tasks import MainThreadCaller
+    return MainThreadCaller()     # the scheduler is built on the Qt thread, so calls land there
+
+
 PROJECT_STAGE_PRIORITY = 1000     # after per-source work (lower numbers run first)
 MAX_DEPENDENCY_DEPTH = 16
 
@@ -70,6 +84,7 @@ class IntelligenceScheduler(SchedulerAccounting):
         # Bumped when the project closes; work started under an older
         # generation must not write into whatever project is open next.
         self._generation = 0
+        self._qt_caller = _make_qt_caller()
 
     # ------------------------------------------------------------ planning
 
@@ -142,8 +157,8 @@ class IntelligenceScheduler(SchedulerAccounting):
             return None
         existing = self._jobs_by_key.get((source_id, stage))
         if existing is not None:
-            # Identical request already queued/running: coalesce.
-            return existing
+            # Identical request already queued/running (or on its way to the Qt thread): coalesce.
+            return None if existing is _HANDING_OFF else existing
         if not force and self._is_stage_current(source_id, stage):
             return None
         if self._project_wide(stage):
@@ -165,6 +180,26 @@ class IntelligenceScheduler(SchedulerAccounting):
         return bool(spec.project_inputs) or any(self._project_wide(dep, depth + 1) for dep in spec.dependencies)
 
     def _enqueue_worker(self, source_id: str, stage: str, priority: int, is_background: bool):
+        fingerprint = self._stage_fingerprint(source_id, stage)     # slow part: stays on the caller's thread
+        if _off_qt_thread():
+            # Background planners (adding sources, Run missing) call in here. A worker QThread
+            # created on such a thread never delivers its finished signal (that thread has no
+            # event loop, and the process queue is not thread-safe), so the stage would sit at
+            # "running" forever. The worker is created and queued on the Qt thread instead.
+            self._jobs_by_key[(source_id, stage)] = _HANDING_OFF
+            generation = self._generation
+            self._qt_caller.call(lambda: self._finish_hand_off(source_id, stage, priority, is_background,
+                                                               fingerprint, generation))
+            return None
+        return self._enqueue_on_qt(source_id, stage, priority, is_background, fingerprint)
+
+    def _finish_hand_off(self, source_id, stage, priority, is_background, fingerprint, generation):
+        if self._jobs_by_key.get((source_id, stage)) is not _HANDING_OFF or generation != self._generation:
+            return None                    # cancelled, or the project closed, while handing off
+        self._jobs_by_key.pop((source_id, stage), None)
+        return self._enqueue_on_qt(source_id, stage, priority, is_background, fingerprint)
+
+    def _enqueue_on_qt(self, source_id, stage, priority, is_background, fingerprint):
         from core.engine.intelligence_stage_worker import IntelligenceStageWorker
 
         worker = IntelligenceStageWorker(self, source_id, stage)
@@ -173,7 +208,6 @@ class IntelligenceScheduler(SchedulerAccounting):
         worker.stage_finished.connect(lambda result, w=worker: self._on_worker_done(w, result))
         worker.error.connect(lambda error, w=worker: self._on_worker_error(w, error))
         source = self._source_by_id(source_id) or {}
-        fingerprint = self._stage_fingerprint(source_id, stage)
         job = self.process_registry.enqueue_runner(
             worker, f"Intelligence: {stage}", job_type="Intelligence", is_express=False,
             metadata={
@@ -327,6 +361,10 @@ class IntelligenceScheduler(SchedulerAccounting):
         stages = set(stage_ids or [])
         return self._cancel_jobs(lambda key: key[1] in stages)
 
+    def live_stage_keys(self):
+        """(source_id, stage) pairs that have a queued or running job in this session."""
+        return list(self._jobs_by_key)
+
     def on_project_closing(self, *_args) -> int:
         """Cancel all work and invalidate in-flight results for this project."""
         self._generation += 1
@@ -338,6 +376,9 @@ class IntelligenceScheduler(SchedulerAccounting):
         count = 0
         for key, job in list(self._jobs_by_key.items()):
             if not matches(key):
+                continue
+            if job is _HANDING_OFF:
+                self._jobs_by_key.pop(key, None)       # the hand-off sees it gone and drops the job
                 continue
             is_active = registry is not None and getattr(registry, "active_job", None) is job
             if registry is not None:
